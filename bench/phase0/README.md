@@ -54,6 +54,60 @@ pass. The other 943 queries agree.
 On this corpus, Xapian is 6–19× slower than Lucene and Tantivy on every command, so
 the gates against Lucene and Tantivy are the binding ones for reads as well as writes.
 
+## Xapiand
+
+Xapiand `master` (`361a2ebf6`, RelWithDebInfo, Clang 18) in the gate VM, one node
+(`--solo`), index `wiki` built from the first 100,000 corpus documents
+(`xapiand_phase0.py convert`), 307 MB on disk.
+
+### RESTORE profile
+
+RESTORE of the 100,000 documents runs at 964 docs/s unprofiled and 954 docs/s under
+`perf record -F 99 --call-graph dwarf` (25,572 samples). Inclusive shares of all
+samples:
+
+| Where | Share |
+|---|---:|
+| Xapian `replace_document` (glass inverter included) | 28.2% |
+| Per-document shard check-in (`DatabasePool::checkin`, `pthread_cond_signal`, kernel futex) | 25.4% |
+| Per-document `DatabaseWALWriter::delete_wal` enqueue | 14.6% |
+| Document preparation (`DocPreparer`: schema, serialization) | 10.2% |
+| Per-document shard checkout (`lock_shard`) | 7.7% |
+
+Xapian accounts for 28% of RESTORE, so an infinitely fast engine bounds Xapiand's
+RESTORE speedup at 1.39×. The largest costs are host per-document synchronization:
+each document checks a shard out and back in, signaling a condition variable, and
+enqueues a WAL deletion. The ingestion gap with Elasticsearch is mostly Xapiand's
+own pipeline; strata's write path is justified by the engine-level indexing rows,
+and the host costs are fixed in Xapiand.
+
+### Offload hop
+
+`SearchService::should_offload` sends every search to the worker pool. A VM-only build
+flag (`XAPIAND_INLINE`, not committed) runs searches on the reactor instead. Sequential
+full-text searches over 900 benchmark queries, two interleaved rounds each:
+
+| Mode | Mean | p50 | p99 |
+|---|---:|---:|---:|
+| Offloaded (current) | 2,375 µs | 2,192 µs | 5,211 µs |
+| Inline | 2,028 µs | 1,899 µs | 4,919 µs |
+
+The hop costs about 350 µs per search, 15% of its latency.
+
+### Light queries under heavy load
+
+Eight clients run broad 4-term disjunctions with exact counts for 30 s while one client
+fetches documents by id:
+
+| Mode | Light unloaded p50 / p99 | Light under load p50 / p99 | Heavy queries done |
+|---|---:|---:|---:|
+| Offloaded (current) | 609 / 1,540 µs | 850 / 7,219 µs | 9,050 |
+| Inline | 432 / 1,149 µs | 703 / 3,020 µs | 6,239 |
+
+The Phase 6 baseline is the offloaded row: light-query p99 of 7.2 ms under heavy load.
+Inline serves light queries faster but completes 31% fewer heavy queries, so the two
+rows do not compare at equal throughput.
+
 ## Reproduce
 
 ```sh
