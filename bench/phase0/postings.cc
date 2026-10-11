@@ -132,7 +132,8 @@ int main(int argc, char** argv) {
 		}
 		for (std::size_t i = full; i < p.docs.size(); ++i) { tail.push_back(p.freqs[i] - 1); }  // freqs >= 1
 		for (auto v : tail) {
-			tails_varint += varint::serialise_length(v);
+			char b[varint::max_length_bytes];
+			tails_varint.append(b, varint::serialise_length(b, v));
 			put_leb128(tails_leb, v);
 		}
 		put_streamvbyte(tails_svb, tail.data(), tail.size());
@@ -143,7 +144,8 @@ int main(int argc, char** argv) {
 	std::string leb_sample, varint_sample;
 	for (auto v : tail_values) {
 		put_leb128(leb_sample, v);
-		varint_sample += varint::serialise_length(v);
+		char b[varint::max_length_bytes];
+		varint_sample.append(b, varint::serialise_length(b, v));
 	}
 	volatile std::uint64_t sink = 0;
 	auto time_ns = [&](auto&& f) {
