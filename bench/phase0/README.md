@@ -34,8 +34,25 @@ part of its size.
 
 ## Querying
 
-Running. Results land in `query.json` with the harness's commands (`TOP_10`,
-`TOP_100`, `TOP_1000`, `TOP_100_COUNT`, `COUNT`) over its 962 queries.
+The harness's 962 queries, one at a time over a pipe, after a 60 s warm-up, 10 runs
+each; a query's time is its fastest run. Raw results are in `query.json`. Times are
+microseconds and include the pipe round trip, which is the same for every engine.
+
+| Command | Tantivy 0.26 mean / p99 | Lucene 10.4.0 mean / p99 | Xapian 2.1.0 mean / p99 |
+|---|---:|---:|---:|
+| `TOP_10` | 1,694 / 14,877 | 1,670 / 10,626 | 11,505 / 61,085 |
+| `TOP_100` | 2,046 / 17,262 | 2,191 / 14,005 | 14,810 / 75,168 |
+| `TOP_1000` | 3,278 / 23,361 | 3,092 / 22,444 | 18,352 / 93,143 |
+| `TOP_100_COUNT` | 3,171 / 34,307 | 5,348 / 63,590 | 29,925 / 260,872 |
+| `COUNT` | 1,580 / 17,934 | 1,463 / 13,354 | 27,770 / 244,836 |
+
+Lucene's counts equal Tantivy's on every query. Xapian's differ on 19 queries with
+excluded terms (`-word`), which this run's adapter searched as literal terms; the
+adapter now maps them to `AND_NOT`, and the Xapian rows are re-run with the quiet-host
+pass. The other 943 queries agree.
+
+On this corpus, Xapian is 6–19× slower than Lucene and Tantivy on every command, so
+the gates against Lucene and Tantivy are the binding ones for reads as well as writes.
 
 ## Reproduce
 
