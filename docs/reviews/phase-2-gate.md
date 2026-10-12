@@ -466,3 +466,83 @@ The postings size is deterministic. It needs no re-run unless C1 changes the for
 Carried to Phase 6: the asynchronous `residency` backends verify regions as they load
 them, through the segment's `verified_regions` state, and the reader prefetches the
 ranges it decodes.
+
+## Re-check
+
+- Date: 2026-10-12.
+- Reviewed: G1–G4 at strata `4edad0a` (`771634f`, `e059d64`, `2731bb2`, `4e756bc`,
+  `4edad0a`), from the code and the diffs against `9204851`. Nothing was built or run
+  for this check; the fuzz figures come from `.scratch/fuzz-segment-v9.log`.
+
+### Verdict
+
+**Not approved yet.** G2 and G4 close. G3 closes in substance, but its record is
+incomplete. G1 stays open on one residual, and the phrase path has a new blocking
+defect, G6. G5 waits for its trials.
+
+### Status
+
+1. **G1. Open on one residual.**
+   - Closed:
+     - Both readers stop at their term's verified range (`reader.hh:260, 753`).
+     - Group lasts increase and stay below the document count, in 64-bit arithmetic
+       (`277`).
+     - Block lasts increase within their group and end at its last (`585`).
+     - Block byte lengths are nonzero and fill their group exactly
+       (`576-577, 601, 605`), so bitset blocks cannot emit ordinals past the document
+       count.
+     - A positions read rejects a count above the segment's maximum before it allocates
+       (`784`).
+   - Open: the level-1 sums are checked only in total (`288-291` against `295, 297`). A
+     sum that wraps past 2^64 leaves a later group's level-0 or block offset outside the
+     term's range. `decode_group` trusts it (`571-577`), and so does `load_next_block`,
+     which relies on `decode_group` for a block's bounds (`630`). Rejecting each addend
+     larger than the room left in the term's range closes it.
+   - No unit test covers these checks; the resealing fuzzer covers them. A resealed test
+     comes with the wraparound fix.
+2. **G2. Closed.** The term index is copied out of the mapping, and `termdict` validates
+   and reads the copy (`reader.hh:129-130`). The checksum runs on the mapped bytes
+   before the copy (`77`). Validating the copy keeps lookups in bounds; checking the
+   checksum on the copy, as `residency::pinned::copy` does, would also close that
+   window for content.
+3. **G3. Closed in substance; the record is incomplete.**
+   - `fuzz_segment` recomputes every checksum for seven inputs in eight
+     (`fuzz_segment.cc:49-59, 121`). Its bases reach several skip groups (`43`), and it
+     runs every scorer, `count()`, and stored reads on the corrupted segment (`61-106`).
+   - The format-9 hour is clean: 107,932 runs in 3,601 seconds, 29 per second, 3,941
+     PCs, a 933-input corpus.
+   - The gate report owes those figures, and the library targets' CPU time: it lists the
+     library targets by runs (`docs/gates/phase-2.md:116-118`).
+   - Follow-up: mutations stay inside sections (`fuzz_segment.cc:115-120`), so the TOC
+     parser's new duplicate and overlap checks (`format.hh:218, 224`) only see
+     well-formed tables.
+4. **G4. Closed, except one line of design text.** Lucene-mode bounds use only terms
+   whose counts are their wdf (`search.hh:805, 862`). A test leads a phrase with a
+   positioned wdf-0 term and compares pruned with exhaustive top-k
+   (`search_test.cc:176-196`). The design's phrase row states the wdf premise
+   (`phase-2.md:233`).
+
+### New blocking item
+
+**G6. Phrases over a term without positions.**
+
+- A term indexed without positions, with any wdf of at least 1, is flagged
+  `no_positions` without `counts_are_wdf` (`writer.hh:246, 314`).
+- Its `positions_reader` returns before reading anything (`reader.hh:748`), yet a phrase
+  asks it for counts (`search.hh:879`).
+- For a document in the term's tail, which holds every document of a term with df under
+  128, `count()` indexes `count_tail_.data()` of an empty vector (`reader.hh:773, 801`),
+  so a valid segment crashes the process. For a document in a full block, it throws
+  `corrupt_segment` (`803`) and fences a valid segment.
+- Neither the fuzz vocabulary (`fuzz_segment.cc:17-33`) nor the tests hold a
+  positionless term.
+- The fix belongs in `positions_reader`, so NEAR (C6) inherits it: a term without
+  positions has a count of 0 and no positions, and a phrase containing it matches
+  nothing. A test runs such a phrase over tail and block documents.
+
+### Conditions
+
+- C4 stays open in one place: `rest_bound_` is `sum` minus the lead's bound
+  (`search.hh:447`). When the lead's window bound dwarfs the rest, the rounding of `sum`
+  exceeds a `sum_upper` margin taken on the lead's score plus the rest. Summing the
+  other children's bounds directly closes it. The duplicate-document tie test is owed.

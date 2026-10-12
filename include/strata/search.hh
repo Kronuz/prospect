@@ -519,6 +519,7 @@ public:
 	}
 	ordinal_t doc() const noexcept override { return doc_; }
 	ordinal_t next() override {
+		if (linear()) { return advance_linear(started_ ? doc_ + 1 : 0); }
 		if (!started_) {
 			started_ = true;
 			for (std::size_t i = 0; i < children_.size(); ++i) { heap_push(i, children_[i]->next()); }
@@ -528,6 +529,7 @@ public:
 		return doc_ = heap_.empty() ? no_more_docs : heap_.front().first;
 	}
 	ordinal_t advance(ordinal_t t) override {
+		if (linear()) { return advance_linear(t); }
 		if (!started_) {
 			started_ = true;
 			for (std::size_t i = 0; i < children_.size(); ++i) { heap_push(i, children_[i]->advance(t)); }
@@ -587,6 +589,18 @@ public:
 	}
 
 private:
+	// A few clauses with no MaxScore split advance directly to the minimum, without a heap.
+	bool linear() const noexcept { return children_.size() <= 4 && essential_from_ == 0 && heap_.empty(); }
+	ordinal_t advance_linear(ordinal_t t) {
+		ordinal_t d = no_more_docs;
+		for (auto& c : children_) {
+			if (!started_ || c->doc() < t) { c->advance(t); }
+			d = std::min(d, c->doc());
+		}
+		started_ = true;
+		return doc_ = d;
+	}
+
 	using entry = std::pair<ordinal_t, std::size_t>;
 	static bool later(const entry& a, const entry& b) noexcept { return a.first > b.first; }
 	void heap_push(std::size_t i, ordinal_t d) {
