@@ -168,11 +168,14 @@ and CRCs, live-docs generations, and, under groups, the applied log position.
 3. **Residency.** At query start, the plan requests the postings ranges it needs
    (positions only for phrase and near) and suspends until they are resident.
 4. **Scorers** are iterators with `doc()`, `next()`, `advance(target)`, `cost()`, and,
-   when scoring, `score()` and `max_score_up_to(target)`.
+   when scoring, `score()` and `max_score(from, upto)`.
    - Conjunctions leapfrog from the cheapest iterator.
-   - Top-level disjunctions use block-max MaxScore; nested scoring disjunctions use
-     block-max WAND. A cost model measured on the benchmark queries picks between
-     them.
+   - Top-level disjunctions use block-max MaxScore in 4,096-ordinal windows. Nested
+     disjunctions do not lead: under `AND_MAYBE` the optional side only follows the
+     required side's documents, where WAND's pivoting has nothing to skip. Measured on
+     the harness's 40 `+a b c` queries, the nested disjunction cost 14% of the time, all
+     in heap updates; disjunctions of up to four clauses advance their children
+     directly instead. WAND waits for a query shape where a nested disjunction leads.
    - `FILTER` and `AND_NOT` use non-scoring iterators; repeated filters are cached
      per segment as bitsets.
    - `SYNONYM`, `ELITE_SET`, `MAX`, `SCALE_WEIGHT`, `AND_MAYBE`, and `XOR` follow
