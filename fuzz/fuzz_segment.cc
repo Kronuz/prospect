@@ -4,7 +4,8 @@
 // and FOR blocks, positions whose counts differ from wdf, positioned wdf-0 terms, and
 // stored records past one zstd frame. The input picks a base and byte changes inside its
 // sections; most inputs then recompute every checksum, so the changes reach the decoders
-// instead of stopping at verification.
+// instead of stopping at verification. One base uses 64-bit skip offsets. Run with a
+// -timeout of a few seconds so a hang counts as a finding.
 #include "strata/reader.hh"
 #include "strata/search.hh"
 #include "strata/writer.hh"
@@ -16,9 +17,10 @@ namespace {
 
 const char* const vocab[] = {"the", "of", "a", "b", "c", "rare", "bool", "weighted", "nopos"};
 
-std::string build(std::uint64_t seed, std::uint32_t docs) {
+std::string build(std::uint64_t seed, std::uint32_t docs, bool wide = false) {
 	std::mt19937_64 rng(seed);
 	strata::segment_writer w;
+	w.wide_skip_offsets = wide;
 	std::vector<std::vector<std::uint32_t>> pos(std::size(vocab));
 	for (std::uint32_t d = 0; d < docs; ++d) {
 		std::vector<strata::posting_input> in;
@@ -41,7 +43,7 @@ std::string build(std::uint64_t seed, std::uint32_t docs) {
 }
 
 const std::string& base(unsigned which) {
-	static const std::string segments[] = {build(1, 300), build(2, 9000), build(3, 20000)};
+	static const std::string segments[] = {build(1, 300), build(2, 9000), build(3, 20000), build(4, 9000, true)};
 	return segments[which % std::size(segments)];
 }
 
@@ -113,6 +115,18 @@ void exercise(const strata::segment& seg) {
 	strata::phrase_scorer phrase_count(seg, {infos[2 % infos.size()], infos.back()});
 	std::uint64_t n = 0;
 	strata::top_k(phrase_count, 10, &n);
+	// Xapian-weighted phrase and NEAR, and a disjunction under pruning parents.
+	const std::vector<strata::format::term_info> two{infos[0], infos[1]};
+	const std::vector<strata::weight> weights{strata::weight::lucene(seg, infos[0].df), strata::weight::lucene(seg, infos[1].df)};
+	strata::phrase_scorer xapian(seg, two, weights);
+	strata::top_k(xapian, 10);
+	strata::phrase_scorer near(seg, two, weights, 4);
+	strata::top_k(near, 10, &n);
+	auto either = [&] { return std::make_unique<strata::disjunction_scorer>(pair(0, 1)); };
+	strata::exclusion_scorer either_not(either(), term(2));
+	strata::top_k(either_not, 10);
+	strata::required_optional_scorer either_maybe(either(), term(2));
+	strata::top_k(either_maybe, 10);
 }
 
 }  // namespace

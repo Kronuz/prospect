@@ -58,7 +58,11 @@ int main() {
 				std::string t = vocab[rng() % vocab.size()];
 				if (std::find(pick.begin(), pick.end(), t) == pick.end() && seg.term(t)) { pick.push_back(t); }
 			}
-			const int kind = int(rng() % 7);
+			const int kind = int(rng() % 9);
+			while (kind >= 7 && pick.size() < 3) {  // (pick[0] OR pick[1]) with pick[2]
+				std::string t = vocab[rng() % vocab.size()];
+				if (std::find(pick.begin(), pick.end(), t) == pick.end() && seg.term(t)) { pick.push_back(t); }
+			}
 			strata::scorer_ptr q;
 			std::map<ordinal_t, double> want;
 			for (std::size_t d = 0; d < ndocs; ++d) {
@@ -83,6 +87,16 @@ int main() {
 					match = tf(d, pick[0]) > 0;
 					for (std::size_t i = 1; i < pick.size(); ++i) { if (tf(d, pick[i])) { match = false; } }
 					if (match) { s = weight(pick[0])(tf(d, pick[0]), std::uint32_t(docs[d].tokens.size())); }
+					break;
+				}
+				case 7:    // (pick[0] OR pick[1]) AND_NOT pick[2]
+				case 8: {  // (pick[0] OR pick[1]) AND_MAYBE pick[2]
+					match = (tf(d, pick[0]) || tf(d, pick[1])) && (kind == 8 || !tf(d, pick[2]));
+					if (match) {
+						for (std::size_t i = 0; i < (kind == 8 ? 3u : 2u); ++i) {
+							if (tf(d, pick[i])) { s += weight(pick[i])(tf(d, pick[i]), std::uint32_t(docs[d].tokens.size())); }
+						}
+					}
 					break;
 				}
 				case 6: {  // NEAR 3: every picked term (repeats counted) within 3 positions
@@ -134,6 +148,13 @@ int main() {
 					auto rest = std::make_unique<strata::disjunction_scorer>(std::move(kids));
 					if (kind == 2) { return std::make_unique<strata::required_optional_scorer>(term(pick[0]), std::move(rest)); }
 					return std::make_unique<strata::exclusion_scorer>(term(pick[0]), std::move(rest));
+				}
+				case 7: case 8: {
+					kids.push_back(term(pick[0]));
+					kids.push_back(term(pick[1]));
+					auto either = std::make_unique<strata::disjunction_scorer>(std::move(kids));
+					if (kind == 8) { return std::make_unique<strata::required_optional_scorer>(std::move(either), term(pick[2])); }
+					return std::make_unique<strata::exclusion_scorer>(std::move(either), term(pick[2]));
 				}
 				default: {
 					std::vector<strata::format::term_info> infos;

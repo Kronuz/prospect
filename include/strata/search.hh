@@ -298,7 +298,9 @@ private:
 				// Find the next group that can compete before decoding any blocks.
 				while (g < it_.groups() && group_bound(g) <= min_) { ++g; }
 				if (g == it_.groups() && total_bound_ <= min_) { return no_more_docs; }
-				d = it_.advance(g < it_.groups() ? it_.group_first(g) : it_.group_last(g - 1) + 1);
+				const ordinal_t to = g < it_.groups() ? it_.group_first(g) : it_.group_last(g - 1) + 1;
+				if (to <= d) { throw corrupt_segment("skip group order"); }  // else the loop never ends
+				d = it_.advance(to);
 				continue;
 			}
 			const std::size_t b = it_.block_index_for(d);
@@ -512,12 +514,17 @@ public:
 		double sum = 0;
 		std::size_t from = 0;
 		while (from < children_.size() && sum_upper(sum + children_[from]->max_score_total(), from + 1) <= s) { sum += children_[from++]->max_score_total(); }
+		const bool was_linear = started_ && linear();
 		if (from > essential_from_ && started_) {
 			// Drop newly non-essential clauses from the candidate heap.
 			std::erase_if(heap_, [&](const entry& e) { return e.second < from; });
 			std::make_heap(heap_.begin(), heap_.end(), later);
 		}
 		essential_from_ = std::max(essential_from_, from);
+		if (was_linear && !linear()) {
+			// Leaving linear mode: the essential clauses enter the heap where they stand.
+			for (std::size_t i = essential_from_; i < children_.size(); ++i) { heap_push(i, children_[i]->doc()); }
+		}
 	}
 
 	double current_bound() override {
@@ -662,7 +669,8 @@ public:
 	double max_score_total() const noexcept override { return req_->max_score_total() + opt_->max_score_total(); }
 	void set_min_competitive_score(double s) override {
 		min_ = s;
-		req_->set_min_competitive_score(s - opt_->max_score_total());
+		// Rounded down, so the required side's minimum never exceeds the exact difference.
+		req_->set_min_competitive_score(std::nextafter(s - opt_->max_score_total(), -std::numeric_limits<double>::infinity()));
 	}
 	std::optional<std::uint64_t> exact_count() override { return req_->exact_count(); }  // the optional side never filters
 	std::unique_ptr<scorer> fresh() const override {
@@ -1079,7 +1087,7 @@ inline std::uint64_t count(scorer& s) {
 	if (auto n = s.exact_count()) { return *n; }
 	std::uint64_t n = 0, bits[64];
 	for (ordinal_t d = s.next(); d != no_more_docs; d = s.doc()) {
-		const ordinal_t base = d & ~ordinal_t(4095), end = base + 4096;
+		const ordinal_t base = d & ~ordinal_t(4095), end = base > no_more_docs - 4096 ? no_more_docs : base + 4096;
 		std::fill(bits, bits + 64, 0);
 		s.fill(base, end, bits);
 		for (auto w : bits) { n += std::uint64_t(std::popcount(w)); }
@@ -1098,7 +1106,7 @@ inline bool disjunction_scorer::collect_top_k(top_collector& c) {
 	started_ = true;
 	constexpr ordinal_t window = 4096;
 	const std::size_t n = children_.size();
-	std::vector<double> acc(window, 0.0), bound(n);
+	std::vector<double> acc(window, 0.0), bound(n), below;
 	std::vector<std::size_t> order(n);
 	std::uint64_t bits[window / 64];
 	for (auto& ch : children_) { ch->next(); }
@@ -1141,9 +1149,10 @@ inline bool disjunction_scorer::collect_top_k(top_collector& c) {
 			if (ch->doc() < window_min) { ch->advance(window_min); }
 			if (ch->doc() <= window_max) { ch->score_window(window_min, window_max + 1, acc.data(), bits); }
 		}
-		// Remaining bound of the non-essential clauses, highest first.
-		double rest = 0;
-		for (std::size_t e = 0; e < essential; ++e) { rest += bound[order[e]]; }
+		// Bounds of the non-essential clauses below each one, summed rather than subtracted
+		// so rounding never understates what remains.
+		below.assign(essential + 1, 0.0);
+		for (std::size_t e = 0; e < essential; ++e) { below[e + 1] = below[e] + bound[order[e]]; }
 		for (std::size_t w = 0; w < window / 64; ++w) {
 			for (std::uint64_t word = bits[w]; word; word &= word - 1) {
 				const ordinal_t i = ordinal_t(w * 64 + std::size_t(std::countr_zero(word)));
@@ -1151,14 +1160,12 @@ inline bool disjunction_scorer::collect_top_k(top_collector& c) {
 				double score = acc[i];
 				acc[i] = 0;
 				++c.count;
-				double remaining = rest;
 				for (std::size_t e = essential; e-- > 0;) {
 					const double m = c.counting ? 0.0 : c.min_competitive();
-					if (!c.counting && sum_upper(score + remaining, n) <= m) { break; }
+					if (!c.counting && sum_upper(score + below[e + 1], n) <= m) { break; }
 					auto& ch = children_[order[e]];
 					if (ch->doc() < d) { ch->advance(d); }
 					if (ch->doc() == d) { score += ch->score(); }
-					remaining -= bound[order[e]];
 				}
 				c.collect(d, score);
 			}

@@ -6,6 +6,8 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <functional>
 #include <map>
 #include <random>
 
@@ -21,6 +23,29 @@ struct model {
 	std::vector<std::uint32_t> lengths;
 	std::vector<std::string> stored;
 };
+
+// Recomputes every section's checksums, then the table of contents' and the footer's, so a
+// changed file reaches the decoders instead of failing verification.
+static void reseal(std::string& file) {
+	const auto footer = strata::format::decode_footer(file);
+	auto toc = strata::format::decode_toc(file, footer);
+	for (auto& e : toc) { e = strata::format::describe(e.kind, e.offset, std::string_view(file).substr(e.offset, e.length)); }
+	const std::string toc_bytes = strata::format::encode_toc(toc);
+	file.replace(footer.toc_offset, toc_bytes.size(), toc_bytes);
+	auto f = footer;
+	f.toc_crc = hashes::crc32c(toc_bytes.data(), toc_bytes.size());
+	const std::string footer_bytes = strata::format::encode_footer(f);
+	file.replace(file.size() - footer_bytes.size(), footer_bytes.size(), footer_bytes);
+}
+
+static bool throws_corrupt(const std::function<void()>& f) {
+	try {
+		f();
+	} catch (const strata::corrupt_segment&) {
+		return true;
+	}
+	return false;
+}
 
 static std::string build(std::mt19937_64& rng, std::size_t docs, model& m) {
 	strata::segment_writer w;
@@ -263,6 +288,49 @@ int main() {
 		std::string bytes = w.flush({});
 		strata::segment s(bytes);
 		CHECK(s.docid(0) == 10 && s.docid(1) == 20 && s.docid(2) == 35);
+	}
+
+	// Resealed corruption that verification cannot see. A skip group's last ordinal lowered
+	// below the previous group's: a pruned term query that skips to that group throws
+	// instead of advancing in place forever.
+	{
+		strata::segment_writer w;
+		const std::uint32_t docs = 128 * 32 * 6;  // six skip groups
+		std::vector<std::uint32_t> none;
+		for (std::uint32_t d = 0; d < docs; ++d) {
+			// The first ten documents fill the top 10; only the last group can beat them.
+			const std::uint32_t wdf = d < 10 ? 5 : d == docs - 1 ? 9 : 1;
+			std::vector<strata::posting_input> in{{"a", wdf, none}};
+			w.add(d + 1, in, 10);
+		}
+		std::string file = w.flush({});
+		{
+			strata::segment seg(file);
+			const auto info = *seg.term("a");
+			const char* p = seg.postings_bytes().data() + info.postings;
+			const char* end = p + info.postings_length;
+			CHECK(strata::format::get_leb(&p, end) == 6 && *p++ == 0);  // six narrow groups
+			for (int i = 0; i < 3; ++i) { (void)strata::format::get_leb(&p, end); }
+			// Level 1: 16-byte entries without positions, each starting with its last.
+			const std::size_t at = std::size_t(p - file.data()) + 4 * 16;
+			const std::uint32_t zero = 0;
+			std::memcpy(file.data() + at, &zero, 4);
+		}
+		reseal(file);
+		CHECK(throws_corrupt([&] {
+			strata::segment bad(file);
+			strata::term_scorer t(bad, *bad.term("a"));
+			strata::top_k(t, 10);
+		}));
+	}
+	// A file of another format version is rejected at open.
+	{
+		std::mt19937_64 r(3);
+		model m;
+		std::string file = build(r, 200, m);
+		const std::uint32_t old = strata::format::version - 1;
+		std::memcpy(file.data() + 8, &old, 4);
+		CHECK(throws_corrupt([&] { strata::segment s(file); }));
 	}
 
 	// Length quantization rounds down and is monotone.

@@ -603,6 +603,7 @@ private:
 
 	void decode_group(std::size_t g) {
 		if (decoded_group_ == g) { return; }
+		decoded_group_ = std::numeric_limits<std::size_t>::max();  // entries_ is partial until the end
 		const group_fields gf = read_group(g);
 		const char* p = level0_ + gf.level0_begin;
 		const char* end = level0_ + gf.level0_end;
@@ -638,6 +639,7 @@ private:
 			last = e.last;
 		}
 		if (offset != group_end) { throw corrupt_segment("group bytes"); }
+		if (p != end) { throw corrupt_segment("level-0 bytes"); }
 		if (entries_[entries_n_ - 1].last != gf.last) { throw corrupt_segment("skip group last ordinal"); }
 		decoded_group_ = g;
 	}
@@ -877,7 +879,8 @@ public:
 		const std::uint32_t count = counts[it.index_in_block()];
 		// No document has more positions than the segment's maximum; full blocks hold 128
 		// positions each and a tail position takes at least a byte.
-		if (count > max_count_ || first + count > full_blocks_ * format::block + std::uint64_t(end_ - tail_)) { throw corrupt_segment("position count"); }
+		const std::uint64_t limit = full_blocks_ * format::block + std::uint64_t(end_ - tail_);
+		if (count > max_count_ || first > limit || count > limit - first) { throw corrupt_segment("position count"); }
 		if (count > out_size_) {
 			out_size_ = std::max<std::size_t>(count, 2 * out_size_);
 			out_ = std::make_unique_for_overwrite<std::uint32_t[]>(out_size_);
