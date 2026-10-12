@@ -2,7 +2,8 @@
 // oracle's index (the first N corpus documents, analyzed by analysis::term_generator with
 // TermGenerator's defaults), rebuilds each recorded query from its
 // Query(...) description, and compares match counts and top-10 (docid, weight) against
-// the oracle's rank vectors at relative error <= 1e-9, ordering near-ties by docid.
+// the oracle's rank vectors at relative error <= 1e-9, ordering near-ties by docid, both
+// counted and pruned.
 //   parity CORPUS_JSON N RANK_JSONL
 #include "analysis.hh"
 #include "strata/search.hh"
@@ -221,16 +222,23 @@ int main(int argc, char** argv) {
 			std::size_t c1 = line.find(',', p), c2 = line.find(',', c1 + 1);
 			want.push_back({std::stoull(line.substr(p + 1, c1 - p - 1)), std::stod(line.substr(c1 + 1, c2 - c1 - 1))});
 		}
-		bool ok = hits.size() == want.size();
-		for (std::size_t i = 0; ok && i < hits.size(); ++i) {
-			const double rel = std::abs(hits[i].score - want[i].second) / std::max(1e-300, std::abs(want[i].second));
-			worst = std::max(worst, rel);
-			const bool same_doc = hits[i].ord + 1 == want[i].first;
-			// Near-ties (within 1e-9) may order differently; accept a docid swap among them.
-			bool tie = false;
-			for (const auto& w2 : want) { tie = tie || (w2.first == hits[i].ord + 1 && std::abs(w2.second - hits[i].score) <= 1e-9 * std::abs(w2.second)); }
-			ok = rel <= 1e-9 && (same_doc || tie);
-		}
+		auto matches = [&](const std::vector<strata::hit>& got) {
+			bool ok = got.size() == want.size();
+			for (std::size_t i = 0; ok && i < got.size(); ++i) {
+				const double rel = std::abs(got[i].score - want[i].second) / std::max(1e-300, std::abs(want[i].second));
+				worst = std::max(worst, rel);
+				const bool same_doc = got[i].ord + 1 == want[i].first;
+				// Near-ties (within 1e-9) may order differently; accept a docid swap among them.
+				bool tie = false;
+				for (const auto& w2 : want) { tie = tie || (w2.first == got[i].ord + 1 && std::abs(w2.second - got[i].score) <= 1e-9 * std::abs(w2.second)); }
+				ok = rel <= 1e-9 && (same_doc || tie);
+			}
+			return ok;
+		};
+		// Counted (every match visited) and pruned (no count: thresholds skip blocks).
+		std::vector<strata::hit> pruned;
+		if (auto s = build(seg, q, wqf)) { pruned = strata::top_k(*s, 10); }
+		const bool ok = matches(hits) && matches(pruned);
 		top_ok += ok;
 		if ((!ok || got_count != want_count) && max_rel_shown++ < 8) {
 			std::cout << "MISMATCH " << desc << " count " << got_count << " vs " << want_count;
