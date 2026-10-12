@@ -45,14 +45,17 @@
 #include "termdict.hh"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdint>
 #include <deque>
 #include <limits>
 #include <memory>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace strata {
@@ -62,6 +65,154 @@ struct posting_input {
 	std::string_view term;
 	std::uint32_t wdf = 1;
 	std::span<const std::uint32_t> positions;  // sorted, unique; empty for positionless terms
+};
+
+// Receives a segment file's bytes in order.
+struct output {
+	virtual ~output() = default;
+	virtual void write(const char* data, std::size_t size) = 0;
+	void write(std::string_view bytes) { write(bytes.data(), bytes.size()); }
+};
+
+// Holds a section produced alongside another until it is appended.
+struct spill : output {
+	virtual void copy_to(output& out) = 0;
+};
+
+class string_output final : public output {
+public:
+	explicit string_output(std::string& s) : s_(s) {}
+	using output::write;
+	void write(const char* data, std::size_t size) override { s_.append(data, size); }
+
+private:
+	std::string& s_;
+};
+
+class string_spill final : public spill {
+public:
+	using output::write;
+	void write(const char* data, std::size_t size) override { s_.append(data, size); }
+	void copy_to(output& out) override {
+		out.write(s_);
+		std::string().swap(s_);
+	}
+
+private:
+	std::string s_;
+};
+
+// Writes to a file; throws std::runtime_error on failure.
+class file_output final : public output {
+public:
+	explicit file_output(const std::string& path) : f_(std::fopen(path.c_str(), "wb")) {
+		if (!f_) { throw std::runtime_error("strata: cannot create " + path); }
+	}
+	~file_output() override {
+		if (f_) { std::fclose(f_); }
+	}
+	file_output(const file_output&) = delete;
+	file_output& operator=(const file_output&) = delete;
+	using output::write;
+	void write(const char* data, std::size_t size) override {
+		if (std::fwrite(data, 1, size, f_) != size) { throw std::runtime_error("strata: write failed"); }
+	}
+	// Flushes and closes; throws when the data did not reach the file.
+	void close() {
+		const bool ok = std::fflush(f_) == 0;
+		std::fclose(std::exchange(f_, nullptr));
+		if (!ok) { throw std::runtime_error("strata: write failed"); }
+	}
+
+private:
+	std::FILE* f_;
+};
+
+// A temporary file holding a spilled section; removed when copied or destroyed.
+class file_spill final : public spill {
+public:
+	explicit file_spill(std::string path) : path_(std::move(path)), f_(std::fopen(path_.c_str(), "w+b")) {
+		if (!f_) { throw std::runtime_error("strata: cannot create " + path_); }
+	}
+	~file_spill() override { release(); }
+	file_spill(const file_spill&) = delete;
+	file_spill& operator=(const file_spill&) = delete;
+	using output::write;
+	void write(const char* data, std::size_t size) override {
+		if (std::fwrite(data, 1, size, f_) != size) { throw std::runtime_error("strata: spill write failed"); }
+	}
+	void copy_to(output& out) override {
+		if (std::fflush(f_) != 0 || std::fseek(f_, 0, SEEK_SET) != 0) { throw std::runtime_error("strata: spill read failed"); }
+		std::vector<char> buf(1 << 20);
+		for (std::size_t n; (n = std::fread(buf.data(), 1, buf.size(), f_)) > 0;) { out.write(buf.data(), n); }
+		if (std::ferror(f_)) { throw std::runtime_error("strata: spill read failed"); }
+		release();
+	}
+
+private:
+	void release() {
+		if (f_) {
+			std::fclose(f_);
+			std::remove(path_.c_str());
+			f_ = nullptr;
+		}
+	}
+	std::string path_;
+	std::FILE* f_;
+};
+
+// Tracks bytes written and pads to an alignment.
+class counting_output final : public output {
+public:
+	explicit counting_output(output& out) : out_(out) {}
+	using output::write;
+	void write(const char* data, std::size_t size) override {
+		out_.write(data, size);
+		size_ += size;
+	}
+	std::uint64_t size() const noexcept { return size_; }
+	void align(std::size_t alignment) {
+		static constexpr char zeros[64] = {};
+		while (size_ % alignment) { write(zeros, std::min<std::size_t>(sizeof zeros, alignment - size_ % alignment)); }
+	}
+
+private:
+	output& out_;
+	std::uint64_t size_ = 0;
+};
+
+// One section's bytes, checksummed as they pass (whole section and 64 KiB regions).
+class section_stream {
+public:
+	explicit section_stream(counting_output& out) : out_(out), offset_(out.size()) {}
+	void write(std::string_view bytes) {
+		out_.write(bytes);
+		crc_.update(bytes.data(), bytes.size());
+		for (std::size_t at = 0; at < bytes.size();) {
+			const std::size_t n = std::min(bytes.size() - at, format::region_size - region_fill_);
+			region_.update(bytes.data() + at, n);
+			region_fill_ += n;
+			at += n;
+			if (region_fill_ == format::region_size) {
+				regions_.push_back(region_.value());
+				region_ = {};
+				region_fill_ = 0;
+			}
+		}
+		length_ += bytes.size();
+	}
+	std::uint64_t size() const noexcept { return length_; }
+	format::section_entry finish(format::section kind) {
+		if (region_fill_) { regions_.push_back(region_.value()); }
+		return {kind, offset_, length_, crc_.value(), std::move(regions_)};
+	}
+
+private:
+	counting_output& out_;
+	std::uint64_t offset_, length_ = 0;
+	hashes::Crc32c crc_, region_;
+	std::size_t region_fill_ = 0;
+	std::vector<std::uint32_t> regions_;
 };
 
 class segment_writer {
@@ -84,8 +235,13 @@ public:
 			t.max_wdf = std::max(t.max_wdf, in.wdf);
 			if (in.wdf) { t.all_zero_wdf = false; }
 			if (!in.positions.empty()) { t.any_positions = true; }
-			if (in.positions.size() != in.wdf) { t.counts_are_wdf = false; }
-			format::put_leb(t.counts, in.positions.size());
+			// Counts are kept only once one differs from its wdf; until then they are the wdfs,
+			// whose LEB128 stream is the same bytes.
+			if (t.counts_are_wdf && in.positions.size() != in.wdf) {
+				t.counts_are_wdf = false;
+				t.counts.assign(t.wdfs, 0, t.wdfs.size() - leb_size(in.wdf));
+			}
+			if (!t.counts_are_wdf) { format::put_leb(t.counts, in.positions.size()); }
 			std::uint32_t prev = 0;
 			for (auto p : in.positions) {
 				format::put_leb(t.positions, p - prev);
@@ -99,6 +255,16 @@ public:
 
 	// Writes the segment file and returns its bytes.
 	std::string flush(const std::array<std::uint8_t, 16>& segment_id) {
+		std::string file;
+		string_output out(file);
+		string_spill positions;
+		flush(segment_id, out, positions);
+		return file;
+	}
+
+	// Streams the segment file to out in one pass. The positions section is produced
+	// alongside the postings, so it goes to `positions` until the postings end.
+	void flush(const std::array<std::uint8_t, 16>& segment_id, output& sink, spill& positions_spill) {
 		std::vector<std::pair<std::string_view, std::size_t>> keys;
 		keys.reserve(buffers_.size());
 		for (const auto& slot : table_) {
@@ -106,16 +272,32 @@ public:
 		}
 		std::sort(keys.begin(), keys.end());
 
-		std::string postings, positions;
+		counting_output out(sink);
+		std::vector<format::section_entry> toc;
+		{
+			const std::string header = format::encode_header(segment_id);
+			section_stream h(out);
+			h.write(header);
+			toc.push_back(h.finish(format::section::header));
+		}
+		out.align(format::section_alignment);
+		section_stream postings(out);
+		counting_output spill_out(positions_spill);
+		section_stream positions(spill_out);
 		termdict::builder dict;
 		std::vector<std::uint32_t> ords, wdfs, counts, pos;
+		std::string term_postings, term_positions;
 		for (auto [key, buffer] : keys) {
 			term_buffer& t = buffers_[buffer];
 			decode_all(t.ords, ords, t.df);
 			for (std::size_t i = 1; i < ords.size(); ++i) { ords[i] += ords[i - 1]; }
 			for (auto& o : ords) { --o; }  // stored as ordinal + 1 deltas
 			decode_all(t.wdfs, wdfs, t.df);
-			decode_all(t.counts, counts, t.df);
+			if (t.counts_are_wdf) {
+				counts = wdfs;
+			} else {
+				decode_all(t.counts, counts, t.df);
+			}
 
 			format::term_info info;
 			info.df = t.df;
@@ -136,7 +318,9 @@ public:
 				std::size_t total = 0;
 				for (auto c : counts) { total += c; }
 				decode_all(t.positions, pos, total);
-				layout = write_positions(positions, counts, pos, t.counts_are_wdf);
+				term_positions.clear();
+				layout = write_positions(term_positions, counts, pos, t.counts_are_wdf);
+				positions.write(term_positions);
 			}
 			if (t.df == 1) {
 				info.flags |= format::single_posting;
@@ -144,48 +328,49 @@ public:
 				info.single_wdf = wdfs[0];
 			} else {
 				info.postings = postings.size();
-				write_postings(postings, ords, wdfs, !t.all_zero_wdf, counts, t.any_positions ? &layout : nullptr, !t.counts_are_wdf);
+				term_postings.clear();
+				write_postings(term_postings, ords, wdfs, !t.all_zero_wdf, counts, t.any_positions ? &layout : nullptr, !t.counts_are_wdf);
+				postings.write(term_postings);
 			}
 			dict.add(key, format::encode_term_info(info));
 		}
+		toc.push_back(postings.finish(format::section::postings));
+		out.align(format::section_alignment);
+		{
+			auto entry = positions.finish(format::section::positions);
+			entry.offset = out.size();
+			positions_spill.copy_to(out);
+			toc.push_back(std::move(entry));
+		}
 		auto tables = dict.finish();
-
-		std::string lengths = pack_u32(lengths_);
-		std::string docids = encode_docids();
 		std::string stats;
 		format::put<std::uint64_t>(stats, lengths_.size());
 		format::put<std::uint64_t>(stats, total_length_);
 		format::put<std::uint32_t>(stats, lengths_.empty() ? 0 : *std::min_element(lengths_.begin(), lengths_.end()));
 		format::put<std::uint32_t>(stats, lengths_.empty() ? 0 : *std::max_element(lengths_.begin(), lengths_.end()));
-
-		std::string file = format::encode_header(segment_id);
-		std::vector<format::section_entry> toc;
-		toc.push_back(format::describe(format::section::header, 0, file));
 		auto append = [&](format::section kind, const std::string& bytes) {
-			while (file.size() % format::section_alignment) { file.push_back('\0'); }
-			toc.push_back(format::describe(kind, file.size(), bytes));
-			file += bytes;
+			out.align(format::section_alignment);
+			section_stream sec(out);
+			sec.write(bytes);
+			toc.push_back(sec.finish(kind));
 		};
 		append(format::section::terms, tables.blocks);
 		append(format::section::term_index, tables.index);
-		append(format::section::postings, postings);
-		append(format::section::positions, positions);
-		append(format::section::lengths, lengths);
-		append(format::section::docids, docids);
+		append(format::section::lengths, pack_u32(lengths_));
+		append(format::section::docids, encode_docids());
 		append(format::section::stats, stats);
-		while (file.size() % format::section_alignment) { file.push_back('\0'); }
+		out.align(format::section_alignment);
 
 		format::footer f;
-		f.toc_offset = file.size();
+		f.toc_offset = out.size();
 		std::string toc_bytes = format::encode_toc(toc);
 		f.toc_length = toc_bytes.size();
 		f.toc_crc = hashes::crc32c(toc_bytes.data(), toc_bytes.size());
 		f.doc_count = std::uint32_t(lengths_.size());
 		f.min_docid = docids_.empty() ? 0 : *std::min_element(docids_.begin(), docids_.end());
 		f.max_docid = docids_.empty() ? 0 : *std::max_element(docids_.begin(), docids_.end());
-		file += toc_bytes;
-		file += format::encode_footer(f);
-		return file;
+		out.write(toc_bytes);
+		out.write(format::encode_footer(f));
 	}
 
 private:
@@ -240,6 +425,12 @@ private:
 		for (const auto& s : old) {
 			if (s.key) { insert(s); }
 		}
+	}
+
+	static std::size_t leb_size(std::uint64_t v) noexcept {
+		std::size_t n = 1;
+		while (v >= 0x80) { v >>= 7, ++n; }
+		return n;
 	}
 
 	static void decode_all(const std::string& stream, std::vector<std::uint32_t>& out, std::size_t n) {

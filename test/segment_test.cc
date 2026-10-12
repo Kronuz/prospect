@@ -172,6 +172,21 @@ int main() {
 		CHECK(golden == bytes);
 		strata::segment seg(golden);
 		CHECK(seg.doc_count() == 300);
+		// Streaming to a file, positions spilled to a second file, writes the same bytes.
+		{
+			strata::file_output out("segment_test_stream.sx");
+			strata::file_spill spill("segment_test_stream.spill");
+			w.flush({}, out, spill);
+			out.close();
+		}
+		std::string streamed;
+		if (std::FILE* f = std::fopen("segment_test_stream.sx", "rb")) {
+			for (int c; (c = std::fgetc(f)) != EOF;) { streamed.push_back(char(c)); }
+			std::fclose(f);
+		}
+		CHECK(streamed == bytes);
+		CHECK(std::fopen("segment_test_stream.spill", "rb") == nullptr);
+		std::remove("segment_test_stream.sx");
 	}
 
 	// Length quantization rounds down and is monotone.

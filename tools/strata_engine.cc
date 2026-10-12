@@ -60,9 +60,14 @@ int index(const std::string& dir) {
 		w.add(++n, in, pos);
 		if (n % 100000 == 0) { std::cerr << n << '\n'; }
 	}
-	std::string bytes = w.flush({});
-	std::ofstream(dir + "/segment.sx", std::ios::binary).write(bytes.data(), std::streamsize(bytes.size()));
-	std::cerr << "segment: " << bytes.size() << " bytes, " << n << " documents\n";
+	{
+		strata::file_output out(dir + "/segment.sx");
+		strata::file_spill spill(dir + "/segment.positions.tmp");
+		w.flush({}, out, spill);
+		out.close();
+	}
+	std::ifstream written(dir + "/segment.sx", std::ios::binary | std::ios::ate);
+	std::cerr << "segment: " << written.tellg() << " bytes, " << n << " documents\n";
 	return 0;
 }
 
