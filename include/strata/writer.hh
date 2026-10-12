@@ -130,20 +130,21 @@ public:
 			for (std::size_t i = 0; i < ords.size(); ++i) { all.push_back({wdfs[i], format::encode_length(lengths_[ords[i]])}); }
 			info.impacts = format::competitive(all);
 
+			positions_layout layout;
+			if (t.any_positions) {
+				info.positions = positions.size();
+				std::size_t total = 0;
+				for (auto c : counts) { total += c; }
+				decode_all(t.positions, pos, total);
+				layout = write_positions(positions, counts, pos, t.counts_are_wdf);
+			}
 			if (t.df == 1) {
 				info.flags |= format::single_posting;
 				info.postings = ords[0];
 				info.single_wdf = wdfs[0];
 			} else {
 				info.postings = postings.size();
-				write_postings(postings, ords, wdfs, !t.all_zero_wdf, counts);
-			}
-			if (t.any_positions) {
-				info.positions = positions.size();
-				std::size_t total = 0;
-				for (auto c : counts) { total += c; }
-				decode_all(t.positions, pos, total);
-				write_positions(positions, counts, pos, t.counts_are_wdf);
+				write_postings(postings, ords, wdfs, !t.all_zero_wdf, counts, t.any_positions ? &layout : nullptr, !t.counts_are_wdf);
 			}
 			dict.add(key, format::encode_term_info(info));
 		}
@@ -253,10 +254,23 @@ private:
 		std::uint64_t bytes;
 		std::uint64_t first_position;  // index into the term's position stream
 		std::vector<format::impact> impacts;
+		std::uint64_t pos_offset = 0;    // byte offset of the position block holding first_position
+		std::uint64_t count_offset = 0;  // byte offset of the block's count block
+	};
+
+	// Where write_positions put each block, for the skip data.
+	struct positions_layout {
+		std::vector<std::uint64_t> block_offsets;  // each full position block, from the blocks' start
+		std::uint64_t blocks_bytes = 0;            // where the tail starts
+		std::vector<std::uint64_t> count_offsets;  // each postings block's count block
+		std::uint64_t offset_of(std::uint64_t first_position) const {
+			const std::uint64_t j = first_position / format::block;
+			return j < block_offsets.size() ? block_offsets[j] : blocks_bytes;
+		}
 	};
 
 	void write_postings(std::string& out, const std::vector<std::uint32_t>& ords, const std::vector<std::uint32_t>& wdfs, bool with_wdf,
-		const std::vector<std::uint32_t>& counts) {
+		const std::vector<std::uint32_t>& counts, const positions_layout* layout, bool with_counts) {
 		const std::size_t full = ords.size() / format::block * format::block;
 		std::string blocks;
 		std::vector<block_meta> meta;
@@ -272,6 +286,10 @@ private:
 			std::vector<format::impact> pairs;
 			for (std::size_t i = b; i < b + format::block; ++i) { pairs.push_back({wdfs[i], format::encode_length(lengths_[ords[i]])}); }
 			meta.push_back({ords[b + format::block - 1], blocks.size() - start, position, format::competitive(std::move(pairs))});
+			if (layout) {
+				meta.back().pos_offset = layout->offset_of(position);
+				if (with_counts) { meta.back().count_offset = layout->count_offsets[b / format::block]; }
+			}
 			for (std::size_t i = b; i < b + format::block; ++i) { position += counts[i]; }
 			prev = ords[b + format::block - 1];
 		}
@@ -284,31 +302,43 @@ private:
 			out += tail;
 			return;
 		}
-		// Level 0, grouped by 32 blocks; level 1 locates each group.
+		// Level 0, grouped by 32 blocks; level 1 locates each group. Positional fields
+		// (first position index, position block offset, count block offset) are present only
+		// for terms with positions, and counts only when they differ from wdf.
+		const bool with_positions = layout != nullptr;
+		with_counts = with_counts && with_positions;
 		std::string level1, level0;
 		const std::size_t groups = (meta.size() + 31) / 32;
 		ordinal_t prev_last = 0, prev_group_last = 0;
-		std::uint64_t prev_group_first_position = 0;
+		block_meta prev_group{};
 		for (std::size_t g = 0; g < groups; ++g) {
 			std::string group;
-			const std::uint64_t group_first_position = meta[g * 32].first_position;
-			std::uint64_t prev_first_position = group_first_position;  // level-0 deltas restart per group
+			const block_meta& first = meta[g * 32];
+			block_meta prev = first;  // level-0 deltas restart per group
 			std::uint64_t group_bytes = 0;
 			std::vector<format::impact> group_pairs;
 			for (std::size_t i = g * 32; i < std::min(meta.size(), g * 32 + 32); ++i) {
 				format::put_leb(group, meta[i].last - (i ? prev_last : 0));
 				format::put_leb(group, meta[i].bytes);
-				format::put_leb(group, meta[i].first_position - prev_first_position);
+				if (with_positions) {
+					format::put_leb(group, meta[i].first_position - prev.first_position);
+					format::put_leb(group, meta[i].pos_offset - prev.pos_offset);
+					if (with_counts) { format::put_leb(group, meta[i].count_offset - prev.count_offset); }
+				}
 				format::encode_impacts(group, meta[i].impacts);
 				prev_last = meta[i].last;
-				prev_first_position = meta[i].first_position;
+				prev = meta[i];
 				group_bytes += meta[i].bytes;
 				group_pairs.insert(group_pairs.end(), meta[i].impacts.begin(), meta[i].impacts.end());
 			}
 			const ordinal_t group_last = meta[std::min(meta.size(), g * 32 + 32) - 1].last;
 			format::put_leb(level1, group_last - (g ? prev_group_last : 0));
-			format::put_leb(level1, group_first_position - prev_group_first_position);
-			prev_group_first_position = group_first_position;
+			if (with_positions) {
+				format::put_leb(level1, first.first_position - prev_group.first_position);
+				format::put_leb(level1, first.pos_offset - prev_group.pos_offset);
+				if (with_counts) { format::put_leb(level1, first.count_offset - prev_group.count_offset); }
+			}
+			prev_group = first;
 			format::put_leb(level1, group.size());
 			format::put_leb(level1, group_bytes);
 			format::encode_impacts(level1, format::competitive(std::move(group_pairs)));
@@ -316,37 +346,46 @@ private:
 			level0 += group;
 		}
 		format::put_leb(out, groups);
-		format::put_leb(out, position);  // first position index of the tail
+		if (with_positions) {
+			format::put_leb(out, position);  // the tail's first position index and its block offset
+			format::put_leb(out, layout->offset_of(position));
+		}
 		out += level1;
 		out += level0;
 		out += blocks;
 		out += tail;
 	}
 
-	static void write_positions(std::string& out, const std::vector<std::uint32_t>& counts, const std::vector<std::uint32_t>& pos, bool counts_are_wdf) {
+	// [count blocks bytes][count blocks][tail counts] when counts differ from wdf, then
+	// [full position blocks][position blocks bytes][position blocks][tail positions]. Blocks
+	// sit back to back; the skip data locates them.
+	static positions_layout write_positions(std::string& out, const std::vector<std::uint32_t>& counts, const std::vector<std::uint32_t>& pos,
+		bool counts_are_wdf) {
+		positions_layout layout;
 		std::uint8_t buf[bitpack::max_encoded_bytes];
 		if (!counts_are_wdf) {
 			const std::size_t full = counts.size() / format::block * format::block;
 			std::string count_blocks;
 			for (std::size_t b = 0; b < full; b += format::block) {
-				std::size_t n = bitpack::encode_pfor(counts.data() + b, buf);
-				format::put_leb(out, n);
-				count_blocks.append(reinterpret_cast<char*>(buf), n);
+				layout.count_offsets.push_back(count_blocks.size());
+				count_blocks.append(reinterpret_cast<char*>(buf), bitpack::encode_pfor(counts.data() + b, buf));
 			}
+			format::put_leb(out, count_blocks.size());
 			out += count_blocks;
 			for (std::size_t i = full; i < counts.size(); ++i) { format::put_leb(out, counts[i]); }
 		}
 		const std::size_t full = pos.size() / format::block * format::block;
-		std::string blocks, sizes;
+		std::string blocks;
 		for (std::size_t b = 0; b < full; b += format::block) {
-			std::size_t n = bitpack::encode_pfor(pos.data() + b, buf);
-			format::put_leb(sizes, n);
-			blocks.append(reinterpret_cast<char*>(buf), n);
+			layout.block_offsets.push_back(blocks.size());
+			blocks.append(reinterpret_cast<char*>(buf), bitpack::encode_pfor(pos.data() + b, buf));
 		}
+		layout.blocks_bytes = blocks.size();
 		format::put_leb(out, full / format::block);
-		out += sizes;
+		format::put_leb(out, blocks.size());
 		out += blocks;
 		for (std::size_t i = full; i < pos.size(); ++i) { format::put_leb(out, pos[i]); }
+		return layout;
 	}
 
 	// Values bit-packed in 128-value blocks at one width: [width u8][blocks].

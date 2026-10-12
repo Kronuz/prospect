@@ -58,7 +58,7 @@ int main() {
 				std::string t = vocab[rng() % vocab.size()];
 				if (std::find(pick.begin(), pick.end(), t) == pick.end() && seg.term(t)) { pick.push_back(t); }
 			}
-			const int kind = int(rng() % 5);
+			const int kind = int(rng() % 6);
 			strata::scorer_ptr q;
 			std::map<ordinal_t, double> want;
 			for (std::size_t d = 0; d < ndocs; ++d) {
@@ -85,7 +85,8 @@ int main() {
 					if (match) { s = weight(pick[0])(tf(d, pick[0]), std::uint32_t(docs[d].tokens.size())); }
 					break;
 				}
-				case 4: {  // phrase
+				case 4:
+				case 5: {  // phrase; 5: phrase AND its first term (two-phase in a conjunction)
 					std::uint32_t freq = 0;
 					const auto& tk = docs[d].tokens;
 					for (std::size_t i = 0; i + pick.size() <= tk.size(); ++i) {
@@ -100,6 +101,7 @@ int main() {
 						auto wt = strata::weight::lucene(seg, 1);
 						wt.idf = idf;
 						s = wt(freq, std::uint32_t(tk.size()));
+						if (kind == 5) { s += weight(pick[0])(tf(d, pick[0]), std::uint32_t(tk.size())); }
 					}
 					break;
 				}
@@ -121,7 +123,11 @@ int main() {
 				default: {
 					std::vector<strata::format::term_info> infos;
 					for (auto& t : pick) { infos.push_back(*seg.term(t)); }
-					return std::make_unique<strata::phrase_scorer>(seg, infos);
+					auto phrase = std::make_unique<strata::phrase_scorer>(seg, infos);
+					if (kind == 4) { return phrase; }
+					kids.push_back(std::move(phrase));
+					kids.push_back(term(pick[0]));
+					return std::make_unique<strata::conjunction_scorer>(std::move(kids));
 				}
 				}
 			};

@@ -72,24 +72,20 @@ int main() {
 			// positions of every posting
 			{
 				strata::postings_iterator pi(seg, *info);
-				strata::positions_reader pr(seg, *info, pi.blocks(), pi.tail_count());
+				strata::positions_reader pr(seg, *info);
 				std::vector<std::uint32_t> got;
 				std::size_t k = 0;
-				bool counts_wdf = info->flags & strata::format::counts_are_wdf;
 				for (auto d = pi.next(); d != strata::no_more_docs; d = pi.next(), ++k) {
-					const std::uint32_t* counts = counts_wdf ? pi.wdfs() : pr.counts(pi.current_block());
-					std::uint64_t first = pi.position_index(counts);
-					pr.read(first, counts[pi.index_in_block()], got);
+					pr.read(pi, got);
 					CHECK(got == m.positions[term][k]);
 				}
 				// random access after advance
 				for (int round = 0; round < 10 && !list.empty(); ++round) {
 					strata::postings_iterator a(seg, *info);
-					strata::positions_reader ar(seg, *info, a.blocks(), a.tail_count());
+					strata::positions_reader ar(seg, *info);
 					std::size_t idx = rng() % list.size();
 					CHECK(a.advance(list[idx].first) == list[idx].first);
-					const std::uint32_t* counts = counts_wdf ? a.wdfs() : ar.counts(a.current_block());
-					ar.read(a.position_index(counts), counts[a.index_in_block()], got);
+					ar.read(a, got);
 					CHECK(got == m.positions[term][idx]);
 				}
 			}

@@ -155,19 +155,30 @@ public:
 		p_ = bytes.data() + info.postings;
 		end_ = bytes.data() + bytes.size();
 		blocks_ = df_ / format::block;
+		with_positions_ = !(info.flags & format::no_positions);
+		with_counts_ = with_positions_ && !(info.flags & format::counts_are_wdf);
 		if (blocks_) {
 			const std::uint64_t groups = format::get_leb(&p_, end_);
 			if (groups != (blocks_ + 31) / 32) { throw corrupt_segment("skip group count"); }
-			tail_first_position_ = format::get_leb(&p_, end_);
+			if (with_positions_) {
+				tail_first_position_ = format::get_leb(&p_, end_);
+				tail_pos_offset_ = format::get_leb(&p_, end_);
+			}
 			groups_.resize(groups);
 			ordinal_t last = 0;
-			std::uint64_t level0 = 0, block_bytes = 0, first_position = 0;
+			std::uint64_t level0 = 0, block_bytes = 0, first_position = 0, pos_offset = 0, count_offset = 0;
 			for (std::size_t g = 0; g < groups; ++g) {
 				auto& gr = groups_[g];
 				last += ordinal_t(format::get_leb(&p_, end_));
 				gr.last = last;
-				first_position += format::get_leb(&p_, end_);
+				if (with_positions_) {
+					first_position += format::get_leb(&p_, end_);
+					pos_offset += format::get_leb(&p_, end_);
+					if (with_counts_) { count_offset += format::get_leb(&p_, end_); }
+				}
 				gr.first_position = first_position;
+				gr.pos_offset = pos_offset;
+				gr.count_offset = count_offset;
 				gr.level0_offset = level0;
 				gr.blocks_offset = block_bytes;
 				level0 += format::get_leb(&p_, end_);
@@ -198,6 +209,11 @@ public:
 
 	ordinal_t advance(ordinal_t target) {
 		if (started_ && doc_ != no_more_docs && doc_ >= target) { return doc_; }
+		// Inside the decoded block: search it without touching skip data.
+		if (started_ && buf_len_ && target <= buf_ords_[buf_len_ - 1]) {
+			pos_ = std::size_t(std::lower_bound(buf_ords_ + pos_, buf_ords_ + buf_len_, target) - buf_ords_);
+			return doc_ = buf_ords_[pos_];
+		}
 		// Skip whole blocks using skip data before decoding.
 		if (blocks_) { skip_to_block_containing(target); }
 		while (true) {
@@ -227,9 +243,8 @@ public:
 	// the tail or past the end).
 	std::size_t block_index_for(ordinal_t target) {
 		if (!blocks_) { return 0; }
-		auto g = std::lower_bound(groups_.begin(), groups_.end(), target, [](const group& gr, ordinal_t t) { return gr.last < t; });
-		if (g == groups_.end()) { return blocks_; }
-		std::size_t gi = std::size_t(g - groups_.begin());
+		std::size_t gi = group_of(target);
+		if (gi == groups_.size()) { return blocks_; }
 		decode_group(gi);
 		auto e = std::lower_bound(entries_, entries_ + entries_n_, target, [](const entry& en, ordinal_t t) { return en.last < t; });
 		return gi * 32 + std::size_t(e - entries_);
@@ -245,6 +260,19 @@ public:
 		return {entry_impacts_.data() + e.impacts_begin, e.impacts_count};
 	}
 	std::size_t groups() const noexcept { return groups_.size(); }
+	// The group holding target, without decoding its blocks (groups() past the end). The
+	// decoded group and the one after it are tried before a binary search.
+	std::size_t group_of(ordinal_t target) const noexcept {
+		const std::size_t n = groups_.size();
+		std::size_t g = decoded_group_;
+		if (g < n) {
+			if (target <= groups_[g].last && (g == 0 || target > groups_[g - 1].last)) { return g; }
+			if (g + 1 < n && target > groups_[g].last && target <= groups_[g + 1].last) { return g + 1; }
+		}
+		return std::size_t(std::lower_bound(groups_.begin(), groups_.end(), target, [](const group& gr, ordinal_t t) { return gr.last < t; }) - groups_.begin());
+	}
+	// The first ordinal a group can hold.
+	ordinal_t group_first(std::size_t g) const noexcept { return g ? groups_[g - 1].last + 1 : 0; }
 	ordinal_t group_last(std::size_t g) const noexcept { return groups_[g].last; }
 	std::span<const format::impact> group_impacts(std::size_t g) const noexcept {
 		return {group_impacts_.data() + groups_[g].impacts_begin, groups_[g].impacts_count};
@@ -268,12 +296,31 @@ public:
 	std::size_t blocks() const noexcept { return blocks_; }
 	std::size_t tail_count() const noexcept { return df_ % format::block; }
 
+	// Where the current postings block's positions start: the index of its first position
+	// in the term's stream and the byte offset of the position block holding it; and the
+	// byte offset of its count block (counts differ from wdf). Zero for terms without skip
+	// data, whose positions start at the beginning.
+	struct position_start {
+		std::uint64_t first_index = 0, block_offset = 0, count_offset = 0;
+	};
+	position_start positions_start() {
+		if (in_tail()) { return {tail_first_position_, tail_pos_offset_, 0}; }
+		const entry& e = level0_entry(next_block_ - 1);
+		return {e.first_position, e.pos_offset, e.count_offset};
+	}
+
 	// Index of the current document's first position in the term's position stream, given
-	// the per-document counts of the current block (its wdf when counts equal wdf).
+	// the per-document counts of the current block (its wdf when counts equal wdf). Sums
+	// forward from the last document asked about in the same block.
 	std::uint64_t position_index(const std::uint32_t* counts) {
-		std::uint64_t base = in_tail() ? tail_first_position_ : level0_entry(next_block_ - 1).first_position;
-		for (std::size_t i = 0; i < pos_; ++i) { base += counts[i]; }
-		return base;
+		const std::size_t block = current_block();
+		if (sum_block_ != block || sum_pos_ > pos_) {
+			sum_block_ = block;
+			sum_pos_ = 0;
+			sum_ = positions_start().first_index;
+		}
+		for (; sum_pos_ < pos_; ++sum_pos_) { sum_ += counts[sum_pos_]; }
+		return sum_;
 	}
 
 	const std::uint32_t* wdfs() const noexcept { return buf_wdfs_; }
@@ -317,7 +364,7 @@ public:
 private:
 	struct group {
 		ordinal_t last = 0;
-		std::uint64_t first_position = 0;
+		std::uint64_t first_position = 0, pos_offset = 0, count_offset = 0;
 		std::uint64_t level0_offset = 0, blocks_offset = 0;
 		std::uint32_t impacts_begin = 0;  // in group_impacts_
 		std::uint8_t impacts_count = 0;
@@ -327,6 +374,8 @@ private:
 		std::uint64_t offset = 0;  // from blocks_begin_
 		std::uint64_t bytes = 0;
 		std::uint64_t first_position = 0;  // index of the block's first position in the term's stream
+		std::uint64_t pos_offset = 0;      // byte offset of the position block holding it
+		std::uint64_t count_offset = 0;    // byte offset of the block's count block
 		std::uint32_t impacts_begin = 0;   // in entry_impacts_
 		std::uint8_t impacts_count = 0;
 	};
@@ -355,14 +404,21 @@ private:
 		entry_impacts_.clear();
 		ordinal_t last = g ? groups_[g - 1].last : 0;
 		std::uint64_t offset = groups_[g].blocks_offset;
-		std::uint64_t first_position = groups_[g].first_position;  // level-0 deltas restart per group
+		// Level-0 deltas restart per group.
+		std::uint64_t first_position = groups_[g].first_position, pos_offset = groups_[g].pos_offset, count_offset = groups_[g].count_offset;
 		const std::size_t n = std::min<std::size_t>(32, blocks_ - g * 32);
 		for (std::size_t i = 0; i < n; ++i) {
 			entry& e = entries_[entries_n_++];
 			e.last = last + ordinal_t(format::get_leb(&p, end));
 			e.bytes = format::get_leb(&p, end);
-			first_position += format::get_leb(&p, end);
+			if (with_positions_) {
+				first_position += format::get_leb(&p, end);
+				pos_offset += format::get_leb(&p, end);
+				if (with_counts_) { count_offset += format::get_leb(&p, end); }
+			}
 			e.first_position = first_position;
+			e.pos_offset = pos_offset;
+			e.count_offset = count_offset;
 			e.impacts_begin = std::uint32_t(entry_impacts_.size());
 			e.impacts_count = std::uint8_t(format::decode_impacts(&p, end, entry_impacts_));
 			e.offset = offset;
@@ -454,7 +510,10 @@ private:
 	std::size_t entries_n_ = 0;
 	std::vector<format::impact> entry_impacts_;
 	std::size_t decoded_group_ = std::numeric_limits<std::size_t>::max();
-	std::uint64_t tail_first_position_ = 0;
+	std::uint64_t tail_first_position_ = 0, tail_pos_offset_ = 0;
+	std::size_t sum_block_ = std::numeric_limits<std::size_t>::max(), sum_pos_ = 0;
+	std::uint64_t sum_ = 0;
+	bool with_positions_ = false, with_counts_ = false;
 	ordinal_t buf_ords_[format::block] = {};
 	std::uint32_t buf_wdfs_[format::block] = {};
 	std::size_t buf_len_ = 0, pos_ = 0;
@@ -463,80 +522,68 @@ private:
 };
 
 // Reads one term's position data: per-document counts (when they differ from wdf) and the
-// position stream, decoding one 128-position block at a time.
+// position stream, decoding one 128-position block at a time. Opening reads a fixed header;
+// blocks are found from the postings skip data and stepped over by their headers.
 class positions_reader {
 public:
-	positions_reader(const segment& seg, const format::term_info& info, std::size_t postings_blocks, std::size_t tail) {
-		auto bytes = seg.positions_bytes();
+	positions_reader(const segment& seg, const format::term_info& info) {
 		if (info.flags & format::no_positions) { return; }
+		auto bytes = seg.positions_bytes();
 		if (info.positions > bytes.size()) { throw corrupt_segment("positions offset"); }
 		const char* p = bytes.data() + info.positions;
 		end_ = bytes.data() + bytes.size();
 		if (!(info.flags & format::counts_are_wdf)) {
-			count_sizes_.resize(postings_blocks);
-			for (auto& n : count_sizes_) { n = format::get_leb(&p, end_); }
+			const std::uint64_t n = format::get_leb(&p, end_);
+			if (n > std::uint64_t(end_ - p)) { throw corrupt_segment("count blocks bounds"); }
 			count_blocks_ = p;
-			std::uint64_t total = 0;
-			for (auto n : count_sizes_) {
-				if (n > std::uint64_t(end_ - p) - total) { throw corrupt_segment("count block bounds"); }
-				count_offsets_.push_back(total);
-				total += n;
-			}
-			p += total;
-			count_tail_.resize(tail);
-			for (auto& c : count_tail_) { c = std::uint32_t(format::get_leb(&p, end_)); }
+			count_blocks_bytes_ = n;
+			p += n;
+			for (std::size_t i = 0; i < info.df % format::block; ++i) { count_tail_.push_back(std::uint32_t(format::get_leb(&p, end_))); }
 		}
-		const std::uint64_t blocks = format::get_leb(&p, end_);
-		if (blocks > std::uint64_t(end_ - p)) { throw corrupt_segment("position block count"); }
-		std::uint64_t total = 0;
-		block_offsets_.reserve(blocks);
-		for (std::uint64_t b = 0; b < blocks; ++b) {
-			std::uint64_t n = format::get_leb(&p, end_);
-			block_offsets_.push_back(total);
-			block_sizes_.push_back(n);
-			total += n;
-		}
-		if (total > std::uint64_t(end_ - p)) { throw corrupt_segment("position blocks bounds"); }
+		full_blocks_ = format::get_leb(&p, end_);
+		blocks_bytes_ = format::get_leb(&p, end_);
+		if (blocks_bytes_ > std::uint64_t(end_ - p) || full_blocks_ > blocks_bytes_) { throw corrupt_segment("position blocks bounds"); }
 		blocks_ = p;
-		tail_ = p + total;
+		tail_ = p + blocks_bytes_;
 	}
 
-	// Per-document position counts for postings block b (b == number of blocks: the tail).
-	const std::uint32_t* counts(std::size_t b) {
-		if (b >= count_sizes_.size()) { return count_tail_.data(); }
-		if (decoded_counts_ != b) {
-			if (!bitpack::decode(reinterpret_cast<const std::uint8_t*>(count_blocks_ + count_offsets_[b]), count_sizes_[b], counts_buf_)) {
-				throw corrupt_segment("count block");
-			}
-			decoded_counts_ = b;
-		}
-		return counts_buf_;
-	}
-
-	// Appends the absolute positions of a document whose run starts at stream index `first`
-	// and holds `count` values (deltas restarting at the document).
-	void read(std::uint64_t first, std::uint32_t count, std::vector<std::uint32_t>& out) {
+	// The positions of the iterator's current document, ascending.
+	void read(postings_iterator& it, std::vector<std::uint32_t>& out) {
+		const auto start = it.positions_start();
+		const std::uint32_t* counts = it.info().flags & format::counts_are_wdf ? it.wdfs() : this->counts(it.in_tail(), start.count_offset);
+		const std::uint64_t first = it.position_index(counts);
+		const std::uint32_t count = counts[it.index_in_block()];
+		// Full blocks hold 128 positions each and a tail position takes at least a byte.
+		if (first + count > full_blocks_ * format::block + std::uint64_t(end_ - tail_)) { throw corrupt_segment("position count"); }
 		out.clear();
 		std::uint32_t at = 0;
 		for (std::uint64_t i = first; i < first + count; ++i) {
-			at += value(i);
+			at += value(i, start);
 			out.push_back(at);
 		}
 	}
 
 private:
-	std::uint32_t value(std::uint64_t i) {
-		const std::uint64_t b = i / format::block;
-		if (b < block_offsets_.size()) {
-			if (decoded_block_ != b) {
-				if (!bitpack::decode(reinterpret_cast<const std::uint8_t*>(blocks_ + block_offsets_[b]), block_sizes_[b], block_buf_)) {
-					throw corrupt_segment("position block");
-				}
-				decoded_block_ = b;
+	const std::uint32_t* counts(bool tail, std::uint64_t offset) {
+		if (tail) { return count_tail_.data(); }
+		if (decoded_counts_ != offset) {
+			if (offset >= count_blocks_bytes_ ||
+				!bitpack::decode(reinterpret_cast<const std::uint8_t*>(count_blocks_ + offset), count_blocks_bytes_ - offset, counts_buf_)) {
+				throw corrupt_segment("count block");
 			}
+			decoded_counts_ = offset;
+		}
+		return counts_buf_;
+	}
+
+	// Position i of the stream; start locates the postings block's first position block.
+	std::uint32_t value(std::uint64_t i, const postings_iterator::position_start& start) {
+		const std::uint64_t j = i / format::block;
+		if (j < full_blocks_) {
+			if (decoded_block_ != j) { decode_block(j, start); }
 			return block_buf_[i % format::block];
 		}
-		const std::uint64_t t = i - block_offsets_.size() * format::block;
+		const std::uint64_t t = i - full_blocks_ * format::block;
 		while (tail_values_.size() <= t) {
 			if (tail_p_ == nullptr) { tail_p_ = tail_; }
 			tail_values_.push_back(std::uint32_t(format::get_leb(&tail_p_, end_)));
@@ -544,16 +591,39 @@ private:
 		return tail_values_[t];
 	}
 
+	// Steps from the nearest known block at or before j (the decoded one, or the postings
+	// block's first) over block headers, then decodes block j.
+	void decode_block(std::uint64_t j, const postings_iterator::position_start& start) {
+		std::uint64_t at = start.first_index / format::block, offset = start.block_offset;
+		if (decoded_block_ < j && decoded_block_ >= at) {
+			at = decoded_block_;
+			offset = decoded_offset_;
+		}
+		if (at > j) { throw corrupt_segment("position block order"); }
+		for (; at < j; ++at) {
+			if (offset >= blocks_bytes_) { throw corrupt_segment("position block bounds"); }
+			const std::size_t n = bitpack::encoded_size(reinterpret_cast<const std::uint8_t*>(blocks_ + offset), blocks_bytes_ - offset);
+			if (!n) { throw corrupt_segment("position block"); }
+			offset += n;
+		}
+		if (offset >= blocks_bytes_ ||
+			!bitpack::decode(reinterpret_cast<const std::uint8_t*>(blocks_ + offset), blocks_bytes_ - offset, block_buf_)) {
+			throw corrupt_segment("position block");
+		}
+		decoded_block_ = j;
+		decoded_offset_ = offset;
+	}
+
 	const char* end_ = nullptr;
 	const char* count_blocks_ = nullptr;
 	const char* blocks_ = nullptr;
 	const char* tail_ = nullptr;
 	const char* tail_p_ = nullptr;
-	std::vector<std::uint64_t> count_sizes_, count_offsets_, block_offsets_, block_sizes_;
+	std::uint64_t count_blocks_bytes_ = 0, full_blocks_ = 0, blocks_bytes_ = 0;
 	std::vector<std::uint32_t> count_tail_, tail_values_;
 	std::uint32_t counts_buf_[format::block] = {}, block_buf_[format::block] = {};
-	std::size_t decoded_counts_ = std::numeric_limits<std::size_t>::max();
-	std::uint64_t decoded_block_ = std::numeric_limits<std::uint64_t>::max();
+	std::uint64_t decoded_counts_ = std::numeric_limits<std::uint64_t>::max();
+	std::uint64_t decoded_block_ = std::numeric_limits<std::uint64_t>::max(), decoded_offset_ = 0;
 };
 
 }  // namespace strata

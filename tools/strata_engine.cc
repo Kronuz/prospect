@@ -183,10 +183,8 @@ int bench(const std::string& dir, std::string_view command, int runs) {
 	for (std::string line; std::getline(std::cin, line);) {
 		auto at = line.find("\"query\": \"");
 		if (at == std::string::npos) { continue; }
-		at += 10;
-		const std::string query = line.substr(at, line.find('"', at) - at);
 		std::string unescaped;
-		for (std::size_t i = 0; i < query.size(); ++i) { unescaped.push_back(query[i] == '\\' ? query[++i] : query[i]); }
+		for (std::size_t i = at + 10; i < line.size() && line[i] != '"'; ++i) { unescaped.push_back(line[i] == '\\' ? line[++i] : line[i]); }
 		double best = 1e300;
 		std::uint64_t result = 0;
 		for (int r = 0; r < runs; ++r) {

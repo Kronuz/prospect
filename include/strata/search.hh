@@ -127,6 +127,13 @@ struct scorer {
 			bits[(d - base) >> 6] |= std::uint64_t(1) << ((d - base) & 63);
 		}
 	}
+	// Two-phase iteration: approx_next/approx_advance move over a superset of the matches
+	// (a phrase's documents holding all its terms) and matches() confirms the current one.
+	// Parents leapfrog on approximations and confirm only documents every child agrees on.
+	virtual bool two_phase() const noexcept { return false; }
+	virtual ordinal_t approx_next() { return next(); }
+	virtual ordinal_t approx_advance(ordinal_t target) { return advance(target); }
+	virtual bool matches() { return true; }
 	// Collects the k best hits itself (bulk scoring); false when the generic loop must.
 	virtual bool collect_top_k(top_collector& c) { (void)c; return false; }
 };
@@ -246,17 +253,19 @@ private:
 	ordinal_t skip_blocks(ordinal_t d) {
 		while (min_ > 0 && d != no_more_docs) {
 			if (checked_until_ != no_more_docs && d <= checked_until_) { return d; }
+			std::size_t g = it_.groups() ? it_.group_of(d) : 0;
+			if (g < it_.groups() && group_bound(g) <= min_) {
+				// Find the next group that can compete before decoding any blocks.
+				while (g < it_.groups() && group_bound(g) <= min_) { ++g; }
+				if (g == it_.groups() && total_bound_ <= min_) { return no_more_docs; }
+				d = it_.advance(g < it_.groups() ? it_.group_first(g) : it_.group_last(g - 1) + 1);
+				continue;
+			}
 			const std::size_t b = it_.block_index_for(d);
 			if (b >= it_.blocks()) {
 				if (total_bound_ <= min_) { return no_more_docs; }
 				checked_until_ = no_more_docs - 1;
 				return d;
-			}
-			const std::size_t g = b / 32;
-			if (group_bound(g) <= min_) {
-				if (g + 1 == it_.groups() && it_.blocks() % 32 == 0 && total_bound_ <= min_) { return no_more_docs; }
-				d = it_.advance(it_.group_last(g) + 1);
-				continue;
 			}
 			if (block_bound(b) <= min_) {
 				d = it_.advance(it_.block_last(b) + 1);
@@ -284,11 +293,23 @@ public:
 	explicit conjunction_scorer(std::vector<scorer_ptr> children)
 		: children_(std::move(children)), started_(children_.size(), false), window_bounds_(children_.size(), 0.0) {
 		std::sort(children_.begin(), children_.end(), [](const scorer_ptr& a, const scorer_ptr& b) { return a->cost() < b->cost(); });
-		for (const auto& c : children_) { bound_ += c->max_score_total(); }
+		for (const auto& c : children_) {
+			bound_ += c->max_score_total();
+			two_phase_ = two_phase_ || c->two_phase();
+		}
 	}
 	ordinal_t doc() const noexcept override { return doc_; }
-	ordinal_t next() override { return doc_ = align(children_[0]->next()); }
-	ordinal_t advance(ordinal_t t) override { return doc_ = align(children_[0]->advance(t)); }
+	ordinal_t next() override { return doc_ = confirm(align(children_[0]->approx_next())); }
+	ordinal_t advance(ordinal_t t) override { return doc_ = confirm(align(children_[0]->approx_advance(t))); }
+	bool two_phase() const noexcept override { return two_phase_; }
+	ordinal_t approx_next() override { return doc_ = align(children_[0]->approx_next()); }
+	ordinal_t approx_advance(ordinal_t t) override { return doc_ = align(children_[0]->approx_advance(t)); }
+	bool matches() override {
+		for (auto& c : children_) {
+			if (c->two_phase() && !c->matches()) { return false; }
+		}
+		return true;
+	}
 	std::uint64_t cost() const noexcept override { return children_[0]->cost(); }
 	void set_min_competitive_score(double s) override { min_ = s; }
 	double score() override {
@@ -303,8 +324,21 @@ public:
 	}
 	ordinal_t block_end(ordinal_t t) override { return children_[0]->block_end(t); }
 	double max_score_total() const noexcept override { return bound_; }
+	std::unique_ptr<scorer> fresh() const override {
+		std::vector<scorer_ptr> kids;
+		for (const auto& c : children_) {
+			if (auto f = c->fresh()) { kids.push_back(std::move(f)); } else { return nullptr; }
+		}
+		return std::make_unique<conjunction_scorer>(std::move(kids));
+	}
 
 private:
+	// Confirms approximate matches until one holds.
+	ordinal_t confirm(ordinal_t d) {
+		while (d != no_more_docs && two_phase_ && !matches()) { d = align(children_[0]->approx_next()); }
+		return d;
+	}
+
 	// Leapfrog from the cheapest child until every child agrees. With a minimum competitive
 	// score, the lead's blocks are windows: a window whose summed bounds cannot compete is
 	// skipped whole, and inside a window a document whose lead score plus the other
@@ -320,25 +354,29 @@ private:
 					for (std::size_t i = 0; i < children_.size(); ++i) { sum += window_bounds_[i] = children_[i]->max_score(target, upto); }
 					if (sum <= min_) {
 						if (end == no_more_docs) { return no_more_docs; }
-						target = lead->advance(end + 1);
+						target = lead->approx_advance(end + 1);
 						continue;
 					}
 					window_end_ = end;
 					rest_bound_ = sum - window_bounds_[0];
 				}
+				if (lead->two_phase() && !lead->matches()) {
+					target = lead->approx_next();
+					continue;
+				}
 				lead_score_ = lead->score();
 				lead_scored_ = target;
 				if (lead_score_ + rest_bound_ <= min_) {
-					target = lead->next();
+					target = lead->approx_next();
 					continue;
 				}
 			}
 			bool agreed = true;
 			for (std::size_t i = 1; i < children_.size(); ++i) {
-				ordinal_t d = children_[i]->doc() >= target && started_[i] ? children_[i]->doc() : children_[i]->advance(target);
+				ordinal_t d = children_[i]->doc() >= target && started_[i] ? children_[i]->doc() : children_[i]->approx_advance(target);
 				started_[i] = true;
 				if (d != target) {
-					target = lead->advance(d);
+					target = lead->approx_advance(d);
 					agreed = false;
 					break;
 				}
@@ -353,6 +391,7 @@ private:
 	std::vector<double> window_bounds_;
 	ordinal_t doc_ = 0, window_end_ = no_more_docs, lead_scored_ = no_more_docs;
 	double bound_ = 0, min_ = 0, rest_bound_ = 0, lead_score_ = 0;
+	bool two_phase_ = false;
 };
 
 // Documents any child matches; score = sum of the matching children's scores.
@@ -439,6 +478,14 @@ public:
 	// Block-max MaxScore over windows of 4,096 ordinals (see the definition).
 	bool collect_top_k(top_collector& c) override;
 
+	std::unique_ptr<scorer> fresh() const override {
+		std::vector<scorer_ptr> kids;
+		for (const auto& c : children_) {
+			if (auto f = c->fresh()) { kids.push_back(std::move(f)); } else { return nullptr; }
+		}
+		return std::make_unique<disjunction_scorer>(std::move(kids));
+	}
+
 	// Each child fills its own matches (positioning non-essential ones first).
 	void fill(ordinal_t base, ordinal_t end, std::uint64_t* bits) override {
 		for (std::size_t i = 0; i < children_.size(); ++i) {
@@ -501,6 +548,12 @@ public:
 	ordinal_t block_end(ordinal_t t) override { return req_->block_end(t); }
 	double max_score_total() const noexcept override { return req_->max_score_total() + opt_->max_score_total(); }
 	void set_min_competitive_score(double s) override { req_->set_min_competitive_score(s - opt_->max_score_total()); }
+	std::optional<std::uint64_t> exact_count() override { return req_->exact_count(); }  // the optional side never filters
+	std::unique_ptr<scorer> fresh() const override {
+		auto r = req_->fresh(), o = opt_->fresh();
+		if (!r || !o) { return nullptr; }
+		return std::make_unique<required_optional_scorer>(std::move(r), std::move(o));
+	}
 
 private:
 	scorer_ptr req_, opt_;
@@ -521,6 +574,13 @@ public:
 	double max_score_total() const noexcept override { return in_->max_score_total(); }
 	void set_min_competitive_score(double s) override { in_->set_min_competitive_score(s); }
 	double current_bound() override { return in_->current_bound(); }
+	// |include| - |include and exclude|, when include's count is known.
+	std::optional<std::uint64_t> exact_count() override;
+	std::unique_ptr<scorer> fresh() const override {
+		auto i = in_->fresh(), e = ex_->fresh();
+		if (!i || !e) { return nullptr; }
+		return std::make_unique<exclusion_scorer>(std::move(i), std::move(e));
+	}
 
 private:
 	ordinal_t skip(ordinal_t d) {
@@ -549,10 +609,13 @@ public:
 		double idf = 0;
 		for (const auto& info : infos) {
 			terms_.push_back(std::make_unique<postings_iterator>(seg, info));
-			readers_.push_back(std::make_unique<positions_reader>(seg, info, terms_.back()->blocks(), terms_.back()->tail_count()));
+			readers_.push_back(std::make_unique<positions_reader>(seg, info));
 			counts_wdf_.push_back(info.flags & format::counts_are_wdf);
 			idf += weight::lucene(seg, info.df).idf;
-			cost_ = std::min(cost_, std::uint64_t(info.df));
+			if (info.df < cost_) {
+				cost_ = info.df;
+				lead_ = terms_.size() - 1;
+			}
 		}
 		started_.assign(terms_.size(), false);
 		weight_ = weight::lucene(seg, 1);
@@ -568,8 +631,18 @@ public:
 		}
 	}
 	ordinal_t doc() const noexcept override { return doc_; }
-	ordinal_t next() override { return doc_ = find(terms_[0]->next()); }
-	ordinal_t advance(ordinal_t t) override { return doc_ = find(terms_[0]->advance(t)); }
+	ordinal_t next() override { return doc_ = find(terms_[lead_]->next()); }
+	ordinal_t advance(ordinal_t t) override { return doc_ = find(terms_[lead_]->advance(t)); }
+	bool two_phase() const noexcept override { return true; }
+	ordinal_t approx_next() override { return doc_ = align(terms_[lead_]->next()); }
+	ordinal_t approx_advance(ordinal_t t) override { return doc_ = align(terms_[lead_]->advance(t)); }
+	bool matches() override {
+		if (checked_ != doc_) {
+			checked_ = doc_;
+			freq_ = phrase_freq();
+		}
+		return freq_ > 0;
+	}
 	std::uint64_t cost() const noexcept override { return cost_; }
 	double score() override {
 		if (term_weights_.empty()) { return weight_(freq_, seg_->length(doc_)); }
@@ -579,35 +652,41 @@ public:
 		return s;
 	}
 	double max_score(ordinal_t, ordinal_t) override { return bound_; }
-	ordinal_t block_end(ordinal_t t) override { return terms_[0]->block_end(t); }
+	ordinal_t block_end(ordinal_t t) override { return terms_[lead_]->block_end(t); }
 	double max_score_total() const noexcept override { return bound_; }
 
 private:
-	ordinal_t find(ordinal_t d) {
+	// The next document at or after d holding every term, leapfrogging from the rarest.
+	ordinal_t align(ordinal_t d) {
 		while (d != no_more_docs) {
 			bool all = true;
-			for (std::size_t i = 1; i < terms_.size(); ++i) {
+			for (std::size_t i = 0; i < terms_.size(); ++i) {
+				if (i == lead_) { continue; }
 				ordinal_t e = started_[i] && terms_[i]->doc() >= d ? terms_[i]->doc() : terms_[i]->advance(d);
 				started_[i] = true;
 				if (e != d) {
-					d = terms_[0]->advance(e);
+					d = terms_[lead_]->advance(e);
 					all = false;
 					break;
 				}
 			}
-			if (all && (freq_ = phrase_freq()) > 0) { return d; }
-			if (all) { d = terms_[0]->next(); }
+			if (all) { return d; }
+		}
+		return no_more_docs;
+	}
+
+	// The next document at or after d where the phrase occurs.
+	ordinal_t find(ordinal_t d) {
+		for (d = align(d); d != no_more_docs; d = align(terms_[lead_]->next())) {
+			checked_ = d;
+			if ((freq_ = phrase_freq()) > 0) { return d; }
 		}
 		return no_more_docs;
 	}
 
 	std::uint32_t phrase_freq() {
 		positions_.resize(terms_.size());
-		for (std::size_t i = 0; i < terms_.size(); ++i) {
-			auto& it = *terms_[i];
-			const std::uint32_t* counts = counts_wdf_[i] ? it.wdfs() : readers_[i]->counts(it.current_block());
-			readers_[i]->read(it.position_index(counts), counts[it.index_in_block()], positions_[i]);
-		}
+		for (std::size_t i = 0; i < terms_.size(); ++i) { readers_[i]->read(*terms_[i], positions_[i]); }
 		std::uint32_t n = 0;
 		for (std::uint32_t p : positions_[0]) {
 			bool ok = true;
@@ -626,6 +705,8 @@ private:
 	weight weight_ = weight::lucene(*seg_, 1);
 	std::uint64_t cost_ = ~std::uint64_t(0);
 	std::uint32_t freq_ = 0;
+	ordinal_t checked_ = no_more_docs;  // the document freq_ belongs to
+	std::size_t lead_ = 0;
 	ordinal_t doc_ = 0;
 	double bound_ = 0;
 	std::vector<bool> started_;
@@ -757,6 +838,18 @@ inline bool disjunction_scorer::collect_top_k(top_collector& c) {
 	}
 	doc_ = no_more_docs;
 	return true;
+}
+
+inline std::optional<std::uint64_t> exclusion_scorer::exact_count() {
+	auto n = in_->exact_count();
+	if (!n) { return std::nullopt; }
+	auto i = in_->fresh(), e = ex_->fresh();
+	if (!i || !e) { return std::nullopt; }
+	std::vector<scorer_ptr> both;
+	both.push_back(std::move(i));
+	both.push_back(std::move(e));
+	conjunction_scorer common(std::move(both));
+	return *n - count(common);
 }
 
 inline std::optional<std::uint64_t> disjunction_scorer::exact_count() {

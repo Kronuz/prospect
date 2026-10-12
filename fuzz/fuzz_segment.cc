@@ -59,12 +59,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 			strata::term_scorer s(seg, *info);
 			strata::top_k(s, 10);
 			strata::postings_iterator it(seg, *info);
-			strata::positions_reader pr(seg, *info, it.blocks(), it.tail_count());
+			strata::positions_reader pr(seg, *info);
 			std::vector<std::uint32_t> got;
-			for (auto d = it.next(); d != strata::no_more_docs; d = it.next()) {
-				const std::uint32_t* counts = (info->flags & strata::format::counts_are_wdf) ? it.wdfs() : pr.counts(it.current_block());
-				if (counts[it.index_in_block()] < 4096) { pr.read(it.position_index(counts), counts[it.index_in_block()], got); }
-			}
+			for (auto d = it.next(); d != strata::no_more_docs; d = it.next()) { pr.read(it, got); }
 		}
 	} catch (const strata::corrupt_segment&) {
 	} catch (const termdict::corrupt&) {

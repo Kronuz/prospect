@@ -7,18 +7,21 @@ OVERRIDES := $(foreach l,docset bitpack fst task hashes residency varint termdic
 clean:
 	rm -fr idx build
 
+# Always rebuilds through ninja, which tracks sources; build/strata_engine existing is
+# not proof that it is current.
+.PHONY: compile build/strata_engine
 compile: build/strata_engine
 
 build/strata_engine:
-	cmake -S $(STRATA_SRC) -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_CXX_FLAGS="-march=native" $(OVERRIDES)
+	[ -f build/build.ninja ] || cmake -S $(STRATA_SRC) -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_CXX_FLAGS="-march=native" $(OVERRIDES)
 	cmake --build build --target strata_engine
 
 index: idx
 
-idx: build/strata_engine
+idx: | build/strata_engine
 	@echo "--- Indexing strata ---"
 	rm -fr idx && mkdir -p idx
 	build/strata_engine index idx < $(CORPUS)
 
-serve: build/strata_engine
+serve: | build/strata_engine
 	@build/strata_engine serve idx
