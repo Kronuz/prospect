@@ -141,7 +141,14 @@ contract states the `fill` window and `max_score` semantics (C8).
 ## Open
 
 - Quiet-host re-runs of every engine, including the Xapian rows.
-- The term dictionary is 2.5× Lucene's `.tim`.
+- The term dictionary is 2.5× Lucene's `.tim` (100.6 MB against 39.5 MB for 3,964,752
+  terms, 54% with one posting). Per term: keys 8.5 bytes; values 19.2: postings and
+  positions offsets 9.0 (absolute, 4–5 byte LEB128s), competitive pairs 4.0, df, cf, and
+  maximum wdf 3.1, flags and byte lengths 3.1. Offsets follow from the previous term's
+  offset plus its length, since terms are written in order, and a single-posting term's
+  cf, maximum wdf, and pair repeat its wdf and the lengths section. Target for Phase 3:
+  offsets relative to the term-dictionary block's first term, the compact
+  single-posting form, and cf omitted when it equals df, for at most 1.5× `.tim`.
 - `residency` backends do not yet verify regions as they prefetch; the segment verifies
   on first read.
 - Indexing memory grows with the segment until Phase 3's flushes.
