@@ -24,15 +24,17 @@
 // file in a single sequential pass.
 //
 // Postings of a term with df >= 128 (all integers LEB128 unless noted):
-//   [group count][level 1: per 32 blocks: last ordinal delta, level-0 byte length,
+//   [group count][tail first position index][level 1: per 32 blocks: last ordinal delta,
+//    first position index delta, level-0 byte length,
 //    blocks byte length, impacts][level 0: per block: last ordinal delta, block byte
 //    length, first position index delta, impacts][blocks][tail]
 // A block is a bitpack FOR block of ordinal deltas, then (unless no-wdf) a PFOR block
 // of wdf. The tail holds ordinal deltas, then wdf. Terms with 1 < df < 128 store only
 // the tail; df == 1 lives in the term info.
 //
-// Positions of a term: [per-document counts when they differ from wdf, laid out like the
-// wdf][position block count][position block byte lengths][PFOR blocks of 128][tail].
+// Positions of a term: [per-document counts when they differ from wdf: count block byte
+// lengths, PFOR blocks aligned with the postings blocks, tail][position block count]
+// [position block byte lengths][PFOR blocks of 128][tail].
 
 #pragma once
 
@@ -252,9 +254,11 @@ private:
 		std::string level1, level0;
 		const std::size_t groups = (meta.size() + 31) / 32;
 		ordinal_t prev_last = 0, prev_group_last = 0;
-		std::uint64_t prev_first_position = 0;
+		std::uint64_t prev_group_first_position = 0;
 		for (std::size_t g = 0; g < groups; ++g) {
 			std::string group;
+			const std::uint64_t group_first_position = meta[g * 32].first_position;
+			std::uint64_t prev_first_position = group_first_position;  // level-0 deltas restart per group
 			std::uint64_t group_bytes = 0;
 			std::vector<format::impact> group_pairs;
 			for (std::size_t i = g * 32; i < std::min(meta.size(), g * 32 + 32); ++i) {
@@ -269,6 +273,8 @@ private:
 			}
 			const ordinal_t group_last = meta[std::min(meta.size(), g * 32 + 32) - 1].last;
 			format::put_leb(level1, group_last - (g ? prev_group_last : 0));
+			format::put_leb(level1, group_first_position - prev_group_first_position);
+			prev_group_first_position = group_first_position;
 			format::put_leb(level1, group.size());
 			format::put_leb(level1, group_bytes);
 			format::encode_impacts(level1, format::competitive(std::move(group_pairs)));
@@ -276,6 +282,7 @@ private:
 			level0 += group;
 		}
 		format::put_leb(out, groups);
+		format::put_leb(out, position);  // first position index of the tail
 		out += level1;
 		out += level0;
 		out += blocks;
@@ -286,9 +293,13 @@ private:
 		std::uint8_t buf[bitpack::max_encoded_bytes];
 		if (!counts_are_wdf) {
 			const std::size_t full = counts.size() / format::block * format::block;
+			std::string count_blocks;
 			for (std::size_t b = 0; b < full; b += format::block) {
-				out.append(reinterpret_cast<char*>(buf), bitpack::encode_pfor(counts.data() + b, buf));
+				std::size_t n = bitpack::encode_pfor(counts.data() + b, buf);
+				format::put_leb(out, n);
+				count_blocks.append(reinterpret_cast<char*>(buf), n);
 			}
+			out += count_blocks;
 			for (std::size_t i = full; i < counts.size(); ++i) { format::put_leb(out, counts[i]); }
 		}
 		const std::size_t full = pos.size() / format::block * format::block;

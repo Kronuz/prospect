@@ -16,6 +16,7 @@ static int failures = 0;
 
 struct model {
 	std::map<std::string, std::vector<std::pair<strata::ordinal_t, std::uint32_t>>> postings;
+	std::map<std::string, std::vector<std::vector<std::uint32_t>>> positions;  // per posting
 	std::vector<std::uint32_t> lengths;
 };
 
@@ -36,7 +37,10 @@ static std::string build(std::mt19937_64& rng, std::size_t docs, model& m) {
 			std::uint32_t wdf = term == "boolean" ? 0 : std::uint32_t(1 + rng() % (rng() % 8 == 0 ? 40 : 3));
 			pos.emplace_back();
 			std::uint32_t at = 0;
-			for (std::uint32_t k = 0; k < wdf; ++k) { pos.back().push_back(at += 1 + std::uint32_t(rng() % 5)); }
+			// t1 has weighted occurrences (more wdf than positions); boolean has positions with wdf 0.
+			std::uint32_t npos = term == "t1" ? (wdf + 1) / 2 : term == "boolean" ? 1 + std::uint32_t(rng() % 2) : wdf;
+			for (std::uint32_t k = 0; k < npos; ++k) { pos.back().push_back(at += 1 + std::uint32_t(rng() % 5)); }
+			m.positions[term].push_back(pos.back());
 			in.push_back({term, wdf, pos.back()});
 			length += wdf;
 			m.postings[term].push_back({strata::ordinal_t(d), wdf});
@@ -65,6 +69,30 @@ int main() {
 				CHECK(i < list.size() && d == list[i].first && it.wdf() == list[i].second);
 			}
 			CHECK(i == list.size());
+			// positions of every posting
+			{
+				strata::postings_iterator pi(seg, *info);
+				strata::positions_reader pr(seg, *info, pi.blocks(), pi.tail_count());
+				std::vector<std::uint32_t> got;
+				std::size_t k = 0;
+				bool counts_wdf = info->flags & strata::format::counts_are_wdf;
+				for (auto d = pi.next(); d != strata::no_more_docs; d = pi.next(), ++k) {
+					const std::uint32_t* counts = counts_wdf ? pi.wdfs() : pr.counts(pi.current_block());
+					std::uint64_t first = pi.position_index(counts);
+					pr.read(first, counts[pi.index_in_block()], got);
+					CHECK(got == m.positions[term][k]);
+				}
+				// random access after advance
+				for (int round = 0; round < 10 && !list.empty(); ++round) {
+					strata::postings_iterator a(seg, *info);
+					strata::positions_reader ar(seg, *info, a.blocks(), a.tail_count());
+					std::size_t idx = rng() % list.size();
+					CHECK(a.advance(list[idx].first) == list[idx].first);
+					const std::uint32_t* counts = counts_wdf ? a.wdfs() : ar.counts(a.current_block());
+					ar.read(a.position_index(counts), counts[a.index_in_block()], got);
+					CHECK(got == m.positions[term][idx]);
+				}
+			}
 			// advance to random targets
 			for (int round = 0; round < 20; ++round) {
 				strata::postings_iterator a(seg, *info);
