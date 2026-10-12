@@ -276,6 +276,8 @@ public:
 		if (blocks_) {
 			const std::uint64_t groups = format::get_leb(&p_, end_);
 			if (groups != (blocks_ + 31) / 32) { throw corrupt_segment("skip group count"); }
+			if (p_ == end_ || std::uint8_t(*p_) > 1) { throw corrupt_segment("skip width"); }
+			offset_width_ = *p_++ ? 8 : 4;
 			if (with_positions_) {
 				tail_first_position_ = format::get_leb(&p_, end_);
 				tail_pos_offset_ = format::get_leb(&p_, end_);
@@ -284,7 +286,7 @@ public:
 			// region is checked against the term's range here, each group when decoded.
 			const std::uint64_t pairs_bytes = format::get_leb(&p_, end_), level0_bytes = format::get_leb(&p_, end_),
 								blocks_bytes = format::get_leb(&p_, end_);
-			entry_size_ = with_positions_ ? 48 : 24;
+			entry_size_ = 8 + offset_width_ * (with_positions_ ? 5 : 2);
 			groups_n_ = groups;
 			std::uint64_t range = std::uint64_t(end_ - p_);
 			if (groups > range / entry_size_) { throw corrupt_segment("skip groups bounds"); }
@@ -366,24 +368,17 @@ public:
 	template <class Pred>
 	bool any_block_impact(std::size_t b, Pred&& pred) {
 		if (b >= blocks_) { return std::any_of(info_.impacts.begin(), info_.impacts.end(), pred); }
-		const std::string_view list = level0_entry(b).impacts;
-		const char* p = list.data();
-		const char* end = p + list.size();
-		const std::uint64_t n = format::get_leb(&p, end);
-		if (n == 0 || n > 256) { throw corrupt_segment("impact count"); }
-		for (std::uint64_t k = 0; k < n; ++k) {
-			format::impact i;
-			i.wdf = std::uint32_t(format::get_leb(&p, end));
-			if (p == end) { throw corrupt_segment("impacts truncated"); }
-			i.length = std::uint8_t(*p++);
-			if (pred(i)) { return true; }
-		}
-		return false;
+		return format::any_sized_impact(level0_entry(b).impacts, pred);
 	}
 
 	std::span<const format::impact> block_impacts_at(std::size_t b) {
 		if (b >= blocks_) { return info_.impacts; }
-		return decode(level0_entry(b).impacts);
+		impacts_.clear();
+		format::any_sized_impact(level0_entry(b).impacts, [&](const format::impact& i) {
+			impacts_.push_back(i);
+			return false;
+		});
+		return impacts_;
 	}
 	std::size_t groups() const noexcept { return groups_n_; }
 	// The group holding target, without decoding its blocks (groups() past the end). The
@@ -579,19 +574,23 @@ private:
 		std::uint64_t level0_begin, level0_end, blocks_begin, blocks_end;
 		std::uint64_t first_position = 0, pos_offset = 0, count_offset = 0;
 	};
+	std::uint64_t offset_at(const char* e, std::size_t i) const noexcept {
+		const char* at = e + 8 + offset_width_ * i;
+		return offset_width_ == 8 ? format::get<std::uint64_t>(at) : format::get<std::uint32_t>(at);
+	}
 	group_fields read_group(std::size_t g) const {
 		const char* e = level1_ + g * entry_size_;
 		group_fields f{};
 		f.last = format::get<std::uint32_t>(e);
 		f.prev_last = g ? group_last(g - 1) : 0;
-		f.level0_begin = format::get<std::uint64_t>(e + 8);
-		f.blocks_begin = format::get<std::uint64_t>(e + 16);
-		f.level0_end = g + 1 < groups_n_ ? format::get<std::uint64_t>(e + entry_size_ + 8) : level0_bytes_;
-		f.blocks_end = g + 1 < groups_n_ ? format::get<std::uint64_t>(e + entry_size_ + 16) : std::uint64_t(tail_ - blocks_begin_);
+		f.level0_begin = offset_at(e, 0);
+		f.blocks_begin = offset_at(e, 1);
+		f.level0_end = g + 1 < groups_n_ ? offset_at(e + entry_size_, 0) : level0_bytes_;
+		f.blocks_end = g + 1 < groups_n_ ? offset_at(e + entry_size_, 1) : std::uint64_t(tail_ - blocks_begin_);
 		if (with_positions_) {
-			f.first_position = format::get<std::uint64_t>(e + 24);
-			f.pos_offset = format::get<std::uint64_t>(e + 32);
-			f.count_offset = format::get<std::uint64_t>(e + 40);
+			f.first_position = offset_at(e, 2);
+			f.pos_offset = offset_at(e, 3);
+			f.count_offset = offset_at(e, 4);
 		}
 		if ((g && f.last <= f.prev_last) || f.last >= seg_->doc_count() || f.level0_begin > f.level0_end || f.level0_end > level0_bytes_ ||
 			f.blocks_begin > f.blocks_end || f.blocks_end > std::uint64_t(tail_ - blocks_begin_)) {
@@ -756,7 +755,7 @@ private:
 	const char* tail_ = nullptr;
 	std::size_t blocks_ = 0, next_block_ = 0;
 	const char* level1_ = nullptr;  // fixed-width group entries
-	std::size_t groups_n_ = 0, entry_size_ = 0;
+	std::size_t groups_n_ = 0, entry_size_ = 0, offset_width_ = 4;
 	std::string_view pairs_;  // the groups' competitive pairs
 	std::uint64_t level0_bytes_ = 0;
 	entry entries_[32];

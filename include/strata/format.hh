@@ -53,7 +53,7 @@ namespace format {
 
 inline constexpr char header_magic[8] = {'S', 'T', 'R', 'S', 'E', 'G', '0', '1'};
 inline constexpr char footer_magic[4] = {'S', 'E', 'N', 'D'};
-inline constexpr std::uint32_t version = 10;
+inline constexpr std::uint32_t version = 11;
 inline constexpr std::size_t header_size = 32;
 inline constexpr std::size_t footer_size = 48;
 inline constexpr std::size_t region_size = 64 * 1024;
@@ -295,20 +295,63 @@ inline std::size_t decode_impacts(const char** p, const char* end, std::vector<i
 
 // Skip data prefixes each list with its byte length, so readers step over it and decode
 // it only when a bound needs it.
+// A block's competitive pairs in skip data: a LEB128 header (count << 1 | compact). A
+// compact list (every wdf below 256) is count pairs of (wdf byte, length byte), so the
+// header alone gives its size; otherwise its size (LEB128) and encode_impacts' bytes follow.
 inline void encode_sized_impacts(std::string& out, const std::vector<impact>& impacts) {
+	const bool compact = std::all_of(impacts.begin(), impacts.end(), [](const impact& i) { return i.wdf < 256; });
+	put_leb(out, std::uint64_t(impacts.size()) << 1 | std::uint64_t(compact));
+	if (compact) {
+		for (const auto& i : impacts) {
+			out.push_back(char(i.wdf));
+			out.push_back(char(i.length));
+		}
+		return;
+	}
 	std::string list;
 	encode_impacts(list, impacts);
 	put_leb(out, list.size());
 	out += list;
 }
 
-// Steps over a sized list; returns its bytes.
+// Steps over a list written by encode_sized_impacts; returns all its bytes.
 inline std::string_view skip_sized_impacts(const char** p, const char* end) {
-	const std::uint64_t n = get_leb(p, end);
-	if (n == 0 || n > std::uint64_t(end - *p)) { throw corrupt_segment("impacts bounds"); }
-	std::string_view list(*p, n);
-	*p += n;
-	return list;
+	const char* start = *p;
+	const std::uint64_t h = get_leb(p, end), n = h >> 1;
+	if (n == 0 || n > 256) { throw corrupt_segment("impact count"); }
+	const std::uint64_t size = (h & 1) ? 2 * n : get_leb(p, end);
+	if (size > std::uint64_t(end - *p)) { throw corrupt_segment("impacts bounds"); }
+	*p += size;
+	return std::string_view(start, std::size_t(*p - start));
+}
+
+// Calls f(impact) for each pair of a list returned by skip_sized_impacts until f returns
+// true; returns whether it did.
+template <class F>
+inline bool any_sized_impact(std::string_view list, F&& f) {
+	const char* p = list.data();
+	const char* end = p + list.size();
+	const std::uint64_t h = get_leb(&p, end), n = h >> 1;
+	if (!(h & 1)) {
+		const std::uint64_t size = get_leb(&p, end);
+		if (size != std::uint64_t(end - p)) { throw corrupt_segment("impacts length"); }
+		const std::uint64_t m = get_leb(&p, end);
+		if (m != n) { throw corrupt_segment("impact count"); }
+	}
+	for (std::uint64_t k = 0; k < n; ++k) {
+		impact i;
+		if (h & 1) {
+			if (end - p < 2) { throw corrupt_segment("impacts truncated"); }
+			i.wdf = std::uint8_t(*p++);
+		} else {
+			i.wdf = std::uint32_t(get_leb(&p, end));
+			if (p == end) { throw corrupt_segment("impacts truncated"); }
+		}
+		i.length = std::uint8_t(*p++);
+		if (f(i)) { return true; }
+	}
+	if (p != end) { throw corrupt_segment("impacts length"); }
+	return false;
 }
 
 inline std::vector<impact> decode_impacts(const char** p, const char* end) {

@@ -343,15 +343,26 @@ public:
 		if (terms_.size() != children_.size()) { terms_.clear(); }
 	}
 
-	// Counting fast paths for conjunctions of terms: a dense lead ANDs each term's window
-	// bits; a sparse lead leapfrogs on the postings directly.
+	// Whether ANDing window bits costs less than leapfrogging: filling costs about 0.05 ns
+	// per posting in a term dense enough for bitset blocks (over a quarter of the
+	// documents) and 1.5 ns otherwise; leapfrogging costs about 40 ns per lead posting
+	// and other term (measured on the gate VM).
+	bool prefer_windows() const {
+		const double n = double(terms_[0]->seg().doc_count());
+		double fill = 0;
+		for (const auto* t : terms_) { fill += double(t->cost()) * (double(t->cost()) * 4 >= n ? 0.05 : 1.5); }
+		return fill < double(terms_[0]->cost()) * double(terms_.size() - 1) * 40.0;
+	}
+
+	// Counting fast paths for conjunctions of terms: ANDing each term's window bits, or
+	// leapfrogging on the postings directly, whichever prefer_windows() estimates cheaper.
 	void fill(ordinal_t base, ordinal_t end, std::uint64_t* bits) override {
 		if (terms_.empty() || min_ > 0) {
 			scorer::fill(base, end, bits);
 			return;
 		}
 		const std::size_t words = std::size_t(end - base + 63) / 64;
-		if (terms_[0]->cost() * 16 >= terms_[0]->seg().doc_count()) {
+		if (prefer_windows()) {
 			std::uint64_t all[64], one[64];
 			for (std::size_t i = 0; i < terms_.size(); ++i) {
 				auto& it = terms_[i]->postings();

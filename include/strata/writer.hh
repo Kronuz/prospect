@@ -218,6 +218,9 @@ private:
 
 class segment_writer {
 public:
+	// Writes 64-bit skip offsets even where 32 bits fit (tests the wide layout).
+	bool wide_skip_offsets = false;
+
 	// Adds a document and returns its ordinal. `length` is the document length used by
 	// weighting (Xapian: the sum of wdf over non-boolean terms).
 	// `stored` is the document's stored record, returned by segment::stored.
@@ -528,14 +531,20 @@ private:
 		}
 		// Level 0, grouped by 32 blocks. Level 1 is a fixed-width array, one entry per group,
 		// so a reader locates groups without parsing: last ordinal (u32), the offset of its
-		// competitive pairs in the pairs area (u32), its level-0 and blocks offsets (u64), and
-		// for terms with positions its first position index and position and count block
-		// offsets (u64). Level-0 positional fields (present only with positions, counts only
+		// competitive pairs in the pairs area (u32), its level-0 and blocks offsets, and for
+		// terms with positions its first position index and position and count block
+		// offsets, each u32, or u64 when the term flags itself wide. Level-0 positional fields (present only with positions, counts only
 		// when they differ from wdf) are deltas restarting per group.
 		const bool with_positions = layout != nullptr;
 		with_counts = with_counts && with_positions;
 		std::string level1, pairs, level0;
 		const std::size_t groups = (meta.size() + 31) / 32;
+		struct group_fields {
+			ordinal_t last;
+			std::uint32_t pairs;
+			std::uint64_t level0, blocks, first_position, pos_offset, count_offset;
+		};
+		std::vector<group_fields> fields;
 		ordinal_t prev_last = 0;
 		std::uint64_t blocks_before = 0;
 		for (std::size_t g = 0; g < groups; ++g) {
@@ -561,19 +570,36 @@ private:
 			}
 			blocks_before += group_bytes;
 			if (pairs.size() > std::numeric_limits<std::uint32_t>::max()) { throw std::length_error("strata: skip data too large"); }
-			format::put<std::uint32_t>(level1, meta[std::min(meta.size(), g * 32 + 32) - 1].last);
-			format::put<std::uint32_t>(level1, std::uint32_t(pairs.size()));
-			format::put<std::uint64_t>(level1, level0_offset);
-			format::put<std::uint64_t>(level1, blocks_offset);
-			if (with_positions) {
-				format::put<std::uint64_t>(level1, first.first_position);
-				format::put<std::uint64_t>(level1, first.pos_offset);
-				format::put<std::uint64_t>(level1, first.count_offset);
-			}
+			fields.push_back({meta[std::min(meta.size(), g * 32 + 32) - 1].last, std::uint32_t(pairs.size()), level0_offset, blocks_offset,
+				first.first_position, first.pos_offset, first.count_offset});
 			format::encode_impacts(pairs, format::competitive(std::move(group_pairs)));
 			level0 += group;
 		}
+		// Offsets take 32 bits unless one of this term's needs 64.
+		bool wide = wide_skip_offsets;
+		for (const auto& f : fields) {
+			wide = wide || std::max({f.level0, f.blocks, f.first_position, f.pos_offset, f.count_offset}) > std::numeric_limits<std::uint32_t>::max();
+		}
+		auto put_offset = [&](std::uint64_t v) {
+			if (wide) {
+				format::put<std::uint64_t>(level1, v);
+			} else {
+				format::put<std::uint32_t>(level1, std::uint32_t(v));
+			}
+		};
+		for (const auto& f : fields) {
+			format::put<std::uint32_t>(level1, f.last);
+			format::put<std::uint32_t>(level1, f.pairs);
+			put_offset(f.level0);
+			put_offset(f.blocks);
+			if (with_positions) {
+				put_offset(f.first_position);
+				put_offset(f.pos_offset);
+				put_offset(f.count_offset);
+			}
+		}
 		format::put_leb(out, groups);
+		out.push_back(char(wide));
 		if (with_positions) {
 			format::put_leb(out, position);  // the tail's first position index and its block offset
 			format::put_leb(out, layout->offset_of(position));

@@ -1,6 +1,7 @@
 // Segment writer and reader against a naive model: postings, advance, block_end,
 // impact bounds, lengths, and corrupt files (every truncation, random corruption).
 #include "strata/reader.hh"
+#include "strata/search.hh"
 #include "strata/writer.hh"
 
 #include <cstdio>
@@ -220,6 +221,35 @@ int main() {
 		CHECK(streamed == bytes);
 		CHECK(std::fopen("segment_test_stream.spill", "rb") == nullptr);
 		std::remove("segment_test_stream.sx");
+	}
+
+	// Wide skip offsets and pair lists with wdf past 255 read back like the narrow ones.
+	for (bool wide : {false, true}) {
+		strata::segment_writer w;
+		w.wide_skip_offsets = wide;
+		std::vector<std::uint32_t> p{1};
+		for (std::uint32_t d = 0; d < 5000; ++d) {
+			std::vector<std::uint32_t> pos;
+			for (std::uint32_t k = 0; k < 3; ++k) { pos.push_back(k + 1); }
+			std::vector<strata::posting_input> in{{"big", 1 + (d * 37) % 600, pos}, {"x", 1, p}};
+			w.add(d + 1, in, 700);
+		}
+		std::string bytes = w.flush({});
+		strata::segment s(bytes);
+		auto info = s.term("big");
+		strata::postings_iterator it(s, *info);
+		strata::positions_reader pr(s, *info);
+		std::vector<std::uint32_t> got;
+		std::uint32_t d = 0;
+		for (auto o = it.next(); o != strata::no_more_docs; o = it.next(), ++d) {
+			CHECK(o == d && it.wdf() == 1 + (d * 37) % 600);
+			pr.read(it, got);
+			CHECK(got.size() == 3);
+		}
+		CHECK(d == 5000);
+		strata::term_scorer ts(s, *info);
+		CHECK(strata::top_k(ts, 10).size() == 10);
+		CHECK(strata::count(ts) == 5000);
 	}
 
 	// Docids that are not contiguous map ordinal by ordinal.
