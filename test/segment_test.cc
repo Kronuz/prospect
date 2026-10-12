@@ -123,21 +123,45 @@ int main() {
 		for (std::size_t cut = 0; cut < file.size(); cut += 1 + file.size() / 100) {
 			try { strata::segment s(std::string_view(file).substr(0, cut)); CHECK(false); } catch (const strata::corrupt_segment&) {} catch (const std::invalid_argument&) {}
 		}
+		// A changed byte anywhere but section padding is detected once everything is read:
+		// at open, or by region checksums on first read.
+		const auto layout = seg.sections();
 		for (int round = 0; round < 300; ++round) {
 			std::string bad = file;
-			bad[rng() % bad.size()] = char(rng());
+			const std::size_t at = rng() % bad.size();
+			bad[at] = char(bad[at] ^ char(1 + rng() % 255));
+			bool in_section = at >= file.size() - 48;  // the footer
+			for (const auto& e : layout) { in_section = in_section || (at >= e.offset && at < e.offset + e.length); }
+			const std::uint64_t toc_at = strata::format::get<std::uint64_t>(file.data() + file.size() - 48);
+			in_section = in_section || at >= toc_at;
+			bool detected = false;
 			try {
 				strata::segment s(bad);
 				for (const auto& [term, list] : m.postings) {
 					auto info = s.term(term);
 					if (!info) { continue; }
 					strata::postings_iterator it(s, *info);
-					for (auto d = it.next(); d != strata::no_more_docs; d = it.next()) {}
+					strata::positions_reader pr(s, *info);
+					std::vector<std::uint32_t> got;
+					for (auto d = it.next(); d != strata::no_more_docs; d = it.next()) { pr.read(it, got); }
 				}
+				s.term("absent");
 			} catch (const strata::corrupt_segment&) {
+				detected = true;
 			} catch (const termdict::corrupt&) {
+				detected = true;
 			} catch (const std::invalid_argument&) {
+				detected = true;
 			}
+			if (in_section && !detected) { std::fprintf(stderr, "undetected change at %zu of %zu\n", at, bad.size()); }
+			CHECK(detected || !in_section);
+		}
+		// Regions are verified lazily: opening checks none; reading a term checks its own.
+		{
+			strata::segment s(file);
+			CHECK(s.verified_regions() == 0);
+			auto info = s.term("t1");
+			CHECK(info && s.verified_regions() >= 1);
 		}
 	}
 	// Golden fixture: a small deterministic segment must keep its bytes.

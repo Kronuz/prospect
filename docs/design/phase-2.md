@@ -85,10 +85,11 @@ A block tree over sorted terms.
   length, suffix, then the term info. Every 16th entry is a **restart point** with a
   shared length of 0; the block's offset table lists restart offsets only. A lookup
   binary-searches the restarts, then decodes at most 16 entries.
-- **Term info:** flags byte (no wdf, no positions, single posting), document frequency,
-  collection frequency, maximum wdf, the whole-list competitive pairs (as in skip data),
-  and the postings and positions offsets as deltas from the block's base offsets. A
-  single-posting term stores its ordinal and wdf instead of a postings offset.
+- **Term info:** flags byte (no wdf, no positions, single posting, counts are wdf),
+  document frequency, collection frequency, maximum wdf, the whole-list competitive
+  pairs, and the postings and positions offsets with their byte lengths, so a reader
+  verifies a term's whole range before reading it. A single-posting term stores its
+  ordinal and wdf instead of a postings offset and length.
 - **Block index:** an `fst` maps each block's first term to the block's offset.
   `floor_value(term)` finds the only block that can hold the term.
 - **Automaton matching** (prefix, wildcard, fuzzy) seeks: compute the smallest string
@@ -163,12 +164,13 @@ in-memory segment tracks each document's count beside its wdf.
 
 - **At open:** footer, table of contents, header, and the small pinned sections
   (`term_index`, `stats`, `lengths`) are verified in full.
-- **Regions:** `residency::file::open` takes the segment's region checksums. The
-  synchronous backend verifies each 64 KiB region the first time a prefetch covers it
-  (one atomic flag per region), which also faults the pages in. Asynchronous backends
-  verify regions as they load them. A mismatch fences the segment. The reader prefetches
-  every range it decodes (term blocks, skip data, postings, positions, stored records),
-  so verification covers every byte a query reads.
+- **Regions:** the segment builds a `residency::verified_regions` over the `terms`,
+  `postings`, and `positions` sections from the table of contents. Each 64 KiB region
+  is verified the first time a read overlaps it (one atomic state per region): the term
+  dictionary verifies a block before reading it, and a term's postings and positions
+  ranges are verified when an iterator or positions reader opens them. A mismatch
+  throws `corrupt_segment`, which fences the segment. Asynchronous backends verify
+  regions as they load them.
 - **Whole sections:** on merge, replication, and scrub.
 - **`SIGBUS`:** a media error under mmap is a node failure. The process exits through
   its fatal-signal handler and the replication fault model covers the loss. The verified

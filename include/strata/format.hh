@@ -53,7 +53,7 @@ namespace format {
 
 inline constexpr char header_magic[8] = {'S', 'T', 'R', 'S', 'E', 'G', '0', '1'};
 inline constexpr char footer_magic[4] = {'S', 'E', 'N', 'D'};
-inline constexpr std::uint32_t version = 4;
+inline constexpr std::uint32_t version = 5;
 inline constexpr std::size_t header_size = 32;
 inline constexpr std::size_t footer_size = 48;
 inline constexpr std::size_t region_size = 64 * 1024;
@@ -250,6 +250,9 @@ struct term_info {
 	std::uint64_t postings = 0;   // offset in `postings`, or the ordinal when single_posting
 	std::uint64_t positions = 0;  // offset in `positions`
 	std::uint32_t single_wdf = 0; // wdf when single_posting
+	// Byte lengths of the term's postings and positions, so a reader verifies their
+	// regions before reading them.
+	std::uint64_t postings_length = 0, positions_length = 0;
 };
 
 inline void encode_impacts(std::string& out, const std::vector<impact>& impacts) {
@@ -306,8 +309,15 @@ inline std::string encode_term_info(const term_info& t) {
 	put_leb(out, t.max_wdf);
 	encode_impacts(out, t.impacts);
 	put_leb(out, t.postings);
-	if (t.flags & single_posting) { put_leb(out, t.single_wdf); }
-	if (!(t.flags & no_positions)) { put_leb(out, t.positions); }
+	if (t.flags & single_posting) {
+		put_leb(out, t.single_wdf);
+	} else {
+		put_leb(out, t.postings_length);
+	}
+	if (!(t.flags & no_positions)) {
+		put_leb(out, t.positions);
+		put_leb(out, t.positions_length);
+	}
 	return out;
 }
 
@@ -323,8 +333,15 @@ inline term_info decode_term_info(std::string_view bytes) {
 	t.max_wdf = std::uint32_t(get_leb(&p, end));
 	t.impacts = decode_impacts(&p, end);
 	t.postings = get_leb(&p, end);
-	if (t.flags & single_posting) { t.single_wdf = std::uint32_t(get_leb(&p, end)); }
-	if (!(t.flags & no_positions)) { t.positions = get_leb(&p, end); }
+	if (t.flags & single_posting) {
+		t.single_wdf = std::uint32_t(get_leb(&p, end));
+	} else {
+		t.postings_length = get_leb(&p, end);
+	}
+	if (!(t.flags & no_positions)) {
+		t.positions = get_leb(&p, end);
+		t.positions_length = get_leb(&p, end);
+	}
 	if (p != end || t.df == 0 || ((t.flags & single_posting) != 0) != (t.df == 1)) { throw corrupt_segment("term info"); }
 	return t;
 }

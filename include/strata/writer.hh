@@ -320,6 +320,7 @@ public:
 				decode_all(t.positions, pos, total);
 				term_positions.clear();
 				layout = write_positions(term_positions, counts, pos, t.counts_are_wdf);
+				info.positions_length = term_positions.size();
 				positions.write(term_positions);
 			}
 			if (t.df == 1) {
@@ -330,6 +331,7 @@ public:
 				info.postings = postings.size();
 				term_postings.clear();
 				write_postings(term_postings, ords, wdfs, !t.all_zero_wdf, counts, t.any_positions ? &layout : nullptr, !t.counts_are_wdf);
+				info.postings_length = term_postings.size();
 				postings.write(term_postings);
 			}
 			dict.add(key, format::encode_term_info(info));

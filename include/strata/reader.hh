@@ -27,6 +27,7 @@
 #pragma once
 
 #include "bitpack.hh"
+#include "residency.hh"
 #include "docset.hh"
 #include "strata/format.hh"
 #include "termdict.hh"
@@ -34,6 +35,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -94,8 +96,35 @@ public:
 		if (length_width_ > 32 || lengths_.size() != 1 + (doc_count_ + 127) / 128 * bitpack::packed_bytes(length_width_)) {
 			throw corrupt_segment("lengths size");
 		}
-		dict_.emplace(terms_, term_index_);  // validates the FST index
+		// Terms, postings, and positions are verified per 64 KiB region on first read.
+		std::vector<residency::verified_regions::region> regions;
+		for (const auto& e : sections_) {
+			if (e.kind != format::section::terms && e.kind != format::section::postings && e.kind != format::section::positions) { continue; }
+			for (std::size_t r = 0; r < e.region_crcs.size(); ++r) {
+				const std::uint64_t at = std::uint64_t(r) * format::region_size;
+				regions.push_back({e.offset + at, std::min<std::uint64_t>(format::region_size, e.length - at), e.region_crcs[r]});
+			}
+			if (e.kind == format::section::terms) { integrity_->terms_offset = e.offset; }
+			if (e.kind == format::section::postings) { integrity_->postings_offset = e.offset; }
+			if (e.kind == format::section::positions) { integrity_->positions_offset = e.offset; }
+		}
+		std::sort(regions.begin(), regions.end(), [](const auto& a, const auto& b) { return a.offset < b.offset; });
+		integrity_->regions = residency::verified_regions(
+			std::span<const std::byte>(reinterpret_cast<const std::byte*>(file.data()), file.size()), std::move(regions));
+		dict_.emplace(terms_, term_index_, &verify_terms, integrity_.get());  // validates the FST index
 	}
+
+	// Verifies a range of the postings or positions section before it is read; throws
+	// corrupt_segment on a checksum mismatch.
+	void verify_postings(std::uint64_t offset, std::uint64_t length) const {
+		if (!integrity_->regions.verify({integrity_->postings_offset + offset, length})) { throw corrupt_segment("postings checksum"); }
+	}
+	void verify_positions(std::uint64_t offset, std::uint64_t length) const {
+		if (!integrity_->regions.verify({integrity_->positions_offset + offset, length})) { throw corrupt_segment("positions checksum"); }
+	}
+	const std::vector<format::section_entry>& sections() const noexcept { return sections_; }
+	// How many 64 KiB regions have been verified.
+	std::size_t verified_regions() const noexcept { return integrity_->regions.verified(); }
 
 	std::uint64_t doc_count() const noexcept { return doc_count_; }
 	std::uint64_t total_length() const noexcept { return total_length_; }
@@ -131,6 +160,15 @@ private:
 	std::string_view file_, terms_, term_index_, postings_, positions_, lengths_, docids_, stats_;
 	format::footer footer_;
 	std::vector<format::section_entry> sections_;
+	struct integrity {
+		residency::verified_regions regions;
+		std::uint64_t terms_offset = 0, postings_offset = 0, positions_offset = 0;
+	};
+	static bool verify_terms(void* context, std::uint64_t offset, std::uint64_t length) {
+		auto* i = static_cast<integrity*>(context);
+		return i->regions.verify({i->terms_offset + offset, length});
+	}
+	std::unique_ptr<integrity> integrity_ = std::make_unique<integrity>();  // stable address for dict_
 	std::optional<termdict::reader> dict_;
 	std::uint64_t doc_count_ = 0, total_length_ = 0;
 	std::uint32_t min_length_ = 0, max_length_ = 0;
@@ -151,7 +189,8 @@ public:
 			return;
 		}
 		auto bytes = seg.postings_bytes();
-		if (info.postings > bytes.size()) { throw corrupt_segment("postings offset"); }
+		if (info.postings > bytes.size() || info.postings_length > bytes.size() - info.postings) { throw corrupt_segment("postings offset"); }
+		seg.verify_postings(info.postings, info.postings_length);
 		p_ = bytes.data() + info.postings;
 		end_ = bytes.data() + bytes.size();
 		blocks_ = df_ / format::block;
@@ -531,7 +570,8 @@ public:
 	positions_reader(const segment& seg, const format::term_info& info) {
 		if (info.flags & format::no_positions) { return; }
 		auto bytes = seg.positions_bytes();
-		if (info.positions > bytes.size()) { throw corrupt_segment("positions offset"); }
+		if (info.positions > bytes.size() || info.positions_length > bytes.size() - info.positions) { throw corrupt_segment("positions offset"); }
+		seg.verify_positions(info.positions, info.positions_length);
 		const char* p = bytes.data() + info.positions;
 		end_ = bytes.data() + bytes.size();
 		if (!(info.flags & format::counts_are_wdf)) {
