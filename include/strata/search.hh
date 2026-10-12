@@ -680,6 +680,25 @@ public:
 	double current_bound() override { return in_->current_bound(); }
 	// |include| - |include and exclude| for a term minus a term.
 	std::optional<std::uint64_t> exact_count() override;
+
+	// Counting windows: include's window bits AND NOT exclude's, when filling the exclude
+	// side costs less than stepping it once per included document (about a block each).
+	void fill(ordinal_t base, ordinal_t end, std::uint64_t* bits) override {
+		if (ex_->cost() > in_->cost() * format::block) {
+			scorer::fill(base, end, bits);
+			return;
+		}
+		std::uint64_t inc[64] = {}, exc[64] = {};
+		const std::size_t words = std::size_t(end - base + 63) / 64;
+		in_->fill(base, end, inc);
+		if (!ex_started_ || ex_->doc() < base) {
+			ex_started_ = true;
+			ex_->advance(base);
+		}
+		if (ex_->doc() < end) { ex_->fill(base, end, exc); }
+		for (std::size_t w = 0; w < words; ++w) { bits[w] |= inc[w] & ~exc[w]; }
+		skip(in_->doc());
+	}
 	std::unique_ptr<scorer> fresh() const override {
 		auto i = in_->fresh(), e = ex_->fresh();
 		if (!i || !e) { return nullptr; }
