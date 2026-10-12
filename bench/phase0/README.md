@@ -90,8 +90,9 @@ Xapiand decisions rather than engine work:
 
 1. Look a non-numeric id up only in the shard its hash selects, which is the only shard
    `replace_document_term` ever writes it to while the shard count is unchanged.
-2. Skip the per-document `delete_wal` enqueue on the RESTORE path, which runs with the
-   WAL disabled.
+2. Delete a restored shard's WAL once per RESTORE instead of at every check-in:
+   `ShardEndpoint::checkin` (`src/database/pool.cc`) enqueues `delete_wal` whenever a
+   restore-flagged writable shard is checked in, which happens once per document.
 
 ### Offload hop
 
