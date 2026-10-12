@@ -144,6 +144,40 @@ int main() {
 			}
 		}
 	}
+	// Golden fixture: a small deterministic segment must keep its bytes.
+	{
+		strata::segment_writer w;
+		const char* words[] = {"alpha", "beta", "gamma", "delta", "epsilon"};
+		for (std::uint32_t d = 0; d < 300; ++d) {
+			std::vector<std::vector<std::uint32_t>> pos(5);
+			std::vector<strata::posting_input> in;
+			std::uint32_t length = 0;
+			for (std::uint32_t k = 0; k < 5; ++k) {
+				if ((d * 7 + k * 3) % (k + 2) == 0) {
+					for (std::uint32_t p = 0; p <= (d + k) % 4; ++p) { pos[k].push_back(1 + k + 5 * p); }
+					in.push_back({words[k], std::uint32_t(pos[k].size()), pos[k]});
+					length += std::uint32_t(pos[k].size());
+				}
+			}
+			w.add(d + 1, in, length);
+		}
+		std::string bytes = w.flush({});
+		const char* path = STRATA_FIXTURES "/small.sx";
+		if (std::getenv("STRATA_WRITE_FIXTURES")) {
+			std::FILE* f = std::fopen(path, "wb");
+			std::fwrite(bytes.data(), 1, bytes.size(), f);
+			std::fclose(f);
+		}
+		std::string golden;
+		if (std::FILE* f = std::fopen(path, "rb")) {
+			for (int c; (c = std::fgetc(f)) != EOF;) { golden.push_back(char(c)); }
+			std::fclose(f);
+		}
+		CHECK(golden == bytes);
+		strata::segment seg(golden);
+		CHECK(seg.doc_count() == 300);
+	}
+
 	// Length quantization rounds down and is monotone.
 	std::uint8_t prev = 0;
 	for (std::uint64_t n = 0; n < (1ull << 32); n = n < 4096 ? n + 1 : n * 3 / 2) {
