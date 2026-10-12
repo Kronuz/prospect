@@ -130,7 +130,8 @@ struct scorer {
 	// An unpositioned copy for an independent pass (counting), or null when not supported.
 	virtual std::unique_ptr<scorer> fresh() const { return nullptr; }
 	// Sets bit (d - base) in bits for every match d in [doc(), end), then stops at the
-	// first match >= end; requires base <= doc() and end - base <= 64 * words of bits.
+	// first match >= end. The window is at most 4,096 ordinals (bits holds 64 words) and
+	// base <= doc().
 	virtual void fill(ordinal_t base, ordinal_t end, std::uint64_t* bits) {
 		for (ordinal_t d = doc(); d < end; d = next()) { bits[(d - base) >> 6] |= std::uint64_t(1) << ((d - base) & 63); }
 	}
