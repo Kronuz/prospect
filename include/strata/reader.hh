@@ -124,10 +124,22 @@ public:
 		integrity_->regions = residency::verified_regions(
 			std::span<const std::byte>(reinterpret_cast<const std::byte*>(file.data()), file.size()), std::move(regions));
 		if (norms_.size() != doc_count_) { throw corrupt_segment("norms size"); }
+		if (docids_.empty() || (docids_[0] == 0 ? docids_.size() != 9
+		                                        : docids_[0] != 1 || docids_.size() != 9 + 8 * doc_count_ ||
+		                                              format::get<std::uint64_t>(docids_.data() + 1) != doc_count_)) {
+			throw corrupt_segment("docids");
+		}
 		// The term index is copied out of the mapping (verified above), so later lookups never
 		// read bytes that could change or fault under the FST's unchecked traversal.
 		integrity_->pinned_index.assign(term_index_);
 		dict_.emplace(terms_, integrity_->pinned_index, &verify_terms, integrity_.get());  // validates the FST index
+	}
+
+	// The host docid of an ordinal.
+	std::uint64_t docid(ordinal_t ord) const {
+		if (ord >= doc_count_) { throw std::out_of_range("strata: ordinal out of range"); }
+		if (docids_[0] == 0) { return format::get<std::uint64_t>(docids_.data() + 1) + ord; }
+		return format::get<std::uint64_t>(docids_.data() + 9 + 8 * std::uint64_t(ord));
 	}
 
 	// The document's length quantized by format::encode_length (one byte, verified at open).

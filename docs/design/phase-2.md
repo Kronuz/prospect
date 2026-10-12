@@ -72,7 +72,7 @@ anything else is read.
 | `positions` | Per term: one position stream |
 | `lengths` | Per-ordinal document length, bit-packed fixed width |
 | `stored` | zstd frames of stored records (up to 64 KiB uncompressed each), then a fixed-width index per frame (first ordinal, uncompressed size, offset) and the frame count; a reader verifies a frame's regions and decompresses it into exactly its recorded size |
-| `docids` | Ordinal → docid, bit-packed; docid → ordinal via a sorted array |
+| `docids` | Ordinal → docid: a kind byte, then for kind 0 (contiguous) the first docid (u64), for kind 1 the count and one u64 per ordinal; validated at open |
 | `stats` | Document count, total length, length minimum and maximum, docid bounds |
 | `norms` | One `encode_length` byte per document, for Lucene-compatible scoring |
 
@@ -104,9 +104,10 @@ A block tree over sorted terms.
 For a term with `df` documents, after the term info:
 
 - `df == 1`: inlined in the term info.
-- `df < 128`: the tail only: ordinal deltas, then `wdf − 1` unless the term is no-wdf.
+- `df < 128`: the tail only: ordinal deltas, then wdf unless the term is no-wdf.
 - Otherwise: skip data, full blocks of 128, then the tail. A block is a `bitpack` FOR
-  block of ordinal deltas, then, unless no-wdf, a PFOR block of `wdf − 1`.
+  block of ordinal deltas (or a bitset of the ordinals when smaller), then, unless no-wdf,
+  a PFOR block of wdf. wdf is stored as is: positioned terms may have wdf 0.
 
 ### Skip data
 

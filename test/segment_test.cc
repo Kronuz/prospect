@@ -126,6 +126,7 @@ int main() {
 		}
 		CHECK(!seg.term("absent"));
 		for (strata::ordinal_t d = 0; d < seg.doc_count(); ++d) { CHECK(seg.stored(d) == m.stored[d]); }
+		for (strata::ordinal_t d = 0; d < seg.doc_count(); ++d) { CHECK(seg.docid(d) == d + 1); }
 		// Corruption: truncations and random byte changes never crash.
 		for (std::size_t cut = 0; cut < file.size(); cut += 1 + file.size() / 100) {
 			try { strata::segment s(std::string_view(file).substr(0, cut)); CHECK(false); } catch (const strata::corrupt_segment&) {} catch (const std::invalid_argument&) {}
@@ -219,6 +220,19 @@ int main() {
 		CHECK(streamed == bytes);
 		CHECK(std::fopen("segment_test_stream.spill", "rb") == nullptr);
 		std::remove("segment_test_stream.sx");
+	}
+
+	// Docids that are not contiguous map ordinal by ordinal.
+	{
+		strata::segment_writer w;
+		std::vector<std::uint32_t> p{1};
+		for (std::uint64_t id : {10u, 20u, 35u}) {
+			std::vector<strata::posting_input> in{{"x", 1, p}};
+			w.add(id, in, 1);
+		}
+		std::string bytes = w.flush({});
+		strata::segment s(bytes);
+		CHECK(s.docid(0) == 10 && s.docid(1) == 20 && s.docid(2) == 35);
 	}
 
 	// Length quantization rounds down and is monotone.
