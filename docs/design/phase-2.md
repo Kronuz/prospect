@@ -74,6 +74,7 @@ anything else is read.
 | `stored` | zstd frames of stored records (up to 64 KiB uncompressed each), then a fixed-width index per frame (first ordinal, uncompressed size, offset) and the frame count; a reader verifies a frame's regions and decompresses it into exactly its recorded size |
 | `docids` | Ordinal → docid, bit-packed; docid → ordinal via a sorted array |
 | `stats` | Document count, total length, length minimum and maximum, docid bounds |
+| `norms` | One `encode_length` byte per document, for Lucene-compatible scoring |
 
 ## Term dictionary (`termdict`)
 
@@ -248,8 +249,10 @@ Evaluation runs in windows of 4,096 ordinals; the query coroutine checks its
   `b = 0.5`, `min_normlen = 0.5`), exact lengths, exact `N`; the term bound uses the
   term's maximum wdf.
 - **Lucene BM25** (`k1 = 1.2`, `b = 0.75`, Lucene's IDF) for the equal-scoring benchmark
-  rows. Lengths are exact; Lucene quantizes them to one byte, so scores differ slightly
-  and the rows say so.
+  rows. Like Lucene, it scores a one-byte quantized length (the `norms` section,
+  `format::encode_length`) through a 256-entry table; the quantization differs from
+  Lucene's, so scores differ slightly and the rows say so. Skip data stores the same
+  codes, so its bounds are exact.
 - **Bool**: constant scores.
 
 ## Collectors

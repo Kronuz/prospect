@@ -27,6 +27,7 @@
 #include "strata/reader.hh"
 
 #include <algorithm>
+#include <array>
 #include <optional>
 #include <bit>
 #include <cmath>
@@ -52,12 +53,16 @@ struct weight {
 	scheme kind = scheme::lucene_bm25;
 	double k1 = 1.2, b = 0.75, min_normlen = 0;
 	double idf = 0, avg = 1, inv_avg = 1;  // inv_avg = 1 / avg: one division per score
+	// Lucene BM25 scores quantized lengths, as Lucene does: norm_k[code] is k1 * (1 - b + b *
+	// decode_length(code) / avg), so a score is one table load and one division.
+	std::array<double, 256> norm_k{};
 
 	static weight lucene(const segment& seg, std::uint64_t df, double boost = 1.0) {
 		weight w;
 		w.idf = boost * std::log(1.0 + (double(seg.doc_count()) - double(df) + 0.5) / (double(df) + 0.5));
 		w.avg = std::max(1.0, seg.average_length());
 		w.inv_avg = 1.0 / w.avg;
+		for (unsigned c = 0; c < 256; ++c) { w.norm_k[c] = w.k1 * (1.0 - w.b + w.b * double(format::decode_length(std::uint8_t(c))) * w.inv_avg); }
 		return w;
 	}
 
@@ -76,12 +81,14 @@ struct weight {
 		return w;
 	}
 
+	// Lucene BM25 by quantized length (segment::norm).
+	double by_norm(std::uint32_t tf, std::uint8_t norm) const noexcept {
+		return tf ? idf * double(tf) / (double(tf) + norm_k[norm]) : 0.0;
+	}
+
 	double operator()(std::uint32_t tf, std::uint32_t length) const noexcept {
 		if (tf == 0) { return 0.0; }
-		if (kind == scheme::lucene_bm25) {
-			const double norm = k1 * (1.0 - b + b * double(length) * inv_avg);
-			return idf * double(tf) / (double(tf) + norm);
-		}
+		if (kind == scheme::lucene_bm25) { return by_norm(tf, format::encode_length(length)); }
 		const double normlen = std::max(double(length) * inv_avg, min_normlen);
 		const double K = k1 * ((1.0 - b) + b * normlen);
 		return idf * double(tf) / (K + double(tf));
@@ -200,7 +207,7 @@ public:
 	ordinal_t approx_next() override { return skip_blocks(it_.next()); }
 	ordinal_t approx_advance(ordinal_t t) override { return skip_blocks(it_.advance(t)); }
 	std::uint64_t cost() const noexcept override { return it_.cost(); }
-	double score() override { return weight_(it_.wdf(), seg_->length(it_.doc())); }
+	double score() override { return score_of(it_.doc(), it_.wdf()); }
 	void set_min_competitive_score(double s) override { min_ = s; }
 	ordinal_t block_end(ordinal_t t) override { return it_.block_end(t); }
 	double max_score_total() const noexcept override { return total_bound_; }
@@ -217,7 +224,7 @@ public:
 			if ((d = skip_blocks(d)) == no_more_docs) { break; }
 			const ordinal_t last = it_.block_end(d);
 			it_.for_each_until(last == no_more_docs ? no_more_docs : last + 1,
-				[&](ordinal_t ord, std::uint32_t wdf) { c.collect(ord, weight_(wdf, seg_->length(ord))); });
+				[&](ordinal_t ord, std::uint32_t wdf) { c.collect(ord, score_of(ord, wdf)); });
 		}
 		return true;
 	}
@@ -239,12 +246,17 @@ public:
 	void score_window(ordinal_t base, ordinal_t end, double* acc, std::uint64_t* bits) override {
 		it_.for_each_until(end, [&](ordinal_t d, std::uint32_t wdf) {
 			const ordinal_t i = d - base;
-			acc[i] += weight_(wdf, seg_->length(d));
+			acc[i] += score_of(d, wdf);
 			bits[i >> 6] |= std::uint64_t(1) << (i & 63);
 		});
 	}
 
 	postings_iterator& postings() noexcept { return it_; }
+
+	// Lucene BM25 reads the one-byte norm; Xapian BM25 reads the exact length.
+	double score_of(ordinal_t ord, std::uint32_t wdf) const {
+		return weight_.kind == scheme::lucene_bm25 ? weight_.by_norm(wdf, seg_->norm(ord)) : weight_(wdf, seg_->length(ord));
+	}
 	const segment& seg() const noexcept { return *seg_; }
 
 private:
@@ -747,7 +759,7 @@ public:
 	}
 	std::uint64_t cost() const noexcept override { return cost_; }
 	double score() override {
-		if (term_weights_.empty()) { return weight_(freq_, seg_->length(doc_)); }
+		if (term_weights_.empty()) { return weight_.by_norm(freq_, seg_->norm(doc_)); }
 		double s = 0;
 		const std::uint32_t len = seg_->length(doc_);
 		for (const auto& sl : slots_) { s += term_weights_[sl.offset](terms_[sl.term]->wdf(), len); }

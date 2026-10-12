@@ -363,6 +363,11 @@ public:
 		append(format::section::terms, tables.blocks);
 		append(format::section::term_index, tables.index);
 		append(format::section::lengths, pack_u32(lengths_));
+		{
+			std::string norms(lengths_.size(), '\0');
+			for (std::size_t i = 0; i < lengths_.size(); ++i) { norms[i] = char(format::encode_length(lengths_[i])); }
+			append(format::section::norms, norms);
+		}
 		append(format::section::docids, encode_docids());
 		append(format::section::stored, encode_stored());
 		append(format::section::stats, stats);

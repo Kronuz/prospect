@@ -53,7 +53,7 @@ namespace format {
 
 inline constexpr char header_magic[8] = {'S', 'T', 'R', 'S', 'E', 'G', '0', '1'};
 inline constexpr char footer_magic[4] = {'S', 'E', 'N', 'D'};
-inline constexpr std::uint32_t version = 7;
+inline constexpr std::uint32_t version = 8;
 inline constexpr std::size_t header_size = 32;
 inline constexpr std::size_t footer_size = 48;
 inline constexpr std::size_t region_size = 64 * 1024;
@@ -73,6 +73,7 @@ enum class section : std::uint16_t {
 	stored = 6,
 	docids = 7,
 	stats = 8,
+	norms = 9,  // one encode_length byte per document, for Lucene-compatible scoring
 };
 
 // --- little-endian fixed-width fields ---------------------------------------------------------

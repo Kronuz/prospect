@@ -71,6 +71,7 @@ public:
 			case format::section::header:
 			case format::section::term_index:
 			case format::section::lengths:
+			case format::section::norms:
 			case format::section::docids:
 			case format::section::stats:
 				if (hashes::crc32c(bytes.data(), bytes.size()) != e.crc) { throw corrupt_segment("section checksum"); }
@@ -87,6 +88,7 @@ public:
 			case format::section::docids: docids_ = bytes; break;
 			case format::section::stats: stats_ = bytes; break;
 			case format::section::stored: stored_ = bytes; break;
+			case format::section::norms: norms_ = bytes; break;
 			default: break;
 			}
 		}
@@ -120,8 +122,12 @@ public:
 		std::sort(regions.begin(), regions.end(), [](const auto& a, const auto& b) { return a.offset < b.offset; });
 		integrity_->regions = residency::verified_regions(
 			std::span<const std::byte>(reinterpret_cast<const std::byte*>(file.data()), file.size()), std::move(regions));
+		if (norms_.size() != doc_count_) { throw corrupt_segment("norms size"); }
 		dict_.emplace(terms_, term_index_, &verify_terms, integrity_.get());  // validates the FST index
 	}
+
+	// The document's length quantized by format::encode_length (one byte, verified at open).
+	std::uint8_t norm(ordinal_t ord) const noexcept { return std::uint8_t(norms_[ord]); }
 
 	// Verifies a range of the postings or positions section before it is read; throws
 	// corrupt_segment on a checksum mismatch.
@@ -208,7 +214,7 @@ public:
 	const termdict::reader& dictionary() const noexcept { return *dict_; }
 
 private:
-	std::string_view file_, terms_, term_index_, postings_, positions_, lengths_, docids_, stats_, stored_;
+	std::string_view file_, terms_, term_index_, postings_, positions_, lengths_, docids_, stats_, stored_, norms_;
 	format::footer footer_;
 	std::vector<format::section_entry> sections_;
 	struct integrity {
