@@ -192,3 +192,84 @@ These parts stand as written:
 - The exhaustive bitset windows for counts.
 - The collectors' heap-to-threshold feedback.
 - The Xapian estimate triple, exact when counting.
+
+## Revision check
+
+- Date: 2026-10-11.
+- Reviewed: `docs/design/phase-2.md` at `088b268`, and PLAN and FEASIBILITY at
+  `a2d79a4`.
+
+### Verdict
+
+**APPROVED: implementation starts.** One format item, R1, remains. It blocks only the
+positions writer and reader, and lands before either is written.
+
+### D1–D18
+
+All eighteen are addressed:
+
+- **Format.**
+  - D1: one position stream per term.
+  - D2: a restart every 16 entries, with only restarts in the offset table.
+  - D3: pairs with exact wdf and lengths rounded down, so bounds stay valid.
+    - Level 0 costs about 8 B per block over 4.37M blocks, about 35 MB, putting postings
+      near 0.98× `.doc`.
+    - At 10 B per block it would still be 0.99×, so the budget holds.
+  - D4: maximum wdf and whole-list pairs in the term info.
+  - D5: a no-positions flag.
+  - D6: a 48-byte footer with widths, a tail magic, and docid bounds.
+  - D7: docid = ordinal + 1 in a fresh segment.
+  - D8: little-endian throughout, and a golden fixture.
+- **Reader safety.**
+  - D9: bounds checks, the last-ordinal check, monotone ordinals, and fencing.
+  - D10: region checksums passed to `residency::file::open`, verified on the first
+    prefetch.
+  - D11: `SIGBUS` is a node failure, and strict mode reads with `pread`.
+- **Query execution.**
+  - D12: a required-plus-optional scorer.
+  - D13: the count shortcut, and counting while scoring only competitive blocks.
+  - D14: automaton-driven seeking.
+- **Analysis, parity, and measurement.**
+  - D15: an analyzer section.
+  - D16: parity queries built from recorded descriptions, with ties within tolerance.
+  - D17: whitespace analysis for the gate rows; an indexing row of 1M documents, 2 GiB,
+    and one thread; and the `termdict` microbenchmark.
+  - D18: the test plan.
+
+PLAN now carries the 2× hard stop, the stratified term queries, and the `termdict`
+threshold, and FEASIBILITY states the measured ingestion causes. With that, Phase 0's
+gate closes, apart from the quiet-host re-runs and single-thread baselines the Phase 2
+gate needs.
+
+### Remaining
+
+1. **R1, position counts (format; before the positions writer).** "Using each document's
+   wdf as its run length" does not hold for Xapiand's data:
+   - Boolean terms add positions with wdf 0: `add_posting(term, pos, 0)` in
+     `src/database/schema.cc:5305-5308`.
+   - Field weights add `weight` to wdf for each occurrence while adding one position:
+     `index_text(value, weight, prefix)` in `src/multivalue/generate_terms.cc:525`.
+   - Global-prefix terms collect positions from several fields, and duplicate
+     positions collapse.
+
+   The stream must carry each document's position count. A per-term flag can mark the
+   common case where count equals wdf, as with `TermGenerator` at a wdf increment of 1,
+   so that case costs nothing; other terms carry counts. The in-memory segment tracks
+   the counts too.
+
+### Minor (non-blocking)
+
+1. **Header coverage.** Say how the TOC covers the header. "Lists the header as region
+   0" reads best as a header entry (offset 0, length 32) with its own CRC, which closes
+   the chain from footer to TOC to header.
+2. **Reader prefetch.** The reader prefetches every range it decodes, including term
+   blocks and skip data, so verification on first prefetch covers every byte the
+   reader uses.
+3. **One segment per engine in the indexing row.** Each engine's run records its segment
+   count. A run in which any engine flushes more than one segment doesn't count.
+4. **Analyzer word rules from vectors.** Xapian's word characters include connector
+   punctuation such as `_`, and its rules cover digit infixes, acronyms, and a length
+   cap. Pin each through vectors.
+5. **Oracle vectors.** The extended term-generation vectors don't exist yet:
+   `termgen.jsonl` still has 112 lines, with no prefix, stopper, or positionless cases.
+   They land before the analyzer work, as the design states.
