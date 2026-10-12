@@ -24,7 +24,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 			length += std::uint32_t(p.size());
 			expected[t].push_back(ord);
 		}
-		w.add(ord + 1, in, length);
+		w.add(ord + 1, in, length, std::string_view(reinterpret_cast<const char*>(data), std::min<std::size_t>(size, ord % 7)));
 		++ord;
 		positions.clear();
 		pos = 0;
@@ -53,6 +53,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 	for (std::size_t i = 0; i + 1 < std::min<std::size_t>(size, 16); i += 2) { bad[(data[i] * 131u + data[i + 1]) % bad.size()] ^= char(data[i + 1] | 1); }
 	try {
 		strata::segment seg(bad);
+		for (strata::ordinal_t d = 0; d < seg.doc_count(); ++d) { (void)seg.stored(d); }
 		for (const auto& [t, ords] : expected) {
 			auto info = seg.term(t);
 			if (!info) { continue; }
