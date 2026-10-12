@@ -97,7 +97,7 @@ strata::scorer_ptr build(const strata::segment& seg, const node& n, const std::m
 		if (!info) { return nullptr; }
 		return std::make_unique<strata::term_scorer>(seg, *info, strata::weight::xapian(seg, info->df, wqf.at(n.term)));
 	}
-	if (n.op == "PHRASE") {
+	if (n.op == "PHRASE" || n.op == "NEAR") {
 		std::vector<strata::format::term_info> infos;
 		std::vector<strata::weight> weights;
 		for (const auto& c : n.children) {
@@ -106,7 +106,7 @@ strata::scorer_ptr build(const strata::segment& seg, const node& n, const std::m
 			infos.push_back(*info);
 			weights.push_back(strata::weight::xapian(seg, info->df, wqf.at(c.term)));
 		}
-		return std::make_unique<strata::phrase_scorer>(seg, infos, std::move(weights));
+		return std::make_unique<strata::phrase_scorer>(seg, infos, std::move(weights), n.op == "NEAR" ? n.window : 0);
 	}
 	std::vector<strata::scorer_ptr> kids;
 	for (const auto& c : n.children) { kids.push_back(build(seg, c, wqf)); }

@@ -734,8 +734,11 @@ public:
 	// Lucene scores the phrase frequency with the terms' summed idf; Xapian (term_weights
 	// given, one per phrase term) sums each term's own weight for the document. A term
 	// repeated in the phrase is iterated and decoded once.
-	phrase_scorer(const segment& seg, const std::vector<format::term_info>& infos, std::vector<weight> term_weights = {})
-		: seg_(&seg), term_weights_(std::move(term_weights)) {
+	// window > 0 makes it NEAR: the terms (repeats counted) at distinct positions, in any
+	// order, spanning fewer than window positions; NEAR needs term_weights.
+	phrase_scorer(const segment& seg, const std::vector<format::term_info>& infos, std::vector<weight> term_weights = {}, std::uint32_t window = 0)
+		: seg_(&seg), term_weights_(std::move(term_weights)), window_(window) {
+		if (window_ && term_weights_.size() != infos.size()) { throw std::invalid_argument("strata: NEAR needs a weight per term"); }
 		double idf = 0;
 		for (std::size_t k = 0; k < infos.size(); ++k) {
 			const auto& info = infos[k];
@@ -876,6 +879,7 @@ private:
 	// slot whose term has the fewest positions and intersects the others into it,
 	// stopping once nothing is left.
 	std::uint32_t phrase_freq() {
+		if (window_) { return near_freq(); }
 		for (std::size_t u = 0; u < terms_.size(); ++u) { counts_[u] = readers_[u]->count(*terms_[u]); }
 		order_.assign(slots_.begin(), slots_.end());
 		for (std::size_t i = 1; i < order_.size(); ++i) {  // insertion sort: a handful of slots
@@ -901,6 +905,32 @@ private:
 		return std::uint32_t(candidates_.size());
 	}
 
+	// NEAR: 1 when some window of fewer than window_ positions holds every term as often as
+	// it repeats in the query (distinct positions), else 0. Slides over the terms' positions
+	// merged in order.
+	std::uint32_t near_freq() {
+		need_.assign(terms_.size(), 0);
+		for (const auto& sl : slots_) { ++need_[sl.term]; }
+		merged_.clear();
+		for (std::size_t u = 0; u < terms_.size(); ++u) {
+			const auto& pos = positions(u);
+			if (pos.size() < need_[u]) { return 0; }
+			for (std::uint32_t p : pos) { merged_.push_back({p, u}); }
+		}
+		std::sort(merged_.begin(), merged_.end());
+		have_.assign(terms_.size(), 0);
+		std::size_t satisfied = 0, lo = 0;
+		for (std::size_t hi = 0; hi < merged_.size(); ++hi) {
+			if (++have_[merged_[hi].second] == need_[merged_[hi].second]) { ++satisfied; }
+			while (merged_[hi].first - merged_[lo].first >= window_) {
+				if (have_[merged_[lo].second]-- == need_[merged_[lo].second]) { --satisfied; }
+				++lo;
+			}
+			if (satisfied == terms_.size()) { return 1; }
+		}
+		return 0;
+	}
+
 	// A bound on w over [from, upto] from one term's skip data: the smallest skip entry
 	// covering the range (its block, its group, or the whole term).
 	static double range_bound(postings_iterator& it, const weight& w, ordinal_t from, ordinal_t upto) {
@@ -924,8 +954,10 @@ private:
 	std::vector<slot> slots_, order_;
 	std::vector<std::vector<std::uint32_t>> positions_;
 	std::vector<ordinal_t> decoded_;  // the document positions_[u] belongs to
-	std::vector<std::uint32_t> candidates_, counts_;
+	std::vector<std::uint32_t> candidates_, counts_, need_, have_;
+	std::vector<std::pair<std::uint32_t, std::size_t>> merged_;  // NEAR: (position, term)
 	std::vector<weight> term_weights_;
+	std::uint32_t window_ = 0;
 	weight weight_ = weight::lucene(*seg_, 1);
 	std::uint64_t cost_ = ~std::uint64_t(0);
 	std::uint32_t freq_ = 0;

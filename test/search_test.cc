@@ -58,7 +58,7 @@ int main() {
 				std::string t = vocab[rng() % vocab.size()];
 				if (std::find(pick.begin(), pick.end(), t) == pick.end() && seg.term(t)) { pick.push_back(t); }
 			}
-			const int kind = int(rng() % 6);
+			const int kind = int(rng() % 7);
 			strata::scorer_ptr q;
 			std::map<ordinal_t, double> want;
 			for (std::size_t d = 0; d < ndocs; ++d) {
@@ -83,6 +83,21 @@ int main() {
 					match = tf(d, pick[0]) > 0;
 					for (std::size_t i = 1; i < pick.size(); ++i) { if (tf(d, pick[i])) { match = false; } }
 					if (match) { s = weight(pick[0])(tf(d, pick[0]), std::uint32_t(docs[d].tokens.size())); }
+					break;
+				}
+				case 6: {  // NEAR 3: every picked term (repeats counted) within 3 positions
+					const auto& tk = docs[d].tokens;
+					for (std::size_t i = 0; i < tk.size() && !match; ++i) {
+						std::map<std::string, int> need;
+						for (auto& t : pick) { ++need[t]; }
+						for (std::size_t j = i; j < tk.size() && j < i + 3; ++j) {
+							if (need.count(tk[j]) && --need[tk[j]] == 0) { need.erase(tk[j]); }
+						}
+						match = need.empty();
+					}
+					if (match) {
+						for (auto& t : pick) { s += weight(t)(tf(d, t), std::uint32_t(tk.size())); }
+					}
 					break;
 				}
 				case 4:
@@ -123,6 +138,11 @@ int main() {
 				default: {
 					std::vector<strata::format::term_info> infos;
 					for (auto& t : pick) { infos.push_back(*seg.term(t)); }
+					if (kind == 6) {
+						std::vector<strata::weight> ws;
+						for (auto& t : pick) { ws.push_back(weight(t)); }
+						return std::make_unique<strata::phrase_scorer>(seg, infos, std::move(ws), 3);
+					}
 					auto phrase = std::make_unique<strata::phrase_scorer>(seg, infos);
 					if (kind == 4) { return phrase; }
 					kids.push_back(std::move(phrase));

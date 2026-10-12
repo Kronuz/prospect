@@ -231,7 +231,7 @@ approximations and confirm only documents every child agrees on.
 | Conjunction | Leapfrogs from the lowest-cost scorer; the lead's blocks are windows, skipped whole when their summed bounds cannot compete; inside a window, a document whose lead score plus the others' window bounds cannot compete is skipped before the others move |
 | Required plus optional (Xapian `AND_MAYBE`) | Iterates the required side; adds optional scores where they match; skips a document before moving the optional side when the required score plus the optional side's bound over the required block cannot compete |
 | Disjunction (top-k) | MaxScore in windows of 4,096 ordinals: per-window bounds split essential and non-essential clauses; essential clauses accumulate scores into a dense array with a match bitset; non-essential clauses are consulted only for documents that can still compete |
-| Phrase, near | Two-phase: the rarest term leads the conjunction, then positions, starting from the term with the fewest positions in the document and stopping when no start survives; a phrase's frequency is at most each term's wdf, so the smallest of its terms' bounds bounds it |
+| Phrase, near | NEAR (window w): the terms, repeats counted, at distinct positions spanning fewer than w, in any order, scored as the sum of their weights (Xapian's semantics, checked against oracle vectors). Two-phase: the rarest term leads the conjunction, then positions, starting from the term with the fewest positions in the document and stopping when no start survives; a phrase's frequency is at most each term's wdf, so the smallest of its terms' bounds bounds it |
 | Filter, and-not | Non-scoring iterators |
 
 **Counting** answers from statistics when it can: a term's document frequency, a
