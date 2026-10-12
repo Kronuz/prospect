@@ -2,6 +2,7 @@
 //   strata_engine index DIR < corpus.json   one segment from JSON lines ("text": whitespace tokens)
 //   strata_engine serve DIR                  "COMMAND\tquery" lines -> one count per line
 //   strata_engine terms DIR                  every term and its document frequency
+//   strata_engine verify DIR < queries.txt   pruned top-k equals an exhaustive scan, k = 10, 100, 1000
 //   strata_engine bench DIR COMMAND RUNS < queries.txt
 //                                            per query: fastest of RUNS in-process runs, in µs
 // Query syntax: words are optional, +word is required, -word is excluded, "a b" is a phrase.
@@ -11,6 +12,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cmath>
 #include <chrono>
 #include <iomanip>
 #include <cstdio>
@@ -222,6 +224,48 @@ int terms(const std::string& dir) {
 	return 0;
 }
 
+std::string query_of(const std::string& line) {
+	auto at = line.find("\"query\": \"");
+	if (at == std::string::npos) { return {}; }
+	std::string q;
+	for (std::size_t i = at + 10; i < line.size() && line[i] != '"'; ++i) { q.push_back(line[i] == '\\' ? line[++i] : line[i]); }
+	return q;
+}
+
+// For every query: the pruned top-k against a scan that scores every match, rank by rank
+// (scores within 1e-9 relative; equal scores may order differently), and the counts.
+int verify(const std::string& dir) {
+	residency::file file;
+	strata::segment seg = open(dir, file);
+	std::size_t queries = 0, mismatches = 0;
+	for (std::string line; std::getline(std::cin, line);) {
+		const std::string q = query_of(line);
+		if (q.empty()) { continue; }
+		++queries;
+		const parsed p = parse(q);
+		for (std::size_t k : {10u, 100u, 1000u}) {
+			auto pruned = build(seg, p), all = build(seg, p);
+			if (!pruned) { break; }
+			const auto hits = strata::top_k(*pruned, k);
+			std::vector<strata::hit> want;
+			std::uint64_t n = 0;
+			for (auto d = all->next(); d != strata::no_more_docs; d = all->next(), ++n) { want.push_back({d, all->score()}); }
+			std::sort(want.begin(), want.end(), [](const auto& a, const auto& b) { return a.score != b.score ? a.score > b.score : a.ord < b.ord; });
+			want.resize(std::min<std::size_t>(k, want.size()));
+			bool ok = hits.size() == want.size();
+			for (std::size_t i = 0; ok && i < hits.size(); ++i) { ok = std::abs(hits[i].score - want[i].score) <= 1e-9 * std::max(1.0, want[i].score); }
+			auto counted = build(seg, p);
+			ok = ok && strata::count(*counted) == n;
+			if (!ok) {
+				++mismatches;
+				std::cout << "MISMATCH k=" << k << '\t' << q << '\n';
+			}
+		}
+	}
+	std::cout << queries << " queries, " << mismatches << " mismatches\n";
+	return mismatches ? 1 : 0;
+}
+
 // queries.txt is the harness's JSON lines: {"query": "...", "tags": [...]}.
 int bench(const std::string& dir, std::string_view command, int runs) {
 	residency::file file;
@@ -250,7 +294,8 @@ int main(int argc, char** argv) {
 	if (mode == "index" && argc == 3) { return index(argv[2]); }
 	if (mode == "serve" && argc == 3) { return serve(argv[2]); }
 	if (mode == "terms" && argc == 3) { return terms(argv[2]); }
+	if (mode == "verify" && argc == 3) { return verify(argv[2]); }
 	if (mode == "bench" && argc == 5) { return bench(argv[2], argv[3], std::atoi(argv[4])); }
-	std::cerr << "usage: strata_engine index|serve|terms DIR | bench DIR COMMAND RUNS < queries\n";
+	std::cerr << "usage: strata_engine index|serve|terms|verify DIR | bench DIR COMMAND RUNS < queries\n";
 	return 2;
 }

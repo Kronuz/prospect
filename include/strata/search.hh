@@ -99,6 +99,11 @@ struct weight {
 
 struct top_collector;
 
+// An upper bound on the exact sum of n non-negative terms whose floating-point sum is sum:
+// summing in another order (as scoring does) can round up to n units in the last place
+// further (Lucene's MathUtil.sumUpperBound).
+inline double sum_upper(double sum, std::size_t n) noexcept { return sum * (1.0 + double(2 * n) * 0x1p-53); }
+
 // The virtual scorer interface; every implementation satisfies strata::scorer.
 struct scorer {
 	virtual ~scorer() = default;
@@ -432,7 +437,7 @@ private:
 					const ordinal_t upto = end == no_more_docs ? target : end;
 					double sum = 0;
 					for (std::size_t i = 0; i < children_.size(); ++i) { sum += window_bounds_[i] = children_[i]->max_score(target, upto); }
-					if (sum <= min_) {
+					if (sum_upper(sum, children_.size()) <= min_) {
 						if (end == no_more_docs) { return no_more_docs; }
 						target = lead->approx_advance(end + 1);
 						continue;
@@ -446,7 +451,7 @@ private:
 				}
 				lead_score_ = lead->score();
 				lead_scored_ = target;
-				if (lead_score_ + rest_bound_ <= min_) {
+				if (sum_upper(lead_score_ + rest_bound_, children_.size()) <= min_) {
 					target = lead->approx_next();
 					continue;
 				}
@@ -493,7 +498,7 @@ public:
 	void set_min_competitive_score(double s) override {
 		double sum = 0;
 		std::size_t from = 0;
-		while (from < children_.size() && sum + children_[from]->max_score_total() <= s) { sum += children_[from++]->max_score_total(); }
+		while (from < children_.size() && sum_upper(sum + children_[from]->max_score_total(), from + 1) <= s) { sum += children_[from++]->max_score_total(); }
 		if (from > essential_from_ && started_) {
 			// Drop newly non-essential clauses from the candidate heap.
 			std::erase_if(heap_, [&](const entry& e) { return e.second < from; });
@@ -652,7 +657,7 @@ private:
 			}
 			req_score_ = req_->score();
 			req_scored_ = d;
-			if (req_score_ + opt_bound_ > min_) { return d; }
+			if (sum_upper(req_score_ + opt_bound_, 2) > min_) { return d; }
 			d = req_->next();
 		}
 		return d;
@@ -1009,7 +1014,7 @@ inline bool disjunction_scorer::collect_top_k(top_collector& c) {
 		double prefix = 0;
 		std::size_t global_from = 0;
 		if (min > 0) {
-			while (global_from < n && prefix + children_[global_from]->max_score_total() <= min) { prefix += children_[global_from++]->max_score_total(); }
+			while (global_from < n && sum_upper(prefix + children_[global_from]->max_score_total(), global_from + 1) <= min) { prefix += children_[global_from++]->max_score_total(); }
 		}
 		ordinal_t first = no_more_docs;
 		for (std::size_t i = global_from; i < n; ++i) {
@@ -1028,7 +1033,7 @@ inline bool disjunction_scorer::collect_top_k(top_collector& c) {
 		if (min > 0) {
 			std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) { return bound[a] < bound[b]; });
 			double sum = 0;
-			while (essential < n && sum + bound[order[essential]] <= min) { sum += bound[order[essential++]]; }
+			while (essential < n && sum_upper(sum + bound[order[essential]], essential + 1) <= min) { sum += bound[order[essential++]]; }
 			if (essential == n) {  // nothing in this window can compete
 				window_min = window_max + 1;
 				if (window_max == no_more_docs - 1) { break; }
@@ -1054,7 +1059,7 @@ inline bool disjunction_scorer::collect_top_k(top_collector& c) {
 				double remaining = rest;
 				for (std::size_t e = essential; e-- > 0;) {
 					const double m = c.counting ? 0.0 : c.min_competitive();
-					if (!c.counting && score + remaining <= m) { break; }
+					if (!c.counting && sum_upper(score + remaining, n) <= m) { break; }
 					auto& ch = children_[order[e]];
 					if (ch->doc() < d) { ch->advance(d); }
 					if (ch->doc() == d) { score += ch->score(); }

@@ -211,6 +211,18 @@ inline std::vector<section_entry> decode_toc(std::string_view file, const footer
 		entries.push_back(std::move(e));
 	}
 	if (p != end) { throw corrupt_segment("table of contents trailing bytes"); }
+	// Each kind at most once; sections never overlap.
+	std::vector<const section_entry*> sorted;
+	for (const auto& e : entries) {
+		for (const auto* o : sorted) {
+			if (o->kind == e.kind) { throw corrupt_segment("duplicate section"); }
+		}
+		sorted.push_back(&e);
+	}
+	std::sort(sorted.begin(), sorted.end(), [](const auto* a, const auto* b) { return a->offset < b->offset; });
+	for (std::size_t i = 1; i < sorted.size(); ++i) {
+		if (sorted[i - 1]->offset + sorted[i - 1]->length > sorted[i]->offset) { throw corrupt_segment("overlapping sections"); }
+	}
 	return entries;
 }
 

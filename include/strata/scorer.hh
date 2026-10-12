@@ -39,7 +39,10 @@ using docset::no_more_docs;
 //   block_end(t)      the last doc of the block that holds t, without decoding the block
 //                     (no_more_docs past the end); doc() is unchanged
 //   max_score(f, u)   an upper bound on score() for docs in [f, u], from skip data alone,
-//                     so a conjunction can bound children it has not moved yet
+//                     so a conjunction can bound children it has not moved yet; not const
+//                     (it decodes and caches skip data) and doc() is unchanged
+// block_end of a scorer over several children is the end of a window its children's
+// blocks share, not of one block.
 // Scores are doubles so Xapian-compatible weighting keeps its precision.
 template <typename S>
 concept scorer = docset::doc_iterator<S> && requires(S s, const S cs, doc_t target, doc_t upto) {

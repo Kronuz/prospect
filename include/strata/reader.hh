@@ -178,6 +178,7 @@ public:
 		std::uint64_t skip = 0, length = 0;
 		for (std::uint64_t i = 0; i < n; ++i) {
 			const std::uint64_t len = format::get_leb(&p, rend);
+			if (len > raw.size()) { throw corrupt_segment("stored record length"); }
 			if (i < ord - first_of(lo)) { skip += len; }
 			if (i == ord - first_of(lo)) { length = len; }
 		}

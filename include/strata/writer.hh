@@ -222,6 +222,8 @@ public:
 	// weighting (Xapian: the sum of wdf over non-boolean terms).
 	// `stored` is the document's stored record, returned by segment::stored.
 	ordinal_t add(std::uint64_t docid, std::span<const posting_input> terms, std::uint32_t length, std::string_view stored = {}) {
+		// Ordinals are 32-bit and the largest value means no more documents.
+		if (lengths_.size() >= std::size_t(no_more_docs) - 1) { throw std::length_error("strata: segment document limit"); }
 		const ordinal_t ord = ordinal_t(lengths_.size());
 		stored_ += stored;
 		stored_ends_.push_back(stored_.size());
