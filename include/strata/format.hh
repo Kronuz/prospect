@@ -53,7 +53,7 @@ namespace format {
 
 inline constexpr char header_magic[8] = {'S', 'T', 'R', 'S', 'E', 'G', '0', '1'};
 inline constexpr char footer_magic[4] = {'S', 'E', 'N', 'D'};
-inline constexpr std::uint32_t version = 3;
+inline constexpr std::uint32_t version = 4;
 inline constexpr std::size_t header_size = 32;
 inline constexpr std::size_t footer_size = 48;
 inline constexpr std::size_t region_size = 64 * 1024;
@@ -272,6 +272,24 @@ inline std::size_t decode_impacts(const char** p, const char* end, std::vector<i
 		out.push_back(i);
 	}
 	return n;
+}
+
+// Skip data prefixes each list with its byte length, so readers step over it and decode
+// it only when a bound needs it.
+inline void encode_sized_impacts(std::string& out, const std::vector<impact>& impacts) {
+	std::string list;
+	encode_impacts(list, impacts);
+	put_leb(out, list.size());
+	out += list;
+}
+
+// Steps over a sized list; returns its bytes.
+inline std::string_view skip_sized_impacts(const char** p, const char* end) {
+	const std::uint64_t n = get_leb(p, end);
+	if (n == 0 || n > std::uint64_t(end - *p)) { throw corrupt_segment("impacts bounds"); }
+	std::string_view list(*p, n);
+	*p += n;
+	return list;
 }
 
 inline std::vector<impact> decode_impacts(const char** p, const char* end) {

@@ -325,7 +325,7 @@ private:
 					format::put_leb(group, meta[i].pos_offset - prev.pos_offset);
 					if (with_counts) { format::put_leb(group, meta[i].count_offset - prev.count_offset); }
 				}
-				format::encode_impacts(group, meta[i].impacts);
+				format::encode_sized_impacts(group, meta[i].impacts);
 				prev_last = meta[i].last;
 				prev = meta[i];
 				group_bytes += meta[i].bytes;
@@ -341,7 +341,7 @@ private:
 			prev_group = first;
 			format::put_leb(level1, group.size());
 			format::put_leb(level1, group_bytes);
-			format::encode_impacts(level1, format::competitive(std::move(group_pairs)));
+			format::encode_sized_impacts(level1, format::competitive(std::move(group_pairs)));
 			prev_group_last = group_last;
 			level0 += group;
 		}

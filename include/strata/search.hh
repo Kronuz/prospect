@@ -180,6 +180,8 @@ public:
 	ordinal_t doc() const noexcept override { return it_.doc(); }
 	ordinal_t next() override { return skip_blocks(it_.next()); }
 	ordinal_t advance(ordinal_t t) override { return skip_blocks(it_.advance(t)); }
+	ordinal_t approx_next() override { return skip_blocks(it_.next()); }
+	ordinal_t approx_advance(ordinal_t t) override { return skip_blocks(it_.advance(t)); }
 	std::uint64_t cost() const noexcept override { return it_.cost(); }
 	double score() override { return weight_(it_.wdf(), seg_->length(it_.doc())); }
 	void set_min_competitive_score(double s) override { min_ = s; }
@@ -224,6 +226,7 @@ public:
 	}
 
 	postings_iterator& postings() noexcept { return it_; }
+	const segment& seg() const noexcept { return *seg_; }
 
 private:
 	double bound(std::span<const format::impact> pairs) const {
@@ -296,7 +299,52 @@ public:
 		for (const auto& c : children_) {
 			bound_ += c->max_score_total();
 			two_phase_ = two_phase_ || c->two_phase();
+			auto* t = dynamic_cast<term_scorer*>(c.get());
+			if (t) { terms_.push_back(t); }
 		}
+		if (terms_.size() != children_.size()) { terms_.clear(); }
+	}
+
+	// Counting fast paths for conjunctions of terms: a dense lead ANDs each term's window
+	// bits; a sparse lead leapfrogs on the postings directly.
+	void fill(ordinal_t base, ordinal_t end, std::uint64_t* bits) override {
+		if (terms_.empty() || min_ > 0) {
+			scorer::fill(base, end, bits);
+			return;
+		}
+		const std::size_t words = std::size_t(end - base + 63) / 64;
+		if (terms_[0]->cost() * 16 >= terms_[0]->seg().doc_count()) {
+			std::uint64_t all[64], one[64];
+			for (std::size_t i = 0; i < terms_.size(); ++i) {
+				auto& it = terms_[i]->postings();
+				if (it.doc() < base) { it.advance(base); }
+				std::uint64_t* into = i ? one : all;
+				std::fill(into, into + words, 0);
+				if (it.doc() < end) { it.fill(base, end, into); }
+				if (i) {
+					for (std::size_t w = 0; w < words; ++w) { all[w] &= one[w]; }
+				}
+			}
+			for (std::size_t w = 0; w < words; ++w) { bits[w] |= all[w]; }
+			doc_ = align(terms_[0]->postings().doc());
+			return;
+		}
+		auto& lead = terms_[0]->postings();
+		ordinal_t d = doc_;
+		while (d < end) {
+			bits[(d - base) >> 6] |= std::uint64_t(1) << ((d - base) & 63);
+			d = lead.next();
+			for (std::size_t i = 1; i < terms_.size() && d != no_more_docs;) {
+				const ordinal_t e = terms_[i]->postings().advance(d);
+				if (e == d) {
+					++i;
+				} else {
+					d = lead.advance(e);
+					i = 1;
+				}
+			}
+		}
+		doc_ = d;
 	}
 	ordinal_t doc() const noexcept override { return doc_; }
 	ordinal_t next() override { return doc_ = confirm(align(children_[0]->approx_next())); }
@@ -392,6 +440,7 @@ private:
 	ordinal_t doc_ = 0, window_end_ = no_more_docs, lead_scored_ = no_more_docs;
 	double bound_ = 0, min_ = 0, rest_bound_ = 0, lead_score_ = 0;
 	bool two_phase_ = false;
+	std::vector<term_scorer*> terms_;  // every child when all are terms, else empty
 };
 
 // Documents any child matches; score = sum of the matching children's scores.

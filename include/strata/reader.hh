@@ -183,8 +183,7 @@ public:
 				gr.blocks_offset = block_bytes;
 				level0 += format::get_leb(&p_, end_);
 				block_bytes += format::get_leb(&p_, end_);
-				gr.impacts_begin = std::uint32_t(group_impacts_.size());
-				gr.impacts_count = std::uint8_t(format::decode_impacts(&p_, end_, group_impacts_));
+				gr.impacts = format::skip_sized_impacts(&p_, end_);
 			}
 			level0_ = p_;
 			if (level0 > std::uint64_t(end_ - p_)) { throw corrupt_segment("level 0 bounds"); }
@@ -254,10 +253,10 @@ public:
 		if (b >= blocks_) { return df_ % format::block ? tail_last() : no_more_docs; }
 		return level0_entry(b).last;
 	}
+	// Competitive pairs; the span is valid until the next impacts call.
 	std::span<const format::impact> block_impacts_at(std::size_t b) {
 		if (b >= blocks_) { return info_.impacts; }
-		const entry& e = level0_entry(b);
-		return {entry_impacts_.data() + e.impacts_begin, e.impacts_count};
+		return decode(level0_entry(b).impacts);
 	}
 	std::size_t groups() const noexcept { return groups_.size(); }
 	// The group holding target, without decoding its blocks (groups() past the end). The
@@ -274,9 +273,7 @@ public:
 	// The first ordinal a group can hold.
 	ordinal_t group_first(std::size_t g) const noexcept { return g ? groups_[g - 1].last + 1 : 0; }
 	ordinal_t group_last(std::size_t g) const noexcept { return groups_[g].last; }
-	std::span<const format::impact> group_impacts(std::size_t g) const noexcept {
-		return {group_impacts_.data() + groups_[g].impacts_begin, groups_[g].impacts_count};
-	}
+	std::span<const format::impact> group_impacts(std::size_t g) { return decode(groups_[g].impacts); }
 
 	// The last ordinal of the block that holds target (no_more_docs past the end), and that
 	// block's competitive pairs.
@@ -347,7 +344,8 @@ public:
 	void fill(ordinal_t base, ordinal_t end, std::uint64_t* bits) {
 		while (doc_ < end) {
 			std::size_t i = pos_;
-			for (; i < buf_len_ && buf_ords_[i] < end; ++i) {
+			const std::size_t stop = buf_ords_[buf_len_ - 1] < end ? buf_len_ : std::size_t(std::lower_bound(buf_ords_ + pos_, buf_ords_ + buf_len_, end) - buf_ords_);
+			for (; i < stop; ++i) {
 				const ordinal_t d = buf_ords_[i] - base;
 				bits[d >> 6] |= std::uint64_t(1) << (d & 63);
 			}
@@ -362,12 +360,19 @@ public:
 	}
 
 private:
+	std::span<const format::impact> decode(std::string_view list) {
+		impacts_.clear();
+		const char* p = list.data();
+		format::decode_impacts(&p, list.data() + list.size(), impacts_);
+		if (p != list.data() + list.size()) { throw corrupt_segment("impacts length"); }
+		return impacts_;
+	}
+
 	struct group {
 		ordinal_t last = 0;
 		std::uint64_t first_position = 0, pos_offset = 0, count_offset = 0;
 		std::uint64_t level0_offset = 0, blocks_offset = 0;
-		std::uint32_t impacts_begin = 0;  // in group_impacts_
-		std::uint8_t impacts_count = 0;
+		std::string_view impacts;  // encoded, decoded on demand
 	};
 	struct entry {
 		ordinal_t last = 0;
@@ -376,8 +381,7 @@ private:
 		std::uint64_t first_position = 0;  // index of the block's first position in the term's stream
 		std::uint64_t pos_offset = 0;      // byte offset of the position block holding it
 		std::uint64_t count_offset = 0;    // byte offset of the block's count block
-		std::uint32_t impacts_begin = 0;   // in entry_impacts_
-		std::uint8_t impacts_count = 0;
+		std::string_view impacts;          // encoded, decoded on demand
 	};
 
 	ordinal_t tail_last() {
@@ -401,7 +405,6 @@ private:
 		const char* p = level0_ + groups_[g].level0_offset;
 		const char* end = (g + 1 < groups_.size()) ? level0_ + groups_[g + 1].level0_offset : blocks_begin_;
 		entries_n_ = 0;
-		entry_impacts_.clear();
 		ordinal_t last = g ? groups_[g - 1].last : 0;
 		std::uint64_t offset = groups_[g].blocks_offset;
 		// Level-0 deltas restart per group.
@@ -419,8 +422,7 @@ private:
 			e.first_position = first_position;
 			e.pos_offset = pos_offset;
 			e.count_offset = count_offset;
-			e.impacts_begin = std::uint32_t(entry_impacts_.size());
-			e.impacts_count = std::uint8_t(format::decode_impacts(&p, end, entry_impacts_));
+			e.impacts = format::skip_sized_impacts(&p, end);
 			e.offset = offset;
 			offset += e.bytes;
 			last = e.last;
@@ -485,14 +487,15 @@ private:
 		return doc_ = no_more_docs;
 	}
 
+	// Ordinals strictly increase from base (none before the first block) and stay below
+	// the document count; branch-free so it vectorizes.
 	void check_increasing(ordinal_t base) const {
-		ordinal_t prev = base;
 		const std::size_t n = buf_len_ ? buf_len_ : std::min<std::size_t>(format::block, df_);
-		for (std::size_t i = 0; i < n; ++i) {
-			if ((base != std::numeric_limits<ordinal_t>::max() || i) && buf_ords_[i] <= prev) { throw corrupt_segment("ordinals not increasing"); }
-			if (buf_ords_[i] >= seg_->doc_count()) { throw corrupt_segment("ordinal out of range"); }
-			prev = buf_ords_[i];
-		}
+		if (n == 0) { return; }
+		bool ok = base == std::numeric_limits<ordinal_t>::max() || buf_ords_[0] > base;
+		for (std::size_t i = 1; i < n; ++i) { ok &= buf_ords_[i] > buf_ords_[i - 1]; }
+		if (!ok) { throw corrupt_segment("ordinals not increasing"); }
+		if (buf_ords_[n - 1] >= seg_->doc_count()) { throw corrupt_segment("ordinal out of range"); }
 	}
 
 	const segment* seg_;
@@ -505,10 +508,9 @@ private:
 	const char* tail_ = nullptr;
 	std::size_t blocks_ = 0, next_block_ = 0;
 	std::vector<group> groups_;
-	std::vector<format::impact> group_impacts_;
 	entry entries_[32];
 	std::size_t entries_n_ = 0;
-	std::vector<format::impact> entry_impacts_;
+	std::vector<format::impact> impacts_;
 	std::size_t decoded_group_ = std::numeric_limits<std::size_t>::max();
 	std::uint64_t tail_first_position_ = 0, tail_pos_offset_ = 0;
 	std::size_t sum_block_ = std::numeric_limits<std::size_t>::max(), sum_pos_ = 0;
