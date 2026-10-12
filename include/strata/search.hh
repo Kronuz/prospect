@@ -221,6 +221,7 @@ public:
 		}
 		return true;
 	}
+	void fill(ordinal_t base, ordinal_t end, std::uint64_t* bits) override { it_.fill(base, end, bits); }
 
 	// The bound of the smallest skip entry covering [from, upto]: its block, its group,
 	// or the whole term (Lucene's MaxScoreCache); one memoized evaluation per call.
