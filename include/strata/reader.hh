@@ -549,6 +549,12 @@ public:
 		tail_ = p + blocks_bytes_;
 	}
 
+	// The number of positions of the iterator's current document, without decoding them.
+	std::uint32_t count(postings_iterator& it) {
+		if (it.info().flags & format::counts_are_wdf) { return it.wdf(); }
+		return counts(it.in_tail(), it.positions_start().count_offset)[it.index_in_block()];
+	}
+
 	// The positions of the iterator's current document, ascending.
 	void read(postings_iterator& it, std::vector<std::uint32_t>& out) {
 		const auto start = it.positions_start();

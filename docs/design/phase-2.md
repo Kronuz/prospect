@@ -178,11 +178,15 @@ in-memory segment tracks each document's count beside its wdf.
 
 - **Term map:** open-addressing table keyed by term bytes in an arena; each entry holds
   growable slices for ordinal deltas, wdf, and the position stream (LEB128 while
-  buffering), plus df, collection frequency, and maximum wdf.
+  buffering), plus df, collection frequency, and maximum wdf. Per-document position
+  counts are kept only once one differs from its wdf.
 - Documents are inverted on the owner core; memory comes from the node-wide indexing
   budget.
 - **Flush:** sort terms, stream them through the `termdict` builder, and re-encode each
   term's slices into blocks, skip data, positions, and tails in one sequential pass.
+  Sections stream to the output and are checksummed as they pass; the positions
+  section, produced alongside the postings, waits in a spill file until the postings
+  end. The finished segment is never held in memory.
 
 ## Analyzer
 
@@ -221,9 +225,9 @@ approximations and confirm only documents every child agrees on.
 |---|---|
 | Term | Decodes one block at a time; skips whole groups, then blocks, whose bounds cannot compete; group bounds equal the maximum of their blocks' |
 | Conjunction | Leapfrogs from the lowest-cost scorer; the lead's blocks are windows, skipped whole when their summed bounds cannot compete; inside a window, a document whose lead score plus the others' window bounds cannot compete is skipped before the others move |
-| Required plus optional (Xapian `AND_MAYBE`) | Iterates the required side; adds optional scores where they match; skips optional work when required score plus optional bound cannot compete |
+| Required plus optional (Xapian `AND_MAYBE`) | Iterates the required side; adds optional scores where they match; skips a document before moving the optional side when the required score plus the optional side's bound over the required block cannot compete |
 | Disjunction (top-k) | MaxScore in windows of 4,096 ordinals: per-window bounds split essential and non-essential clauses; essential clauses accumulate scores into a dense array with a match bitset; non-essential clauses are consulted only for documents that can still compete |
-| Phrase, near | Two-phase: the rarest term leads the conjunction, then positions |
+| Phrase, near | Two-phase: the rarest term leads the conjunction, then positions, starting from the term with the fewest positions in the document and stopping when no start survives; a phrase's frequency is at most each term's wdf, so the smallest of its terms' bounds bounds it |
 | Filter, and-not | Non-scoring iterators |
 
 **Counting** answers from statistics when it can: a term's document frequency, a

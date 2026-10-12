@@ -580,12 +580,12 @@ class required_optional_scorer final : public scorer {
 public:
 	required_optional_scorer(scorer_ptr required, scorer_ptr optional) : req_(std::move(required)), opt_(std::move(optional)) {}
 	ordinal_t doc() const noexcept override { return req_->doc(); }
-	ordinal_t next() override { return req_->next(); }
-	ordinal_t advance(ordinal_t t) override { return req_->advance(t); }
+	ordinal_t next() override { return prune(req_->next()); }
+	ordinal_t advance(ordinal_t t) override { return prune(req_->advance(t)); }
 	std::uint64_t cost() const noexcept override { return req_->cost(); }
 	double score() override {
-		double s = req_->score();
 		const ordinal_t d = req_->doc();
+		double s = req_scored_ == d ? req_score_ : req_->score();
 		if (opt_->doc() < d || !opt_started_) {
 			opt_started_ = true;
 			opt_->advance(d);
@@ -596,7 +596,10 @@ public:
 	double max_score(ordinal_t from, ordinal_t upto) override { return req_->max_score(from, upto) + opt_->max_score(from, upto); }
 	ordinal_t block_end(ordinal_t t) override { return req_->block_end(t); }
 	double max_score_total() const noexcept override { return req_->max_score_total() + opt_->max_score_total(); }
-	void set_min_competitive_score(double s) override { req_->set_min_competitive_score(s - opt_->max_score_total()); }
+	void set_min_competitive_score(double s) override {
+		min_ = s;
+		req_->set_min_competitive_score(s - opt_->max_score_total());
+	}
 	std::optional<std::uint64_t> exact_count() override { return req_->exact_count(); }  // the optional side never filters
 	std::unique_ptr<scorer> fresh() const override {
 		auto r = req_->fresh(), o = opt_->fresh();
@@ -605,8 +608,28 @@ public:
 	}
 
 private:
+	// With a minimum competitive score, skips required matches whose score plus the
+	// optional side's bound over the required block cannot compete, before moving the
+	// optional side.
+	ordinal_t prune(ordinal_t d) {
+		while (min_ > 0 && d != no_more_docs) {
+			if (window_end_ == no_more_docs || d > window_end_) {
+				const ordinal_t end = req_->block_end(d);
+				window_end_ = end;
+				opt_bound_ = opt_->max_score(d, end == no_more_docs ? d : end);
+			}
+			req_score_ = req_->score();
+			req_scored_ = d;
+			if (req_score_ + opt_bound_ > min_) { return d; }
+			d = req_->next();
+		}
+		return d;
+	}
+
 	scorer_ptr req_, opt_;
 	bool opt_started_ = false;
+	double min_ = 0, req_score_ = 0, opt_bound_ = 0;
+	ordinal_t req_scored_ = no_more_docs, window_end_ = no_more_docs;
 };
 
 // Documents `include` matches and `exclude` does not; scores come from `include`.
@@ -700,7 +723,20 @@ public:
 		for (std::size_t i = 0; i < terms_.size(); ++i) { s += term_weights_[i](terms_[i]->wdf(), len); }
 		return s;
 	}
-	double max_score(ordinal_t, ordinal_t) override { return bound_; }
+	// Lucene mode: the phrase frequency is at most each term's wdf in the document, so each
+	// term's pairs bound the phrase weight and the smallest such bound holds. Xapian mode
+	// sums the terms' own bounds.
+	double max_score(ordinal_t from, ordinal_t upto) override {
+		if (!term_weights_.empty()) {
+			double sum = 0;
+			for (std::size_t i = 0; i < terms_.size(); ++i) { sum += range_bound(*terms_[i], term_weights_[i], from, upto); }
+			return std::min(sum, bound_);
+		}
+		double best = bound_;
+		for (auto& t : terms_) { best = std::min(best, range_bound(*t, weight_, from, upto)); }
+		return best;
+	}
+	void set_min_competitive_score(double s) override { min_ = s; }
 	ordinal_t block_end(ordinal_t t) override { return terms_[lead_]->block_end(t); }
 	double max_score_total() const noexcept override { return bound_; }
 
@@ -724,25 +760,85 @@ private:
 		return no_more_docs;
 	}
 
-	// The next document at or after d where the phrase occurs.
+	// The next document at or after d where the phrase occurs. With a minimum competitive
+	// score, the lead's blocks whose phrase bound cannot compete are skipped unverified.
 	ordinal_t find(ordinal_t d) {
-		for (d = align(d); d != no_more_docs; d = align(terms_[lead_]->next())) {
+		d = align(d);
+		while (d != no_more_docs) {
+			if (min_ > 0 && (window_end_ == no_more_docs || d > window_end_)) {
+				const ordinal_t end = terms_[lead_]->block_end(d);
+				if (max_score(d, end == no_more_docs ? d : end) <= min_) {
+					if (end == no_more_docs) { return no_more_docs; }
+					d = align(terms_[lead_]->advance(end + 1));
+					continue;
+				}
+				window_end_ = end;
+			}
 			checked_ = d;
 			if ((freq_ = phrase_freq()) > 0) { return d; }
+			d = align(terms_[lead_]->next());
 		}
 		return no_more_docs;
 	}
 
+	// Occurrences of the phrase in the current document: starts from the term with the
+	// fewest positions and intersects the others into it, stopping once nothing is left.
 	std::uint32_t phrase_freq() {
-		positions_.resize(terms_.size());
-		for (std::size_t i = 0; i < terms_.size(); ++i) { readers_[i]->read(*terms_[i], positions_[i]); }
-		std::uint32_t n = 0;
-		for (std::uint32_t p : positions_[0]) {
-			bool ok = true;
-			for (std::size_t i = 1; i < terms_.size() && ok; ++i) { ok = std::binary_search(positions_[i].begin(), positions_[i].end(), p + std::uint32_t(i)); }
-			n += ok;
+		const std::size_t n = terms_.size();
+		order_.resize(n);
+		counts_.resize(n);
+		for (std::size_t i = 0; i < n; ++i) {
+			order_[i] = i;
+			counts_[i] = readers_[i]->count(*terms_[i]);
 		}
-		return n;
+		std::sort(order_.begin(), order_.end(), [&](std::size_t a, std::size_t b) { return counts_[a] < counts_[b]; });
+		positions_.resize(n);
+		// Candidate phrase starts: the first term's positions shifted by its offset.
+		const std::size_t first = order_[0];
+		readers_[first]->read(*terms_[first], candidates_);
+		std::size_t live = 0;
+		for (std::uint32_t p : candidates_) {
+			if (p >= first) { candidates_[live++] = p - std::uint32_t(first); }
+		}
+		candidates_.resize(live);
+		for (std::size_t k = 1; k < n && !candidates_.empty(); ++k) {
+			const std::size_t i = order_[k];
+			auto& pos = positions_[i];
+			readers_[i]->read(*terms_[i], pos);
+			std::size_t keep = 0, j = 0;
+			for (std::uint32_t c : candidates_) {
+				const std::uint32_t want = c + std::uint32_t(i);
+				while (j < pos.size() && pos[j] < want) { ++j; }
+				if (j < pos.size() && pos[j] == want) { candidates_[keep++] = c; }
+			}
+			candidates_.resize(keep);
+		}
+		return std::uint32_t(candidates_.size());
+	}
+
+	// A bound on w over [from, upto] from one term's skip data.
+	static double range_bound(postings_iterator& it, const weight& w, ordinal_t from, ordinal_t upto) {
+		auto pairs_bound = [&](std::span<const format::impact> pairs) {
+			double best = 0;
+			for (const auto& p : pairs) { best = std::max(best, w(p.wdf, format::decode_length(p.length))); }
+			return best;
+		};
+		double best = 0;
+		std::size_t b = it.block_index_for(from);
+		while (from <= upto) {
+			if (b >= it.blocks()) { return std::max(best, pairs_bound(it.info().impacts)); }
+			const std::size_t g = b / 32;
+			if (b % 32 == 0 && from <= it.group_first(g) && it.group_last(g) <= upto) {
+				best = std::max(best, pairs_bound(it.group_impacts(g)));
+				from = it.group_last(g) + 1;
+				b += 32;
+				continue;
+			}
+			best = std::max(best, pairs_bound(it.block_impacts_at(b)));
+			from = it.block_last(b) + 1;
+			++b;
+		}
+		return best;
 	}
 
 	const segment* seg_;
@@ -750,14 +846,16 @@ private:
 	std::vector<std::unique_ptr<positions_reader>> readers_;
 	std::vector<bool> counts_wdf_;
 	std::vector<std::vector<std::uint32_t>> positions_;
+	std::vector<std::uint32_t> candidates_, counts_;
+	std::vector<std::size_t> order_;
 	std::vector<weight> term_weights_;
 	weight weight_ = weight::lucene(*seg_, 1);
 	std::uint64_t cost_ = ~std::uint64_t(0);
 	std::uint32_t freq_ = 0;
 	ordinal_t checked_ = no_more_docs;  // the document freq_ belongs to
 	std::size_t lead_ = 0;
-	ordinal_t doc_ = 0;
-	double bound_ = 0;
+	ordinal_t doc_ = 0, window_end_ = no_more_docs;
+	double bound_ = 0, min_ = 0;
 	std::vector<bool> started_;
 };
 
