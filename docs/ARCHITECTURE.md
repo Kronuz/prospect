@@ -112,7 +112,7 @@ version and a CRC32C. Live docs are per-generation side files.
 |---|---|
 | Term blocks | Prefix-compressed blocks of 25–48 terms with document frequency, collection frequency, and postings pointers |
 | Term index | A small resident FST over block prefixes |
-| Postings | 128-docid blocks: FOR doc deltas, PFOR wdf; VByte tails; two skip levels with competitive (wdf, doclen) pairs |
+| Postings | 128-ordinal blocks: FOR ordinal deltas, PFOR wdf; LEB128 tails (`varint::leb128`); two skip levels with competitive (wdf, doclen) pairs |
 | Positions | 128-position PFOR delta blocks |
 | Lengths | Exact per-document length (sum of wdf over non-boolean terms), bit-packed fixed width, with segment minimum and maximum |
 | Doc values | Slot directory and columns (numeric: delta, GCD, table, or bit-packed; sorted-set ordinals; binary) |
