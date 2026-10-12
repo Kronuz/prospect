@@ -2,10 +2,11 @@
 # Runs the gate VM's benchmark trials only while the host is quiet: waits until the
 # 1-minute load average stays below LIMIT for QUIET_SECONDS, starts ~/bench/trials.sh in
 # the VM, and samples host load every 30 s while it runs; a sample above LIMIT stops the
-# trials, and it waits for quiet again and starts over.
+# trials, and it waits for quiet again and starts over. The default LIMIT of 6 sits above
+# the host's idle load (2.5-3.5 on 16 threads) and below a compile's (8 and up).
 #   tools/vm/quiet_trials.sh [LIMIT] [QUIET_SECONDS]
 set -uo pipefail
-LIMIT=${1:-1.5}
+LIMIT=${1:-6}
 QUIET=${2:-300}
 here=$(cd "$(dirname "$0")" && pwd)
 log=${STRATA_TRIALS_LOG:-$here/../../.scratch/quiet-trials.log}
