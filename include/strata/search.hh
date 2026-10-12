@@ -485,7 +485,7 @@ private:
 	}
 
 	std::vector<scorer_ptr> children_;
-	std::vector<bool> started_;  // whether each child has been positioned
+	std::vector<std::uint8_t> started_;  // whether each child has been positioned
 	std::vector<double> window_bounds_;
 	ordinal_t doc_ = 0, window_end_ = no_more_docs, lead_scored_ = no_more_docs;
 	double bound_ = 0, min_ = 0, rest_bound_ = 0, lead_score_ = 0;
@@ -782,6 +782,10 @@ public:
 			}
 			slots_.push_back({u, std::uint32_t(k)});
 		}
+		for (std::size_t u = 0; u < terms_.size(); ++u) {
+			if (u != lead_) { others_.push_back(u); }
+		}
+		std::sort(others_.begin(), others_.end(), [&](std::size_t a, std::size_t b) { return infos_[a].df < infos_[b].df; });
 		started_.assign(terms_.size(), false);
 		positions_.resize(terms_.size());
 		decoded_.assign(terms_.size(), no_more_docs);
@@ -807,13 +811,19 @@ public:
 	bool matches() override {
 		if (checked_ != doc_) {
 			checked_ = doc_;
-			freq_ = phrase_freq();
+			matched_ = phrase_freq(false) > 0;
 		}
-		return freq_ > 0;
+		return matched_;
 	}
 	std::uint64_t cost() const noexcept override { return cost_; }
 	double score() override {
-		if (term_weights_.empty()) { return weight_.by_norm(freq_, seg_->norm(doc_)); }
+		if (term_weights_.empty()) {
+			if (freq_doc_ != doc_) {
+				freq_doc_ = doc_;
+				freq_ = phrase_freq(true);
+			}
+			return weight_.by_norm(freq_, seg_->norm(doc_));
+		}
 		double s = 0;
 		const std::uint32_t len = seg_->length(doc_);
 		for (const auto& sl : slots_) { s += term_weights_[sl.offset](terms_[sl.term]->wdf(), len); }
@@ -849,8 +859,7 @@ private:
 	ordinal_t align(ordinal_t d) {
 		while (d != no_more_docs) {
 			bool all = true;
-			for (std::size_t i = 0; i < terms_.size(); ++i) {
-				if (i == lead_) { continue; }
+			for (const std::size_t i : others_) {
 				ordinal_t e = started_[i] && terms_[i]->doc() >= d ? terms_[i]->doc() : terms_[i]->advance(d);
 				started_[i] = true;
 				if (e != d) {
@@ -880,7 +889,7 @@ private:
 				window_end_ = end;
 			}
 			checked_ = d;
-			if ((freq_ = phrase_freq()) > 0) { return d; }
+			if ((matched_ = phrase_freq(false) > 0)) { return d; }
 			d = align(terms_[lead_]->next());
 		}
 		return no_more_docs;
@@ -893,18 +902,18 @@ private:
 	}
 
 	// The current document's positions of unique term u, decoded once per document.
-	const std::vector<std::uint32_t>& positions(std::size_t u) {
+	std::span<const std::uint32_t> positions(std::size_t u) {
 		if (decoded_[u] != terms_[u]->doc()) {
-			readers_[u]->read(*terms_[u], positions_[u]);
+			positions_[u] = readers_[u]->read(*terms_[u]);
 			decoded_[u] = terms_[u]->doc();
 		}
 		return positions_[u];
 	}
 
-	// Occurrences of the phrase in the current document: starts from the (term, offset)
-	// slot whose term has the fewest positions and intersects the others into it,
-	// stopping once nothing is left.
-	std::uint32_t phrase_freq() {
+	// Occurrences of the phrase in the current document, or with all false 1 at the first
+	// one: starts from the (term, offset) slot whose term has the fewest positions and
+	// intersects the others into it, stopping once nothing is left.
+	std::uint32_t phrase_freq(bool all) {
 		if (window_) { return near_freq(); }
 		for (std::size_t u = 0; u < terms_.size(); ++u) { counts_[u] = readers_[u]->count(*terms_[u]); }
 		order_.assign(slots_.begin(), slots_.end());
@@ -912,13 +921,35 @@ private:
 			for (std::size_t j = i; j > 0 && counts_[order_[j].term] < counts_[order_[j - 1].term]; --j) { std::swap(order_[j], order_[j - 1]); }
 		}
 		const slot first = order_[0];
-		const auto& lead = positions(first.term);
+		const auto lead = positions(first.term);
+		if (!all) {
+			// Each other slot's cursor only moves forward as the candidates rise; its positions
+			// are decoded when first needed.
+			lists_.assign(order_.size() - 1, {{}, unread});
+			for (std::uint32_t p : lead) {
+				if (p < first.offset) { continue; }
+				std::size_t k = 1;
+				for (; k < order_.size(); ++k) {
+					auto& [pos, j] = lists_[k - 1];
+					if (j == unread) {
+						pos = positions(order_[k].term);
+						j = 0;
+					}
+					const std::uint32_t want = p - first.offset + order_[k].offset;
+					while (j < pos.size() && pos[j] < want) { ++j; }
+					if (j == pos.size()) { return 0; }
+					if (pos[j] != want) { break; }
+				}
+				if (k == order_.size()) { return 1; }
+			}
+			return 0;
+		}
 		candidates_.clear();
 		for (std::uint32_t p : lead) {
 			if (p >= first.offset) { candidates_.push_back(p - first.offset); }
 		}
 		for (std::size_t k = 1; k < order_.size() && !candidates_.empty(); ++k) {
-			const auto& pos = positions(order_[k].term);
+			const auto pos = positions(order_[k].term);
 			const std::uint32_t offset = order_[k].offset;
 			std::size_t keep = 0, j = 0;
 			for (std::uint32_t c : candidates_) {
@@ -939,7 +970,7 @@ private:
 		for (const auto& sl : slots_) { ++need_[sl.term]; }
 		merged_.clear();
 		for (std::size_t u = 0; u < terms_.size(); ++u) {
-			const auto& pos = positions(u);
+			const auto pos = positions(u);
 			if (pos.size() < need_[u]) { return 0; }
 			for (std::uint32_t p : pos) { merged_.push_back({p, u}); }
 		}
@@ -978,20 +1009,25 @@ private:
 	std::vector<std::unique_ptr<postings_iterator>> terms_;
 	std::vector<std::unique_ptr<positions_reader>> readers_;
 	std::vector<slot> slots_, order_;
-	std::vector<std::vector<std::uint32_t>> positions_;
+	std::vector<std::span<const std::uint32_t>> positions_;
 	std::vector<ordinal_t> decoded_;  // the document positions_[u] belongs to
 	std::vector<std::uint32_t> candidates_, counts_, need_, have_;
 	std::vector<std::pair<std::uint32_t, std::size_t>> merged_;  // NEAR: (position, term)
+	static constexpr std::size_t unread = ~std::size_t(0);
+	std::vector<std::pair<std::span<const std::uint32_t>, std::size_t>> lists_;  // (positions, cursor or unread)
+	std::vector<std::size_t> others_;  // the terms but the lead, rarest first
 	std::vector<weight> term_weights_;
 	std::uint32_t window_ = 0;
 	weight weight_ = weight::lucene(*seg_, 1);
 	std::uint64_t cost_ = ~std::uint64_t(0);
 	std::uint32_t freq_ = 0;
-	ordinal_t checked_ = no_more_docs;  // the document freq_ belongs to
+	bool matched_ = false;
+	ordinal_t checked_ = no_more_docs;   // the document matched_ belongs to
+	ordinal_t freq_doc_ = no_more_docs;  // the document freq_ belongs to
 	std::size_t lead_ = 0;
 	ordinal_t doc_ = 0, window_end_ = no_more_docs;
 	double bound_ = 0, min_ = 0;
-	std::vector<bool> started_;
+	std::vector<std::uint8_t> started_;
 };
 
 // --- collectors --------------------------------------------------------------------------------
