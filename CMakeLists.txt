@@ -6,9 +6,13 @@ include(FetchContent)
 # Building blocks (Kronuz libraries). Point FETCHCONTENT_SOURCE_DIR_<NAME> at local
 # checkouts to develop them together.
 set(TASK_ASIO OFF CACHE BOOL "" FORCE)
-foreach(lib docset bitpack fst task hashes residency)
-  FetchContent_Declare(${lib} GIT_REPOSITORY https://github.com/Kronuz/${lib}.git GIT_TAG main)
-endforeach()
+# Each building block is pinned to the commit its Phase 1 gate numbers were measured at.
+FetchContent_Declare(docset GIT_REPOSITORY https://github.com/Kronuz/docset.git GIT_TAG 4e4d73fda4b53583122e8b1a976b96c496cee3b2)
+FetchContent_Declare(bitpack GIT_REPOSITORY https://github.com/Kronuz/bitpack.git GIT_TAG 6d14df141e1dc9c8f5e709f11a55f48493744370)
+FetchContent_Declare(fst GIT_REPOSITORY https://github.com/Kronuz/fst.git GIT_TAG 2cb8927e4c0e3926b9ade99e6869a4b900783696)
+FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG c3c30e49212769e1bbf424517003150de3f20682)
+FetchContent_Declare(hashes GIT_REPOSITORY https://github.com/Kronuz/hashes.git GIT_TAG 90ec4055e3c1322334511ef2c5d254ea25dfa865)
+FetchContent_Declare(residency GIT_REPOSITORY https://github.com/Kronuz/residency.git GIT_TAG e52bd7bcb987a7f07993f1dc73b1760453067db2)
 FetchContent_MakeAvailable(docset bitpack fst task hashes residency)
 
 add_library(strata INTERFACE)
