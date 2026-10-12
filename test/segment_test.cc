@@ -18,6 +18,7 @@ struct model {
 	std::map<std::string, std::vector<std::pair<strata::ordinal_t, std::uint32_t>>> postings;
 	std::map<std::string, std::vector<std::vector<std::uint32_t>>> positions;  // per posting
 	std::vector<std::uint32_t> lengths;
+	std::vector<std::string> stored;
 };
 
 static std::string build(std::mt19937_64& rng, std::size_t docs, model& m) {
@@ -46,7 +47,12 @@ static std::string build(std::mt19937_64& rng, std::size_t docs, model& m) {
 			m.postings[term].push_back({strata::ordinal_t(d), wdf});
 		}
 		m.lengths.push_back(length);
-		w.add(d + 1, in, length);
+		// Stored records: mostly short, some empty, a few past one zstd frame's size.
+		const std::size_t pick = rng() % 100;
+		std::string rec(pick < 10 ? 0 : pick < 97 ? rng() % 300 : 70000 + rng() % 70000, '\0');
+		for (auto& c : rec) { c = char('a' + rng() % 26); }
+		m.stored.push_back(rec);
+		w.add(d + 1, in, length, rec);
 	}
 	return w.flush({});
 }
@@ -119,6 +125,7 @@ int main() {
 			}
 		}
 		CHECK(!seg.term("absent"));
+		for (strata::ordinal_t d = 0; d < seg.doc_count(); ++d) { CHECK(seg.stored(d) == m.stored[d]); }
 		// Corruption: truncations and random byte changes never crash.
 		for (std::size_t cut = 0; cut < file.size(); cut += 1 + file.size() / 100) {
 			try { strata::segment s(std::string_view(file).substr(0, cut)); CHECK(false); } catch (const strata::corrupt_segment&) {} catch (const std::invalid_argument&) {}
@@ -146,6 +153,7 @@ int main() {
 					for (auto d = it.next(); d != strata::no_more_docs; d = it.next()) { pr.read(it, got); }
 				}
 				s.term("absent");
+				for (strata::ordinal_t d = 0; d < s.doc_count(); ++d) { (void)s.stored(d); }
 			} catch (const strata::corrupt_segment&) {
 				detected = true;
 			} catch (const termdict::corrupt&) {

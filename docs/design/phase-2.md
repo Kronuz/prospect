@@ -71,7 +71,7 @@ anything else is read.
 | `postings` | Per term: skip data, blocks, tail |
 | `positions` | Per term: one position stream |
 | `lengths` | Per-ordinal document length, bit-packed fixed width |
-| `stored` | zstd blocks of stored records with an offset index |
+| `stored` | zstd frames of stored records (up to 64 KiB uncompressed each), then a fixed-width index per frame (first ordinal, uncompressed size, offset) and the frame count; a reader verifies a frame's regions and decompresses it into exactly its recorded size |
 | `docids` | Ordinal → docid, bit-packed; docid → ordinal via a sorted array |
 | `stats` | Document count, total length, length minimum and maximum, docid bounds |
 

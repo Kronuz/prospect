@@ -27,6 +27,7 @@
 #pragma once
 
 #include "bitpack.hh"
+#include "compressor_zstd.h"
 #include "residency.hh"
 #include "docset.hh"
 #include "strata/format.hh"
@@ -40,6 +41,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -84,6 +86,7 @@ public:
 			case format::section::lengths: lengths_ = bytes; break;
 			case format::section::docids: docids_ = bytes; break;
 			case format::section::stats: stats_ = bytes; break;
+			case format::section::stored: stored_ = bytes; break;
 			default: break;
 			}
 		}
@@ -101,7 +104,10 @@ public:
 		// Terms, postings, and positions are verified per 64 KiB region on first read.
 		std::vector<residency::verified_regions::region> regions;
 		for (const auto& e : sections_) {
-			if (e.kind != format::section::terms && e.kind != format::section::postings && e.kind != format::section::positions) { continue; }
+			if (e.kind != format::section::terms && e.kind != format::section::postings && e.kind != format::section::positions &&
+				e.kind != format::section::stored) {
+				continue;
+			}
 			for (std::size_t r = 0; r < e.region_crcs.size(); ++r) {
 				const std::uint64_t at = std::uint64_t(r) * format::region_size;
 				regions.push_back({e.offset + at, std::min<std::uint64_t>(format::region_size, e.length - at), e.region_crcs[r]});
@@ -109,6 +115,7 @@ public:
 			if (e.kind == format::section::terms) { integrity_->terms_offset = e.offset; }
 			if (e.kind == format::section::postings) { integrity_->postings_offset = e.offset; }
 			if (e.kind == format::section::positions) { integrity_->positions_offset = e.offset; }
+			if (e.kind == format::section::stored) { integrity_->stored_offset = e.offset; }
 		}
 		std::sort(regions.begin(), regions.end(), [](const auto& a, const auto& b) { return a.offset < b.offset; });
 		integrity_->regions = residency::verified_regions(
@@ -125,6 +132,48 @@ public:
 		if (!integrity_->regions.verify({integrity_->positions_offset + offset, length})) { throw corrupt_segment("positions checksum"); }
 	}
 	const std::vector<format::section_entry>& sections() const noexcept { return sections_; }
+
+	// The document's stored record (empty when it has none). Each zstd frame's range is
+	// verified before it is decompressed, into exactly its recorded size.
+	std::string stored(ordinal_t ord) const {
+		if (ord >= doc_count_) { throw std::out_of_range("strata: ordinal out of range"); }
+		if (stored_.size() < 4) { return {}; }
+		const std::uint32_t frames = format::get<std::uint32_t>(stored_.data() + stored_.size() - 4);
+		if (std::uint64_t(frames) * 16 > stored_.size() - 4) { throw corrupt_segment("stored index"); }
+		const std::uint64_t index_at = stored_.size() - 4 - std::uint64_t(frames) * 16;
+		if (!integrity_->regions.verify({integrity_->stored_offset + index_at, stored_.size() - index_at})) { throw corrupt_segment("stored checksum"); }
+		auto first_of = [&](std::uint32_t f) { return format::get<std::uint32_t>(stored_.data() + index_at + 16 * std::uint64_t(f)); };
+		std::uint32_t lo = 0, hi = frames;  // the last frame whose first ordinal <= ord
+		while (hi - lo > 1) {
+			const std::uint32_t mid = lo + (hi - lo) / 2;
+			if (first_of(mid) <= ord) { lo = mid; } else { hi = mid; }
+		}
+		if (frames == 0 || first_of(lo) > ord) { throw corrupt_segment("stored index"); }
+		const char* e = stored_.data() + index_at + 16 * std::uint64_t(lo);
+		const std::uint32_t raw_size = format::get<std::uint32_t>(e + 4);
+		const std::uint64_t begin = format::get<std::uint64_t>(e + 8);
+		const std::uint64_t end = lo + 1 < frames ? format::get<std::uint64_t>(e + 24) : index_at;
+		if (begin > end || end > index_at) { throw corrupt_segment("stored frame bounds"); }
+		if (!integrity_->regions.verify({integrity_->stored_offset + begin, end - begin})) { throw corrupt_segment("stored checksum"); }
+		std::string raw;
+		try {
+			raw = decompress_zstd(stored_.substr(begin, end - begin), raw_size);
+		} catch (const std::exception&) {
+			throw corrupt_segment("stored frame");
+		}
+		const char* p = raw.data();
+		const char* rend = p + raw.size();
+		const std::uint64_t n = format::get_leb(&p, rend);
+		if (ord - first_of(lo) >= n) { throw corrupt_segment("stored frame count"); }
+		std::uint64_t skip = 0, length = 0;
+		for (std::uint64_t i = 0; i < n; ++i) {
+			const std::uint64_t len = format::get_leb(&p, rend);
+			if (i < ord - first_of(lo)) { skip += len; }
+			if (i == ord - first_of(lo)) { length = len; }
+		}
+		if (skip > std::uint64_t(rend - p) || length > std::uint64_t(rend - p) - skip) { throw corrupt_segment("stored record bounds"); }
+		return std::string(p + skip, length);
+	}
 	// How many 64 KiB regions have been verified.
 	std::size_t verified_regions() const noexcept { return integrity_->regions.verified(); }
 
@@ -159,12 +208,12 @@ public:
 	const termdict::reader& dictionary() const noexcept { return *dict_; }
 
 private:
-	std::string_view file_, terms_, term_index_, postings_, positions_, lengths_, docids_, stats_;
+	std::string_view file_, terms_, term_index_, postings_, positions_, lengths_, docids_, stats_, stored_;
 	format::footer footer_;
 	std::vector<format::section_entry> sections_;
 	struct integrity {
 		residency::verified_regions regions;
-		std::uint64_t terms_offset = 0, postings_offset = 0, positions_offset = 0;
+		std::uint64_t terms_offset = 0, postings_offset = 0, positions_offset = 0, stored_offset = 0;
 	};
 	static bool verify_terms(void* context, std::uint64_t offset, std::uint64_t length) {
 		auto* i = static_cast<integrity*>(context);

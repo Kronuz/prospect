@@ -27,6 +27,14 @@ std::string_view text_field(std::string_view line) {
 	return line.substr(at, line.find('"', at) - at);
 }
 
+// The "id" field, stored like the baseline engines' stored id.
+std::string_view id_field(std::string_view line) {
+	auto at = line.find("\"id\": \"");
+	if (at == std::string_view::npos) { return {}; }
+	at += 7;
+	return line.substr(at, line.find('"', at) - at);
+}
+
 int index(const std::string& dir) {
 	std::ios::sync_with_stdio(false);
 	strata::segment_writer w;
@@ -57,7 +65,7 @@ int index(const std::string& dir) {
 			in.push_back({tokens[i].first, std::uint32_t(j - i), std::span<const std::uint32_t>(positions.data() + i, j - i)});
 			i = j;
 		}
-		w.add(++n, in, pos);
+		w.add(++n, in, pos, id_field(line));
 		if (n % 100000 == 0) { std::cerr << n << '\n'; }
 	}
 	{

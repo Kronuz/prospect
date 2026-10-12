@@ -53,10 +53,13 @@ namespace format {
 
 inline constexpr char header_magic[8] = {'S', 'T', 'R', 'S', 'E', 'G', '0', '1'};
 inline constexpr char footer_magic[4] = {'S', 'E', 'N', 'D'};
-inline constexpr std::uint32_t version = 6;
+inline constexpr std::uint32_t version = 7;
 inline constexpr std::size_t header_size = 32;
 inline constexpr std::size_t footer_size = 48;
 inline constexpr std::size_t region_size = 64 * 1024;
+// Stored records are packed into zstd frames of at most this many uncompressed bytes (a
+// larger record takes a frame of its own).
+inline constexpr std::size_t stored_block_size = 64 * 1024;
 inline constexpr std::size_t section_alignment = 64;
 inline constexpr std::size_t block = 128;
 

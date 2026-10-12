@@ -18,12 +18,16 @@ FetchContent_Declare(residency GIT_REPOSITORY https://github.com/Kronuz/residenc
 FetchContent_Declare(unicode GIT_REPOSITORY https://github.com/Kronuz/unicode.git GIT_TAG 81219c39deca91ed0186fb5eebd2afcec6f5f8c7)
 FetchContent_Declare(snowball GIT_REPOSITORY https://github.com/Kronuz/snowball.git GIT_TAG 8b0c540173f8f48afc00cd8ab49ce956397992b6)
 FetchContent_Declare(analysis GIT_REPOSITORY https://github.com/Kronuz/analysis.git GIT_TAG d3f94cb5cdac70c3cfa116a3fb761615c66a3f31)
-FetchContent_MakeAvailable(docset bitpack fst task hashes residency varint termdict unicode snowball analysis)
+# Stored records use zstd alone.
+set(COMPRESSORS_DEFLATE OFF CACHE BOOL "" FORCE)
+set(COMPRESSORS_LZ4 OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG 7a6cc22f8a4eaceefd098374c05cdc2935c0fd19)
+FetchContent_MakeAvailable(docset bitpack fst task hashes residency varint termdict unicode snowball analysis compressors)
 
 add_library(strata INTERFACE)
 target_include_directories(strata INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(strata INTERFACE cxx_std_20)
-target_link_libraries(strata INTERFACE docset::docset bitpack::bitpack fst::fst task::task hashes::hashes residency::residency varint::varint termdict::termdict analysis::analysis)
+target_link_libraries(strata INTERFACE docset::docset bitpack::bitpack fst::fst task::task hashes::hashes residency::residency varint::varint termdict::termdict analysis::analysis compressors::compressors)
 add_library(strata::strata ALIAS strata)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)

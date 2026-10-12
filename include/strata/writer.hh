@@ -39,6 +39,7 @@
 #pragma once
 
 #include "bitpack.hh"
+#include "compressor_zstd.h"
 #include "fst.hh"
 #include "hashes.hh"
 #include "strata/format.hh"
@@ -219,8 +220,11 @@ class segment_writer {
 public:
 	// Adds a document and returns its ordinal. `length` is the document length used by
 	// weighting (Xapian: the sum of wdf over non-boolean terms).
-	ordinal_t add(std::uint64_t docid, std::span<const posting_input> terms, std::uint32_t length) {
+	// `stored` is the document's stored record, returned by segment::stored.
+	ordinal_t add(std::uint64_t docid, std::span<const posting_input> terms, std::uint32_t length, std::string_view stored = {}) {
 		const ordinal_t ord = ordinal_t(lengths_.size());
+		stored_ += stored;
+		stored_ends_.push_back(stored_.size());
 		lengths_.push_back(length);
 		docids_.push_back(docid);
 		total_length_ += length;
@@ -360,6 +364,7 @@ public:
 		append(format::section::term_index, tables.index);
 		append(format::section::lengths, pack_u32(lengths_));
 		append(format::section::docids, encode_docids());
+		append(format::section::stored, encode_stored());
 		append(format::section::stats, stats);
 		out.align(format::section_alignment);
 
@@ -598,6 +603,33 @@ private:
 		return layout;
 	}
 
+	// Stored records: zstd frames back to back, each the payload [count][record lengths]
+	// [records] (LEB128 counts and lengths), then one 16-byte index entry per frame (first
+	// ordinal u32, uncompressed size u32, offset u64), then the frame count (u32).
+	std::string encode_stored() const {
+		std::string out, index, raw;
+		std::uint32_t frames = 0;
+		for (std::size_t first = 0; first < stored_ends_.size();) {
+			std::size_t last = first;
+			const std::uint64_t begin = first ? stored_ends_[first - 1] : 0;
+			while (last + 1 < stored_ends_.size() && stored_ends_[last + 1] - begin <= format::stored_block_size) { ++last; }
+			raw.clear();
+			format::put_leb(raw, last - first + 1);
+			for (std::size_t i = first; i <= last; ++i) { format::put_leb(raw, stored_ends_[i] - (i ? stored_ends_[i - 1] : 0)); }
+			raw.append(stored_, begin, stored_ends_[last] - begin);
+			if (raw.size() > std::numeric_limits<std::uint32_t>::max()) { throw std::invalid_argument("strata: stored record too large"); }
+			format::put<std::uint32_t>(index, std::uint32_t(first));
+			format::put<std::uint32_t>(index, std::uint32_t(raw.size()));
+			format::put<std::uint64_t>(index, out.size());
+			out += compress_zstd(raw);
+			++frames;
+			first = last + 1;
+		}
+		out += index;
+		format::put<std::uint32_t>(out, frames);
+		return out;
+	}
+
 	// Values bit-packed in 128-value blocks at one width: [width u8][blocks].
 	static std::string pack_u32(const std::vector<std::uint32_t>& values) {
 		std::uint32_t all = 0;
@@ -637,6 +669,8 @@ private:
 	std::vector<slot> table_;
 	std::deque<term_buffer> buffers_;
 	std::vector<std::uint32_t> lengths_;
+	std::string stored_;                     // stored records, concatenated
+	std::vector<std::uint64_t> stored_ends_;  // where each document's record ends
 	std::vector<std::uint64_t> docids_;
 	std::uint64_t total_length_ = 0;
 };
