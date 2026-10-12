@@ -81,6 +81,18 @@ enqueues a WAL deletion. The ingestion gap with Elasticsearch is mostly Xapiand'
 own pipeline; strata's write path is justified by the engine-level indexing rows,
 and the host costs are fixed in Xapiand.
 
+The mechanism (`DatabaseHandler::replace_document_term`, `src/database/handler.cc`):
+on a multi-shard index, every document first looks its id term up in every shard
+(`get_docid_term`: lock the shard, open the term's posting list, release), then locks
+its target shard again to write. Concurrent `DocIndexer` threads convoy on those shard
+locks, and each release wakes a waiter through a futex. Two host fixes follow, both
+Xapiand decisions rather than engine work:
+
+1. Look a non-numeric id up only in the shard its hash selects, which is the only shard
+   `replace_document_term` ever writes it to while the shard count is unchanged.
+2. Skip the per-document `delete_wal` enqueue on the RESTORE path, which runs with the
+   WAL disabled.
+
 ### Offload hop
 
 `SearchService::should_offload` sends every search to the worker pool. A VM-only build
