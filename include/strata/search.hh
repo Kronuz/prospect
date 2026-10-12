@@ -51,12 +51,13 @@ enum class scheme { lucene_bm25, xapian_bm25 };
 struct weight {
 	scheme kind = scheme::lucene_bm25;
 	double k1 = 1.2, b = 0.75, min_normlen = 0;
-	double idf = 0, avg = 1;
+	double idf = 0, avg = 1, inv_avg = 1;  // inv_avg = 1 / avg: one division per score
 
 	static weight lucene(const segment& seg, std::uint64_t df, double boost = 1.0) {
 		weight w;
 		w.idf = boost * std::log(1.0 + (double(seg.doc_count()) - double(df) + 0.5) / (double(df) + 0.5));
 		w.avg = std::max(1.0, seg.average_length());
+		w.inv_avg = 1.0 / w.avg;
 		return w;
 	}
 
@@ -71,16 +72,17 @@ struct weight {
 		constexpr double k3 = 1.0;
 		w.idf = std::log(tw) * (k3 + 1) * wqf / (k3 + wqf) * (w.k1 + 1);
 		w.avg = seg.average_length() > 0 ? seg.average_length() : 1.0;
+		w.inv_avg = 1.0 / w.avg;
 		return w;
 	}
 
 	double operator()(std::uint32_t tf, std::uint32_t length) const noexcept {
 		if (tf == 0) { return 0.0; }
 		if (kind == scheme::lucene_bm25) {
-			const double norm = k1 * (1.0 - b + b * double(length) / avg);
+			const double norm = k1 * (1.0 - b + b * double(length) * inv_avg);
 			return idf * double(tf) / (double(tf) + norm);
 		}
-		const double normlen = std::max(double(length) / avg, min_normlen);
+		const double normlen = std::max(double(length) * inv_avg, min_normlen);
 		const double K = k1 * ((1.0 - b) + b * normlen);
 		return idf * double(tf) / (K + double(tf));
 	}
@@ -143,26 +145,41 @@ struct hit {
 	double score;
 };
 
-// A bounded heap of the best hits, worst on top; ties keep the smaller ordinal.
+// The best k hits, as Tantivy's TopNComputer keeps them: a buffer of up to 2k hits that,
+// when full, keeps its k best (nth_element) and raises the threshold to the k-th best
+// score; amortized constant time per hit. Ties keep the smaller ordinal (hits arrive in
+// increasing ordinal order).
 struct top_collector {
-	explicit top_collector(std::size_t k, bool counting) : k(k), counting(counting) {}
-	static bool worse(const hit& a, const hit& b) noexcept { return a.score != b.score ? a.score > b.score : a.ord < b.ord; }
-	// Only documents scoring above this can enter (0 until the heap fills).
-	double min_competitive() const noexcept { return heap.size() == k && k ? heap.front().score : 0.0; }
+	explicit top_collector(std::size_t k, bool counting) : k(k), counting(counting) { hits.reserve(2 * k + 1); }
+	// True when a is better than b.
+	static bool better(const hit& a, const hit& b) noexcept { return a.score != b.score ? a.score > b.score : a.ord < b.ord; }
+	// Only documents scoring above this can enter (0 until k hits are known).
+	double min_competitive() const noexcept { return threshold; }
 	void collect(ordinal_t d, double score) {
-		if (heap.size() < k) {
-			heap.push_back({d, score});
-			std::push_heap(heap.begin(), heap.end(), worse);
-		} else if (k && score > heap.front().score) {
-			std::pop_heap(heap.begin(), heap.end(), worse);
-			heap.back() = {d, score};
-			std::push_heap(heap.begin(), heap.end(), worse);
-		}
+		if (!k || (truncated && score <= threshold)) { return; }
+		hits.push_back({d, score});
+		if (hits.size() >= 2 * k) { truncate(); }
+	}
+	// The k best, best first.
+	std::vector<hit> finish() {
+		if (hits.size() > k) { truncate(); }
+		std::sort(hits.begin(), hits.end(), better);
+		return std::move(hits);
 	}
 	std::size_t k;
 	bool counting;           // every match must be counted: no skipping by score
 	std::uint64_t count = 0;
-	std::vector<hit> heap;
+
+private:
+	void truncate() {
+		std::nth_element(hits.begin(), hits.begin() + std::ptrdiff_t(k - 1), hits.end(), better);
+		hits.resize(k);
+		threshold = hits[k - 1].score;  // the k-th best; every kept hit scores at least this
+		truncated = true;
+	}
+	std::vector<hit> hits;
+	double threshold = 0;
+	bool truncated = false;
 };
 
 using scorer_ptr = std::unique_ptr<scorer>;
@@ -199,14 +216,11 @@ public:
 			min_ = c.min_competitive();
 			if ((d = skip_blocks(d)) == no_more_docs) { break; }
 			const ordinal_t last = it_.block_end(d);
-			it_.for_each_until(last == no_more_docs ? no_more_docs : last + 1, [&](ordinal_t ord, std::uint32_t wdf) {
-				const double sc = weight_(wdf, seg_->length(ord));
-				if (sc > c.min_competitive() || c.heap.size() < c.k) { c.collect(ord, sc); }
-			});
+			it_.for_each_until(last == no_more_docs ? no_more_docs : last + 1,
+				[&](ordinal_t ord, std::uint32_t wdf) { c.collect(ord, weight_(wdf, seg_->length(ord))); });
 		}
 		return true;
 	}
-	void fill(ordinal_t base, ordinal_t end, std::uint64_t* bits) override { it_.fill(base, end, bits); }
 
 	// The bound of the smallest skip entry covering [from, upto]: its block, its group,
 	// or the whole term (Lucene's MaxScoreCache); one memoized evaluation per call.
@@ -292,6 +306,7 @@ private:
 	std::vector<double> group_bounds_;
 	std::size_t cached_group_ = std::size_t(-1);
 	double block_bounds_[32];
+
 };
 
 // Documents every child matches; score = sum.
@@ -893,8 +908,7 @@ inline std::vector<hit> top_k(scorer& s, std::size_t k, std::uint64_t* count = n
 	}
 	if (top_collector c(k, count != nullptr); s.collect_top_k(c)) {
 		if (count) { *count = c.count; }
-		std::sort(c.heap.begin(), c.heap.end(), worse);
-		return std::move(c.heap);
+		return c.finish();
 	}
 	std::vector<hit> heap;
 	std::uint64_t n = 0;
@@ -1004,7 +1018,7 @@ inline bool disjunction_scorer::collect_top_k(top_collector& c) {
 					if (ch->doc() == d) { score += ch->score(); }
 					remaining -= bound[order[e]];
 				}
-				if (score > c.min_competitive() || c.heap.size() < c.k) { c.collect(d, score); }
+				c.collect(d, score);
 			}
 		}
 		if (window_max == no_more_docs - 1) { break; }
