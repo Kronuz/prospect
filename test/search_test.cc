@@ -143,6 +143,20 @@ int main() {
 			for (std::size_t i = 0; i < hits.size(); ++i) {
 				CHECK(std::abs(hits[i].score + sorted[i].first) <= 1e-9 * std::max(1.0, -sorted[i].first));
 			}
+			// pruned top-k (no count: thresholds feed MaxScore and block skipping) equals the
+			// unpruned order, ties broken by ordinal.
+			for (std::size_t k : {1u, 3u, 10u}) {
+				auto q4 = build();
+				auto pruned = strata::top_k(*q4, k);
+				std::vector<std::pair<double, ordinal_t>> best;
+				for (auto& [d, s] : want) { best.push_back({-s, d}); }
+				std::sort(best.begin(), best.end());
+				CHECK(pruned.size() == std::min(k, best.size()));
+				for (std::size_t i = 0; i < pruned.size() && i < best.size(); ++i) {
+					CHECK(std::abs(pruned[i].score + best[i].first) <= 1e-9 * std::max(1.0, -best[i].first));
+					CHECK(pruned[i].ord == best[i].second || std::abs(pruned[i].score + best[i].first) <= 1e-9);
+				}
+			}
 			// advance skips correctly
 			auto q3 = build();
 			ordinal_t target = ordinal_t(rng() % ndocs);
