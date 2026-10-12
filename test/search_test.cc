@@ -47,7 +47,7 @@ int main() {
 		};
 		auto weight = [&](const std::string& t) {
 			auto info = seg.term(t);
-			return strata::lucene_bm25(seg, info ? info->df : 0);
+			return strata::weight::lucene(seg, info ? info->df : 0);
 		};
 		auto term = [&](const std::string& t) -> strata::scorer_ptr { return std::make_unique<strata::term_scorer>(seg, *seg.term(t)); };
 
@@ -97,7 +97,7 @@ int main() {
 					if (match) {
 						double idf = 0;
 						for (auto& t : pick) { idf += weight(t).idf; }
-						auto wt = strata::lucene_bm25(seg, 1);
+						auto wt = strata::weight::lucene(seg, 1);
 						wt.idf = idf;
 						s = wt(freq, std::uint32_t(tk.size()));
 					}

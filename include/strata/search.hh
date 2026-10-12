@@ -38,18 +38,49 @@ namespace strata {
 
 // --- weighting ----------------------------------------------------------------------------------
 
-// Lucene's BM25 (k1 = 1.2, b = 0.75): idf · tf / (tf + k1 · (1 − b + b · len / avglen)).
-struct lucene_bm25 {
-	double k1 = 1.2, b = 0.75;
+enum class scheme { lucene_bm25, xapian_bm25 };
+
+// A term's weighting function: score(tf, length) for one scheme.
+//   Lucene BM25 (k1 = 1.2, b = 0.75): idf · tf / (tf + k1 · (1 − b + b · len / avglen)),
+//     idf = ln(1 + (N − df + 0.5) / (df + 0.5)).
+//   Xapian BM25 (k1 = 1, k2 = 0, k3 = 1, b = 0.5, min_normlen = 0.5):
+//     idf · (k3 + 1) · wqf / (k3 + wqf) · (k1 + 1) · tf / (K + tf),
+//     K = k1 · ((1 − b) + b · max(len / avglen, min_normlen)), idf from (N − df + 0.5) / (df + 0.5).
+struct weight {
+	scheme kind = scheme::lucene_bm25;
+	double k1 = 1.2, b = 0.75, min_normlen = 0;
 	double idf = 0, avg = 1;
 
-	lucene_bm25(const segment& seg, std::uint64_t df, double boost = 1.0)
-		: idf(boost * std::log(1.0 + (double(seg.doc_count()) - double(df) + 0.5) / (double(df) + 0.5))), avg(std::max(1.0, seg.average_length())) {}
+	static weight lucene(const segment& seg, std::uint64_t df, double boost = 1.0) {
+		weight w;
+		w.idf = boost * std::log(1.0 + (double(seg.doc_count()) - double(df) + 0.5) / (double(df) + 0.5));
+		w.avg = std::max(1.0, seg.average_length());
+		return w;
+	}
+
+	static weight xapian(const segment& seg, std::uint64_t df, std::uint32_t wqf = 1) {
+		weight w;
+		w.kind = scheme::xapian_bm25;
+		w.k1 = 1.0;
+		w.b = 0.5;
+		w.min_normlen = 0.5;
+		double tw = (double(seg.doc_count()) - double(df) + 0.5) / (double(df) + 0.5);
+		if (tw < 2) { tw = tw * 0.5 + 1; }  // Xapian keeps small idf positive
+		constexpr double k3 = 1.0;
+		w.idf = std::log(tw) * (k3 + 1) * wqf / (k3 + wqf) * (w.k1 + 1);
+		w.avg = seg.average_length() > 0 ? seg.average_length() : 1.0;
+		return w;
+	}
 
 	double operator()(std::uint32_t tf, std::uint32_t length) const noexcept {
 		if (tf == 0) { return 0.0; }
-		const double norm = k1 * (1.0 - b + b * double(length) / avg);
-		return idf * double(tf) / (double(tf) + norm);
+		if (kind == scheme::lucene_bm25) {
+			const double norm = k1 * (1.0 - b + b * double(length) / avg);
+			return idf * double(tf) / (double(tf) + norm);
+		}
+		const double normlen = std::max(double(length) / avg, min_normlen);
+		const double K = k1 * ((1.0 - b) + b * normlen);
+		return idf * double(tf) / (K + double(tf));
 	}
 };
 
@@ -80,7 +111,9 @@ using scorer_ptr = std::unique_ptr<scorer>;
 class term_scorer final : public scorer {
 public:
 	term_scorer(const segment& seg, const format::term_info& info, double boost = 1.0)
-		: seg_(&seg), it_(seg, info), weight_(seg, info.df, boost) {
+		: term_scorer(seg, info, weight::lucene(seg, info.df, boost)) {}
+
+	term_scorer(const segment& seg, const format::term_info& info, const weight& w) : seg_(&seg), it_(seg, info), weight_(w) {
 		// Whole-list bound from the term's competitive pairs.
 		for (const auto& p : info.impacts) { total_bound_ = std::max(total_bound_, weight_(p.wdf, format::decode_length(p.length))); }
 	}
@@ -129,7 +162,7 @@ private:
 
 	const segment* seg_;
 	postings_iterator it_;
-	lucene_bm25 weight_;
+	weight weight_;
 	double total_bound_ = 0, min_ = 0;
 	ordinal_t block_checked_until_ = no_more_docs;
 };
@@ -365,25 +398,42 @@ private:
 // phrase frequency as tf and the summed idf of its terms.
 class phrase_scorer final : public scorer {
 public:
-	phrase_scorer(const segment& seg, const std::vector<format::term_info>& infos) : seg_(&seg) {
+	// Lucene scores the phrase frequency with the terms' summed idf; Xapian (term_weights
+	// given) sums each term's own weight for the document.
+	phrase_scorer(const segment& seg, const std::vector<format::term_info>& infos, std::vector<weight> term_weights = {})
+		: seg_(&seg), term_weights_(std::move(term_weights)) {
 		double idf = 0;
 		for (const auto& info : infos) {
 			terms_.push_back(std::make_unique<postings_iterator>(seg, info));
 			readers_.push_back(std::make_unique<positions_reader>(seg, info, terms_.back()->blocks(), terms_.back()->tail_count()));
 			counts_wdf_.push_back(info.flags & format::counts_are_wdf);
-			idf += lucene_bm25(seg, info.df).idf;
+			idf += weight::lucene(seg, info.df).idf;
 			cost_ = std::min(cost_, std::uint64_t(info.df));
 		}
 		started_.assign(terms_.size(), false);
-		weight_ = lucene_bm25(seg, 1);
+		weight_ = weight::lucene(seg, 1);
 		weight_.idf = idf;
 		bound_ = idf;  // tf / (tf + norm) < 1
+		if (!term_weights_.empty()) {
+			bound_ = 0;
+			for (std::size_t i = 0; i < infos.size(); ++i) {
+				double best = 0;
+				for (const auto& p : infos[i].impacts) { best = std::max(best, term_weights_[i](p.wdf, format::decode_length(p.length))); }
+				bound_ += best;
+			}
+		}
 	}
 	ordinal_t doc() const noexcept override { return doc_; }
 	ordinal_t next() override { return doc_ = find(terms_[0]->next()); }
 	ordinal_t advance(ordinal_t t) override { return doc_ = find(terms_[0]->advance(t)); }
 	std::uint64_t cost() const noexcept override { return cost_; }
-	double score() override { return weight_(freq_, seg_->length(doc_)); }
+	double score() override {
+		if (term_weights_.empty()) { return weight_(freq_, seg_->length(doc_)); }
+		double s = 0;
+		const std::uint32_t len = seg_->length(doc_);
+		for (std::size_t i = 0; i < terms_.size(); ++i) { s += term_weights_[i](terms_[i]->wdf(), len); }
+		return s;
+	}
 	double max_score(ordinal_t) override { return bound_; }
 	ordinal_t block_end(ordinal_t t) override { return terms_[0]->block_end(t); }
 	double max_score_total() const noexcept override { return bound_; }
@@ -428,7 +478,8 @@ private:
 	std::vector<std::unique_ptr<positions_reader>> readers_;
 	std::vector<bool> counts_wdf_;
 	std::vector<std::vector<std::uint32_t>> positions_;
-	lucene_bm25 weight_{*seg_, 1};
+	std::vector<weight> term_weights_;
+	weight weight_ = weight::lucene(*seg_, 1);
 	std::uint64_t cost_ = ~std::uint64_t(0);
 	std::uint32_t freq_ = 0;
 	ordinal_t doc_ = 0;
