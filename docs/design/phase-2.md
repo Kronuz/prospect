@@ -117,8 +117,11 @@ For a term with `df` documents, after the term info:
   from wdf) the byte offset of the block's count block, each a delta that restarts per
   group; then the competitive pairs, prefixed with their byte length so readers step
   over them and decode them only for a bound.
-- **Level 1**, one entry per 32 blocks, with the same fields over its range, plus the
-  byte lengths of its level-0 entries and of its blocks.
+- **Level 1**, one fixed-width entry per 32 blocks, so opening a term parses nothing:
+  last ordinal (u32), the offset of its competitive pairs in a pairs area (u32), its
+  level-0 and blocks offsets (u64), and for terms with positions its first position
+  index and position and count block offsets (u64); each group is checked against its
+  neighbors and the regions when decoded.
 - **Competitive pairs** are the Pareto frontier of (wdf high, length low) over the
   range. Lengths are stored rounded down to a 1-byte log scale and wdf exactly, so a
   stored pair never understates a score bound; scoring itself reads exact lengths from

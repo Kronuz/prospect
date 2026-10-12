@@ -526,21 +526,25 @@ private:
 			out += tail;
 			return;
 		}
-		// Level 0, grouped by 32 blocks; level 1 locates each group. Positional fields
-		// (first position index, position block offset, count block offset) are present only
-		// for terms with positions, and counts only when they differ from wdf.
+		// Level 0, grouped by 32 blocks. Level 1 is a fixed-width array, one entry per group,
+		// so a reader locates groups without parsing: last ordinal (u32), the offset of its
+		// competitive pairs in the pairs area (u32), its level-0 and blocks offsets (u64), and
+		// for terms with positions its first position index and position and count block
+		// offsets (u64). Level-0 positional fields (present only with positions, counts only
+		// when they differ from wdf) are deltas restarting per group.
 		const bool with_positions = layout != nullptr;
 		with_counts = with_counts && with_positions;
-		std::string level1, level0;
+		std::string level1, pairs, level0;
 		const std::size_t groups = (meta.size() + 31) / 32;
-		ordinal_t prev_last = 0, prev_group_last = 0;
-		block_meta prev_group{};
+		ordinal_t prev_last = 0;
+		std::uint64_t blocks_before = 0;
 		for (std::size_t g = 0; g < groups; ++g) {
 			std::string group;
 			const block_meta& first = meta[g * 32];
-			block_meta prev = first;  // level-0 deltas restart per group
+			block_meta prev = first;
 			std::uint64_t group_bytes = 0;
 			std::vector<format::impact> group_pairs;
+			const std::uint64_t level0_offset = level0.size(), blocks_offset = blocks_before;
 			for (std::size_t i = g * 32; i < std::min(meta.size(), g * 32 + 32); ++i) {
 				format::put_leb(group, meta[i].last - (i ? prev_last : 0));
 				format::put_leb(group, meta[i].bytes << 1 | std::uint64_t(meta[i].bitset));
@@ -555,18 +559,18 @@ private:
 				group_bytes += meta[i].bytes;
 				group_pairs.insert(group_pairs.end(), meta[i].impacts.begin(), meta[i].impacts.end());
 			}
-			const ordinal_t group_last = meta[std::min(meta.size(), g * 32 + 32) - 1].last;
-			format::put_leb(level1, group_last - (g ? prev_group_last : 0));
+			blocks_before += group_bytes;
+			if (pairs.size() > std::numeric_limits<std::uint32_t>::max()) { throw std::length_error("strata: skip data too large"); }
+			format::put<std::uint32_t>(level1, meta[std::min(meta.size(), g * 32 + 32) - 1].last);
+			format::put<std::uint32_t>(level1, std::uint32_t(pairs.size()));
+			format::put<std::uint64_t>(level1, level0_offset);
+			format::put<std::uint64_t>(level1, blocks_offset);
 			if (with_positions) {
-				format::put_leb(level1, first.first_position - prev_group.first_position);
-				format::put_leb(level1, first.pos_offset - prev_group.pos_offset);
-				if (with_counts) { format::put_leb(level1, first.count_offset - prev_group.count_offset); }
+				format::put<std::uint64_t>(level1, first.first_position);
+				format::put<std::uint64_t>(level1, first.pos_offset);
+				format::put<std::uint64_t>(level1, first.count_offset);
 			}
-			prev_group = first;
-			format::put_leb(level1, group.size());
-			format::put_leb(level1, group_bytes);
-			format::encode_sized_impacts(level1, format::competitive(std::move(group_pairs)));
-			prev_group_last = group_last;
+			format::encode_impacts(pairs, format::competitive(std::move(group_pairs)));
 			level0 += group;
 		}
 		format::put_leb(out, groups);
@@ -574,7 +578,11 @@ private:
 			format::put_leb(out, position);  // the tail's first position index and its block offset
 			format::put_leb(out, layout->offset_of(position));
 		}
+		format::put_leb(out, pairs.size());
+		format::put_leb(out, level0.size());
+		format::put_leb(out, blocks.size());
 		out += level1;
+		out += pairs;
 		out += level0;
 		out += blocks;
 		out += tail;

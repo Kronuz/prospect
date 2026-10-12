@@ -280,38 +280,25 @@ public:
 				tail_first_position_ = format::get_leb(&p_, end_);
 				tail_pos_offset_ = format::get_leb(&p_, end_);
 			}
-			groups_.resize(groups);
-			ordinal_t last = 0;
-			std::uint64_t level0 = 0, block_bytes = 0, first_position = 0, pos_offset = 0, count_offset = 0;
-			for (std::size_t g = 0; g < groups; ++g) {
-				auto& gr = groups_[g];
-				const std::uint64_t delta = format::get_leb(&p_, end_);
-				if ((g && delta == 0) || delta >= seg.doc_count() - last) { throw corrupt_segment("skip group last ordinal"); }
-				last += ordinal_t(delta);
-				gr.last = last;
-				if (with_positions_) {
-					first_position += format::get_leb(&p_, end_);
-					pos_offset += format::get_leb(&p_, end_);
-					if (with_counts_) { count_offset += format::get_leb(&p_, end_); }
-				}
-				gr.first_position = first_position;
-				gr.pos_offset = pos_offset;
-				gr.count_offset = count_offset;
-				gr.level0_offset = level0;
-				gr.blocks_offset = block_bytes;
-				// Each addend fits in the term's range, so no partial sum can wrap.
-				const std::uint64_t range = std::uint64_t(end_ - p_);
-				const std::uint64_t level0_bytes = format::get_leb(&p_, end_), group_bytes = format::get_leb(&p_, end_);
-				if (level0_bytes > range - std::min(range, level0) || group_bytes > range - std::min(range, block_bytes)) { throw corrupt_segment("skip group bytes"); }
-				level0 += level0_bytes;
-				block_bytes += group_bytes;
-				gr.impacts = format::skip_sized_impacts(&p_, end_);
+			// Fixed-width level 1, then the groups' pairs, level 0, blocks, and tail; each
+			// region is checked against the term's range here, each group when decoded.
+			const std::uint64_t pairs_bytes = format::get_leb(&p_, end_), level0_bytes = format::get_leb(&p_, end_),
+								blocks_bytes = format::get_leb(&p_, end_);
+			entry_size_ = with_positions_ ? 48 : 24;
+			groups_n_ = groups;
+			std::uint64_t range = std::uint64_t(end_ - p_);
+			if (groups > range / entry_size_) { throw corrupt_segment("skip groups bounds"); }
+			level1_ = p_;
+			p_ += groups * entry_size_;
+			range = std::uint64_t(end_ - p_);
+			if (pairs_bytes > range || level0_bytes > range - pairs_bytes || blocks_bytes > range - pairs_bytes - level0_bytes) {
+				throw corrupt_segment("skip data bounds");
 			}
-			level0_ = p_;
-			if (level0 > std::uint64_t(end_ - p_)) { throw corrupt_segment("level 0 bounds"); }
-			blocks_begin_ = p_ + level0;
-			if (block_bytes > std::uint64_t(end_ - blocks_begin_)) { throw corrupt_segment("blocks bounds"); }
-			tail_ = blocks_begin_ + block_bytes;
+			pairs_ = std::string_view(p_, pairs_bytes);
+			level0_ = p_ + pairs_bytes;
+			level0_bytes_ = level0_bytes;
+			blocks_begin_ = level0_ + level0_bytes;
+			tail_ = blocks_begin_ + blocks_bytes;
 		} else {
 			tail_ = p_;
 		}
@@ -364,7 +351,7 @@ public:
 	std::size_t block_index_for(ordinal_t target) {
 		if (!blocks_) { return 0; }
 		std::size_t gi = group_of(target);
-		if (gi == groups_.size()) { return blocks_; }
+		if (gi == groups_n_) { return blocks_; }
 		decode_group(gi);
 		auto e = std::lower_bound(entries_, entries_ + entries_n_, target, [](const entry& en, ordinal_t t) { return en.last < t; });
 		return gi * 32 + std::size_t(e - entries_);
@@ -398,22 +385,32 @@ public:
 		if (b >= blocks_) { return info_.impacts; }
 		return decode(level0_entry(b).impacts);
 	}
-	std::size_t groups() const noexcept { return groups_.size(); }
+	std::size_t groups() const noexcept { return groups_n_; }
 	// The group holding target, without decoding its blocks (groups() past the end). The
 	// decoded group and the one after it are tried before a binary search.
 	std::size_t group_of(ordinal_t target) const noexcept {
-		const std::size_t n = groups_.size();
+		const std::size_t n = groups_n_;
 		std::size_t g = decoded_group_;
 		if (g < n) {
-			if (target <= groups_[g].last && (g == 0 || target > groups_[g - 1].last)) { return g; }
-			if (g + 1 < n && target > groups_[g].last && target <= groups_[g + 1].last) { return g + 1; }
+			if (target <= group_last(g) && (g == 0 || target > group_last(g - 1))) { return g; }
+			if (g + 1 < n && target > group_last(g) && target <= group_last(g + 1)) { return g + 1; }
 		}
-		return std::size_t(std::lower_bound(groups_.begin(), groups_.end(), target, [](const group& gr, ordinal_t t) { return gr.last < t; }) - groups_.begin());
+		std::size_t lo = 0, hi = n;  // the first group whose last is >= target
+		while (lo < hi) {
+			const std::size_t mid = lo + (hi - lo) / 2;
+			if (group_last(mid) < target) { lo = mid + 1; } else { hi = mid; }
+		}
+		return lo;
 	}
 	// The first ordinal a group can hold.
-	ordinal_t group_first(std::size_t g) const noexcept { return g ? groups_[g - 1].last + 1 : 0; }
-	ordinal_t group_last(std::size_t g) const noexcept { return groups_[g].last; }
-	std::span<const format::impact> group_impacts(std::size_t g) { return decode(groups_[g].impacts); }
+	ordinal_t group_first(std::size_t g) const noexcept { return g ? group_last(g - 1) + 1 : 0; }
+	ordinal_t group_last(std::size_t g) const noexcept { return format::get<std::uint32_t>(level1_ + g * entry_size_); }
+	std::span<const format::impact> group_impacts(std::size_t g) {
+		const std::uint64_t at = format::get<std::uint32_t>(level1_ + g * entry_size_ + 4);
+		const std::uint64_t end = g + 1 < groups_n_ ? format::get<std::uint32_t>(level1_ + (g + 1) * entry_size_ + 4) : pairs_.size();
+		if (at >= end || end > pairs_.size()) { throw corrupt_segment("group pairs bounds"); }
+		return decode(pairs_.substr(at, end - at));
+	}
 
 	// The last ordinal of the block that holds target (no_more_docs past the end), and that
 	// block's competitive pairs.
@@ -548,12 +545,6 @@ private:
 		return impacts_;
 	}
 
-	struct group {
-		ordinal_t last = 0;
-		std::uint64_t first_position = 0, pos_offset = 0, count_offset = 0;
-		std::uint64_t level0_offset = 0, blocks_offset = 0;
-		std::string_view impacts;  // encoded, decoded on demand
-	};
 	struct entry {
 		ordinal_t last = 0;
 		std::uint64_t offset = 0;  // from blocks_begin_
@@ -571,10 +562,10 @@ private:
 		if (tail_last_ == no_more_docs) {
 			// Decode lazily the last ordinal of the list: the tail's sum.
 			if (df_ % format::block == 0) {
-				tail_last_ = blocks_ ? groups_.back().last : no_more_docs;
+				tail_last_ = blocks_ ? group_last(groups_n_ - 1) : no_more_docs;
 			} else {
 				const char* p = tail_;
-				ordinal_t prev = blocks_ ? groups_.back().last : std::numeric_limits<ordinal_t>::max();
+				ordinal_t prev = blocks_ ? group_last(groups_n_ - 1) : std::numeric_limits<ordinal_t>::max();
 				for (std::size_t i = 0; i < df_ % format::block; ++i) { prev += ordinal_t(format::get_leb(&p, end_)); }
 				tail_last_ = prev;
 			}
@@ -582,23 +573,50 @@ private:
 		return tail_last_;
 	}
 
+	// A group's fixed level-1 fields, checked against its neighbors and the regions.
+	struct group_fields {
+		ordinal_t last, prev_last;
+		std::uint64_t level0_begin, level0_end, blocks_begin, blocks_end;
+		std::uint64_t first_position = 0, pos_offset = 0, count_offset = 0;
+	};
+	group_fields read_group(std::size_t g) const {
+		const char* e = level1_ + g * entry_size_;
+		group_fields f{};
+		f.last = format::get<std::uint32_t>(e);
+		f.prev_last = g ? group_last(g - 1) : 0;
+		f.level0_begin = format::get<std::uint64_t>(e + 8);
+		f.blocks_begin = format::get<std::uint64_t>(e + 16);
+		f.level0_end = g + 1 < groups_n_ ? format::get<std::uint64_t>(e + entry_size_ + 8) : level0_bytes_;
+		f.blocks_end = g + 1 < groups_n_ ? format::get<std::uint64_t>(e + entry_size_ + 16) : std::uint64_t(tail_ - blocks_begin_);
+		if (with_positions_) {
+			f.first_position = format::get<std::uint64_t>(e + 24);
+			f.pos_offset = format::get<std::uint64_t>(e + 32);
+			f.count_offset = format::get<std::uint64_t>(e + 40);
+		}
+		if ((g && f.last <= f.prev_last) || f.last >= seg_->doc_count() || f.level0_begin > f.level0_end || f.level0_end > level0_bytes_ ||
+			f.blocks_begin > f.blocks_end || f.blocks_end > std::uint64_t(tail_ - blocks_begin_)) {
+			throw corrupt_segment("skip group");
+		}
+		return f;
+	}
+
 	void decode_group(std::size_t g) {
 		if (decoded_group_ == g) { return; }
-		const char* p = level0_ + groups_[g].level0_offset;
-		const char* end = (g + 1 < groups_.size()) ? level0_ + groups_[g + 1].level0_offset : blocks_begin_;
+		const group_fields gf = read_group(g);
+		const char* p = level0_ + gf.level0_begin;
+		const char* end = level0_ + gf.level0_end;
 		entries_n_ = 0;
-		ordinal_t last = g ? groups_[g - 1].last : 0;
-		std::uint64_t offset = groups_[g].blocks_offset;
-		const std::uint64_t group_end = g + 1 < groups_.size() ? groups_[g + 1].blocks_offset : std::uint64_t(tail_ - blocks_begin_);
-		if (group_end < offset) { throw corrupt_segment("group bytes"); }
+		ordinal_t last = gf.prev_last;
+		std::uint64_t offset = gf.blocks_begin;
+		const std::uint64_t group_end = gf.blocks_end;
 		// Level-0 deltas restart per group.
-		std::uint64_t first_position = groups_[g].first_position, pos_offset = groups_[g].pos_offset, count_offset = groups_[g].count_offset;
+		std::uint64_t first_position = gf.first_position, pos_offset = gf.pos_offset, count_offset = gf.count_offset;
 		const std::size_t n = std::min<std::size_t>(32, blocks_ - g * 32);
 		for (std::size_t i = 0; i < n; ++i) {
 			entry& e = entries_[entries_n_++];
 			// Lasts increase within the group and end at its last; block bytes stay inside it.
 			const std::uint64_t delta = format::get_leb(&p, end);
-			if (((g || i) && delta == 0) || delta > std::uint64_t(groups_[g].last) - last) { throw corrupt_segment("block last ordinal"); }
+			if (((g || i) && delta == 0) || delta > std::uint64_t(gf.last) - last) { throw corrupt_segment("block last ordinal"); }
 			e.last = last + ordinal_t(delta);
 			const std::uint64_t bytes = format::get_leb(&p, end);
 			e.bytes = bytes >> 1;
@@ -619,7 +637,7 @@ private:
 			last = e.last;
 		}
 		if (offset != group_end) { throw corrupt_segment("group bytes"); }
-		if (entries_[entries_n_ - 1].last != groups_[g].last || groups_[g].last >= seg_->doc_count()) { throw corrupt_segment("skip group last ordinal"); }
+		if (entries_[entries_n_ - 1].last != gf.last) { throw corrupt_segment("skip group last ordinal"); }
 		decoded_group_ = g;
 	}
 
@@ -674,7 +692,7 @@ private:
 			}
 			const char* p = tail_;
 			const std::size_t n = df_ % format::block;
-			ordinal_t prev = blocks_ ? groups_.back().last : std::numeric_limits<ordinal_t>::max();
+			ordinal_t prev = blocks_ ? group_last(groups_n_ - 1) : std::numeric_limits<ordinal_t>::max();
 			const ordinal_t base = prev;
 			for (std::size_t i = 0; i < n; ++i) { buf_ords_[i] = prev += ordinal_t(format::get_leb(&p, end_)); }
 			for (std::size_t i = 0; i < n; ++i) { buf_wdfs_[i] = (info_.flags & format::no_wdf) ? 0 : std::uint32_t(format::get_leb(&p, end_)); }
@@ -737,7 +755,10 @@ private:
 	const char* blocks_begin_ = nullptr;
 	const char* tail_ = nullptr;
 	std::size_t blocks_ = 0, next_block_ = 0;
-	std::vector<group> groups_;
+	const char* level1_ = nullptr;  // fixed-width group entries
+	std::size_t groups_n_ = 0, entry_size_ = 0;
+	std::string_view pairs_;  // the groups' competitive pairs
+	std::uint64_t level0_bytes_ = 0;
 	entry entries_[32];
 	std::size_t entries_n_ = 0;
 	std::vector<format::impact> impacts_;
