@@ -449,6 +449,7 @@ private:
 		std::vector<format::impact> impacts;
 		std::uint64_t pos_offset = 0;    // byte offset of the position block holding first_position
 		std::uint64_t count_offset = 0;  // byte offset of the block's count block
+		bool bitset = false;             // ordinals as a bitset instead of FOR deltas
 	};
 
 	// Where write_positions put each block, for the skip data.
@@ -471,14 +472,30 @@ private:
 		std::uint8_t buf[bitpack::max_encoded_bytes];
 		std::uint32_t prev = std::numeric_limits<std::uint32_t>::max();  // the first delta is ordinal + 1
 		std::uint64_t position = 0;
+		std::string bits;
 		for (std::size_t b = 0; b < full; b += format::block) {
 			const std::size_t start = blocks.size();
+			// A dense block is a bitset over (previous last, last] when that is smaller.
+			const ordinal_t base = b ? ords[b - 1] + 1 : 0;
+			const std::uint64_t span = std::uint64_t(ords[b + format::block - 1]) - base + 1;
 			bitpack::delta_encode(prev, ords.data() + b, deltas);
-			blocks.append(reinterpret_cast<char*>(buf), bitpack::encode_for(deltas, buf));
+			const std::size_t for_bytes = bitpack::encode_for(deltas, buf);
+			const bool bitset = (span + 7) / 8 < for_bytes;
+			if (bitset) {
+				bits.assign((span + 7) / 8, '\0');
+				for (std::size_t i = b; i < b + format::block; ++i) {
+					const std::uint64_t at = ords[i] - base;
+					bits[at >> 3] = char(std::uint8_t(bits[at >> 3]) | (1u << (at & 7)));
+				}
+				blocks += bits;
+			} else {
+				blocks.append(reinterpret_cast<char*>(buf), for_bytes);
+			}
 			if (with_wdf) { blocks.append(reinterpret_cast<char*>(buf), bitpack::encode_pfor(wdfs.data() + b, buf)); }
 			std::vector<format::impact> pairs;
 			for (std::size_t i = b; i < b + format::block; ++i) { pairs.push_back({wdfs[i], format::encode_length(lengths_[ords[i]])}); }
 			meta.push_back({ords[b + format::block - 1], blocks.size() - start, position, format::competitive(std::move(pairs))});
+			meta.back().bitset = bitset;
 			if (layout) {
 				meta.back().pos_offset = layout->offset_of(position);
 				if (with_counts) { meta.back().count_offset = layout->count_offsets[b / format::block]; }
@@ -512,7 +529,7 @@ private:
 			std::vector<format::impact> group_pairs;
 			for (std::size_t i = g * 32; i < std::min(meta.size(), g * 32 + 32); ++i) {
 				format::put_leb(group, meta[i].last - (i ? prev_last : 0));
-				format::put_leb(group, meta[i].bytes);
+				format::put_leb(group, meta[i].bytes << 1 | std::uint64_t(meta[i].bitset));
 				if (with_positions) {
 					format::put_leb(group, meta[i].first_position - prev.first_position);
 					format::put_leb(group, meta[i].pos_offset - prev.pos_offset);

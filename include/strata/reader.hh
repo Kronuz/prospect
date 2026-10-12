@@ -33,7 +33,9 @@
 #include "termdict.hh"
 
 #include <algorithm>
+#include <bit>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -249,7 +251,7 @@ public:
 		if (started_ && doc_ != no_more_docs && doc_ >= target) { return doc_; }
 		// Inside the decoded block: search it without touching skip data.
 		if (started_ && buf_len_ && target <= buf_ords_[buf_len_ - 1]) {
-			pos_ = std::size_t(std::lower_bound(buf_ords_ + pos_, buf_ords_ + buf_len_, target) - buf_ords_);
+			pos_ += count_below(buf_ords_ + pos_, buf_len_ - pos_, target);
 			return doc_ = buf_ords_[pos_];
 		}
 		// Skip whole blocks using skip data before decoding.
@@ -262,10 +264,9 @@ public:
 				++pos_;
 				doc_ = buf_ords_[pos_];
 			}
-			// Binary search inside the decoded block.
+			// Search inside the decoded block.
 			if (doc_ < target) {
-				auto it = std::lower_bound(buf_ords_ + pos_, buf_ords_ + buf_len_, target);
-				pos_ = std::size_t(it - buf_ords_);
+				pos_ += count_below(buf_ords_ + pos_, buf_len_ - pos_, target);
 				if (pos_ < buf_len_) { return doc_ = buf_ords_[pos_]; }
 				pos_ = buf_len_ - 1;
 				continue;
@@ -393,9 +394,39 @@ public:
 				doc_ = buf_ords_[i];
 				return;
 			}
+			// Whole bitset blocks inside the window are OR'd in without decoding.
+			while (next_block_ < blocks_) {
+				if (!level0_entry(next_block_).bitset || level0_entry(next_block_).last >= end) { break; }
+				or_bitset(next_block_, base, bits);
+				++next_block_;
+			}
 			pos_ = buf_len_ - 1;
 			if (load_next_block() == no_more_docs) { return; }
 		}
+	}
+
+	// ORs bitset block b into a window starting at base; the last word is masked to the
+	// block's span, and the block must hold exactly 128 documents.
+	void or_bitset(std::size_t b, ordinal_t base, std::uint64_t* bits) {
+		const entry& e = level0_entry(b);
+		const ordinal_t first = b ? e.base + 1 : 0;
+		if (e.last < first || first < base) { throw corrupt_segment("bitset block span"); }
+		const std::uint64_t span = std::uint64_t(e.last) - first + 1, bytes = (span + 7) / 8;
+		const char* p = blocks_begin_ + e.offset;
+		if (bytes > e.bytes || e.bytes > std::uint64_t(tail_ - p)) { throw corrupt_segment("bitset block bounds"); }
+		const std::uint64_t at = first - base;
+		const unsigned shift = unsigned(at % 64);
+		std::size_t n = 0;
+		for (std::uint64_t w = 0; w * 8 < bytes; ++w) {
+			std::uint64_t word = 0;
+			std::memcpy(&word, p + w * 8, std::min<std::uint64_t>(8, bytes - w * 8));
+			if ((w + 1) * 64 > span) { word &= span % 64 ? (std::uint64_t(1) << (span % 64)) - 1 : ~std::uint64_t(0); }
+			n += std::size_t(std::popcount(word));
+			const std::uint64_t k = at / 64 + w;
+			bits[k] |= word << shift;
+			if (shift && (word >> (64 - shift))) { bits[k + 1] |= word >> (64 - shift); }
+		}
+		if (n != format::block) { throw corrupt_segment("bitset block count"); }
 	}
 
 private:
@@ -420,6 +451,8 @@ private:
 		std::uint64_t first_position = 0;  // index of the block's first position in the term's stream
 		std::uint64_t pos_offset = 0;      // byte offset of the position block holding it
 		std::uint64_t count_offset = 0;    // byte offset of the block's count block
+		ordinal_t base = 0;                // the previous block's last ordinal
+		bool bitset = false;               // ordinals as a bitset over (base, last]
 		std::string_view impacts;          // encoded, decoded on demand
 	};
 
@@ -452,7 +485,10 @@ private:
 		for (std::size_t i = 0; i < n; ++i) {
 			entry& e = entries_[entries_n_++];
 			e.last = last + ordinal_t(format::get_leb(&p, end));
-			e.bytes = format::get_leb(&p, end);
+			const std::uint64_t bytes = format::get_leb(&p, end);
+			e.bytes = bytes >> 1;
+			e.bitset = bytes & 1;
+			e.base = last;  // the previous block's last ordinal (none before the first)
 			if (with_positions_) {
 				first_position += format::get_leb(&p, end);
 				pos_offset += format::get_leb(&p, end);
@@ -476,6 +512,8 @@ private:
 	}
 
 	void skip_to_block_containing(ordinal_t target) {
+		// The next block holds it (targets only move forward past loaded blocks): no search.
+		if (next_block_ < blocks_ && target <= level0_entry(next_block_).last) { return; }
 		std::size_t b = block_index_for(target);
 		if (b > next_block_ && b <= blocks_) {
 			next_block_ = b;
@@ -487,13 +525,17 @@ private:
 	ordinal_t load_next_block() {
 		pos_ = 0;
 		if (next_block_ < blocks_) {
-			const entry& e = level0_entry(next_block_);
-			const char* p = blocks_begin_ + e.offset;
-			if (e.bytes > std::uint64_t(tail_ - p)) { throw corrupt_segment("block bounds"); }
-			ordinal_t base = next_block_ ? level0_entry(next_block_ - 1).last : std::numeric_limits<ordinal_t>::max();
 			const entry& cur = level0_entry(next_block_);
-			std::size_t used = bitpack::decode_delta(reinterpret_cast<const std::uint8_t*>(p), cur.bytes, base, buf_ords_);
-			if (!used) { throw corrupt_segment("ordinal block"); }
+			const char* p = blocks_begin_ + cur.offset;
+			if (cur.bytes > std::uint64_t(tail_ - p)) { throw corrupt_segment("block bounds"); }
+			const ordinal_t base = next_block_ ? cur.base : std::numeric_limits<ordinal_t>::max();
+			std::size_t used;
+			if (cur.bitset) {
+				used = decode_bitset(p, cur);
+			} else {
+				used = bitpack::decode_delta(reinterpret_cast<const std::uint8_t*>(p), cur.bytes, base, buf_ords_);
+				if (!used) { throw corrupt_segment("ordinal block"); }
+			}
 			if (info_.flags & format::no_wdf) {
 				std::fill(buf_wdfs_, buf_wdfs_ + format::block, 0u);
 			} else if (!bitpack::decode(reinterpret_cast<const std::uint8_t*>(p) + used, cur.bytes - used, buf_wdfs_)) {
@@ -526,14 +568,43 @@ private:
 		return doc_ = no_more_docs;
 	}
 
+	// Expands a bitset block into buf_ords_; returns its bytes. Exactly 128 bits must be set,
+	// none past the block's last ordinal.
+	std::size_t decode_bitset(const char* p, const entry& e) {
+		const ordinal_t first = next_block_ ? e.base + 1 : 0;
+		if (e.last < first) { throw corrupt_segment("bitset block span"); }
+		const std::uint64_t span = std::uint64_t(e.last) - first + 1, bytes = (span + 7) / 8;
+		if (bytes > e.bytes) { throw corrupt_segment("bitset block bounds"); }
+		std::size_t n = 0;
+		for (std::uint64_t w = 0; w * 8 < bytes; ++w) {
+			std::uint64_t word = 0;
+			std::memcpy(&word, p + w * 8, std::min<std::uint64_t>(8, bytes - w * 8));
+			if ((w + 1) * 64 > span) { word &= span % 64 ? (std::uint64_t(1) << (span % 64)) - 1 : ~std::uint64_t(0); }
+			if (n + std::size_t(std::popcount(word)) > format::block) { throw corrupt_segment("bitset block count"); }
+			for (; word; word &= word - 1) { buf_ords_[n++] = first + ordinal_t(w * 64 + std::size_t(std::countr_zero(word))); }
+		}
+		if (n != format::block) { throw corrupt_segment("bitset block count"); }
+		return std::size_t(bytes);
+	}
+
+	// How many of n sorted values are below target: a few linear probes (dense lists'
+	// targets are usually close), then a binary search.
+	static std::size_t count_below(const ordinal_t* v, std::size_t n, ordinal_t target) noexcept {
+		std::size_t i = 0;
+		for (const std::size_t probe = std::min<std::size_t>(n, 4); i < probe; ++i) {
+			if (v[i] >= target) { return i; }
+		}
+		return std::size_t(std::lower_bound(v + i, v + n, target) - v);
+	}
+
 	// Ordinals strictly increase from base (none before the first block) and stay below
 	// the document count; branch-free so it vectorizes.
 	void check_increasing(ordinal_t base) const {
 		const std::size_t n = buf_len_ ? buf_len_ : std::min<std::size_t>(format::block, df_);
 		if (n == 0) { return; }
-		bool ok = base == std::numeric_limits<ordinal_t>::max() || buf_ords_[0] > base;
-		for (std::size_t i = 1; i < n; ++i) { ok &= buf_ords_[i] > buf_ords_[i - 1]; }
-		if (!ok) { throw corrupt_segment("ordinals not increasing"); }
+		std::uint32_t bad = base != std::numeric_limits<ordinal_t>::max() && buf_ords_[0] <= base;
+		for (std::size_t i = 1; i < n; ++i) { bad |= buf_ords_[i] <= buf_ords_[i - 1]; }
+		if (bad) { throw corrupt_segment("ordinals not increasing"); }
 		if (buf_ords_[n - 1] >= seg_->doc_count()) { throw corrupt_segment("ordinal out of range"); }
 	}
 
@@ -603,12 +674,18 @@ public:
 		const std::uint32_t count = counts[it.index_in_block()];
 		// Full blocks hold 128 positions each and a tail position takes at least a byte.
 		if (first + count > full_blocks_ * format::block + std::uint64_t(end_ - tail_)) { throw corrupt_segment("position count"); }
-		out.clear();
+		out.resize(count);
 		std::uint32_t at = 0;
-		for (std::uint64_t i = first; i < first + count; ++i) {
-			at += value(i, start);
-			out.push_back(at);
+		std::uint64_t i = first;
+		std::uint32_t* o = out.data();
+		// Spans of full blocks, then the tail.
+		while (i < first + count && i / format::block < full_blocks_) {
+			const std::uint64_t j = i / format::block;
+			if (decoded_block_ != j) { decode_block(j, start); }
+			const std::uint64_t stop = std::min<std::uint64_t>(first + count, (j + 1) * format::block);
+			for (const std::uint32_t* v = block_buf_ + i % format::block; i < stop; ++i) { *o++ = at += *v++; }
 		}
+		for (; i < first + count; ++i) { *o++ = at += value(i, start); }
 	}
 
 private:

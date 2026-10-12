@@ -192,27 +192,15 @@ public:
 	std::unique_ptr<scorer> fresh() const override { return std::make_unique<term_scorer>(*seg_, it_.info(), weight_); }
 	void fill(ordinal_t base, ordinal_t end, std::uint64_t* bits) override { it_.fill(base, end, bits); }
 
-	// Whole groups inside [from, upto] use the group bound (the maximum of its blocks'),
-	// partly covered groups their blocks' bounds.
+	// The bound of the smallest skip entry covering [from, upto]: its block, its group,
+	// or the whole term (Lucene's MaxScoreCache); one memoized evaluation per call.
 	double max_score(ordinal_t from, ordinal_t upto) override {
-		double best = 0;
-		std::size_t b = it_.block_index_for(from);
-		while (from <= upto) {
-			if (b >= it_.blocks()) { return std::max(best, total_bound_); }  // the tail
-			const std::size_t g = b / 32;
-			const ordinal_t group_first = g ? it_.group_last(g - 1) + 1 : 0;
-			if (b % 32 == 0 && from <= group_first && it_.group_last(g) <= upto) {
-				best = std::max(best, group_bound(g));
-				from = it_.group_last(g) + 1;
-				b += 32;
-				continue;
-			}
-			best = std::max(best, block_bound(b));
-			from = it_.block_last(b) + 1;
-			++b;
-			if (b > it_.blocks()) { break; }
-		}
-		return best;
+		const std::size_t b = it_.block_index_for(from);
+		if (b >= it_.blocks()) { return total_bound_; }  // the tail
+		if (it_.block_last(b) >= upto) { return block_bound(b); }
+		const std::size_t g = b / 32;
+		if (it_.group_last(g) >= upto) { return group_bound(g); }
+		return total_bound_;
 	}
 
 	// Adds each posting's score in [doc(), end) to acc[d - base] and sets its bit, then
@@ -675,29 +663,39 @@ private:
 class phrase_scorer final : public scorer {
 public:
 	// Lucene scores the phrase frequency with the terms' summed idf; Xapian (term_weights
-	// given) sums each term's own weight for the document.
+	// given, one per phrase term) sums each term's own weight for the document. A term
+	// repeated in the phrase is iterated and decoded once.
 	phrase_scorer(const segment& seg, const std::vector<format::term_info>& infos, std::vector<weight> term_weights = {})
 		: seg_(&seg), term_weights_(std::move(term_weights)) {
 		double idf = 0;
-		for (const auto& info : infos) {
-			terms_.push_back(std::make_unique<postings_iterator>(seg, info));
-			readers_.push_back(std::make_unique<positions_reader>(seg, info));
-			counts_wdf_.push_back(info.flags & format::counts_are_wdf);
+		for (std::size_t k = 0; k < infos.size(); ++k) {
+			const auto& info = infos[k];
 			idf += weight::lucene(seg, info.df).idf;
-			if (info.df < cost_) {
-				cost_ = info.df;
-				lead_ = terms_.size() - 1;
+			std::size_t u = 0;
+			while (u < infos_.size() && !(infos_[u].postings == info.postings && infos_[u].positions == info.positions && infos_[u].df == info.df)) { ++u; }
+			if (u == infos_.size()) {
+				infos_.push_back(info);
+				terms_.push_back(std::make_unique<postings_iterator>(seg, info));
+				readers_.push_back(std::make_unique<positions_reader>(seg, info));
+				if (info.df < cost_) {
+					cost_ = info.df;
+					lead_ = u;
+				}
 			}
+			slots_.push_back({u, std::uint32_t(k)});
 		}
 		started_.assign(terms_.size(), false);
+		positions_.resize(terms_.size());
+		decoded_.assign(terms_.size(), no_more_docs);
+		counts_.resize(terms_.size());
 		weight_ = weight::lucene(seg, 1);
 		weight_.idf = idf;
 		bound_ = idf;  // tf / (tf + norm) < 1
 		if (!term_weights_.empty()) {
 			bound_ = 0;
-			for (std::size_t i = 0; i < infos.size(); ++i) {
+			for (const auto& sl : slots_) {
 				double best = 0;
-				for (const auto& p : infos[i].impacts) { best = std::max(best, term_weights_[i](p.wdf, format::decode_length(p.length))); }
+				for (const auto& p : infos_[sl.term].impacts) { best = std::max(best, term_weights_[sl.offset](p.wdf, format::decode_length(p.length))); }
 				bound_ += best;
 			}
 		}
@@ -720,7 +718,7 @@ public:
 		if (term_weights_.empty()) { return weight_(freq_, seg_->length(doc_)); }
 		double s = 0;
 		const std::uint32_t len = seg_->length(doc_);
-		for (std::size_t i = 0; i < terms_.size(); ++i) { s += term_weights_[i](terms_[i]->wdf(), len); }
+		for (const auto& sl : slots_) { s += term_weights_[sl.offset](terms_[sl.term]->wdf(), len); }
 		return s;
 	}
 	// Lucene mode: the phrase frequency is at most each term's wdf in the document, so each
@@ -729,7 +727,7 @@ public:
 	double max_score(ordinal_t from, ordinal_t upto) override {
 		if (!term_weights_.empty()) {
 			double sum = 0;
-			for (std::size_t i = 0; i < terms_.size(); ++i) { sum += range_bound(*terms_[i], term_weights_[i], from, upto); }
+			for (const auto& sl : slots_) { sum += range_bound(*terms_[sl.term], term_weights_[sl.offset], from, upto); }
 			return std::min(sum, bound_);
 		}
 		double best = bound_;
@@ -741,6 +739,11 @@ public:
 	double max_score_total() const noexcept override { return bound_; }
 
 private:
+	struct slot {
+		std::size_t term;      // index into terms_
+		std::uint32_t offset;  // position in the phrase
+	};
+
 	// The next document at or after d holding every term, leapfrogging from the rarest.
 	ordinal_t align(ordinal_t d) {
 		while (d != no_more_docs) {
@@ -766,8 +769,9 @@ private:
 		d = align(d);
 		while (d != no_more_docs) {
 			if (min_ > 0 && (window_end_ == no_more_docs || d > window_end_)) {
+				// The lead's block bound alone (one skip entry) is a valid, cheap bound.
 				const ordinal_t end = terms_[lead_]->block_end(d);
-				if (max_score(d, end == no_more_docs ? d : end) <= min_) {
+				if (lead_bound(d, end == no_more_docs ? d : end) <= min_) {
 					if (end == no_more_docs) { return no_more_docs; }
 					d = align(terms_[lead_]->advance(end + 1));
 					continue;
@@ -781,33 +785,41 @@ private:
 		return no_more_docs;
 	}
 
-	// Occurrences of the phrase in the current document: starts from the term with the
-	// fewest positions and intersects the others into it, stopping once nothing is left.
+	double lead_bound(ordinal_t from, ordinal_t upto) {
+		if (!term_weights_.empty()) { return max_score(from, upto); }
+		return std::min(bound_, range_bound(*terms_[lead_], weight_, from, upto));
+	}
+
+	// The current document's positions of unique term u, decoded once per document.
+	const std::vector<std::uint32_t>& positions(std::size_t u) {
+		if (decoded_[u] != terms_[u]->doc()) {
+			readers_[u]->read(*terms_[u], positions_[u]);
+			decoded_[u] = terms_[u]->doc();
+		}
+		return positions_[u];
+	}
+
+	// Occurrences of the phrase in the current document: starts from the (term, offset)
+	// slot whose term has the fewest positions and intersects the others into it,
+	// stopping once nothing is left.
 	std::uint32_t phrase_freq() {
-		const std::size_t n = terms_.size();
-		order_.resize(n);
-		counts_.resize(n);
-		for (std::size_t i = 0; i < n; ++i) {
-			order_[i] = i;
-			counts_[i] = readers_[i]->count(*terms_[i]);
+		for (std::size_t u = 0; u < terms_.size(); ++u) { counts_[u] = readers_[u]->count(*terms_[u]); }
+		order_.assign(slots_.begin(), slots_.end());
+		for (std::size_t i = 1; i < order_.size(); ++i) {  // insertion sort: a handful of slots
+			for (std::size_t j = i; j > 0 && counts_[order_[j].term] < counts_[order_[j - 1].term]; --j) { std::swap(order_[j], order_[j - 1]); }
 		}
-		std::sort(order_.begin(), order_.end(), [&](std::size_t a, std::size_t b) { return counts_[a] < counts_[b]; });
-		positions_.resize(n);
-		// Candidate phrase starts: the first term's positions shifted by its offset.
-		const std::size_t first = order_[0];
-		readers_[first]->read(*terms_[first], candidates_);
-		std::size_t live = 0;
-		for (std::uint32_t p : candidates_) {
-			if (p >= first) { candidates_[live++] = p - std::uint32_t(first); }
+		const slot first = order_[0];
+		const auto& lead = positions(first.term);
+		candidates_.clear();
+		for (std::uint32_t p : lead) {
+			if (p >= first.offset) { candidates_.push_back(p - first.offset); }
 		}
-		candidates_.resize(live);
-		for (std::size_t k = 1; k < n && !candidates_.empty(); ++k) {
-			const std::size_t i = order_[k];
-			auto& pos = positions_[i];
-			readers_[i]->read(*terms_[i], pos);
+		for (std::size_t k = 1; k < order_.size() && !candidates_.empty(); ++k) {
+			const auto& pos = positions(order_[k].term);
+			const std::uint32_t offset = order_[k].offset;
 			std::size_t keep = 0, j = 0;
 			for (std::uint32_t c : candidates_) {
-				const std::uint32_t want = c + std::uint32_t(i);
+				const std::uint32_t want = c + offset;
 				while (j < pos.size() && pos[j] < want) { ++j; }
 				if (j < pos.size() && pos[j] == want) { candidates_[keep++] = c; }
 			}
@@ -816,38 +828,30 @@ private:
 		return std::uint32_t(candidates_.size());
 	}
 
-	// A bound on w over [from, upto] from one term's skip data.
+	// A bound on w over [from, upto] from one term's skip data: the smallest skip entry
+	// covering the range (its block, its group, or the whole term).
 	static double range_bound(postings_iterator& it, const weight& w, ordinal_t from, ordinal_t upto) {
 		auto pairs_bound = [&](std::span<const format::impact> pairs) {
 			double best = 0;
 			for (const auto& p : pairs) { best = std::max(best, w(p.wdf, format::decode_length(p.length))); }
 			return best;
 		};
-		double best = 0;
-		std::size_t b = it.block_index_for(from);
-		while (from <= upto) {
-			if (b >= it.blocks()) { return std::max(best, pairs_bound(it.info().impacts)); }
-			const std::size_t g = b / 32;
-			if (b % 32 == 0 && from <= it.group_first(g) && it.group_last(g) <= upto) {
-				best = std::max(best, pairs_bound(it.group_impacts(g)));
-				from = it.group_last(g) + 1;
-				b += 32;
-				continue;
-			}
-			best = std::max(best, pairs_bound(it.block_impacts_at(b)));
-			from = it.block_last(b) + 1;
-			++b;
-		}
-		return best;
+		const std::size_t b = it.block_index_for(from);
+		if (b >= it.blocks()) { return pairs_bound(it.info().impacts); }
+		if (it.block_last(b) >= upto) { return pairs_bound(it.block_impacts_at(b)); }
+		const std::size_t g = b / 32;
+		if (it.group_last(g) >= upto) { return pairs_bound(it.group_impacts(g)); }
+		return pairs_bound(it.info().impacts);
 	}
 
 	const segment* seg_;
+	std::vector<format::term_info> infos_;  // unique terms
 	std::vector<std::unique_ptr<postings_iterator>> terms_;
 	std::vector<std::unique_ptr<positions_reader>> readers_;
-	std::vector<bool> counts_wdf_;
+	std::vector<slot> slots_, order_;
 	std::vector<std::vector<std::uint32_t>> positions_;
+	std::vector<ordinal_t> decoded_;  // the document positions_[u] belongs to
 	std::vector<std::uint32_t> candidates_, counts_;
-	std::vector<std::size_t> order_;
 	std::vector<weight> term_weights_;
 	weight weight_ = weight::lucene(*seg_, 1);
 	std::uint64_t cost_ = ~std::uint64_t(0);
