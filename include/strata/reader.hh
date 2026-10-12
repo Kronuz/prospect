@@ -237,7 +237,7 @@ public:
 	}
 
 	ordinal_t doc() const noexcept { return doc_; }
-	std::uint32_t wdf() const noexcept { return buf_wdfs_[pos_]; }
+	std::uint32_t wdf() const { return wdfs()[pos_]; }
 	std::uint64_t cost() const noexcept { return df_; }
 
 	ordinal_t next() {
@@ -294,6 +294,25 @@ public:
 		return level0_entry(b).last;
 	}
 	// Competitive pairs; the span is valid until the next impacts call.
+	// Whether any of block b's pairs satisfies pred, decoding them only until one does.
+	template <class Pred>
+	bool any_block_impact(std::size_t b, Pred&& pred) {
+		if (b >= blocks_) { return std::any_of(info_.impacts.begin(), info_.impacts.end(), pred); }
+		const std::string_view list = level0_entry(b).impacts;
+		const char* p = list.data();
+		const char* end = p + list.size();
+		const std::uint64_t n = format::get_leb(&p, end);
+		if (n == 0 || n > 256) { throw corrupt_segment("impact count"); }
+		for (std::uint64_t k = 0; k < n; ++k) {
+			format::impact i;
+			i.wdf = std::uint32_t(format::get_leb(&p, end));
+			if (p == end) { throw corrupt_segment("impacts truncated"); }
+			i.length = std::uint8_t(*p++);
+			if (pred(i)) { return true; }
+		}
+		return false;
+	}
+
 	std::span<const format::impact> block_impacts_at(std::size_t b) {
 		if (b >= blocks_) { return info_.impacts; }
 		return decode(level0_entry(b).impacts);
@@ -360,7 +379,14 @@ public:
 		return sum_;
 	}
 
-	const std::uint32_t* wdfs() const noexcept { return buf_wdfs_; }
+	// The decoded block's wdfs, decoded on first use (counting never needs them).
+	const std::uint32_t* wdfs() const {
+		if (wdf_pending_) {
+			if (!bitpack::decode(reinterpret_cast<const std::uint8_t*>(wdf_pending_), wdf_size_, buf_wdfs_)) { throw corrupt_segment("wdf block"); }
+			wdf_pending_ = nullptr;
+		}
+		return buf_wdfs_;
+	}
 
 	// Calls f(d, wdf) for every posting d in [doc(), end), then stops at the first posting
 	// >= end.
@@ -368,7 +394,8 @@ public:
 	void for_each_until(ordinal_t end, F&& f) {
 		while (doc_ < end) {
 			std::size_t i = pos_;
-			for (; i < buf_len_ && buf_ords_[i] < end; ++i) { f(buf_ords_[i], buf_wdfs_[i]); }
+			const std::uint32_t* w = wdfs();
+			for (; i < buf_len_ && buf_ords_[i] < end; ++i) { f(buf_ords_[i], w[i]); }
 			if (i < buf_len_) {
 				pos_ = i;
 				doc_ = buf_ords_[i];
@@ -538,11 +565,14 @@ private:
 			}
 			if (info_.flags & format::no_wdf) {
 				std::fill(buf_wdfs_, buf_wdfs_ + format::block, 0u);
-			} else if (!bitpack::decode(reinterpret_cast<const std::uint8_t*>(p) + used, cur.bytes - used, buf_wdfs_)) {
-				throw corrupt_segment("wdf block");
+				wdf_pending_ = nullptr;
+			} else {
+				if (used >= cur.bytes) { throw corrupt_segment("wdf block"); }
+				wdf_pending_ = p + used;
+				wdf_size_ = cur.bytes - used;
 			}
 			if (buf_ords_[format::block - 1] != cur.last || buf_ords_[0] == no_more_docs) { throw corrupt_segment("block last ordinal"); }
-			check_increasing(base);
+			if (!cur.bitset) { check_increasing(base); }  // bitsets increase by construction
 			buf_len_ = format::block;
 			++next_block_;
 			return doc_ = buf_ords_[0];
@@ -559,6 +589,7 @@ private:
 			const ordinal_t base = prev;
 			for (std::size_t i = 0; i < n; ++i) { buf_ords_[i] = prev += ordinal_t(format::get_leb(&p, end_)); }
 			for (std::size_t i = 0; i < n; ++i) { buf_wdfs_[i] = (info_.flags & format::no_wdf) ? 0 : std::uint32_t(format::get_leb(&p, end_)); }
+			wdf_pending_ = nullptr;
 			buf_len_ = n;
 			check_increasing(base);
 			tail_done_ = true;
@@ -627,7 +658,9 @@ private:
 	std::uint64_t sum_ = 0;
 	bool with_positions_ = false, with_counts_ = false;
 	ordinal_t buf_ords_[format::block] = {};
-	std::uint32_t buf_wdfs_[format::block] = {};
+	mutable std::uint32_t buf_wdfs_[format::block] = {};
+	mutable const char* wdf_pending_ = nullptr;  // the current block's undecoded wdf block
+	std::size_t wdf_size_ = 0;
 	std::size_t buf_len_ = 0, pos_ = 0;
 	ordinal_t doc_ = 0, tail_last_ = no_more_docs;
 	bool started_ = false, tail_done_ = false;

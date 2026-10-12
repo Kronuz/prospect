@@ -274,7 +274,7 @@ private:
 				checked_until_ = no_more_docs - 1;
 				return d;
 			}
-			if (block_bound(b) <= min_) {
+			if (!it_.any_block_impact(b, [&](const format::impact& p) { return weight_(p.wdf, format::decode_length(p.length)) > min_; })) {
 				d = it_.advance(it_.block_last(b) + 1);
 				continue;
 			}
@@ -650,7 +650,7 @@ public:
 	double max_score_total() const noexcept override { return in_->max_score_total(); }
 	void set_min_competitive_score(double s) override { in_->set_min_competitive_score(s); }
 	double current_bound() override { return in_->current_bound(); }
-	// |include| - |include and exclude|, when include's count is known.
+	// |include| - |include and exclude| for a term minus a term.
 	std::optional<std::uint64_t> exact_count() override;
 	std::unique_ptr<scorer> fresh() const override {
 		auto i = in_->fresh(), e = ex_->fresh();
@@ -1015,6 +1015,9 @@ inline bool disjunction_scorer::collect_top_k(top_collector& c) {
 }
 
 inline std::optional<std::uint64_t> exclusion_scorer::exact_count() {
+	// Only term minus term: anything else counts faster in one pass than through
+	// |include| - |include and exclude|.
+	if (!dynamic_cast<term_scorer*>(in_.get()) || !dynamic_cast<term_scorer*>(ex_.get())) { return std::nullopt; }
 	auto n = in_->exact_count();
 	if (!n) { return std::nullopt; }
 	auto i = in_->fresh(), e = ex_->fresh();
