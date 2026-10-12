@@ -112,10 +112,13 @@ contract states the `fill` window and `max_score` semantics (C8).
 - **Bounded decoding.** Every length and offset is checked against its section; bitset
   blocks are masked to their span and must hold 128 documents; stored frames decompress
   into exactly their recorded size (`compressors`' bounded `decompress_zstd`).
-- **Fuzzing.** `fuzz/fuzz_segment.cc` (segments from fuzz input, then corrupted, read in
-  full including positions and stored records), plus the libraries' targets: `unicode`
-  35M runs, `snowball` 50M, `analysis` 6.2M, `bitpack` with `encoded_size` 27.9M,
-  `termdict` 4.2M, all clean.
+- **Fuzzing.** `fuzz/fuzz_segment.cc` corrupts prebuilt segments and recomputes their
+  checksums so changes reach the decoders, changes the table of contents with its
+  checksum kept valid, and runs every scorer type and stored reads: one CPU-hour at
+  format 9 (ASan, UBSan, RSS limit 2 GB), 107,932 runs, 3,941 PCs, clean; re-run after
+  the positionless-term and table-of-contents additions. Library targets, ASan and
+  UBSan, clean: `unicode` 5 CPU-minutes (35M runs), `snowball` 30 (50M), `analysis` 30
+  (6.2M), `bitpack` with `encoded_size` 5 (27.9M), `termdict` 60 (4.2M).
 - **Golden fixture.** `test/fixtures/small.sx` pins the writer's bytes at format 9.
 
 ## Changes for the architect

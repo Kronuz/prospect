@@ -14,7 +14,7 @@
 
 namespace {
 
-const char* const vocab[] = {"the", "of", "a", "b", "c", "rare", "bool", "weighted"};
+const char* const vocab[] = {"the", "of", "a", "b", "c", "rare", "bool", "weighted", "nopos"};
 
 std::string build(std::uint64_t seed, std::uint32_t docs) {
 	std::mt19937_64 rng(seed);
@@ -30,6 +30,7 @@ std::string build(std::uint64_t seed, std::uint32_t docs) {
 			const std::uint32_t n = 1 + std::uint32_t(rng() % (t == 0 ? 6 : 3));
 			for (std::uint32_t k = 0; k < n; ++k) { pos[t].push_back(at += 1 + std::uint32_t(rng() % 3)); }
 			const std::uint32_t wdf = vocab[t] == std::string_view("bool") ? 0 : vocab[t] == std::string_view("weighted") ? n * 3 : n;
+			if (vocab[t] == std::string_view("nopos")) { pos[t].clear(); }  // indexed without positions
 			in.push_back({vocab[t], wdf, pos[t]});
 			length += wdf;
 		}
@@ -54,6 +55,15 @@ void refresh_checksums(std::string& file) {
 	file.replace(footer.toc_offset, toc_bytes.size(), toc_bytes);
 	auto f = footer;
 	f.toc_crc = hashes::crc32c(toc_bytes.data(), toc_bytes.size());
+	const std::string footer_bytes = strata::format::encode_footer(f);
+	file.replace(file.size() - footer_bytes.size(), footer_bytes.size(), footer_bytes);
+}
+
+// Recomputes only the table of contents' and the footer's checksums, so a changed table
+// (duplicate, overlapping, or out-of-range sections) reaches the reader's table checks.
+void refresh_toc_checksum(std::string& file) {
+	auto f = strata::format::decode_footer(file);
+	f.toc_crc = hashes::crc32c(file.data() + f.toc_offset, f.toc_length);
 	const std::string footer_bytes = strata::format::encode_footer(f);
 	file.replace(file.size() - footer_bytes.size(), footer_bytes.size(), footer_bytes);
 }
@@ -100,7 +110,7 @@ void exercise(const strata::segment& seg) {
 	strata::top_k(req, 10);
 	strata::phrase_scorer phrase(seg, {infos[0], infos[1 % infos.size()], infos[0]});
 	strata::top_k(phrase, 10);
-	strata::phrase_scorer phrase_count(seg, {infos[2 % infos.size()], infos[0]});
+	strata::phrase_scorer phrase_count(seg, {infos[2 % infos.size()], infos.back()});
 	std::uint64_t n = 0;
 	strata::top_k(phrase_count, 10, &n);
 }
@@ -112,13 +122,20 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 	std::string file = base(data[0]);
 	const auto sections = strata::format::decode_toc(file, strata::format::decode_footer(file));
 	// Byte changes: (section, position, xor) quintuples, positions scaled to the section.
-	for (std::size_t i = 2; i + 4 < size; i += 5) {
+	for (std::size_t i = 2; data[1] % 8 != 1 && i + 4 < size; i += 5) {
 		const auto& e = sections[data[i] % sections.size()];
 		if (!e.length) { continue; }
 		const std::uint32_t at = std::uint32_t(data[i + 1]) | std::uint32_t(data[i + 2]) << 8 | std::uint32_t(data[i + 3]) << 16;
 		file[e.offset + at % e.length] ^= char(data[i + 4] | 1);
 	}
-	if (data[1] % 8 != 0) { refresh_checksums(file); }  // one input in eight checks detection instead
+	if (data[1] % 8 == 1) {
+		// Change the table of contents itself instead, keeping its checksum valid.
+		const auto f = strata::format::decode_footer(file);
+		for (std::size_t i = 2; i + 2 < size; i += 3) { file[f.toc_offset + (data[i] * 256u + data[i + 1]) % f.toc_length] ^= char(data[i + 2] | 1); }
+		refresh_toc_checksum(file);
+	} else if (data[1] % 8 != 0) {
+		refresh_checksums(file);  // one input in eight checks detection instead
+	}
 	try {
 		strata::segment seg(file);
 		exercise(seg);

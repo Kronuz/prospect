@@ -299,8 +299,12 @@ public:
 				gr.count_offset = count_offset;
 				gr.level0_offset = level0;
 				gr.blocks_offset = block_bytes;
-				level0 += format::get_leb(&p_, end_);
-				block_bytes += format::get_leb(&p_, end_);
+				// Each addend fits in the term's range, so no partial sum can wrap.
+				const std::uint64_t range = std::uint64_t(end_ - p_);
+				const std::uint64_t level0_bytes = format::get_leb(&p_, end_), group_bytes = format::get_leb(&p_, end_);
+				if (level0_bytes > range - std::min(range, level0) || group_bytes > range - std::min(range, block_bytes)) { throw corrupt_segment("skip group bytes"); }
+				level0 += level0_bytes;
+				block_bytes += group_bytes;
 				gr.impacts = format::skip_sized_impacts(&p_, end_);
 			}
 			level0_ = p_;
@@ -757,7 +761,10 @@ private:
 class positions_reader {
 public:
 	positions_reader(const segment& seg, const format::term_info& info) {
-		if (info.flags & format::no_positions) { return; }
+		if (info.flags & format::no_positions) {
+			none_ = true;  // a term indexed without positions: every count is 0
+			return;
+		}
 		auto bytes = seg.positions_bytes();
 		if (info.positions > bytes.size() || info.positions_length > bytes.size() - info.positions) { throw corrupt_segment("positions offset"); }
 		seg.verify_positions(info.positions, info.positions_length);
@@ -781,12 +788,17 @@ public:
 
 	// The number of positions of the iterator's current document, without decoding them.
 	std::uint32_t count(postings_iterator& it) {
+		if (none_) { return 0; }
 		if (it.info().flags & format::counts_are_wdf) { return it.wdf(); }
 		return counts(it.in_tail(), it.positions_start().count_offset)[it.index_in_block()];
 	}
 
 	// The positions of the iterator's current document, ascending.
 	void read(postings_iterator& it, std::vector<std::uint32_t>& out) {
+		if (none_) {
+			out.clear();
+			return;
+		}
 		const auto start = it.positions_start();
 		const std::uint32_t* counts = it.info().flags & format::counts_are_wdf ? it.wdfs() : this->counts(it.in_tail(), start.count_offset);
 		const std::uint64_t first = it.position_index(counts);
@@ -866,6 +878,7 @@ private:
 	const char* tail_p_ = nullptr;
 	std::uint64_t count_blocks_bytes_ = 0, full_blocks_ = 0, blocks_bytes_ = 0;
 	std::uint32_t max_count_ = 0;
+	bool none_ = false;
 	std::vector<std::uint32_t> count_tail_, tail_values_;
 	std::uint32_t counts_buf_[format::block] = {}, block_buf_[format::block] = {};
 	std::uint64_t decoded_counts_ = std::numeric_limits<std::uint64_t>::max();

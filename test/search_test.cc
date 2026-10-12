@@ -215,6 +215,24 @@ int main() {
 		CHECK(hits.size() == 10 && exhaustive.size() == 10);
 		for (std::size_t i = 0; i < hits.size() && i < exhaustive.size(); ++i) { CHECK(std::abs(hits[i].score - exhaustive[i].score) <= 1e-12); }
 	}
+	// A term indexed without positions in a phrase or NEAR: no matches, no error, in full
+	// blocks and in the tail.
+	{
+		strata::segment_writer w;
+		for (std::uint32_t d = 0; d < 300; ++d) {
+			std::vector<std::uint32_t> pa{1}, none;
+			std::vector<strata::posting_input> in{{"a", 1, pa}, {"p", 2, none}};
+			w.add(d + 1, in, 3);
+		}
+		std::string file = w.flush({});
+		strata::segment seg(file);
+		const std::vector<strata::format::term_info> infos{*seg.term("a"), *seg.term("p")};
+		strata::phrase_scorer phrase(seg, infos);
+		CHECK(strata::top_k(phrase, 10).empty());
+		strata::phrase_scorer near(seg, infos, {strata::weight::lucene(seg, 300), strata::weight::lucene(seg, 300)}, 5);
+		std::uint64_t n = 1;
+		CHECK(strata::top_k(near, 10, &n).empty() && n == 0);
+	}
 	std::printf("search: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }

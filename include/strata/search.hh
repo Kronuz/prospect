@@ -444,7 +444,8 @@ private:
 						continue;
 					}
 					window_end_ = end;
-					rest_bound_ = sum - window_bounds_[0];
+					rest_bound_ = 0;  // summed, not subtracted from sum, so rounding stays upward
+					for (std::size_t i = 1; i < children_.size(); ++i) { rest_bound_ += window_bounds_[i]; }
 				}
 				if (lead->two_phase() && !lead->matches()) {
 					target = lead->approx_next();
