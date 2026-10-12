@@ -215,6 +215,36 @@ int main() {
 		CHECK(hits.size() == 10 && exhaustive.size() == 10);
 		for (std::size_t i = 0; i < hits.size() && i < exhaustive.size(); ++i) { CHECK(std::abs(hits[i].score - exhaustive[i].score) <= 1e-12); }
 	}
+	// Identical documents tie: every path keeps the smallest ordinals, best first.
+	{
+		strata::segment_writer w;
+		for (std::uint32_t d = 0; d < 5000; ++d) {
+			std::vector<std::uint32_t> p1{1}, p2{2};
+			std::vector<strata::posting_input> in{{"a", 1, p1}, {"b", 1, p2}};
+			w.add(d + 1, in, 2);
+		}
+		std::string file = w.flush({});
+		strata::segment seg(file);
+		auto check = [&](strata::scorer& s, bool counted) {
+			std::uint64_t n = 0;
+			auto hits = counted ? strata::top_k(s, 10, &n) : strata::top_k(s, 10);
+			CHECK(hits.size() == 10);
+			for (std::size_t i = 0; i < hits.size(); ++i) { CHECK(hits[i].ord == i); }
+		};
+		for (bool counted : {false, true}) {
+			strata::term_scorer t(seg, *seg.term("a"));
+			check(t, counted);
+			std::vector<strata::scorer_ptr> v1, v2;
+			v1.push_back(std::make_unique<strata::term_scorer>(seg, *seg.term("a")));
+			v1.push_back(std::make_unique<strata::term_scorer>(seg, *seg.term("b")));
+			strata::disjunction_scorer u(std::move(v1));
+			check(u, counted);
+			v2.push_back(std::make_unique<strata::term_scorer>(seg, *seg.term("a")));
+			v2.push_back(std::make_unique<strata::term_scorer>(seg, *seg.term("b")));
+			strata::conjunction_scorer c(std::move(v2));
+			check(c, counted);
+		}
+	}
 	// A term indexed without positions in a phrase or NEAR: no matches, no error, in full
 	// blocks and in the tail.
 	{
