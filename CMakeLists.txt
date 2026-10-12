@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.14)
-project(strata LANGUAGES CXX)
+project(strata LANGUAGES C CXX)
 
 include(FetchContent)
 
@@ -15,12 +15,15 @@ FetchContent_Declare(hashes GIT_REPOSITORY https://github.com/Kronuz/hashes.git 
 FetchContent_Declare(termdict GIT_REPOSITORY https://github.com/Kronuz/termdict.git GIT_TAG 4100fda23468b5502df4bc4aac0bf5f3c0e7a4be)
 FetchContent_Declare(varint GIT_REPOSITORY https://github.com/Kronuz/varint.git GIT_TAG de3d05dbec86cd4c147b3177947f9c3b58312675)
 FetchContent_Declare(residency GIT_REPOSITORY https://github.com/Kronuz/residency.git GIT_TAG e52bd7bcb987a7f07993f1dc73b1760453067db2)
-FetchContent_MakeAvailable(docset bitpack fst task hashes residency varint termdict)
+FetchContent_Declare(unicode GIT_REPOSITORY https://github.com/Kronuz/unicode.git GIT_TAG 5c745dd6a44de27123ce7ef2f80c1049f8eec04b)
+FetchContent_Declare(snowball GIT_REPOSITORY https://github.com/Kronuz/snowball.git GIT_TAG main)
+FetchContent_Declare(analysis GIT_REPOSITORY https://github.com/Kronuz/analysis.git GIT_TAG main)
+FetchContent_MakeAvailable(docset bitpack fst task hashes residency varint termdict unicode snowball analysis)
 
 add_library(strata INTERFACE)
 target_include_directories(strata INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(strata INTERFACE cxx_std_20)
-target_link_libraries(strata INTERFACE docset::docset bitpack::bitpack fst::fst task::task hashes::hashes residency::residency varint::varint termdict::termdict)
+target_link_libraries(strata INTERFACE docset::docset bitpack::bitpack fst::fst task::task hashes::hashes residency::residency varint::varint termdict::termdict analysis::analysis)
 add_library(strata::strata ALIAS strata)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)

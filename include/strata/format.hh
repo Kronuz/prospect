@@ -53,7 +53,7 @@ namespace format {
 
 inline constexpr char header_magic[8] = {'S', 'T', 'R', 'S', 'E', 'G', '0', '1'};
 inline constexpr char footer_magic[4] = {'S', 'E', 'N', 'D'};
-inline constexpr std::uint32_t version = 1;
+inline constexpr std::uint32_t version = 2;
 inline constexpr std::size_t header_size = 32;
 inline constexpr std::size_t footer_size = 48;
 inline constexpr std::size_t region_size = 64 * 1024;
@@ -253,23 +253,30 @@ struct term_info {
 };
 
 inline void encode_impacts(std::string& out, const std::vector<impact>& impacts) {
-	out.push_back(char(impacts.size()));
+	put_leb(out, impacts.size());
 	for (const auto& i : impacts) {
 		put_leb(out, i.wdf);
 		out.push_back(char(i.length));
 	}
 }
 
-inline std::vector<impact> decode_impacts(const char** p, const char* end) {
-	if (*p == end) { throw corrupt_segment("impacts truncated"); }
-	std::size_t n = std::uint8_t(*(*p)++);
-	if (n == 0 || n > 4) { throw corrupt_segment("impact count"); }
-	std::vector<impact> out(n);
-	for (auto& i : out) {
+// Appends one encoded list of competitive pairs to out; returns how many.
+inline std::size_t decode_impacts(const char** p, const char* end, std::vector<impact>& out) {
+	const std::uint64_t n = get_leb(p, end);
+	if (n == 0 || n > 256) { throw corrupt_segment("impact count"); }  // lengths are 1 byte
+	for (std::size_t k = 0; k < n; ++k) {
+		impact i;
 		i.wdf = std::uint32_t(get_leb(p, end));
 		if (*p == end) { throw corrupt_segment("impacts truncated"); }
 		i.length = std::uint8_t(*(*p)++);
+		out.push_back(i);
 	}
+	return n;
+}
+
+inline std::vector<impact> decode_impacts(const char** p, const char* end) {
+	std::vector<impact> out;
+	decode_impacts(p, end, out);
 	return out;
 }
 
@@ -304,23 +311,13 @@ inline term_info decode_term_info(std::string_view bytes) {
 	return t;
 }
 
-// Reduces a list of (wdf, length) pairs to at most four competitive pairs that still
-// dominate every input: the Pareto frontier (higher wdf, lower length), then merging
-// neighbors into (max wdf, min length) while it has more than four.
+// The competitive pairs of a list of (wdf, length) pairs: its Pareto frontier (higher
+// wdf, lower length), highest wdf first. At most 256 pairs, one per length code.
 inline std::vector<impact> competitive(std::vector<impact> pairs) {
 	std::sort(pairs.begin(), pairs.end(), [](const impact& a, const impact& b) { return a.wdf != b.wdf ? a.wdf > b.wdf : a.length < b.length; });
 	std::vector<impact> frontier;
 	for (const auto& p : pairs) {
 		if (frontier.empty() || p.length < frontier.back().length) { frontier.push_back(p); }
-	}
-	while (frontier.size() > 4) {
-		// Merge the adjacent pair whose merge loosens the bound least: smallest wdf gap.
-		std::size_t best = 0;
-		for (std::size_t i = 1; i + 1 < frontier.size(); ++i) {
-			if (frontier[i].wdf - frontier[i + 1].wdf < frontier[best].wdf - frontier[best + 1].wdf) { best = i; }
-		}
-		frontier[best] = impact{frontier[best].wdf, std::min(frontier[best].length, frontier[best + 1].length)};
-		frontier.erase(frontier.begin() + std::ptrdiff_t(best) + 1);
 	}
 	if (frontier.empty()) { frontier.push_back({}); }
 	return frontier;

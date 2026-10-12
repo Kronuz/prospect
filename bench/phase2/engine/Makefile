@@ -2,7 +2,7 @@
 # STRATA_SRC points at a strata checkout; LIBS at sibling Kronuz library checkouts.
 STRATA_SRC ?= $(HOME)/libs/strata
 LIBS ?= $(HOME)/libs
-OVERRIDES := $(foreach l,docset bitpack fst task hashes residency varint termdict,-DFETCHCONTENT_SOURCE_DIR_$(shell echo $(l) | tr a-z A-Z)=$(LIBS)/$(l))
+OVERRIDES := $(foreach l,docset bitpack fst task hashes residency varint termdict unicode snowball analysis,-DFETCHCONTENT_SOURCE_DIR_$(shell echo $(l) | tr a-z A-Z)=$(LIBS)/$(l))
 
 clean:
 	rm -fr idx build

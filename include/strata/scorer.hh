@@ -38,13 +38,14 @@ using docset::no_more_docs;
 //   score()           the current doc's score (valid after next/advance returned a doc)
 //   block_end(t)      the last doc of the block that holds t, without decoding the block
 //                     (no_more_docs past the end); doc() is unchanged
-//   max_score(upto)   an upper bound on score() for docs in [doc(), upto]
+//   max_score(f, u)   an upper bound on score() for docs in [f, u], from skip data alone,
+//                     so a conjunction can bound children it has not moved yet
 // Scores are doubles so Xapian-compatible weighting keeps its precision.
 template <typename S>
-concept scorer = docset::doc_iterator<S> && requires(S s, const S cs, doc_t target) {
+concept scorer = docset::doc_iterator<S> && requires(S s, const S cs, doc_t target, doc_t upto) {
 	{ s.score() } -> std::same_as<double>;
 	{ s.block_end(target) } -> std::same_as<doc_t>;
-	{ s.max_score(target) } -> std::same_as<double>;
+	{ s.max_score(target, upto) } -> std::same_as<double>;
 };
 
 // A filter that also weights its matches (ranges, geo distance): the same contract.

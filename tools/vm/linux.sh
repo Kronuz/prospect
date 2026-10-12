@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # strata's Linux gate VM: Ubuntu 24.04 under QEMU with HVF acceleration.
 #   tools/vm/linux.sh create BASE_IMG   create the disk and cloud-init seed from a verified noble cloud image
-#   tools/vm/linux.sh start | stop | ssh [CMD...] | status
+#   tools/vm/linux.sh start | stop | ssh [CMD...] | status | sync CHECKOUT...
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -62,6 +62,14 @@ status)
 	;;
 ssh)
 	shift; ssh_vm "$@"
+	;;
+sync)
+	# Copies each checkout's tracked and untracked (not ignored) files to ~/libs/<name>.
+	shift
+	for src in "$@"; do
+		name=$(basename "$src")
+		(cd "$src" && git ls-files -co --exclude-standard -z | xargs -0 tar -cf - 2>/dev/null) | ssh_vm "rm -rf ~/libs/$name && mkdir -p ~/libs/$name && tar -xf - -C ~/libs/$name 2>/dev/null"
+	done
 	;;
 *)
 	sed -n '2,4p' "$0"; exit 2

@@ -1,8 +1,10 @@
 // Relevance parity with Xapian (docs/design/phase-2.md, "Parity harness"): builds the
-// oracle's index (the first N corpus documents), rebuilds each recorded query from its
+// oracle's index (the first N corpus documents, analyzed by analysis::term_generator with
+// TermGenerator's defaults), rebuilds each recorded query from its
 // Query(...) description, and compares match counts and top-10 (docid, weight) against
 // the oracle's rank vectors at relative error <= 1e-9, ordering near-ties by docid.
 //   parity CORPUS_JSON N RANK_JSONL
+#include "analysis.hh"
 #include "strata/search.hh"
 #include "strata/writer.hh"
 
@@ -170,33 +172,22 @@ int main(int argc, char** argv) {
 	{
 		std::ifstream in(argv[1]);
 		std::string line;
-		std::vector<std::pair<std::string_view, std::uint32_t>> tokens;
-		std::vector<std::uint32_t> positions;
+		analysis::term_generator g;
+		std::map<std::string, std::pair<std::uint32_t, std::vector<std::uint32_t>>> terms;
 		std::vector<strata::posting_input> postings;
 		for (std::size_t d = 0; d < n && std::getline(in, line); ++d) {
-			std::string_view text = text_field(line);
-			tokens.clear();
-			std::uint32_t pos = 0;
-			for (std::size_t i = 0; i < text.size();) {
-				std::size_t j = text.find(' ', i);
-				if (j == std::string_view::npos) { j = text.size(); }
-				if (j > i) {
-					++pos;  // a word over 64 bytes takes a position but generates no term (oracle vectors)
-					if (j - i <= 64) { tokens.push_back({text.substr(i, j - i), pos}); }
-				}
-				i = j + 1;
-			}
-			std::sort(tokens.begin(), tokens.end());
-			positions.clear();
-			for (const auto& t : tokens) { positions.push_back(t.second); }
+			terms.clear();
+			std::uint32_t length = 0;
+			g.set_termpos(0);
+			g.index_text(text_field(line), [&](std::string_view term, std::uint32_t wdf, std::uint32_t pos) {
+				auto& t = terms[std::string(term)];
+				t.first += wdf;
+				length += wdf;
+				if (pos) { t.second.push_back(pos); }
+			});
 			postings.clear();
-			for (std::size_t i = 0; i < tokens.size();) {
-				std::size_t j = i;
-				while (j < tokens.size() && tokens[j].first == tokens[i].first) { ++j; }
-				postings.push_back({tokens[i].first, std::uint32_t(j - i), std::span<const std::uint32_t>(positions.data() + i, j - i)});
-				i = j;
-			}
-			w.add(d + 1, postings, std::uint32_t(tokens.size()));
+			for (const auto& [term, t] : terms) { postings.push_back({term, t.first, t.second}); }
+			w.add(d + 1, postings, length);
 		}
 	}
 	std::string file = w.flush({});

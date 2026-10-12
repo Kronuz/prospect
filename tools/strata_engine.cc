@@ -1,12 +1,16 @@
 // strata as a search-benchmark-game engine.
 //   strata_engine index DIR < corpus.json   one segment from JSON lines ("text": whitespace tokens)
 //   strata_engine serve DIR                  "COMMAND\tquery" lines -> one count per line
+//   strata_engine bench DIR COMMAND RUNS < queries.txt
+//                                            per query: fastest of RUNS in-process runs, in µs
 // Query syntax: words are optional, +word is required, -word is excluded, "a b" is a phrase.
 #include "residency.hh"
 #include "strata/search.hh"
 #include "strata/writer.hh"
 
 #include <charconv>
+#include <chrono>
+#include <iomanip>
 #include <cstdio>
 #include <fstream>
 #include <iostream>
@@ -136,40 +140,61 @@ strata::scorer_ptr build(const strata::segment& seg, const parsed& q) {
 	return result;
 }
 
-int serve(const std::string& dir) {
-	auto file = residency::file::open(dir + "/segment.sx");
+std::uint64_t run(const strata::segment& seg, std::string_view command, std::string_view query) {
+	const parsed q = parse(query);
+	const bool counting = command == "COUNT" || command.ends_with("_COUNT");
+	// A single term's count is its document frequency (one segment, no deletes).
+	if (command == "COUNT" && q.must.size() + q.should.size() == 1 && q.must_not.empty() && (q.must.empty() ? q.should[0] : q.must[0]).size() == 1) {
+		auto info = seg.term((q.must.empty() ? q.should[0] : q.must[0])[0]);
+		return info ? info->df : 0;
+	}
+	auto s = build(seg, q);
+	if (!s) { return counting ? 0 : 1; }
+	if (command == "COUNT") { return strata::count(*s); }
+	std::size_t k = 0;
+	std::from_chars(command.data() + 4, command.data() + command.size(), k);
+	std::uint64_t n = 0;
+	strata::top_k(*s, k, counting ? &n : nullptr);
+	return counting ? n : 1;
+}
+
+strata::segment open(const std::string& dir, residency::file& file) {
+	file = residency::file::open(dir + "/segment.sx");
 	auto bytes = file.view({0, file.size()});
-	strata::segment seg(std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
+	return strata::segment(std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
+}
+
+int serve(const std::string& dir) {
+	residency::file file;
+	strata::segment seg = open(dir, file);
 	std::string line;
 	std::cout.setf(std::ios::unitbuf);
 	while (std::getline(std::cin, line)) {
 		const std::size_t tab = line.find('\t');
-		const std::string_view command(line.data(), tab);
-		const parsed q = parse(std::string_view(line).substr(tab + 1));
-		std::uint64_t result = 1;
-		const bool counting = command == "COUNT" || command.ends_with("_COUNT");
-		// A single term's count is its document frequency (one segment, no deletes).
-		if (command == "COUNT" && q.must.size() + q.should.size() == 1 && q.must_not.empty() &&
-			(q.must.empty() ? q.should[0] : q.must[0]).size() == 1) {
-			auto info = seg.term((q.must.empty() ? q.should[0] : q.must[0])[0]);
-			std::cout << (info ? info->df : 0) << '\n';
-			continue;
+		std::cout << run(seg, std::string_view(line.data(), tab), std::string_view(line).substr(tab + 1)) << '\n';
+	}
+	return 0;
+}
+
+// queries.txt is the harness's JSON lines: {"query": "...", "tags": [...]}.
+int bench(const std::string& dir, std::string_view command, int runs) {
+	residency::file file;
+	strata::segment seg = open(dir, file);
+	for (std::string line; std::getline(std::cin, line);) {
+		auto at = line.find("\"query\": \"");
+		if (at == std::string::npos) { continue; }
+		at += 10;
+		const std::string query = line.substr(at, line.find('"', at) - at);
+		std::string unescaped;
+		for (std::size_t i = 0; i < query.size(); ++i) { unescaped.push_back(query[i] == '\\' ? query[++i] : query[i]); }
+		double best = 1e300;
+		std::uint64_t result = 0;
+		for (int r = 0; r < runs; ++r) {
+			auto t0 = std::chrono::steady_clock::now();
+			result = run(seg, command, unescaped);
+			best = std::min(best, std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count());
 		}
-		auto s = build(seg, q);
-		if (!s) {
-			std::cout << (counting ? 0 : 1) << '\n';
-			continue;
-		}
-		if (command == "COUNT") {
-			result = strata::count(*s);
-		} else if (command.starts_with("TOP_")) {
-			std::size_t k = 0;
-			std::from_chars(command.data() + 4, command.data() + command.size(), k);
-			std::uint64_t n = 0;
-			strata::top_k(*s, k, counting ? &n : nullptr);
-			if (counting) { result = n; }
-		}
-		std::cout << result << '\n';
+		std::cout << std::fixed << std::setprecision(1) << best << '\t' << result << '\t' << unescaped << '\n';
 	}
 	return 0;
 }
@@ -177,10 +202,10 @@ int serve(const std::string& dir) {
 }  // namespace
 
 int main(int argc, char** argv) {
-	if (argc != 3) {
-		std::cerr << "usage: strata_engine index|serve DIR\n";
-		return 2;
-	}
-	std::string mode = argv[1];
-	return mode == "index" ? index(argv[2]) : serve(argv[2]);
+	const std::string mode = argc > 1 ? argv[1] : "";
+	if (mode == "index" && argc == 3) { return index(argv[2]); }
+	if (mode == "serve" && argc == 3) { return serve(argv[2]); }
+	if (mode == "bench" && argc == 5) { return bench(argv[2], argv[3], std::atoi(argv[4])); }
+	std::cerr << "usage: strata_engine index|serve DIR | bench DIR COMMAND RUNS < queries\n";
+	return 2;
 }

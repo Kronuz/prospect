@@ -25,7 +25,7 @@ struct doc_model {
 int main() {
 	std::mt19937_64 rng(11);
 	const std::vector<std::string> vocab = {"a", "b", "c", "d", "e", "f", "g", "h", "rare1", "rare2"};
-	for (std::size_t ndocs : {50u, 400u, 3000u}) {
+	for (std::size_t ndocs : {50u, 400u, 3000u, 10000u, 30000u}) {
 		std::vector<doc_model> docs(ndocs);
 		strata::segment_writer w;
 		for (std::size_t d = 0; d < ndocs; ++d) {
@@ -157,6 +157,9 @@ int main() {
 					CHECK(pruned[i].ord == best[i].second || std::abs(pruned[i].score + best[i].first) <= 1e-9);
 				}
 			}
+			// count(): exact, inclusion-exclusion, or windowed fill
+			auto q5 = build();
+			CHECK(strata::count(*q5) == want.size());
 			// advance skips correctly
 			auto q3 = build();
 			ordinal_t target = ordinal_t(rng() % ndocs);

@@ -115,8 +115,9 @@ For a term with `df` documents, after the term info:
 - **Competitive pairs** are the Pareto frontier of (wdf high, length low) over the
   range. Lengths are stored rounded down to a 1-byte log scale and wdf exactly, so a
   stored pair never understates a score bound; scoring itself reads exact lengths from
-  `lengths`. When the frontier has more than four pairs, neighbors merge into
-  (maximum wdf, minimum length), which keeps the bound valid.
+  `lengths`. The whole frontier is stored (at most 256 pairs, one per length code):
+  merging pairs to cap the count loosens dense terms' bounds until almost no block
+  skips.
 
 **Size budget.** The Wikipedia corpus has 4.37 million full blocks. A level-0 entry is
 about 8 bytes (two 2-byte deltas, a positions offset of 2–3 bytes, one or two 2-byte

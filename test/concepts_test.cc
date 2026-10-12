@@ -14,7 +14,7 @@ struct constant_scorer {
 	std::uint64_t cost() const noexcept { return it.cost(); }
 	double score() noexcept { return weight; }
 	strata::doc_t block_end(strata::doc_t) noexcept { return strata::no_more_docs; }
-	double max_score(strata::doc_t) noexcept { return weight; }
+	double max_score(strata::doc_t, strata::doc_t) noexcept { return weight; }
 };
 
 static_assert(strata::scorer<constant_scorer>);
