@@ -85,6 +85,22 @@ Section sizes on the 5M corpus: postings 1,008.0 MB (Lucene `.doc` 990.6 MB), po
 1,631.2 MB (`.pos` 1,714.8 MB), terms 100.6 MB (`.tim` 39.5 MB), norms 5.0 MB, lengths
 10.1 MB.
 
+## Review findings (phase-2-gate.md)
+
+| Item | Resolution |
+|---|---|
+| G1 reader safety | Postings and positions readers bound every read by the term's verified range; skip groups' and blocks' last ordinals must increase and stay below the document count, and a group's blocks must fill its bytes exactly, so bitset blocks cannot yield ordinals past the document count; a positions read rejects counts above the segment's maximum (format 9 stats) before allocating |
+| G2 term index | Copied out of the mapping at open, after its checksum |
+| G3 fuzzing | `fuzz/fuzz_segment.cc` corrupts prebuilt segments (300 to 20,000 documents, several skip groups, bitset and FOR blocks, counts that differ from wdf, positioned wdf-0 terms, stored records past one frame) and recomputes every checksum for seven inputs in eight, then runs term, conjunction, disjunction, exclusion, required-plus-optional, phrase, and counted queries and stored reads: one CPU-hour at format 9, 107,932 runs, ASan and UBSan, RSS limit 2 GB, clean |
+| G4 phrase bound | Lucene-mode phrase bounds use only terms whose position counts equal their wdf; a test with a positioned wdf-0 term leading the phrase compares pruned and exhaustive top-k |
+| G5 benchmarks | `strata_engine verify`: pruned top-k equals an exhaustive scan for all 1,162 queries at k = 10, 100, 1000 on Wikipedia, and counts agree. Trials of all three engines in one run, engine order rotated, gated on host load (`tools/vm/quiet_trials.sh`), scored by `bench/phase2/gate.py` (geometric means of per-query ratios, each run's measured pipe floor): pending a quiet host |
+
+Also closed: bound sums compared against the threshold allow for summation rounding
+(C4); the table of contents rejects duplicate and overlapping sections, stored record
+lengths are checked as read, the writer refuses more documents than 32-bit ordinals
+hold, `top_k` with k = 0 and `fill` on an unstarted iterator are safe (C9); the scorer
+contract states the `fill` window and `max_score` semantics (C8).
+
 ## Robustness
 
 - **Integrity.** Small sections are verified in full at open; terms, postings,
@@ -100,7 +116,7 @@ Section sizes on the 5M corpus: postings 1,008.0 MB (Lucene `.doc` 990.6 MB), po
   full including positions and stored records), plus the libraries' targets: `unicode`
   35M runs, `snowball` 50M, `analysis` 6.2M, `bitpack` with `encoded_size` 27.9M,
   `termdict` 4.2M, all clean.
-- **Golden fixture.** `test/fixtures/small.sx` pins the writer's bytes at format 8.
+- **Golden fixture.** `test/fixtures/small.sx` pins the writer's bytes at format 9.
 
 ## Changes for the architect
 
