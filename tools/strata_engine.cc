@@ -1,6 +1,7 @@
 // strata as a search-benchmark-game engine.
 //   strata_engine index DIR < corpus.json   one segment from JSON lines ("text": whitespace tokens)
 //   strata_engine serve DIR                  "COMMAND\tquery" lines -> one count per line
+//   strata_engine terms DIR                  every term and its document frequency
 //   strata_engine bench DIR COMMAND RUNS < queries.txt
 //                                            per query: fastest of RUNS in-process runs, in µs
 // Query syntax: words are optional, +word is required, -word is excluded, "a b" is a phrase.
@@ -8,6 +9,7 @@
 #include "strata/search.hh"
 #include "strata/writer.hh"
 
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <iomanip>
@@ -99,26 +101,43 @@ parsed parse(std::string_view q) {
 }
 
 // A clause's scorer, or null when one of its terms is absent (the clause matches nothing).
-strata::scorer_ptr clause_scorer(const strata::segment& seg, const std::vector<std::string>& clause) {
+// boost is how many times the clause repeats in its group.
+strata::scorer_ptr clause_scorer(const strata::segment& seg, const std::vector<std::string>& clause, double boost = 1.0) {
 	std::vector<strata::format::term_info> infos;
 	for (const auto& t : clause) {
 		auto info = seg.term(t);
 		if (!info) { return nullptr; }
 		infos.push_back(*info);
 	}
-	if (infos.size() == 1) { return std::make_unique<strata::term_scorer>(seg, infos[0]); }
+	if (infos.size() == 1) { return std::make_unique<strata::term_scorer>(seg, infos[0], boost); }
 	return std::make_unique<strata::phrase_scorer>(seg, infos);
+}
+
+// Repeated clauses in a group merge into one with the repeat count as boost, as Lucene's
+// BooleanQuery rewrite does; BM25 is linear in the boost, so scores are unchanged. Phrases
+// keep their repeats.
+std::vector<std::pair<std::vector<std::string>, double>> merge_repeats(const std::vector<std::vector<std::string>>& clauses) {
+	std::vector<std::pair<std::vector<std::string>, double>> out;
+	for (const auto& c : clauses) {
+		auto it = std::find_if(out.begin(), out.end(), [&](const auto& e) { return e.first == c; });
+		if (it != out.end() && c.size() == 1) {
+			it->second += 1.0;
+		} else {
+			out.push_back({c, 1.0});
+		}
+	}
+	return out;
 }
 
 strata::scorer_ptr build(const strata::segment& seg, const parsed& q) {
 	std::vector<strata::scorer_ptr> must, should, must_not;
-	for (const auto& c : q.must) {
-		auto s = clause_scorer(seg, c);
+	for (const auto& [c, boost] : merge_repeats(q.must)) {
+		auto s = clause_scorer(seg, c, boost);
 		if (!s) { return nullptr; }
 		must.push_back(std::move(s));
 	}
-	for (const auto& c : q.should) {
-		if (auto s = clause_scorer(seg, c)) { should.push_back(std::move(s)); }
+	for (const auto& [c, boost] : merge_repeats(q.should)) {
+		if (auto s = clause_scorer(seg, c, boost)) { should.push_back(std::move(s)); }
 	}
 	for (const auto& c : q.must_not) {
 		if (auto s = clause_scorer(seg, c)) { must_not.push_back(std::move(s)); }
@@ -176,6 +195,17 @@ int serve(const std::string& dir) {
 	return 0;
 }
 
+int terms(const std::string& dir) {
+	residency::file file;
+	strata::segment seg = open(dir, file);
+	std::ios::sync_with_stdio(false);
+	seg.dictionary().scan("", [](std::string_view key, std::string_view value) {
+		std::cout << key << '\t' << strata::format::decode_term_info(value).df << '\n';
+		return true;
+	});
+	return 0;
+}
+
 // queries.txt is the harness's JSON lines: {"query": "...", "tags": [...]}.
 int bench(const std::string& dir, std::string_view command, int runs) {
 	residency::file file;
@@ -203,7 +233,8 @@ int main(int argc, char** argv) {
 	const std::string mode = argc > 1 ? argv[1] : "";
 	if (mode == "index" && argc == 3) { return index(argv[2]); }
 	if (mode == "serve" && argc == 3) { return serve(argv[2]); }
+	if (mode == "terms" && argc == 3) { return terms(argv[2]); }
 	if (mode == "bench" && argc == 5) { return bench(argv[2], argv[3], std::atoi(argv[4])); }
-	std::cerr << "usage: strata_engine index|serve DIR | bench DIR COMMAND RUNS < queries\n";
+	std::cerr << "usage: strata_engine index|serve|terms DIR | bench DIR COMMAND RUNS < queries\n";
 	return 2;
 }

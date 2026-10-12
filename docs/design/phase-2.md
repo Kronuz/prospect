@@ -108,10 +108,14 @@ For a term with `df` documents, after the term info:
 
 ### Skip data
 
-- **Level 0**, one entry per block: last ordinal (delta), the block's end offset
-  (delta), the positions stream offset and the index within the positions block where
-  this postings block's positions start, and the competitive pairs.
-- **Level 1**, one entry per 32 blocks, with the same fields over its range.
+- **Level 0**, one entry per block: last ordinal (delta), the block's byte length,
+  then for terms with positions the index of the block's first position in the term's
+  stream, the byte offset of the positions block holding it, and (when counts differ
+  from wdf) the byte offset of the block's count block, each a delta that restarts per
+  group; then the competitive pairs, prefixed with their byte length so readers step
+  over them and decode them only for a bound.
+- **Level 1**, one entry per 32 blocks, with the same fields over its range, plus the
+  byte lengths of its level-0 entries and of its blocks.
 - **Competitive pairs** are the Pareto frontier of (wdf high, length low) over the
   range. Lengths are stored rounded down to a 1-byte log scale and wdf exactly, so a
   stored pair never understates a score bound; scoring itself reads exact lengths from
@@ -129,9 +133,12 @@ the 1.02× budget (1,010 MB). The gate measures the real figure.
 
 Each term has one position stream. A document's positions are deltas restarting at
 that document; the documents' runs are concatenated in ordinal order and packed into
-PFOR blocks of 128 with an LEB128 tail. A postings skip entry points to the positions
-block and the index within it where its documents start; a scorer decodes forward
-from there. Terms flagged no-positions have no stream.
+PFOR blocks of 128 with an LEB128 tail. Blocks sit back to back with no size table: a
+postings skip entry gives the byte offset of the positions block holding its first
+position, and a reader steps to later blocks by reading each block's header
+(`bitpack::encoded_size`). Opening a term's positions reads a fixed header. When
+per-document counts differ from wdf, a count block per postings block precedes the
+positions, located the same way. Terms flagged no-positions have no stream.
 
 A run's length is the document's position count, which is not always its wdf in
 Xapiand: boolean terms carry positions with wdf 0, weighted fields add their weight to
@@ -204,17 +211,27 @@ before the parity gate runs.
 ## Scorers
 
 All scorers implement `strata::scorer`. Scoring scorers accept
-`set_min_competitive_score(s)` from their parent.
+`set_min_competitive_score(s)` from their parent. `max_score(from, upto)` bounds a range
+from skip data alone, without moving the scorer, so a parent can bound children it has
+not positioned yet. Scorers with an expensive check (phrases) iterate in two phases: an
+approximation (their terms' conjunction) and `matches()`; parents leapfrog on
+approximations and confirm only documents every child agrees on.
 
 | Scorer | Behavior |
 |---|---|
-| Term | Decodes one block at a time; `block_end` and `max_score` come from skip data; term-level bounds come from the term info |
-| Conjunction | Leapfrogs from the lowest-cost scorer; block-max AND skips blocks whose summed maxima cannot compete |
+| Term | Decodes one block at a time; skips whole groups, then blocks, whose bounds cannot compete; group bounds equal the maximum of their blocks' |
+| Conjunction | Leapfrogs from the lowest-cost scorer; the lead's blocks are windows, skipped whole when their summed bounds cannot compete; inside a window, a document whose lead score plus the others' window bounds cannot compete is skipped before the others move |
 | Required plus optional (Xapian `AND_MAYBE`) | Iterates the required side; adds optional scores where they match; skips optional work when required score plus optional bound cannot compete |
-| Disjunction (top-k) | Block-max MaxScore at the top level, using each term's global bound to split essential and non-essential clauses; block-max WAND nested |
-| Disjunction (exhaustive) | Windows of 4,096 ordinals with a bitset, for counts and aggregations |
-| Phrase, near | Conjunction first, then positions |
+| Disjunction (top-k) | MaxScore in windows of 4,096 ordinals: per-window bounds split essential and non-essential clauses; essential clauses accumulate scores into a dense array with a match bitset; non-essential clauses are consulted only for documents that can still compete |
+| Phrase, near | Two-phase: the rarest term leads the conjunction, then positions |
 | Filter, and-not | Non-scoring iterators |
+
+**Counting** answers from statistics when it can: a term's document frequency, a
+union containing a term that matches every document, `|A| + |B| − |A ∩ B|` for two
+clauses, the required side's count for required plus optional, and
+`|A| − |A ∩ B|` for and-not. Otherwise it counts windows of 4,096 ordinals into a
+bitset: unions OR their clauses' window bits; conjunctions of terms AND them when the
+lead is denser than 1/16 of the segment and leapfrog on raw postings otherwise.
 
 Evaluation runs in windows of 4,096 ordinals; the query coroutine checks its
 `task::budget` between windows.
