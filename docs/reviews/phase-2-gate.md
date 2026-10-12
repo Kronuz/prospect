@@ -546,3 +546,215 @@ defect, G6. G5 waits for its trials.
   (`search.hh:447`). When the lead's window bound dwarfs the rest, the rounding of `sum`
   exceeds a `sum_upper` margin taken on the lead's score plus the rest. Summing the
   other children's bounds directly closes it. The duplicate-document tie test is owed.
+
+## Second re-check
+
+- Date: 2026-10-12.
+- Reviewed: G1–G6 and C4, C7, C9–C11 at strata `cb01c65`, from the code and the diffs
+  against `4edad0a`: `2542867`, `5fa66a4`, `e073258`, `523438b`, `e5fafec`, `662558f`,
+  `7f48e42`, `03e2544`, `24429ec`, `69813ba` (format 10), `64623d0` (format 11),
+  `5ec6c0d`, and `cb01c65`. The Phase 3 design commits (`474b29c`, `b2ffe24`, `d885f7a`)
+  are outside this gate. Nothing was built or run; fuzz figures come from
+  `.scratch/fuzz-segment-v9b.log` and `.scratch/fuzz-segment-v11a.log`.
+
+### Verdict
+
+**Not approved yet.** G2, G4, and G6 close. Format 10 removes G1's level-1 sums, but G1
+stays open on a position index that wraps past its check and on its resealed tests. Two
+new defects block: G7, a pruned term query that loops forever on a skipped group's
+corrupt last ordinal; and G8, a disjunction of up to four clauses that drops its
+remaining matches once a parent's minimum splits it, on valid segments. G3 waits for the
+format-11 hours, G5 for its trials, and the postings row for a format-11 measurement.
+Phase 3 implementation starts at approval.
+
+### Status
+
+1. **G1. Open.**
+   - Closed:
+     - Level 1 is fixed-width, so no offset is a sum. The header checks the level-1 array
+       and the pairs, level-0, and block areas against the term's range before forming a
+       pointer (`reader.hh:287-303`). `read_group` takes a group's level-0 and block
+       ranges from its own entry and the next one, requires them ordered and inside their
+       areas, and requires its last above its predecessor's and below the document count
+       (`583-601`). `group_impacts` checks its pair range (`403-408`).
+     - `decode_group` keeps block lasts increasing up to the group's last, and block bytes
+       nonzero and filling the group (`620, 636, 640-641`).
+     - The lazy bitset path is bounded. `load_bitset` caps a block at its entry's bytes
+       and at `bits_`'s 512, masks the last word, and requires 128 bits with the block's
+       last ordinal among them (`715-737`), so `ords()` and `advance_bits` stay in the
+       loaded words and stop at that bit (`740-764`). The cap rejects no valid block: the
+       writer picks a bitset only when it is smaller than the FOR encoding
+       (`writer.hh:500`).
+   - Open:
+     1. **The position index wraps past its check.** `read` compares `first + count` with
+        the term's stream (`reader.hh:880`), and `first` sums unchecked file values: the
+        tail's first index (`283`), a group's (`593`, 64-bit when wide), level-0 deltas
+        (`627`), and counts (`451`). With `first` within `count` of 2^64 the sum wraps,
+        the check passes, neither loop runs (`889, 895`), and `read` returns `count`
+        values that `make_unique_for_overwrite` left uninitialized, or a previous
+        document's (`881-884, 896`). Fix: reject `first > limit || count > limit - first`.
+     2. **No resealed unit test.** G1 asks for one per check; `segment_test` still
+        corrupts without resealing (`segment_test.cc:131-166`). `refresh_checksums`
+        (`fuzz_segment.cc:50-60`) becomes a test helper, and tests cover at least a
+        level-1 offset past its area, a bitset block without its last bit, a FOR block
+        reaching the document count, the wrapped position index, and G7's lowered last.
+     3. `decode_group` does not require a group's level-0 bytes consumed exactly, as G1
+        asks (`reader.hh:640`): one compare.
+2. **G2. Closed** (`reader.hh:132-135`, unchanged).
+3. **G3. Open until the format-11 hours; the format-9 record is complete.**
+   - The table-of-contents mode the first re-check asked for is in: one input in eight
+     changes the table and recomputes only its checksum (`fuzz_segment.cc:131-135`), so
+     the duplicate and overlap checks see malformed tables (`format.hh:214-225`).
+   - The target reaches the new code: dense terms produce bitset blocks; the sequential
+     walk expands them (`ords`); conjunctions, unions, phrases, and required-plus-optional
+     advance inside pending blocks (`advance_bits`); counted conjunctions OR whole bitset
+     blocks (`or_bitset`); Lucene-mode phrases run the existence check and the frequency
+     path.
+   - It does not reach NEAR or Xapian-weighted phrases (`fuzz_segment.cc:111-115` passes
+     neither weights nor a window), valid wide level-1 entries (every base is narrow,
+     `44`; a flipped width byte reaches the wide reads only with garbage entries), or
+     G8's shape.
+   - The format-9 "re-run after the positionless-term and table-of-contents additions"
+     (`gates/phase-2.md:118-119`) stopped at 36,489 runs (`fuzz-segment-v9b.log`), and
+     the format-11 run is 10 minutes, 45,298 runs (`fuzz-segment-v11a.log`). Neither is
+     the hour; what it must show is under "What approval needs".
+4. **G4. Closed.** The design's phrase row bounds by position counts and states that a
+   positionless term matches no phrase (`phase-2.md:237`).
+5. **G5. Pending** (under "What approval needs").
+6. **G6. Closed.** A term flagged `no_positions` has count 0 and no positions
+   (`reader.hh:833-836, 860, 873`). The phrase existence check leads with that slot and
+   finds nothing (`search.hh:918-946`); NEAR returns 0 when a term has fewer positions
+   than it repeats (`974`), inheriting the fix from the reader. The test runs a phrase and
+   a counted NEAR over 300 documents, two full blocks and a 44-document tail
+   (`search_test.cc:248-265`).
+
+### New blocking items
+
+**G7. A pruned term query loops forever on a skipped group's corrupt last ordinal.**
+
+- Format 10 checks a group's last only when the group decodes, and only against its
+  predecessor (`reader.hh:597`); format 9 checked every last at open.
+- `skip_blocks` advances to `group_last(g − 1) + 1` (directly, or as `group_first(g)`),
+  where group g − 1 is one it skipped without decoding (`search.hh:299-301`). When that
+  last is below `d`, `advance` returns `d` unchanged (`reader.hh:321`), `group_of(d)`
+  returns the same group, and the loop repeats (`search.hh:294-302`).
+- It needs a resealed level-1 entry and a threshold under which the group holding `d` and
+  the next one cannot compete while a later group or the tail can. `collect_top_k`
+  reaches it (`226-236`), as do a required side and an exclusion's include side. At
+  libFuzzer's default 1,200-second timeout, such an input surfaces after 20 minutes.
+- Fix: `skip_blocks` throws `corrupt_segment` unless its target exceeds `d`
+  (`search.hh:301`); on valid skip data, the group before the target ends at or past `d`.
+  Checking every level-1 last at open, one strided 32-bit load per group (1,018 for
+  `the`), also closes it. A resealed test lowers a skipped group's last below `d` and runs
+  a pruned `top_k`: it throws.
+
+**G8. A disjunction of up to four clauses drops its remaining matches when a minimum
+splits it.**
+
+- Linear mode (`523438b`) advances the children directly and never fills the heap
+  (`search.hh:605-614`).
+- When `set_min_competitive_score` then makes a clause non-essential, `essential_from_`
+  rises, `linear()` stays false from then on, and the heap stays empty (`511-521`). The
+  next `next()` or `advance()` pops nothing and returns `no_more_docs` (`538-541,
+  548-551`), so pruned top-k keeps only the best hits before the split. Valid segments
+  trigger it.
+- Under `top_k`'s generic loop the minimum reaches a disjunction through an exclusion's
+  include side (`711`) and a required side (`665`). `strata_engine` builds `a b -c` as an
+  exclusion over a two-clause disjunction (`tools/strata_engine.cc:166-176`), and
+  `parity` builds `AND_NOT` and `AND_MAYBE` over whatever left side the query has
+  (`tools/parity.cc:125-143`).
+- No gate run sees it: the 19 negated benchmark queries are `+a -b [-c]`, every oracle
+  `AND_NOT` and `AND_MAYBE` has a single term on the left, and `search_test` builds
+  disjunctions only as the optional or excluded side (`search_test.cc:131-136`). Parity's
+  last recorded pass (419 of 419, `e073258`) predates `523438b`.
+- Fix: when `set_min_competitive_score` raises `essential_from_` on a started disjunction
+  whose heap is empty, it pushes each essential child at its current `doc()`
+  (`search.hh:515-520`). A test compares pruned with exhaustive top-k for an exclusion
+  over a disjunction and for a disjunction as the required side, with one clause's bound
+  under the k-th score (C5's `strata_engine` shapes); `parity` and `verify` re-run on the
+  fix.
+
+### What approval needs
+
+- **Fuzzing**, on the commit that closes G1, G7, and G8:
+  - The segment target: one CPU-hour under ASan and UBSan, RSS limit 2 GB, with a
+    `-timeout` of seconds rather than the default so a loop is a finding; zero findings;
+    executions per second, PCs, corpus size, and CPU time recorded. `exercise` first adds
+    a NEAR scorer, a Xapian-weighted phrase, a pruned `top_k` over an exclusion of a
+    two-clause disjunction, and a base written with `wide_skip_offsets`.
+  - PLAN asks an hour per decoder and parser added in the phase. The gate report gives
+    `unicode` 5 CPU-minutes, `snowball` 30, `analysis` 30, and `bitpack`'s
+    `encoded_size` 5 (`gates/phase-2.md:119-121`): each reaches an hour, or the report
+    says which predate Phase 2.
+- **Tests**: all four pass under ASan and UBSan, and `concurrency_test` under TSan
+  (PLAN: TSan where threads are involved), at that commit, recorded in the gate report.
+- **G5.** The first review's list stands. In addition:
+  - `gate.py` reports per row the median and 95% bootstrap interval across trials, the
+    raw geometric mean beside the floor-subtracted one, and the flag for classes whose
+    floor exceeds half their time, and it scores the Xapian rows. Today it prints the mean
+    and range of floor-subtracted geometric means against Lucene and Tantivy only
+    (`bench/phase2/gate.py:19, 44-64`). It takes the floor as the smallest time over every
+    trial (`cb01c65`); the report states that floor and the trial it came from.
+  - `strata_engine verify` re-runs on the commit that closes G7 and G8. Trials taken at
+    `cb01c65` count if that commit changes no measured path beyond the added checks and
+    states its in-process term and phrase timings against `cb01c65`.
+- **The record at format 11:**
+  - The postings row is re-measured: the gate report holds format 8's 1.018×
+    (`gates/phase-2.md:16`), and `64623d0` gives 1.026× for format 10 and no figure for
+    format 11. Format 11 holds ≤ 1.02×.
+  - Ruling 4: a test that a version-10 file is rejected. `small.sx` was rewritten at
+    formats 9, 10, and 11 (`771634f`, `69813ba`, `64623d0`), and no test rejects or
+    reads an earlier version.
+  - The gate report says format 9 for the fuzz hour and the fixture (`117, 122`), and its
+    format list stops at 8 (`133`). Its "Also closed" line (`98-102`) overstates C4 and
+    C9.
+
+### Conditions
+
+- **C4. Open in two places.** `rest_bound_` sums the other children's window bounds
+  (`search.hh:457-459`), and the tie test returns ordinals 0–9 over 5,000 identical
+  documents for a term, a union, and a conjunction, pruned and counted
+  (`search_test.cc:218-247`). The original C4 also names:
+  - The windowed MaxScore's `remaining -= bound[order[e]]` (`search.hh:1161`). Its
+    rounding error is relative to `rest`, not to what remains, so it can exceed
+    `sum_upper`'s margin when the consulted bound dominates. Prefix sums of the
+    non-essential bounds, formed lowest first as `rest` is, close it.
+  - `s - opt_->max_score_total()` rounds to nearest, not down (`665`); one `nextafter`
+    toward −∞ closes it.
+  - The tie test cannot show either: identical documents only tie the threshold, where
+    pruning cannot change the result.
+- **C7. Closed for `AND_MAYBE`; open for conjunctions of disjunctions.** ARCHITECTURE
+  records the measurement and the choice (`ARCHITECTURE.md:173-178`). Conjunctions of
+  disjunctions, where a disjunction can lead, are unmeasured, and the amended text defers
+  WAND to exactly that shape; the measurement is owed before the Phase 3 gate.
+- **C9.**
+  - Closed: `top_k` with k = 0 (`search.hh:1040-1043`); `fill` and `for_each_until` on
+    an unstarted iterator (`reader.hh:468, 487`); duplicate and overlapping sections
+    (`format.hh:214-225`); stored record lengths checked as read (`reader.hh:192-197`).
+  - Open: the writer caps a segment at 2^32 − 2 documents (`writer.hh:229`), and
+    `count()`'s window end `base + 4096` wraps to 0 for ordinals at or past 2^32 − 4,096
+    (`search.hh:1082`); `fill` then sets nothing, and the loop never ends. The cap
+    becomes 2^32 − 4,096, checked at open, or `count()` clamps its end as `collect_top_k`
+    does (`1121`).
+  - Open: a frame's allocation is bounded only by its 32-bit `raw_size`
+    (`reader.hh:175, 182`), up to 4 GiB; the stored section records its largest frame
+    size.
+  - Open, text: the design's collectors section still describes a heap and Xapian's
+    count triple (`phase-2.md:262-269`); its skip-data text gives format 10's 64-bit
+    offsets and length-prefixed pairs (`114-124`), not format 11's width flag, 32-bit
+    offsets, and count-headed compact pairs; `writer.hh:26-37` describes format 9's
+    level 1, and `writer.hh:536` runs to 131 columns.
+- **C10. Closed in code.** Eight threads run term, counted-union, and phrase queries and
+  stored reads on one segment while its regions verify lazily, and each digest equals a
+  single thread's (`concurrency_test.cc:33-61`). The TSan run appears only in
+  `7f48e42`'s message (see "Tests" above).
+- **C11. Closed.** The gate report breaks the term dictionary down and sets ≤ 1.5× `.tim`
+  for Phase 3 (`gates/phase-2.md:144-151`). Its parts sum to 27.7 bytes a term, which
+  over 3,964,752 terms exceeds the 100.6 MB section; it states whether keys count raw or
+  as stored.
+- **C12. Exception-safe skip-group state** (new). `decode_group` overwrites `entries_`
+  before validating and sets `decoded_group_` only at the end, so after a throw it still
+  names the previous group over half-decoded entries (`reader.hh:605-609, 642`). It
+  invalidates `decoded_group_` before decoding. Before Phase 3 fences one segment and
+  keeps serving others.
+- Not re-checked here: C1–C3, C5, C6, C8.
