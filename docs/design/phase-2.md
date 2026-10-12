@@ -30,8 +30,9 @@ One file per segment, written once, sequentially, then fsynced:
 | Reserved (zero) | 4 |
 | Segment id | 16 |
 
-The header's integrity is covered by the footer's CRC of the table of contents, which
-lists the header as region 0.
+The table of contents starts with an entry for the header (kind `header`, offset 0,
+length 32) and its CRC-32C, so the chain footer → table of contents → header and
+sections is checked end to end.
 
 Sections start at 64-byte-aligned offsets. A section is a run of 64 KiB regions; the
 table of contents stores each region's CRC-32C.
@@ -129,8 +130,16 @@ Each term has one position stream. A document's positions are deltas restarting 
 that document; the documents' runs are concatenated in ordinal order and packed into
 PFOR blocks of 128 with an LEB128 tail. A postings skip entry points to the positions
 block and the index within it where its documents start; a scorer decodes forward
-from there, using each document's wdf as its run length. Terms flagged no-positions
-have no stream.
+from there. Terms flagged no-positions have no stream.
+
+A run's length is the document's position count, which is not always its wdf in
+Xapiand: boolean terms carry positions with wdf 0, weighted fields add their weight to
+wdf but one position per occurrence, and global-prefix terms merge positions from
+several fields, collapsing duplicates. The term info's "counts equal wdf" flag marks
+the usual case, where every document's count equals its wdf and nothing more is
+stored. Otherwise the positions section holds, before the stream, a per-document count
+stream aligned with the postings blocks (FOR blocks of 128 and an LEB128 tail). The
+in-memory segment tracks each document's count beside its wdf.
 
 ## Reader safety
 
@@ -149,7 +158,9 @@ have no stream.
 - **Regions:** `residency::file::open` takes the segment's region checksums. The
   synchronous backend verifies each 64 KiB region the first time a prefetch covers it
   (one atomic flag per region), which also faults the pages in. Asynchronous backends
-  verify regions as they load them. A mismatch fences the segment.
+  verify regions as they load them. A mismatch fences the segment. The reader prefetches
+  every range it decodes (term blocks, skip data, postings, positions, stored records),
+  so verification covers every byte a query reads.
 - **Whole sections:** on merge, replication, and scrub.
 - **`SIGBUS`:** a media error under mmap is a node failure. The process exits through
   its fatal-signal handler and the replication fault model covers the loss. The verified
@@ -184,8 +195,10 @@ documentation and the oracle's vectors:
 - **CJK:** n-grams under `FLAG_CJK_NGRAM`.
 
 The oracle's term-generation vectors are extended to these inputs: prefixes, wdf
-increments, each stop strategy with a stopper, and positionless indexing. The analyzer
-passes every vector before the parity gate runs.
+increments, each stop strategy with a stopper, positionless indexing, and the word
+rules that need pinning (connector punctuation such as `_`, digits inside words,
+acronyms with periods, and the term-length cap). The analyzer passes every vector
+before the parity gate runs.
 
 ## Scorers
 
@@ -239,7 +252,9 @@ Evaluation runs in windows of 4,096 ordinals; the query coroutine checks its
 - Gate rows analyze with whitespace tokenization, as the baseline engines do.
 - **Indexing row:** from JSON lines to a committed single segment, 1,000,000 documents
   (one segment fits every engine's writer: Tantivy caps a writer thread below 4 GB),
-  each engine with a 2 GiB indexing memory budget and one indexing thread.
+  each engine with a 2 GiB indexing memory budget and one indexing thread. Each run
+  records every engine's segment count; a run where any engine flushes more than one
+  segment does not count.
 - **`termdict` row:** exact lookups of present and absent keys (absent keys sampled from
   the query log and from perturbed vocabulary terms) against Lucene's `seekExact` on the
   same vocabulary, in a microbenchmark that excludes the pipe.
