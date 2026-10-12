@@ -861,9 +861,16 @@ private:
 
 // --- collectors --------------------------------------------------------------------------------
 
-// The k best hits by score (ties by ordinal), best first.
+// The k best hits by score (ties by ordinal), best first. With count, also the number of
+// matches; a count known from statistics leaves the collection free to prune.
 inline std::vector<hit> top_k(scorer& s, std::size_t k, std::uint64_t* count = nullptr) {
 	auto worse = [](const hit& a, const hit& b) { return a.score != b.score ? a.score > b.score : a.ord < b.ord; };
+	if (count) {
+		if (auto n = s.exact_count()) {
+			*count = *n;
+			count = nullptr;
+		}
+	}
 	if (top_collector c(k, count != nullptr); s.collect_top_k(c)) {
 		if (count) { *count = c.count; }
 		std::sort(c.heap.begin(), c.heap.end(), worse);
