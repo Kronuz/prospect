@@ -246,6 +246,7 @@ public:
 				t.counts.assign(t.wdfs, 0, t.wdfs.size() - leb_size(in.wdf));
 			}
 			if (!t.counts_are_wdf) { format::put_leb(t.counts, in.positions.size()); }
+			max_positions_ = std::max(max_positions_, std::uint32_t(in.positions.size()));
 			std::uint32_t prev = 0;
 			for (auto p : in.positions) {
 				format::put_leb(t.positions, p - prev);
@@ -354,6 +355,7 @@ public:
 		format::put<std::uint64_t>(stats, total_length_);
 		format::put<std::uint32_t>(stats, lengths_.empty() ? 0 : *std::min_element(lengths_.begin(), lengths_.end()));
 		format::put<std::uint32_t>(stats, lengths_.empty() ? 0 : *std::max_element(lengths_.begin(), lengths_.end()));
+		format::put<std::uint32_t>(stats, max_positions_);
 		auto append = [&](format::section kind, const std::string& bytes) {
 			out.align(format::section_alignment);
 			section_stream sec(out);
@@ -676,6 +678,7 @@ private:
 	std::vector<std::uint32_t> lengths_;
 	std::string stored_;                     // stored records, concatenated
 	std::vector<std::uint64_t> stored_ends_;  // where each document's record ends
+	std::uint32_t max_positions_ = 0;        // the most positions of one term in one document
 	std::vector<std::uint64_t> docids_;
 	std::uint64_t total_length_ = 0;
 };

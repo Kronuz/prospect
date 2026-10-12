@@ -784,9 +784,10 @@ public:
 		for (const auto& sl : slots_) { s += term_weights_[sl.offset](terms_[sl.term]->wdf(), len); }
 		return s;
 	}
-	// Lucene mode: the phrase frequency is at most each term's wdf in the document, so each
-	// term's pairs bound the phrase weight and the smallest such bound holds. Xapian mode
-	// sums the terms' own bounds.
+	// Lucene mode: the phrase frequency is at most each term's position count, which is its
+	// wdf when counts are wdf, so those terms' pairs bound the phrase weight and the
+	// smallest such bound holds; other terms do not bound it. Xapian mode sums the terms'
+	// own bounds.
 	double max_score(ordinal_t from, ordinal_t upto) override {
 		if (!term_weights_.empty()) {
 			double sum = 0;
@@ -794,7 +795,9 @@ public:
 			return std::min(sum, bound_);
 		}
 		double best = bound_;
-		for (auto& t : terms_) { best = std::min(best, range_bound(*t, weight_, from, upto)); }
+		for (auto& t : terms_) {
+			if (t->info().flags & format::counts_are_wdf) { best = std::min(best, range_bound(*t, weight_, from, upto)); }
+		}
 		return best;
 	}
 	void set_min_competitive_score(double s) override { min_ = s; }
@@ -850,6 +853,7 @@ private:
 
 	double lead_bound(ordinal_t from, ordinal_t upto) {
 		if (!term_weights_.empty()) { return max_score(from, upto); }
+		if (!(terms_[lead_]->info().flags & format::counts_are_wdf)) { return bound_; }
 		return std::min(bound_, range_bound(*terms_[lead_], weight_, from, upto));
 	}
 
@@ -928,9 +932,15 @@ private:
 
 // --- collectors --------------------------------------------------------------------------------
 
+inline std::uint64_t count(scorer& s);
+
 // The k best hits by score (ties by ordinal), best first. With count, also the number of
 // matches; a count known from statistics leaves the collection free to prune.
 inline std::vector<hit> top_k(scorer& s, std::size_t k, std::uint64_t* count = nullptr) {
+	if (k == 0) {
+		if (count) { *count = strata::count(s); }
+		return {};
+	}
 	auto worse = [](const hit& a, const hit& b) { return a.score != b.score ? a.score > b.score : a.ord < b.ord; };
 	if (count) {
 		if (auto n = s.exact_count()) {

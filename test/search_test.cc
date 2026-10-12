@@ -173,6 +173,28 @@ int main() {
 			CHECK(q3->advance(target) == (it == want.end() ? strata::no_more_docs : it->first));
 		}
 	}
+	// A phrase with a positioned term of wdf 0 (a boolean term): its frequency comes from
+	// positions, so pruning must not bound it by wdf.
+	{
+		strata::segment_writer w;
+		for (std::uint32_t d = 0; d < 2000; ++d) {
+			std::vector<std::uint32_t> pa{1}, pb{2}, px{3};
+			std::vector<strata::posting_input> in{{"a", 1, pa}, {"x", 1 + d % 7, px}};
+			if (d % 2 == 0) { in.insert(in.begin() + 1, strata::posting_input{"b", 0, pb}); }  // rarer: it leads
+			w.add(d + 1, in, 2 + d % 7);
+		}
+		std::string file = w.flush({});
+		strata::segment seg(file);
+		auto phrase = [&] { return std::make_unique<strata::phrase_scorer>(seg, std::vector<strata::format::term_info>{*seg.term("a"), *seg.term("b")}); };
+		auto pruned = phrase();
+		auto hits = strata::top_k(*pruned, 10);
+		auto all = phrase();
+		std::uint64_t n = 0;
+		auto exhaustive = strata::top_k(*all, 10, &n);
+		CHECK(n == 1000);
+		CHECK(hits.size() == 10 && exhaustive.size() == 10);
+		for (std::size_t i = 0; i < hits.size() && i < exhaustive.size(); ++i) { CHECK(std::abs(hits[i].score - exhaustive[i].score) <= 1e-12); }
+	}
 	std::printf("search: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }

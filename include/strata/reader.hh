@@ -92,7 +92,8 @@ public:
 			default: break;
 			}
 		}
-		if (stats_.size() != 24) { throw corrupt_segment("stats"); }
+		if (stats_.size() != 28) { throw corrupt_segment("stats"); }
+		max_positions_ = format::get<std::uint32_t>(stats_.data() + 24);
 		doc_count_ = format::get<std::uint64_t>(stats_.data());
 		total_length_ = format::get<std::uint64_t>(stats_.data() + 8);
 		min_length_ = format::get<std::uint32_t>(stats_.data() + 16);
@@ -123,7 +124,10 @@ public:
 		integrity_->regions = residency::verified_regions(
 			std::span<const std::byte>(reinterpret_cast<const std::byte*>(file.data()), file.size()), std::move(regions));
 		if (norms_.size() != doc_count_) { throw corrupt_segment("norms size"); }
-		dict_.emplace(terms_, term_index_, &verify_terms, integrity_.get());  // validates the FST index
+		// The term index is copied out of the mapping (verified above), so later lookups never
+		// read bytes that could change or fault under the FST's unchecked traversal.
+		integrity_->pinned_index.assign(term_index_);
+		dict_.emplace(terms_, integrity_->pinned_index, &verify_terms, integrity_.get());  // validates the FST index
 	}
 
 	// The document's length quantized by format::encode_length (one byte, verified at open).
@@ -184,6 +188,8 @@ public:
 	std::size_t verified_regions() const noexcept { return integrity_->regions.verified(); }
 
 	std::uint64_t doc_count() const noexcept { return doc_count_; }
+	// The most positions any document has for one term.
+	std::uint32_t max_positions() const noexcept { return max_positions_; }
 	std::uint64_t total_length() const noexcept { return total_length_; }
 	double average_length() const noexcept { return doc_count_ ? double(total_length_) / double(doc_count_) : 0.0; }
 	std::uint32_t min_length() const noexcept { return min_length_; }
@@ -220,6 +226,7 @@ private:
 	struct integrity {
 		residency::verified_regions regions;
 		std::uint64_t terms_offset = 0, postings_offset = 0, positions_offset = 0, stored_offset = 0;
+		std::string pinned_index;  // the term index, copied out of the mapping
 	};
 	static bool verify_terms(void* context, std::uint64_t offset, std::uint64_t length) {
 		auto* i = static_cast<integrity*>(context);
@@ -228,7 +235,7 @@ private:
 	std::unique_ptr<integrity> integrity_ = std::make_unique<integrity>();  // stable address for dict_
 	std::optional<termdict::reader> dict_;
 	std::uint64_t doc_count_ = 0, total_length_ = 0;
-	std::uint32_t min_length_ = 0, max_length_ = 0;
+	std::uint32_t min_length_ = 0, max_length_ = 0, max_positions_ = 0;
 	std::uint8_t length_width_ = 0;
 };
 
@@ -249,7 +256,7 @@ public:
 		if (info.postings > bytes.size() || info.postings_length > bytes.size() - info.postings) { throw corrupt_segment("postings offset"); }
 		seg.verify_postings(info.postings, info.postings_length);
 		p_ = bytes.data() + info.postings;
-		end_ = bytes.data() + bytes.size();
+		end_ = p_ + info.postings_length;  // everything read stays inside the verified range
 		blocks_ = df_ / format::block;
 		with_positions_ = !(info.flags & format::no_positions);
 		with_counts_ = with_positions_ && !(info.flags & format::counts_are_wdf);
@@ -265,7 +272,9 @@ public:
 			std::uint64_t level0 = 0, block_bytes = 0, first_position = 0, pos_offset = 0, count_offset = 0;
 			for (std::size_t g = 0; g < groups; ++g) {
 				auto& gr = groups_[g];
-				last += ordinal_t(format::get_leb(&p_, end_));
+				const std::uint64_t delta = format::get_leb(&p_, end_);
+				if ((g && delta == 0) || delta >= seg.doc_count() - last) { throw corrupt_segment("skip group last ordinal"); }
+				last += ordinal_t(delta);
 				gr.last = last;
 				if (with_positions_) {
 					first_position += format::get_leb(&p_, end_);
@@ -447,6 +456,7 @@ public:
 	// >= end.
 	template <class F>
 	void for_each_until(ordinal_t end, F&& f) {
+		if (!started_ && next() == no_more_docs) { return; }
 		while (doc_ < end) {
 			std::size_t i = pos_;
 			const std::uint32_t* w = wdfs();
@@ -464,6 +474,7 @@ public:
 	// Sets bit (d - base) for every posting d in [doc(), end), then stops at the first
 	// posting >= end (see scorer::fill).
 	void fill(ordinal_t base, ordinal_t end, std::uint64_t* bits) {
+		if (!started_ && next() == no_more_docs) { return; }
 		while (doc_ < end) {
 			std::size_t i = pos_;
 			const std::size_t stop = buf_ords_[buf_len_ - 1] < end ? buf_len_ : std::size_t(std::lower_bound(buf_ords_ + pos_, buf_ords_ + buf_len_, end) - buf_ords_);
@@ -495,7 +506,7 @@ public:
 		if (e.last < first || first < base) { throw corrupt_segment("bitset block span"); }
 		const std::uint64_t span = std::uint64_t(e.last) - first + 1, bytes = (span + 7) / 8;
 		const char* p = blocks_begin_ + e.offset;
-		if (bytes > e.bytes || e.bytes > std::uint64_t(tail_ - p)) { throw corrupt_segment("bitset block bounds"); }
+		if (bytes > e.bytes) { throw corrupt_segment("bitset block bounds"); }
 		const std::uint64_t at = first - base;
 		const unsigned shift = unsigned(at % 64);
 		std::size_t n = 0;
@@ -561,12 +572,17 @@ private:
 		entries_n_ = 0;
 		ordinal_t last = g ? groups_[g - 1].last : 0;
 		std::uint64_t offset = groups_[g].blocks_offset;
+		const std::uint64_t group_end = g + 1 < groups_.size() ? groups_[g + 1].blocks_offset : std::uint64_t(tail_ - blocks_begin_);
+		if (group_end < offset) { throw corrupt_segment("group bytes"); }
 		// Level-0 deltas restart per group.
 		std::uint64_t first_position = groups_[g].first_position, pos_offset = groups_[g].pos_offset, count_offset = groups_[g].count_offset;
 		const std::size_t n = std::min<std::size_t>(32, blocks_ - g * 32);
 		for (std::size_t i = 0; i < n; ++i) {
 			entry& e = entries_[entries_n_++];
-			e.last = last + ordinal_t(format::get_leb(&p, end));
+			// Lasts increase within the group and end at its last; block bytes stay inside it.
+			const std::uint64_t delta = format::get_leb(&p, end);
+			if (((g || i) && delta == 0) || delta > std::uint64_t(groups_[g].last) - last) { throw corrupt_segment("block last ordinal"); }
+			e.last = last + ordinal_t(delta);
 			const std::uint64_t bytes = format::get_leb(&p, end);
 			e.bytes = bytes >> 1;
 			e.bitset = bytes & 1;
@@ -581,9 +597,11 @@ private:
 			e.count_offset = count_offset;
 			e.impacts = format::skip_sized_impacts(&p, end);
 			e.offset = offset;
+			if (e.bytes == 0 || e.bytes > group_end - offset) { throw corrupt_segment("block bytes"); }
 			offset += e.bytes;
 			last = e.last;
 		}
+		if (offset != group_end) { throw corrupt_segment("group bytes"); }
 		if (entries_[entries_n_ - 1].last != groups_[g].last || groups_[g].last >= seg_->doc_count()) { throw corrupt_segment("skip group last ordinal"); }
 		decoded_group_ = g;
 	}
@@ -608,8 +626,7 @@ private:
 		pos_ = 0;
 		if (next_block_ < blocks_) {
 			const entry& cur = level0_entry(next_block_);
-			const char* p = blocks_begin_ + cur.offset;
-			if (cur.bytes > std::uint64_t(tail_ - p)) { throw corrupt_segment("block bounds"); }
+			const char* p = blocks_begin_ + cur.offset;  // decode_group checked offset + bytes against the region
 			const ordinal_t base = next_block_ ? cur.base : std::numeric_limits<ordinal_t>::max();
 			std::size_t used;
 			if (cur.bitset) {
@@ -732,7 +749,8 @@ public:
 		if (info.positions > bytes.size() || info.positions_length > bytes.size() - info.positions) { throw corrupt_segment("positions offset"); }
 		seg.verify_positions(info.positions, info.positions_length);
 		const char* p = bytes.data() + info.positions;
-		end_ = bytes.data() + bytes.size();
+		end_ = p + info.positions_length;  // everything read stays inside the verified range
+		max_count_ = seg.max_positions();
 		if (!(info.flags & format::counts_are_wdf)) {
 			const std::uint64_t n = format::get_leb(&p, end_);
 			if (n > std::uint64_t(end_ - p)) { throw corrupt_segment("count blocks bounds"); }
@@ -760,8 +778,9 @@ public:
 		const std::uint32_t* counts = it.info().flags & format::counts_are_wdf ? it.wdfs() : this->counts(it.in_tail(), start.count_offset);
 		const std::uint64_t first = it.position_index(counts);
 		const std::uint32_t count = counts[it.index_in_block()];
-		// Full blocks hold 128 positions each and a tail position takes at least a byte.
-		if (first + count > full_blocks_ * format::block + std::uint64_t(end_ - tail_)) { throw corrupt_segment("position count"); }
+		// No document has more positions than the segment's maximum; full blocks hold 128
+		// positions each and a tail position takes at least a byte.
+		if (count > max_count_ || first + count > full_blocks_ * format::block + std::uint64_t(end_ - tail_)) { throw corrupt_segment("position count"); }
 		out.resize(count);
 		std::uint32_t at = 0;
 		std::uint64_t i = first;
@@ -833,6 +852,7 @@ private:
 	const char* tail_ = nullptr;
 	const char* tail_p_ = nullptr;
 	std::uint64_t count_blocks_bytes_ = 0, full_blocks_ = 0, blocks_bytes_ = 0;
+	std::uint32_t max_count_ = 0;
 	std::vector<std::uint32_t> count_tail_, tail_values_;
 	std::uint32_t counts_buf_[format::block] = {}, block_buf_[format::block] = {};
 	std::uint64_t decoded_counts_ = std::numeric_limits<std::uint64_t>::max();
