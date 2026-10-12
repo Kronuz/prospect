@@ -22,25 +22,35 @@ std::string_view text_field(std::string_view line) {
 }
 
 int index(const std::string& dir) {
+	std::ios::sync_with_stdio(false);
 	strata::segment_writer w;
 	std::string line;
-	std::vector<std::string_view> tokens;
-	std::unordered_map<std::string_view, std::vector<std::uint32_t>> positions;
+	std::vector<std::pair<std::string_view, std::uint32_t>> tokens;  // (token, position)
+	std::vector<std::uint32_t> positions;
 	std::vector<strata::posting_input> in;
 	std::uint64_t n = 0;
 	while (std::getline(std::cin, line)) {
 		if (line.empty()) { continue; }
 		std::string_view text = text_field(line);
-		positions.clear();
+		tokens.clear();
 		std::uint32_t pos = 0;
 		for (std::size_t i = 0; i < text.size();) {
 			std::size_t j = text.find(' ', i);
 			if (j == std::string_view::npos) { j = text.size(); }
-			if (j > i) { positions[text.substr(i, j - i)].push_back(++pos); }
+			if (j > i) { tokens.push_back({text.substr(i, j - i), ++pos}); }
 			i = j + 1;
 		}
+		// Group a document's tokens by sorting: each term's positions end up contiguous.
+		std::sort(tokens.begin(), tokens.end());
+		positions.clear();
+		for (const auto& t : tokens) { positions.push_back(t.second); }
 		in.clear();
-		for (auto& [t, p] : positions) { in.push_back({t, std::uint32_t(p.size()), p}); }
+		for (std::size_t i = 0; i < tokens.size();) {
+			std::size_t j = i;
+			while (j < tokens.size() && tokens[j].first == tokens[i].first) { ++j; }
+			in.push_back({tokens[i].first, std::uint32_t(j - i), std::span<const std::uint32_t>(positions.data() + i, j - i)});
+			i = j;
+		}
 		w.add(++n, in, pos);
 		if (n % 100000 == 0) { std::cerr << n << '\n'; }
 	}

@@ -40,6 +40,7 @@
 
 #include "bitpack.hh"
 #include "fst.hh"
+#include "hashes.hh"
 #include "strata/format.hh"
 #include "termdict.hh"
 
@@ -98,16 +99,18 @@ public:
 
 	// Writes the segment file and returns its bytes.
 	std::string flush(const std::array<std::uint8_t, 16>& segment_id) {
-		std::vector<std::string_view> keys;
-		keys.reserve(index_.size());
-		for (const auto& [k, v] : index_) { keys.push_back(k); }
+		std::vector<std::pair<std::string_view, std::size_t>> keys;
+		keys.reserve(buffers_.size());
+		for (const auto& slot : table_) {
+			if (slot.key) { keys.push_back({std::string_view(slot.key, slot.length), slot.buffer}); }
+		}
 		std::sort(keys.begin(), keys.end());
 
 		std::string postings, positions;
 		termdict::builder dict;
 		std::vector<std::uint32_t> ords, wdfs, counts, pos;
-		for (auto key : keys) {
-			term_buffer& t = buffers_[index_.at(key)];
+		for (auto [key, buffer] : keys) {
+			term_buffer& t = buffers_[buffer];
 			decode_all(t.ords, ords, t.df);
 			for (std::size_t i = 1; i < ords.size(); ++i) { ords[i] += ords[i - 1]; }
 			for (auto& o : ords) { --o; }  // stored as ordinal + 1 deltas
@@ -193,9 +196,24 @@ private:
 		bool all_zero_wdf = true, any_positions = false, counts_are_wdf = true;
 	};
 
+	// Open addressing with linear probing over stored hashes; grows at half load.
+	struct slot {
+		std::uint64_t hash = 0;
+		const char* key = nullptr;  // in arena_
+		std::uint32_t length = 0;
+		std::uint32_t buffer = 0;
+	};
+
 	term_buffer& buffer_for(std::string_view term) {
-		if (auto it = index_.find(term); it != index_.end()) { return buffers_[it->second]; }
-		// Term bytes live in stable arena chunks so the map can key on views.
+		if (table_.empty()) { table_.resize(1 << 16); }
+		const std::uint64_t h = ::wordwise::hash(term.data(), term.size());
+		std::size_t mask = table_.size() - 1;
+		for (std::size_t i = h & mask;; i = (i + 1) & mask) {
+			slot& sl = table_[i];
+			if (!sl.key) { break; }
+			if (sl.hash == h && sl.length == term.size() && std::memcmp(sl.key, term.data(), term.size()) == 0) { return buffers_[sl.buffer]; }
+		}
+		// Term bytes live in stable arena chunks so slots can point at them.
 		if (arena_.empty() || arena_.back().size() + term.size() > arena_.back().capacity()) {
 			arena_.emplace_back();
 			arena_.back().reserve(std::max<std::size_t>(1 << 20, term.size()));
@@ -203,8 +221,24 @@ private:
 		std::string& chunk = arena_.back();
 		const char* at = chunk.data() + chunk.size();
 		chunk.append(term);
-		index_.emplace(std::string_view(at, term.size()), buffers_.size());
+		if ((buffers_.size() + 1) * 2 > table_.size()) { grow(); }
+		insert({h, at, std::uint32_t(term.size()), std::uint32_t(buffers_.size())});
 		return buffers_.emplace_back();
+	}
+
+	void insert(const slot& s) {
+		const std::size_t mask = table_.size() - 1;
+		std::size_t i = s.hash & mask;
+		while (table_[i].key) { i = (i + 1) & mask; }
+		table_[i] = s;
+	}
+
+	void grow() {
+		std::vector<slot> old(table_.size() * 2);
+		old.swap(table_);
+		for (const auto& s : old) {
+			if (s.key) { insert(s); }
+		}
 	}
 
 	static void decode_all(const std::string& stream, std::vector<std::uint32_t>& out, std::size_t n) {
@@ -351,7 +385,7 @@ private:
 	}
 
 	std::deque<std::string> arena_;
-	std::unordered_map<std::string_view, std::size_t> index_;
+	std::vector<slot> table_;
 	std::deque<term_buffer> buffers_;
 	std::vector<std::uint32_t> lengths_;
 	std::vector<std::uint64_t> docids_;
