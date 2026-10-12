@@ -190,6 +190,22 @@ public:
 	std::optional<std::uint64_t> exact_count() override { return it_.cost(); }  // one segment, no deletes
 	bool matches_all() const noexcept override { return it_.cost() == seg_->doc_count(); }
 	std::unique_ptr<scorer> fresh() const override { return std::make_unique<term_scorer>(*seg_, it_.info(), weight_); }
+
+	// Bulk top-k: skips groups and blocks that cannot compete, then scores each remaining
+	// block in one loop over its decoded postings. Counting leaves this to the generic loop.
+	bool collect_top_k(top_collector& c) override {
+		if (c.counting) { return false; }
+		for (ordinal_t d = it_.next(); d != no_more_docs; d = it_.doc()) {
+			min_ = c.min_competitive();
+			if ((d = skip_blocks(d)) == no_more_docs) { break; }
+			const ordinal_t last = it_.block_end(d);
+			it_.for_each_until(last == no_more_docs ? no_more_docs : last + 1, [&](ordinal_t ord, std::uint32_t wdf) {
+				const double sc = weight_(wdf, seg_->length(ord));
+				if (sc > c.min_competitive() || c.heap.size() < c.k) { c.collect(ord, sc); }
+			});
+		}
+		return true;
+	}
 	void fill(ordinal_t base, ordinal_t end, std::uint64_t* bits) override { it_.fill(base, end, bits); }
 
 	// The bound of the smallest skip entry covering [from, upto]: its block, its group,

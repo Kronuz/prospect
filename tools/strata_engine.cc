@@ -160,7 +160,10 @@ strata::scorer_ptr build(const strata::segment& seg, const parsed& q) {
 	} else {
 		result = req ? std::move(req) : std::move(opt);
 	}
-	if (result && !must_not.empty()) { result = std::make_unique<strata::exclusion_scorer>(std::move(result), combine(std::move(must_not), false)); }
+	// A - (B or C) as (A - B) - C: each exclusion checks one clause, without a union.
+	for (auto& ex : must_not) {
+		if (result) { result = std::make_unique<strata::exclusion_scorer>(std::move(result), std::move(ex)); }
+	}
 	return result;
 }
 
