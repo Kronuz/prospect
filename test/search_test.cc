@@ -317,6 +317,79 @@ int main() {
 			if (copy) { CHECK(strata::count(*copy) == want.size()); }
 		}
 	}
+	// Paths the random corpus rarely takes, at densities chosen for them: a rare lead with a
+	// mid-density term (leapfrog counting), a rare term minus a dense one (stepping instead
+	// of windows), a disjunction of six terms (heap mode, advance before next), and k = 0.
+	{
+		std::mt19937_64 r(5);
+		const std::uint32_t n = 20000;
+		const std::vector<std::pair<std::string, std::uint32_t>> density = {{"x", 1}, {"y", 20}, {"z", 100}, {"w1", 10}, {"w2", 10}, {"w3", 10}, {"w4", 10}, {"w5", 10}, {"w6", 10}};
+		std::map<std::string, std::set<ordinal_t>> holds;
+		strata::segment_writer w;
+		for (std::uint32_t d = 0; d < n; ++d) {
+			std::vector<strata::posting_input> in;
+			std::vector<std::uint32_t> none;
+			for (const auto& [t, pct] : density) {
+				if (r() % 100 < pct) {
+					in.push_back({t, 1 + std::uint32_t(r() % 3), none});
+					holds[t].insert(d);
+				}
+			}
+			std::sort(in.begin(), in.end(), [](const auto& a, const auto& b) { return a.term < b.term; });
+			w.add(d + 1, in, 10);
+		}
+		std::string file = w.flush({});
+		strata::segment seg(file);
+		auto term = [&](const std::string& t) -> strata::scorer_ptr { return std::make_unique<strata::term_scorer>(seg, *seg.term(t)); };
+		auto both = [&](const std::string& a, const std::string& b) {
+			std::size_t c = 0;
+			for (auto d : holds[a]) { c += holds[b].count(d); }
+			return c;
+		};
+		{
+			std::vector<strata::scorer_ptr> kids;
+			kids.push_back(term("x"));
+			kids.push_back(term("y"));
+			strata::conjunction_scorer q(std::move(kids));
+			CHECK(strata::count(q) == both("x", "y"));
+		}
+		{
+			strata::exclusion_scorer q(term("x"), term("z"));
+			CHECK(strata::count(q) == holds["x"].size() - both("x", "z"));
+			strata::exclusion_scorer p(term("y"), term("x"));
+			CHECK(strata::count(p) == holds["y"].size() - both("y", "x"));
+		}
+		std::set<ordinal_t> any;
+		for (int i = 1; i <= 6; ++i) { any.insert(holds["w" + std::to_string(i)].begin(), holds["w" + std::to_string(i)].end()); }
+		auto six = [&] {
+			std::vector<strata::scorer_ptr> kids;
+			for (int i = 1; i <= 6; ++i) { kids.push_back(term("w" + std::to_string(i))); }
+			return std::make_unique<strata::disjunction_scorer>(std::move(kids));
+		};
+		{
+			auto q = six();
+			const ordinal_t target = 7777;
+			CHECK(q->advance(target) == *any.lower_bound(target));
+			std::size_t seen = 1;
+			while (q->next() != strata::no_more_docs) { ++seen; }
+			CHECK(seen == std::size_t(std::distance(any.lower_bound(target), any.end())));
+			auto c = six();
+			CHECK(strata::count(*c) == any.size());
+			auto all = six();
+			std::uint64_t total = 0;
+			const auto exhaustive = strata::top_k(*all, 10, &total);
+			auto pruned_q = six();
+			const auto pruned = strata::top_k(*pruned_q, 10);
+			CHECK(total == any.size() && pruned.size() == 10 && exhaustive.size() == 10);
+			// The same hits; scores within summation order (the paths add clauses differently).
+			for (std::size_t i = 0; i < pruned.size() && i < exhaustive.size(); ++i) {
+				CHECK(pruned[i].ord == exhaustive[i].ord && std::abs(pruned[i].score - exhaustive[i].score) <= 1e-9 * exhaustive[i].score);
+			}
+			auto none = six();
+			std::uint64_t k0 = 0;
+			CHECK(strata::top_k(*none, 0, &k0).empty() && k0 == any.size());
+		}
+	}
 	// A phrase with a positioned term of wdf 0 (a boolean term): its frequency comes from
 	// positions, so pruning must not bound it by wdf.
 	{
