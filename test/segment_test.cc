@@ -38,10 +38,72 @@ static void reseal(std::string& file) {
 	file.replace(file.size() - footer_bytes.size(), footer_bytes.size(), footer_bytes);
 }
 
+// The file with one section's bytes replaced (any length): every section laid out again
+// at its alignment, the table of contents and footer recomputed, and the footer then
+// edited as `edit` asks. Reaches the checks that consistent checksums cannot.
+static std::string with_sections(const std::string& file, const std::map<strata::format::section, std::string>& replaced,
+	const std::function<void(strata::format::footer&)>& edit = {}) {
+	auto f = strata::format::decode_footer(file);
+	auto toc = strata::format::decode_toc(file, f);
+	std::sort(toc.begin(), toc.end(), [](const auto& a, const auto& b) { return a.offset < b.offset; });
+	std::string out;
+	for (auto& e : toc) {
+		while (out.size() % strata::format::section_alignment) { out.push_back('\0'); }
+		auto it = replaced.find(e.kind);
+		const std::string b = it != replaced.end() ? it->second : std::string(std::string_view(file).substr(e.offset, e.length));
+		e = strata::format::describe(e.kind, out.size(), b, e.region_shift);
+		out += b;
+	}
+	const std::string toc_bytes = strata::format::encode_toc(toc);
+	f.toc_offset = out.size();
+	f.toc_length = toc_bytes.size();
+	f.toc_crc = hashes::crc32c(toc_bytes.data(), toc_bytes.size());
+	out += toc_bytes;
+	if (edit) { edit(f); }
+	return out + strata::format::encode_footer(f);
+}
+
+static std::string with_section(const std::string& file, strata::format::section kind, std::string_view bytes,
+	const std::function<void(strata::format::footer&)>& edit = {}) {
+	return with_sections(file, {{kind, std::string(bytes)}}, edit);
+}
+
+// The file with its dictionary rebuilt from its own term infos, `change` editing each.
+static std::string with_terms(const std::string& file, const std::function<void(std::string_view, strata::format::term_info&)>& change) {
+	strata::segment seg(file);
+	termdict::builder b(seg.dictionary().alphabet_bytes().size() == 256 ? std::string_view() : seg.dictionary().alphabet_bytes());
+	strata::format::term_run run;
+	seg.scan_terms([&](std::string_view term, const strata::format::term_info& info) {
+		auto t = info;
+		if (t.df >= strata::format::block) { t.impacts = seg.term(term)->impacts; }
+		change(term, t);
+		b.add(term, strata::format::encode_term_info(t, run, b.next_is_restart()));
+		return true;
+	});
+	auto t = b.finish();
+	return with_sections(file, {{strata::format::section::terms, t.blocks}, {strata::format::section::term_index, t.index}});
+}
+
+static std::string section_of(const std::string& file, strata::format::section kind) {
+	for (const auto& e : strata::format::decode_toc(file, strata::format::decode_footer(file))) {
+		if (e.kind == kind) { return file.substr(e.offset, e.length); }
+	}
+	return {};
+}
+
 static bool throws_invalid(const std::function<void()>& f) {
 	try {
 		f();
 	} catch (const std::invalid_argument&) {
+		return true;
+	}
+	return false;
+}
+
+static bool throws_out_of_range(const std::function<void()>& f) {
+	try {
+		f();
+	} catch (const std::out_of_range&) {
 		return true;
 	}
 	return false;
@@ -423,6 +485,253 @@ int main() {
 		}
 	}
 
+	// C13: every open-time check on sections whose checksums are consistent but whose
+	// contents are not, and ordinals out of range.
+	{
+		using strata::format::section;
+		auto opens = [](const std::string& f) { return !throws_corrupt([&] { strata::segment s(f); }); };
+		// A keyed segment (monotone docids, versions, key filter) and a contiguous one.
+		strata::segment_writer kw;
+		std::uint64_t id = 100;
+		for (std::uint32_t d = 0; d < 300; ++d) {
+			id += 1 + d % 5;
+			const std::string key = "Qk" + std::to_string(id);
+			std::vector<std::uint32_t> none, one{1};
+			std::vector<strata::posting_input> in{{key, 0, none}, {"w", 1, one}};
+			kw.add(id, in, 1, "r", 1 + d % 7, key);
+		}
+		const std::string keyed = kw.flush({});
+		std::mt19937_64 r3(4);
+		model m3;
+		const std::string plain = build(r3, 200, m3);
+		CHECK(opens(keyed) && opens(plain) && opens(with_section(keyed, section::stats, section_of(keyed, section::stats))));
+		{
+			strata::segment s(keyed);
+			CHECK(throws_out_of_range([&] { (void)s.docid(300); }) && throws_out_of_range([&] { (void)s.version(300); }) && throws_out_of_range([&] { (void)s.stored(300); }));
+		}
+		// Footer bounds on the table of contents.
+		auto refooter = [&](auto edit) {
+			std::string f = keyed;
+			auto ft = strata::format::decode_footer(f);
+			edit(ft);
+			const std::string fb = strata::format::encode_footer(ft);
+			f.replace(f.size() - fb.size(), fb.size(), fb);
+			return f;
+		};
+		const std::uint64_t body = keyed.size() - strata::format::footer_size;
+		CHECK(!opens(refooter([&](auto& f) { f.toc_offset = body + 1; })));
+		CHECK(!opens(refooter([&](auto& f) { f.toc_length = body - f.toc_offset + 1; })));
+		CHECK(!opens(refooter([&](auto& f) { --f.toc_length; })));
+		// stats: not 28 bytes.
+		CHECK(!opens(with_section(keyed, section::stats, section_of(keyed, section::stats).substr(0, 27))));
+		// Contiguous docids: size, base 0, base unlike the footer, and a range that wraps.
+		const std::string cd = section_of(plain, section::docids);
+		auto with_base = [&](std::uint64_t base) {
+			std::string d = cd;
+			std::memcpy(d.data() + 1, &base, 8);
+			return d;
+		};
+		CHECK(!opens(with_section(plain, section::docids, cd + "x")));
+		CHECK(!opens(with_section(plain, section::docids, with_base(0))));
+		CHECK(!opens(with_section(plain, section::docids, with_base(2))));
+		CHECK(!opens(with_section(plain, section::docids, cd, [&](auto& f) { ++f.max_docid; })));  // last unlike the footer
+		const std::uint64_t high = ~std::uint64_t(0) - 50;
+		CHECK(!opens(with_section(plain, section::docids, with_base(high), [&](auto& f) {
+			f.min_docid = high;
+			f.max_docid = high + 199;  // wraps
+		})));
+		// Monotone docids: tag, size, count, block index, order, offsets, first, deltas, end.
+		const std::string md = section_of(keyed, section::docids);
+		auto edited = [&](std::size_t at, std::uint64_t v, std::size_t width) {
+			std::string d = md;
+			std::memcpy(d.data() + at, &v, width);
+			return d;
+		};
+		CHECK(!opens(with_section(keyed, section::docids, std::string(1, char(7)) + md.substr(1))));
+		CHECK(!opens(with_section(keyed, section::docids, md.substr(0, 5))));
+		CHECK(!opens(with_section(keyed, section::docids, edited(1, 299, 8))));                                // count
+		CHECK(!opens(with_section(keyed, section::docids, md.substr(0, 9 + 16 * 2))));                         // fewer index entries than blocks
+		CHECK(!opens(with_section(keyed, section::docids, edited(9 + 16, 1, 8))));                             // block 1 not above block 0
+		CHECK(!opens(with_section(keyed, section::docids, edited(17 + 16, 3, 8))));                            // block 1's offset
+		CHECK(!opens(with_section(keyed, section::docids, md, [&](auto& f) { f.min_docid = 99; })));  // first unlike the footer
+		const std::size_t deltas = 9 + 16 * 3;
+		CHECK(!opens(with_section(keyed, section::docids, edited(deltas, 0, 1))));                             // a zero delta
+		CHECK(!opens(with_section(keyed, section::docids, md.substr(0, deltas) + std::string("\xff\xff\xff\xff\xff\xff\xff\xff\xff\x01", 10) + md.substr(deltas + 1))));  // a wrapping delta
+		CHECK(!opens(with_section(keyed, section::docids, md + "\x01")));                                     // bytes past the deltas
+		CHECK(!opens(with_section(keyed, section::docids, md, [&](auto& f) { ++f.max_docid; })));             // last unlike the footer
+		// Versions: size, width, length, and a base that overflows.
+		const std::string vs = section_of(keyed, section::versions);
+		auto with_versions = [&](std::size_t at, std::uint64_t v, std::size_t width) {
+			std::string d = vs;
+			std::memcpy(d.data() + at, &v, width);
+			return d;
+		};
+		CHECK(!opens(with_section(keyed, section::versions, vs.substr(0, 8))));
+		CHECK(!opens(with_section(keyed, section::versions, with_versions(8, 65, 1))));
+		CHECK(!opens(with_section(keyed, section::versions, vs + "x")));
+		CHECK(!opens(with_section(keyed, section::versions, with_versions(0, ~std::uint64_t(0) - 2, 8))));
+		// Key filter: a length past the bytes, a broken filter, and min above max or empty.
+		const std::string pk = section_of(keyed, section::pk_filter);
+		auto key_filter = [&](std::string_view lo, std::string_view hi, std::string_view rest) {
+			std::string out;
+			out.push_back(char(lo.size()));
+			out += lo;
+			out.push_back(char(hi.size()));
+			out += hi;
+			return out + std::string(rest);
+		};
+		const std::size_t filter_at = 2 + std::size_t(std::uint8_t(pk[0])) + std::size_t(std::uint8_t(pk[1 + std::uint8_t(pk[0])]));
+		const std::string filter = pk.substr(filter_at);
+		CHECK(opens(with_section(keyed, section::pk_filter, key_filter("Qk101", "Qk9999", filter))));
+		CHECK(!opens(with_section(keyed, section::pk_filter, std::string("\x7f") + "Qk")));
+		CHECK(!opens(with_section(keyed, section::pk_filter, key_filter("Qk101", "Qk9999", "junk"))));
+		CHECK(!opens(with_section(keyed, section::pk_filter, key_filter("Qk9", "Qk1", filter))));
+		CHECK(!opens(with_section(keyed, section::pk_filter, key_filter("", "Qk1", filter))));
+	}
+	// C13: decoders reached with crafted bytes: term-info ranges that wrap, impact lists
+	// whose sizes, counts, or ends disagree, a stored index without frames or whose first
+	// frame starts past ordinal 0, and dictionaries whose values the postings cannot hold.
+	{
+		using namespace strata::format;
+		auto leb = [](std::string& out, std::uint64_t v) { put_leb(out, v); };
+		auto term_bytes = [&](std::uint64_t head, std::initializer_list<std::uint64_t> fields) {
+			std::string out;
+			leb(out, head);
+			for (auto v : fields) { leb(out, v); }
+			return out;
+		};
+		// head = df << 5 | {no_wdf, no_positions, counts_are_wdf, cf_is_df, absolute} bits.
+		const std::uint64_t huge = ~std::uint64_t(0) - 4;
+		CHECK(throws_corrupt([&] { term_run r; (void)decode_term_info(term_bytes(2 << 5 | 1 << 4 | 1 << 3 | 1 << 1, {huge, 0, 10}), r, false); }));
+		CHECK(throws_corrupt([&] { term_run r; (void)decode_term_info(term_bytes(2 << 5 | 1 << 4 | 1 << 3, {0, huge, 1, 10}), r, false); }));
+		auto no_match = [](const impact&) { return false; };
+		auto list = [&](std::initializer_list<std::uint64_t> lebs, std::string tail = {}) {
+			std::string out;
+			for (auto v : lebs) { leb(out, v); }
+			return out + tail;
+		};
+		CHECK(throws_corrupt([&] { (void)any_sized_impact(list({2 << 1, 9, 2, 1, 1, 1, 1}), no_match); }));     // size unlike the list
+		CHECK(throws_corrupt([&] { (void)any_sized_impact(list({2 << 1, 5, 3, 1, 1, 1, 1}), no_match); }));     // count unlike the header
+		CHECK(throws_corrupt([&] { (void)any_sized_impact(list({2 << 1 | 1, 1, 1, 1}), no_match); }));          // compact, truncated
+		CHECK(throws_corrupt([&] { (void)any_sized_impact(list({2 << 1, 4, 2, 1, 1, 1}), no_match); }));        // full, truncated
+		CHECK(throws_corrupt([&] { (void)any_sized_impact(list({1 << 1 | 1, 1, 1, 7}), no_match); }));          // bytes past the pairs
+		CHECK(!any_sized_impact(list({1 << 1 | 1, 1, 1}), no_match));
+		// Stored records.
+		std::mt19937_64 r5(5);
+		model m5;
+		const std::string plain = build(r5, 200, m5);
+		const std::string zero_frames(4, '\0');
+		const std::string no_frames = with_section(plain, section::stored, zero_frames);
+		CHECK(throws_corrupt([&] { strata::segment s(no_frames); (void)s.stored(0); }));
+		{
+			std::string st;
+			for (const auto& e : decode_toc(plain, decode_footer(plain))) {
+				if (e.kind == section::stored) { st = plain.substr(e.offset, e.length); }
+			}
+			const std::uint32_t frames = get<std::uint32_t>(st.data() + st.size() - 4);
+			const std::size_t index_at = st.size() - 4 - 16 * std::size_t(frames);
+			const std::uint32_t one = 1;
+			std::memcpy(st.data() + index_at, &one, 4);  // the first frame starts at ordinal 1
+			const std::string late = with_section(plain, section::stored, st);
+			CHECK(throws_corrupt([&] { strata::segment s(late); (void)s.stored(0); }));
+		}
+		// Dictionary values: a df above the document count, a single posting past the last
+		// ordinal, and skip groups that do not fit the term's postings.
+		auto read_all = [](const std::string& f) {
+			strata::segment s(f);
+			s.scan_terms([&](std::string_view, const term_info& info) {
+				strata::postings_iterator it(s, info);
+				while (it.next() != strata::no_more_docs) {}
+				return true;
+			});
+		};
+		CHECK(!throws_corrupt([&] { read_all(with_terms(plain, [](std::string_view, term_info&) {})); }));
+		strata::segment_writer fw;
+		for (std::uint32_t d = 0; d < 60; ++d) {
+			std::vector<std::uint32_t> one{1};
+			std::vector<strata::posting_input> in{{"w", 1, one}};
+			fw.add(d + 1, in, 1);
+		}
+		const std::string few = fw.flush({});
+		CHECK(throws_corrupt([&] { read_all(with_terms(few, [](std::string_view, term_info& t) { t.df = 61; })); }));  // more than the documents
+		strata::segment_writer kw;
+		for (std::uint32_t d = 0; d < 50; ++d) {
+			std::vector<std::uint32_t> none;
+			const std::string key = "Q" + std::to_string(d);
+			std::vector<strata::posting_input> in{{key, 0, none}};
+			kw.add(d + 1, in, 1, {}, 1, key);  // each key term is a single posting
+		}
+		const std::string singles = kw.flush({});
+		CHECK(!throws_corrupt([&] { read_all(singles); }));
+		CHECK(throws_corrupt([&] { read_all(with_terms(singles, [](std::string_view, term_info& t) { t.postings = 50; })); }));
+		strata::segment_writer gw;
+		for (std::uint32_t d = 0; d < 128 * 32 * 3; ++d) {
+			std::vector<std::uint32_t> none;
+			std::vector<strata::posting_input> in{{"a", 1 + d % 3, none}};
+			gw.add(d + 1, in, 4);
+		}
+		const std::string groups = gw.flush({});
+		CHECK(throws_corrupt([&] { read_all(with_terms(groups, [](std::string_view, term_info& t) { t.postings_length = 40; })); }));
+		CHECK(throws_corrupt([&] { term_run r; (void)decode_term_info(term_bytes(std::uint64_t(1) << 37 | 1 << 4, {0, 0, 1}), r, false); }));  // df >= 2^32
+		CHECK(throws_corrupt([&] { term_run r; (void)decode_term_info(term_bytes(1 << 4, {0, 0}), r, false); }));                                // df 0
+	}
+	// C13: every byte of a small segment's postings and positions changed and resealed:
+	// bitset, FOR, and wdf blocks over two skip groups, positions in count and value
+	// blocks. Each change fences the segment or leaves it answering, never more.
+	{
+		strata::segment_writer w;
+		std::mt19937_64 r(8);
+		const std::uint32_t docs = 128 * 32 + 700;
+		for (std::uint32_t d = 0; d < docs; ++d) {
+			std::vector<std::uint32_t> pd{1, 7, 9, 11, 13, 15}, pm{2, 5}, pr{3};
+			std::vector<strata::posting_input> in{{"dense", 6, pd}};
+			if (d % 3 == 0) { in.push_back({"mid", 2 + std::uint32_t(r() % 3), pm}); }
+			if (d % 41 == 0) { in.push_back({"rare", 1, pr}); }
+			w.add(d + 1, in, 6);
+		}
+		const std::string good = w.flush({});
+		std::uint64_t changes = 0, fenced = 0;
+		for (auto kind : {strata::format::section::postings, strata::format::section::positions}) {
+			const std::string bytes = section_of(good, kind);
+			for (std::size_t at = 0; at < bytes.size(); ++at) {
+				for (char x : {char(0x01), char(0x80)}) {
+					std::string bad = bytes;
+					bad[at] ^= x;
+					++changes;
+					const std::string file = with_section(good, kind, bad);
+					try {
+						strata::segment s(file);
+						std::vector<strata::format::term_info> infos;
+						s.scan_terms([&](std::string_view, const strata::format::term_info& info) {
+							infos.push_back(info);
+							strata::postings_iterator it(s, info);
+							strata::positions_reader pr(s, info);
+							for (auto d = it.next(); d != strata::no_more_docs; d = it.next()) { (void)pr.read(it); }
+							strata::postings_iterator jump(s, info);
+							(void)jump.advance(docs / 2);
+							(void)jump.advance(docs - 1);
+							return true;
+						});
+						std::vector<strata::scorer_ptr> both;
+						for (const auto& info : infos) { both.push_back(std::make_unique<strata::term_scorer>(s, info)); }
+						strata::conjunction_scorer all(std::move(both));
+						(void)strata::count(all);
+						std::vector<strata::scorer_ptr> dense;  // two dense terms: counting windows
+						dense.push_back(std::make_unique<strata::term_scorer>(s, infos[0]));
+						dense.push_back(std::make_unique<strata::term_scorer>(s, infos[1]));
+						strata::conjunction_scorer windows(std::move(dense));
+						(void)strata::count(windows);
+						strata::phrase_scorer phrase(s, {infos[0], infos[1]});
+						(void)strata::top_k(phrase, 10);
+					} catch (const strata::corrupt_segment&) {
+						++fenced;
+					}
+				}
+			}
+		}
+		std::printf("  resealed sweep: %llu changes, %llu fenced\n", (unsigned long long)changes, (unsigned long long)fenced);
+		CHECK(changes > 1000 && fenced > changes / 10);
+	}
 	// Term infos in restart runs: random terms (singles, positionless, gaps, skip blocks)
 	// decode the same read in order or from their run's start, as find_run reads them.
 	{

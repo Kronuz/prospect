@@ -58,6 +58,8 @@ public:
 	// Verifies the footer, the table of contents, the header, and the pinned sections
 	// (term index, lengths, docids, stats) in full; other sections are verified per region
 	// as they are read.
+	// The file's bytes must outlive the segment; a temporary string cannot be one.
+	explicit segment(std::string&&) = delete;
 	explicit segment(std::string_view file) : file_(file) {
 		footer_ = format::decode_footer(file);
 		sections_ = format::decode_toc(file, footer_);
@@ -678,8 +680,8 @@ public:
 	// block's span, and the block must hold exactly 128 documents.
 	void or_bitset(std::size_t b, ordinal_t base, std::uint64_t* bits) {
 		const entry& e = level0_entry(b);
-		const ordinal_t first = b ? e.base + 1 : 0;
-		if (e.last < first || first < base) { throw corrupt_segment("bitset block span"); }
+		const ordinal_t first = b ? e.base + 1 : 0;  // <= e.last: level-0 lasts increase
+		if (first < base) { throw corrupt_segment("bitset block span"); }
 		const std::uint64_t span = std::uint64_t(e.last) - first + 1, bytes = (span + 7) / 8;
 		const char* p = blocks_begin_ + e.offset;
 		if (bytes > e.bytes) { throw corrupt_segment("bitset block bounds"); }
@@ -885,8 +887,7 @@ private:
 	// Keeps a bitset block's words, masked to its span, for advance_bits and ords; returns
 	// its bytes. Exactly 128 bits must be set, the last at the block's last ordinal.
 	std::size_t load_bitset(const char* p, const entry& e) {
-		const ordinal_t first = next_block_ ? e.base + 1 : 0;
-		if (e.last < first) { throw corrupt_segment("bitset block span"); }
+		const ordinal_t first = next_block_ ? e.base + 1 : 0;  // <= e.last: level-0 lasts increase
 		const std::uint64_t span = std::uint64_t(e.last) - first + 1, bytes = (span + 7) / 8;
 		if (bytes > e.bytes || bytes > sizeof bits_) { throw corrupt_segment("bitset block bounds"); }
 		const std::size_t words = std::size_t((bytes + 7) / 8);
@@ -1125,8 +1126,7 @@ private:
 			at = decoded_block_;
 			offset = decoded_offset_;
 		}
-		if (at > j) { throw corrupt_segment("position block order"); }
-		for (; at < j; ++at) {
+		for (; at < j; ++at) {  // j >= at: a document's positions start at or after its block's first
 			if (offset >= blocks_bytes_) { throw corrupt_segment("position block bounds"); }
 			need_block(blocks_ + offset, blocks_bytes_ - offset);
 			const std::size_t n = bitpack::encoded_size(reinterpret_cast<const std::uint8_t*>(blocks_ + offset), blocks_bytes_ - offset);
