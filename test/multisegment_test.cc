@@ -280,8 +280,8 @@ int main() {
 	}
 	// Budget permits: an empty permit draws nothing; move assignment settles the target.
 	{
-		memory_budget b(100);
-		memory_budget::permit none;
+		byte_budget b(100);
+		byte_budget::permit none;
 		CHECK(!none.try_grow(1) && !none);
 		none.grow(5);
 		CHECK(b.used() == 0);

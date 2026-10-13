@@ -58,7 +58,7 @@ struct transaction {
 
 // Apply's answer. A rejected transaction left no trace.
 struct verdict {
-	enum outcome : std::uint8_t { accepted, version_conflict, schema_conflict, invalid, skipped };
+	enum outcome : std::uint8_t { accepted, version_conflict, schema_conflict, invalid, skipped, no_space };
 	outcome result = accepted;
 	std::size_t op = 0;                  // the rejecting operation
 	std::uint64_t current_version = 0;   // on a version conflict
@@ -147,8 +147,12 @@ struct index_options {
 	// The node's indexing budget, if any, and this index's share of it: the buffer flushes
 	// when the budget is under pressure, when the buffer passes its share, or when the
 	// version map passes a quarter of the share (D17).
-	memory_budget* budget = nullptr;
+	byte_budget* budget = nullptr;
 	std::uint64_t buffer_share = ~std::uint64_t(0);
+	// The node's storage, if any (T5): the index holds its files' bytes and reserves each
+	// transaction's estimated bytes at admission and each merge's sources' live bytes
+	// before it starts; a transaction that does not fit is rejected with no_space.
+	byte_budget* storage = nullptr;
 	// Merges after each flush by `policy` when set; otherwise only merge() and force_merge().
 	bool auto_merge = false;
 	merge_policy policy;
@@ -166,17 +170,19 @@ public:
 		ix.m_.key_prefix = opts.key_prefix;
 		ix.opts_ = opts;
 		if (opts.budget) { ix.permit_ = opts.budget->open(); }
+		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
 		ix.commit();
 		return ix;
 	}
 
-	// Opens the highest durable manifest (or `to`, deleting every higher one first), fails
+	// Opens the highest durable manifest (or `to`, committed again as the newest), fails
 	// closed when a file it names is missing or differs, then deletes orphans.
 	static index open(kronuz::journal::IO& io, const options& opts = {}, std::optional<std::uint64_t> to = std::nullopt) {
 		index ix(io);
 		ix.lock_ = io.acquire_owner(false);
 		ix.opts_ = opts;
 		if (opts.budget) { ix.permit_ = opts.budget->open(); }
+		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
 		ix.recover(to);
 		return ix;
 	}
@@ -194,6 +200,7 @@ public:
 		docid_keys_.clear();
 		buffer_bytes_ = version_key_bytes_ = 0;
 		permit_ = {};
+		storage_permit_ = {};
 		lock_.reset();
 		fenced_ = true;
 	}
@@ -212,11 +219,19 @@ public:
 			v.result = verdict::skipped;
 			return v;
 		}
+		// Storage admission: the transaction's estimated bytes, or no_space.
+		const std::uint64_t reserve = storage_permit_ ? estimate_bytes(t) : 0;
+		if (reserve && !storage_permit_.try_grow(reserve)) {
+			v.result = verdict::no_space;
+			return v;
+		}
 		undo_.clear();
 		v = evaluate(t);
 		if (v.result != verdict::accepted) {
 			rollback();
+			storage_permit_.shrink(reserve);
 		} else {
+			reserved_ += reserve;
 			charge();
 			if (t.set_schema) { set_schema(*t.set_schema); }
 			++applied_since_commit_;
@@ -248,6 +263,20 @@ public:
 				}
 			}
 			if (picked.empty()) { return; }
+			// Storage admission: the sources' bytes bound the output's.
+			std::uint64_t need = 0;
+			for (std::size_t i : picked) { need += segs_[i]->bytes.size(); }
+			if (storage_permit_ && !storage_permit_.try_grow(need)) {
+				throw space_error(std::make_error_code(std::errc::no_space_on_device), "strata: no storage reserved for a merge");
+			}
+			struct release {
+				index* ix;
+				std::uint64_t n;
+				~release() {
+					ix->storage_permit_.shrink(n);
+					ix->settle_storage();
+				}
+			} held{this, storage_permit_ ? need : 0};
 			const std::uint64_t id = m_.next_segment++;
 			std::array<std::uint8_t, 16> header{};
 			std::memcpy(header.data(), &id, 8);
@@ -284,9 +313,14 @@ public:
 		run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_forced_deletes_merges(std::move(c)); });
 	}
 
-	// Runs the policy's merges until it asks for none.
+	// Runs the policy's merges until it asks for none, or until storage admission has no
+	// room for the next; those wait for space.
 	void maybe_merge() {
-		run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_merges(std::move(c)); });
+		try {
+			run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_merges(std::move(c)); });
+		} catch (const std::system_error& e) {
+			if (e.code().value() != ENOSPC) { throw; }
+		}
 	}
 
 	// Makes everything applied durable (design D1), then reclaims what retention allows.
@@ -300,6 +334,7 @@ public:
 			commit_files();
 		});
 		retain();
+		settle_storage();
 	}
 
 	// --- reading --------------------------------------------------------------------------
@@ -603,7 +638,44 @@ private:
 			io_->remove(name);
 			throw space_error(e.code(), e.what());
 		}
+		track(name, bytes.size());
 		return f;
+	}
+
+	// --- storage accounting (T5) -------------------------------------------------------------
+
+	void track(const std::string& name, std::uint64_t size) {
+		auto& at = files_[name];
+		on_disk_ += size - at;
+		at = size;
+	}
+	void remove_file(const std::string& name) {
+		io_->remove(name);
+		if (auto it = files_.find(name); it != files_.end()) {
+			on_disk_ -= it->second;
+			files_.erase(it);
+		}
+	}
+	// Brings the storage permit to the files' bytes plus what admission reserved.
+	void settle_storage() {
+		if (!storage_permit_) { return; }
+		const std::uint64_t want = on_disk_ + reserved_;
+		if (want > storage_permit_.bytes()) {
+			storage_permit_.grow(want - storage_permit_.bytes());
+		} else {
+			storage_permit_.shrink(storage_permit_.bytes() - want);
+		}
+	}
+	// A transaction's bytes on disk, overestimated: stored records, each term with its
+	// posting and positions, a per-document overhead, and deletes' live-docs entries.
+	static std::uint64_t estimate_bytes(const transaction& t) {
+		std::uint64_t n = 64;
+		for (const auto& o : t.ops) {
+			n += 16 + o.key.size() + o.meta_key.size() + o.meta_value.size();
+			n += o.doc.stored.size() + o.doc.stored.size() / 16 + 64;
+			for (const auto& term : o.doc.terms) { n += term.term.size() + 12 + 4 * term.positions.size(); }
+		}
+		return n;
 	}
 
 	// --- lookups ----------------------------------------------------------------------------
@@ -909,6 +981,8 @@ private:
 		docid_keys_.clear();
 		version_key_bytes_ = 0;
 		if (permit_) { permit_.settle(); }
+		reserved_ = 0;  // the buffer's bytes are on disk now
+		settle_storage();
 	}
 
 	// --- commit -----------------------------------------------------------------------------
@@ -973,6 +1047,8 @@ private:
 		++next_manifest_;  // a failed attempt's name is never reused
 		write_new(tmp, bytes);
 		io_->replace(tmp, index_detail::manifest_name(next.generation));
+		files_.erase(tmp);
+		files_[index_detail::manifest_name(next.generation)] = bytes.size();
 		io_->sync_directory();
 		m_ = next;
 		applied_since_commit_ = 0;
@@ -1038,11 +1114,11 @@ private:
 		// Manifests leave first, then the data files only they referenced.
 		for (const auto& n : names) {
 			auto p = index_detail::parse_name(n);
-			if (p && p->type == index_detail::parsed_name::manifest && !referenced.count(n)) { io_->remove(n); }
+			if (p && p->type == index_detail::parsed_name::manifest && !referenced.count(n)) { remove_file(n); }
 		}
 		for (const auto& n : names) {
 			auto p = index_detail::parse_name(n);
-			if (p && p->type != index_detail::parsed_name::manifest && !referenced.count(n)) { io_->remove(n); }
+			if (p && p->type != index_detail::parsed_name::manifest && !referenced.count(n)) { remove_file(n); }
 		}
 	}
 
@@ -1058,6 +1134,7 @@ private:
 		for (const auto& n : names) {
 			auto p = index_detail::parse_name(n);
 			if (!p) { continue; }
+			if (storage_permit_) { track(n, io_->open_existing(n)->size()); }
 			switch (p->type) {
 			case index_detail::parsed_name::manifest: top = std::max(top, p->a); break;
 			case index_detail::parsed_name::manifest_tmp: top = std::max(top, p->a); break;
@@ -1119,9 +1196,10 @@ private:
 		if (chosen != manifests.back()) { commit_files(); }
 		// Orphans leave only after a successful open, under the owner lock.
 		for (const auto& n : names) {
-			if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest_tmp) { io_->remove(n); }
+			if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest_tmp) { remove_file(n); }
 		}
 		retain();
+		settle_storage();
 	}
 
 	std::string read_named(const std::string& name, std::uint64_t size) {
@@ -1148,7 +1226,10 @@ private:
 	std::map<std::string, std::string> meta_;
 	std::vector<undo_step> undo_;
 	std::uint64_t buffer_bytes_ = 0, version_key_bytes_ = 0;
-	memory_budget::permit permit_;
+	byte_budget::permit permit_;
+	byte_budget::permit storage_permit_;
+	std::map<std::string, std::uint64_t> files_;  // the index's files and their sizes
+	std::uint64_t on_disk_ = 0, reserved_ = 0;
 	std::uint64_t applied_since_commit_ = 0;
 	std::uint64_t next_manifest_ = 1;
 	std::optional<std::uint64_t> pending_pin_, pending_unpin_;

@@ -294,6 +294,142 @@ int main() {
 			CHECK(contents(ix) == good && ix.digest() == digest);
 		}
 	}
+	// Storage admission (T5). The index holds its files' bytes: after a commit, the
+	// budget's use equals the bytes of the files on disk, across reopens too.
+	{
+		auto on_disk = [](const faultfs::filesystem& fs) {
+			std::uint64_t n = 0;
+			for (const auto& name : fs.list()) {
+				if (strata::index_detail::parse_name(name)) { n += fs.view(name).size(); }
+			}
+			return n;
+		};
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		byte_budget storage(~std::uint64_t(0) >> 1);
+		strata::index::options o = keyed;
+		o.storage = &storage;
+		o.auto_merge = true;
+		{
+			auto ix = strata::index::create(io, o, uuid);
+			for (int i = 0; i < 300; ++i) {
+				ix.apply(tx({add("Q" + std::to_string(i % 120), "body " + std::to_string(i))}), {});
+				if (i % 40 == 39) { ix.commit(); }
+			}
+			ix.commit();
+			CHECK(storage.used() == on_disk(fs));
+		}
+		CHECK(storage.used() == 0);
+		auto ix = strata::index::open(io, o);
+		CHECK(storage.used() == on_disk(fs));
+	}
+	// Admission rejects with no_space and changes nothing; what it admitted commits without
+	// ENOSPC on a disk of the budget's size; merges wait for room; once another index on
+	// the same storage is dropped, work continues and the content holds.
+	{
+		faultfs::filesystem fs, other_fs;
+		faultfs::io io(fs), other_io(other_fs);
+		const std::uint64_t capacity = 256 * 1024;
+		byte_budget storage(capacity);
+		strata::index::options o = keyed;
+		o.storage = &storage;
+		std::mt19937_64 r(21);
+		auto doc_of = [&](const std::string& key) {
+			operation op = add(key, "body");
+			op.doc.stored.resize(3000);
+			for (auto& c : op.doc.stored) { c = char(r()); }
+			return op;
+		};
+		auto other = strata::index::create(other_io, o, uuid);
+		for (int i = 0; i < 30; ++i) { CHECK(other.apply(tx({doc_of("Qo" + std::to_string(i))}), {}).result == verdict::accepted); }
+		other.commit();
+		fs.set_capacity(capacity - storage.used());  // the disk this index has left
+		auto ix = strata::index::create(io, o, uuid);
+		int accepted = 0;
+		for (int i = 0; i < 200; ++i) {
+			const auto v = ix.apply(tx({doc_of("Q" + std::to_string(i))}), {});
+			if (v.result == verdict::no_space) { break; }
+			CHECK(v.result == verdict::accepted);
+			++accepted;
+			if (i % 10 == 9) { ix.commit(); }
+		}
+		CHECK(accepted > 10 && accepted < 200);
+		ix.commit();  // no ENOSPC: admission reserved it
+		const auto before = contents(ix);
+		const auto digest = ix.digest();
+		CHECK(int(before.size()) == accepted);
+		CHECK(ix.apply(tx({doc_of("Qx")}), {}).result == verdict::no_space);
+		CHECK(contents(ix) == before && ix.digest() == digest);
+		std::vector<std::uint64_t> ids;
+		for (const auto& v : ix.segments()) { ids.push_back(v.id); }
+		bool space = false;
+		try {
+			ix.merge(ids);
+		} catch (const std::system_error& e) {
+			space = e.code().value() == ENOSPC;
+		}
+		CHECK(space && ix.segments().size() == ids.size() && ix.digest() == digest);
+		ix.maybe_merge();  // waits for room instead of failing
+		CHECK(ix.digest() == digest);
+		// The other index is dropped: its files leave and its bytes return.
+		other.close();
+		for (const auto& name : other_fs.list()) { other_io.remove(name); }
+		fs.set_capacity(capacity);
+		CHECK(ix.apply(tx({doc_of("Qx")}), {}).result == verdict::accepted);
+		ix.merge({ids[0], ids[1]});  // a merge needs room for its output beside its sources
+		ix.commit();
+		CHECK(contents(ix).size() == before.size() + 1 && ix.segments().size() == ids.size());
+		ix.close();
+		ix = strata::index::open(io, o);
+		CHECK(contents(ix).size() == before.size() + 1);
+	}
+	// ENOSPC at every point of a commit's files (segment, live docs, metadata, manifest):
+	// the commit fails without fencing, and succeeds as a reference commit does once space
+	// returns.
+	{
+		auto run = [&](faultfs::filesystem& fs, faultfs::io& io, std::optional<std::uint64_t> room) {
+			auto ix = strata::index::create(io, keyed, uuid);
+			ix.apply(tx({add("Qa", "a"), add("Qb", "b"), add("Qc", "c")}), {});
+			ix.commit();
+			operation big = add("Qd", "d");
+			big.doc.stored.assign(1500, 'd');
+			transaction t = tx({erase("Qa"), replace("Qb", "b2"), big});
+			operation meta;
+			meta.type = operation::set_meta;
+			meta.meta_key = "m";
+			meta.meta_value = std::string(1500, 'm');
+			t.ops.push_back(meta);
+			CHECK(ix.apply(t, {}).result == verdict::accepted);
+			bool failed = false;
+			if (room) { fs.set_capacity(fs.used() + *room); }
+			try {
+				ix.commit();
+			} catch (const std::system_error& e) {
+				CHECK(e.code().value() == ENOSPC);
+				failed = true;
+				fs.set_capacity(~std::uint64_t(0));
+				ix.commit();
+			}
+			return std::pair{failed, std::move(ix)};
+		};
+		faultfs::filesystem ref_fs;
+		faultfs::io ref_io(ref_fs);
+		auto [_, ref] = run(ref_fs, ref_io, std::nullopt);
+		const auto want = contents(ref);
+		const auto digest = ref.digest();
+		std::size_t failed = 0;
+		for (std::uint64_t room = 0; room < 6000; room += 97) {
+			faultfs::filesystem fs;
+			faultfs::io io(fs);
+			auto [f, ix] = run(fs, io, room);
+			failed += f;
+			CHECK(contents(ix) == want && ix.digest() == digest && ix.metadata().at("m").size() == 1500);
+			ix.close();
+			ix = strata::index::open(io, keyed);
+			CHECK(contents(ix) == want && ix.digest() == digest && ix.metadata().at("m").size() == 1500);
+		}
+		CHECK(failed > 20);
+	}
 	// Retention keeps the current manifest and two predecessors; orphans leave at open.
 	{
 		faultfs::filesystem fs;
@@ -350,7 +486,7 @@ int main() {
 	// stay within it plus one transaction, flush into several segments, and reach the same
 	// digest as unbudgeted runs.
 	{
-		memory_budget b(1000);
+		byte_budget b(1000);
 		auto p = b.open();
 		CHECK(p.try_grow(600) && b.used() == 600);
 		CHECK(!p.try_grow(500) && b.used() == 600);  // refused, nothing drawn
@@ -365,7 +501,7 @@ int main() {
 		CHECK(b.used() == 0);  // the moved-to permit settled when it ended
 	}
 	{
-		memory_budget budget(200 * 1024);
+		byte_budget budget(200 * 1024);
 		index::options opts = keyed;
 		opts.budget = &budget;
 		faultfs::filesystem fa, fb, fc, fd;
