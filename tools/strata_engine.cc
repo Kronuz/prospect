@@ -5,7 +5,7 @@
 //   strata_engine dictstats DIR              the term dictionary's bytes by part
 //   strata_engine verify DIR < queries.txt   pruned top-k equals an exhaustive scan, k = 10, 100, 1000,
 //                                            ordinals and scores, Lucene and Xapian BM25
-//   strata_engine bench DIR COMMAND RUNS < queries.txt
+//   strata_engine bench DIR COMMAND RUNS [bm25_xapian] < queries.txt
 //                                            per query: fastest of RUNS in-process runs, in µs
 // Query syntax: words are optional, +word is required, -word is excluded, "a b" is a phrase.
 #include "residency.hh"
@@ -126,14 +126,14 @@ strata::scorer_ptr clause_scorer(const strata::segment& seg, const std::vector<s
 		if (!info) { return nullptr; }
 		infos.push_back(*info);
 	}
-	const bool xapian = scheme == strata::scheme::xapian_bm25;
+	const bool xapian = scheme == strata::scheme::bm25_xapian;
 	if (infos.size() == 1) {
-		if (xapian) { return std::make_unique<strata::term_scorer>(seg, infos[0], strata::weight::xapian(seg, infos[0].df, std::uint32_t(boost))); }
+		if (xapian) { return std::make_unique<strata::term_scorer>(seg, infos[0], strata::weight::bm25_xapian(seg, infos[0].df, std::uint32_t(boost))); }
 		return std::make_unique<strata::term_scorer>(seg, infos[0], boost);
 	}
 	if (!xapian) { return std::make_unique<strata::phrase_scorer>(seg, infos); }
 	std::vector<strata::weight> weights;
-	for (const auto& info : infos) { weights.push_back(strata::weight::xapian(seg, info.df)); }
+	for (const auto& info : infos) { weights.push_back(strata::weight::bm25_xapian(seg, info.df)); }
 	return std::make_unique<strata::phrase_scorer>(seg, infos, std::move(weights));
 }
 
@@ -153,7 +153,7 @@ std::vector<std::pair<std::vector<std::string>, double>> merge_repeats(const std
 	return out;
 }
 
-strata::scorer_ptr build(const strata::segment& seg, const parsed& q, strata::scheme scheme = strata::scheme::lucene_bm25) {
+strata::scorer_ptr build(const strata::segment& seg, const parsed& q, strata::scheme scheme = strata::scheme::bm25) {
 	std::vector<strata::scorer_ptr> must, should, must_not;
 	for (const auto& [c, boost] : merge_repeats(q.must)) {
 		auto s = clause_scorer(seg, c, boost, scheme);
@@ -186,7 +186,7 @@ strata::scorer_ptr build(const strata::segment& seg, const parsed& q, strata::sc
 	return result;
 }
 
-std::uint64_t run(const strata::segment& seg, std::string_view command, std::string_view query) {
+std::uint64_t run(const strata::segment& seg, std::string_view command, std::string_view query, strata::scheme scheme = strata::scheme::bm25) {
 	const parsed q = parse(query);
 	const bool counting = command == "COUNT" || command.ends_with("_COUNT");
 	// A single term's count is its document frequency (one segment, no deletes).
@@ -194,7 +194,7 @@ std::uint64_t run(const strata::segment& seg, std::string_view command, std::str
 		auto info = seg.term((q.must.empty() ? q.should[0] : q.must[0])[0]);
 		return info ? info->df : 0;
 	}
-	auto s = build(seg, q);
+	auto s = build(seg, q, scheme);
 	if (!s) { return counting ? 0 : 1; }
 	if (command == "COUNT") { return strata::count(*s); }
 	std::size_t k = 0;
@@ -311,7 +311,7 @@ int verify(const std::string& dir) {
 		if (q.empty()) { continue; }
 		++queries;
 		const parsed p = parse(q);
-		for (const auto scheme : {strata::scheme::lucene_bm25, strata::scheme::xapian_bm25}) {
+		for (const auto scheme : {strata::scheme::bm25, strata::scheme::bm25_xapian}) {
 			auto all = build(seg, p, scheme);
 			if (!all) { break; }
 			std::vector<strata::hit> scan;
@@ -343,7 +343,7 @@ int verify(const std::string& dir) {
 				}
 				if (!ok) {
 					++mismatches;
-					std::cout << "MISMATCH " << (scheme == strata::scheme::lucene_bm25 ? "lucene" : "xapian") << " k=" << k << '\t' << q << '\n';
+					std::cout << "MISMATCH " << (scheme == strata::scheme::bm25 ? "bm25" : "bm25_xapian") << " k=" << k << '\t' << q << '\n';
 					break;
 				}
 			}
@@ -354,7 +354,7 @@ int verify(const std::string& dir) {
 }
 
 // queries.txt is the harness's JSON lines: {"query": "...", "tags": [...]}.
-int bench(const std::string& dir, std::string_view command, int runs) {
+int bench(const std::string& dir, std::string_view command, int runs, strata::scheme scheme) {
 	residency::file file;
 	strata::segment seg = open(dir, file);
 	for (std::string line; std::getline(std::cin, line);) {
@@ -366,7 +366,7 @@ int bench(const std::string& dir, std::string_view command, int runs) {
 		std::uint64_t result = 0;
 		for (int r = 0; r < runs; ++r) {
 			auto t0 = std::chrono::steady_clock::now();
-			result = run(seg, command, unescaped);
+			result = run(seg, command, unescaped, scheme);
 			best = std::min(best, std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count());
 		}
 		std::cout << std::fixed << std::setprecision(1) << best << '\t' << result << '\t' << unescaped << '\n';
@@ -383,7 +383,10 @@ int main(int argc, char** argv) {
 	if (mode == "terms" && argc == 3) { return terms(argv[2]); }
 	if (mode == "dictstats" && argc == 3) { return dictstats(argv[2]); }
 	if (mode == "verify" && argc == 3) { return verify(argv[2]); }
-	if (mode == "bench" && argc == 5) { return bench(argv[2], argv[3], std::atoi(argv[4])); }
+	if (mode == "bench" && (argc == 5 || argc == 6)) {
+		const bool xapian = argc == 6 && std::string_view(argv[5]) == "bm25_xapian";
+		return bench(argv[2], argv[3], std::atoi(argv[4]), xapian ? strata::scheme::bm25_xapian : strata::scheme::bm25);
+	}
 	std::cerr << "usage: strata_engine index|serve|terms|dictstats|verify DIR | bench DIR COMMAND RUNS < queries\n";
 	return 2;
 }

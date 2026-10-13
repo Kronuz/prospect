@@ -37,29 +37,35 @@ int main() {
 			std::map<std::string, std::vector<std::uint32_t>> positions;
 			for (std::size_t i = 0; i < docs[d].tokens.size(); ++i) { positions[docs[d].tokens[i]].push_back(std::uint32_t(i + 1)); }
 			std::vector<strata::posting_input> in;
-			for (auto& [t, p] : positions) { in.push_back({t, std::uint32_t(p.size()), p}); }
+			// "h" is weighted: its wdf is twice its position count (counts differ from wdf).
+			for (auto& [t, p] : positions) { in.push_back({t, std::uint32_t(p.size()) * (t == "h" ? 2 : 1), p}); }
 			w.add(d + 1, in, std::uint32_t(docs[d].tokens.size()));
 		}
 		std::string file = w.flush({});
 		strata::segment seg(file);
-		auto tf = [&](std::size_t d, const std::string& t) {
+		// Positions in the document, and the wdf scoring reads.
+		auto occurrences = [&](std::size_t d, const std::string& t) {
 			return std::uint32_t(std::count(docs[d].tokens.begin(), docs[d].tokens.end(), t));
 		};
+		auto tf = [&](std::size_t d, const std::string& t) { return occurrences(d, t) * (t == "h" ? 2 : 1); };
+		bool xapian = false;  // the round's scoring scheme
 		auto weight = [&](const std::string& t) {
 			auto info = seg.term(t);
-			return strata::weight::lucene(seg, info ? info->df : 0);
+			return xapian ? strata::weight::bm25_xapian(seg, info ? info->df : 0) : strata::weight::bm25(seg, info ? info->df : 0);
 		};
-		auto term = [&](const std::string& t) -> strata::scorer_ptr { return std::make_unique<strata::term_scorer>(seg, *seg.term(t)); };
+		auto term = [&](const std::string& t) -> strata::scorer_ptr { return std::make_unique<strata::term_scorer>(seg, *seg.term(t), weight(t)); };
 
 		for (int round = 0; round < 300; ++round) {
+			xapian = round % 2 == 1;
 			std::vector<std::string> pick;
 			std::size_t n = 1 + rng() % 3;
 			while (pick.size() < n) {
 				std::string t = vocab[rng() % vocab.size()];
 				if (std::find(pick.begin(), pick.end(), t) == pick.end() && seg.term(t)) { pick.push_back(t); }
 			}
-			const int kind = int(rng() % 9);
-			while (kind >= 7 && pick.size() < 3) {  // (pick[0] OR pick[1]) with pick[2]
+			const int kind = int(rng() % 12);
+			const std::size_t need = kind == 11 ? 4 : kind >= 7 ? 3 : 0;
+			while (pick.size() < need) {
 				std::string t = vocab[rng() % vocab.size()];
 				if (std::find(pick.begin(), pick.end(), t) == pick.end() && seg.term(t)) { pick.push_back(t); }
 			}
@@ -87,6 +93,29 @@ int main() {
 					match = tf(d, pick[0]) > 0;
 					for (std::size_t i = 1; i < pick.size(); ++i) { if (tf(d, pick[i])) { match = false; } }
 					if (match) { s = weight(pick[0])(tf(d, pick[0]), std::uint32_t(docs[d].tokens.size())); }
+					break;
+				}
+				case 9: {  // (+pick[0] +pick[1]) pick[2]: required-plus-optional over a conjunction
+					match = tf(d, pick[0]) && tf(d, pick[1]);
+					if (match) {
+						for (std::size_t i = 0; i < 3; ++i) {
+							if (tf(d, pick[i])) { s += weight(pick[i])(tf(d, pick[i]), std::uint32_t(docs[d].tokens.size())); }
+						}
+					}
+					break;
+				}
+				case 10: {  // pick[0] -pick[1] -pick[2]: an exclusion chain
+					match = tf(d, pick[0]) && !tf(d, pick[1]) && !tf(d, pick[2]);
+					if (match) { s = weight(pick[0])(tf(d, pick[0]), std::uint32_t(docs[d].tokens.size())); }
+					break;
+				}
+				case 11: {  // (pick[0] OR pick[1]) AND (pick[2] OR pick[3])
+					match = (tf(d, pick[0]) || tf(d, pick[1])) && (tf(d, pick[2]) || tf(d, pick[3]));
+					if (match) {
+						for (std::size_t i = 0; i < 4; ++i) {
+							if (tf(d, pick[i])) { s += weight(pick[i])(tf(d, pick[i]), std::uint32_t(docs[d].tokens.size())); }
+						}
+					}
 					break;
 				}
 				case 7:    // (pick[0] OR pick[1]) AND_NOT pick[2]
@@ -124,10 +153,14 @@ int main() {
 						freq += ok;
 					}
 					match = freq > 0;
-					if (match) {
+					if (match && xapian) {
+						// Xapian sums each phrase term's own weight.
+						for (auto& t : pick) { s += weight(t)(tf(d, t), std::uint32_t(tk.size())); }
+						if (kind == 5) { s += weight(pick[0])(tf(d, pick[0]), std::uint32_t(tk.size())); }
+					} else if (match) {
 						double idf = 0;
 						for (auto& t : pick) { idf += weight(t).idf; }
-						auto wt = strata::weight::lucene(seg, 1);
+						auto wt = strata::weight::bm25(seg, 1);
 						wt.idf = idf;
 						s = wt(freq, std::uint32_t(tk.size()));
 						if (kind == 5) { s += weight(pick[0])(tf(d, pick[0]), std::uint32_t(tk.size())); }
@@ -156,15 +189,32 @@ int main() {
 					if (kind == 8) { return std::make_unique<strata::required_optional_scorer>(std::move(either), term(pick[2])); }
 					return std::make_unique<strata::exclusion_scorer>(std::move(either), term(pick[2]));
 				}
+				case 9: {
+					kids.push_back(term(pick[0]));
+					kids.push_back(term(pick[1]));
+					return std::make_unique<strata::required_optional_scorer>(std::make_unique<strata::conjunction_scorer>(std::move(kids)), term(pick[2]));
+				}
+				case 10: {
+					auto first = std::make_unique<strata::exclusion_scorer>(term(pick[0]), term(pick[1]));
+					return std::make_unique<strata::exclusion_scorer>(std::move(first), term(pick[2]));
+				}
+				case 11: {
+					std::vector<strata::scorer_ptr> left, right;
+					left.push_back(term(pick[0]));
+					left.push_back(term(pick[1]));
+					right.push_back(term(pick[2]));
+					right.push_back(term(pick[3]));
+					kids.push_back(std::make_unique<strata::disjunction_scorer>(std::move(left)));
+					kids.push_back(std::make_unique<strata::disjunction_scorer>(std::move(right)));
+					return std::make_unique<strata::conjunction_scorer>(std::move(kids));
+				}
 				default: {
 					std::vector<strata::format::term_info> infos;
 					for (auto& t : pick) { infos.push_back(*seg.term(t)); }
-					if (kind == 6) {
-						std::vector<strata::weight> ws;
-						for (auto& t : pick) { ws.push_back(weight(t)); }
-						return std::make_unique<strata::phrase_scorer>(seg, infos, std::move(ws), 3);
-					}
-					auto phrase = std::make_unique<strata::phrase_scorer>(seg, infos);
+					std::vector<strata::weight> ws;
+					for (auto& t : pick) { ws.push_back(weight(t)); }
+					if (kind == 6) { return std::make_unique<strata::phrase_scorer>(seg, infos, std::move(ws), 3); }
+					auto phrase = xapian ? std::make_unique<strata::phrase_scorer>(seg, infos, std::move(ws)) : std::make_unique<strata::phrase_scorer>(seg, infos);
 					if (kind == 4) { return phrase; }
 					kids.push_back(std::move(phrase));
 					kids.push_back(term(pick[0]));
@@ -280,7 +330,7 @@ int main() {
 		const std::vector<strata::format::term_info> infos{*seg.term("a"), *seg.term("p")};
 		strata::phrase_scorer phrase(seg, infos);
 		CHECK(strata::top_k(phrase, 10).empty());
-		strata::phrase_scorer near(seg, infos, {strata::weight::lucene(seg, 300), strata::weight::lucene(seg, 300)}, 5);
+		strata::phrase_scorer near(seg, infos, {strata::weight::bm25(seg, 300), strata::weight::bm25(seg, 300)}, 5);
 		std::uint64_t n = 1;
 		CHECK(strata::top_k(near, 10, &n).empty() && n == 0);
 	}

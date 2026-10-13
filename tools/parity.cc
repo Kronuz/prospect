@@ -95,7 +95,7 @@ strata::scorer_ptr build(const strata::segment& seg, const node& n, const std::m
 	if (n.op.empty()) {
 		auto info = seg.term(n.term);
 		if (!info) { return nullptr; }
-		return std::make_unique<strata::term_scorer>(seg, *info, strata::weight::xapian(seg, info->df, wqf.at(n.term)));
+		return std::make_unique<strata::term_scorer>(seg, *info, strata::weight::bm25_xapian(seg, info->df, wqf.at(n.term)));
 	}
 	if (n.op == "PHRASE" || n.op == "NEAR") {
 		std::vector<strata::format::term_info> infos;
@@ -104,7 +104,7 @@ strata::scorer_ptr build(const strata::segment& seg, const node& n, const std::m
 			auto info = seg.term(c.term);
 			if (!info) { return nullptr; }
 			infos.push_back(*info);
-			weights.push_back(strata::weight::xapian(seg, info->df, wqf.at(c.term)));
+			weights.push_back(strata::weight::bm25_xapian(seg, info->df, wqf.at(c.term)));
 		}
 		return std::make_unique<strata::phrase_scorer>(seg, infos, std::move(weights), n.op == "NEAR" ? n.window : 0);
 	}

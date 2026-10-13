@@ -117,7 +117,7 @@ void exercise(const strata::segment& seg) {
 	strata::top_k(phrase_count, 10, &n);
 	// Xapian-weighted phrase and NEAR, and a disjunction under pruning parents.
 	const std::vector<strata::format::term_info> two{infos[0], infos[1]};
-	const std::vector<strata::weight> weights{strata::weight::lucene(seg, infos[0].df), strata::weight::lucene(seg, infos[1].df)};
+	const std::vector<strata::weight> weights{strata::weight::bm25(seg, infos[0].df), strata::weight::bm25(seg, infos[1].df)};
 	strata::phrase_scorer xapian(seg, two, weights);
 	strata::top_k(xapian, 10);
 	strata::phrase_scorer near(seg, two, weights, 4);

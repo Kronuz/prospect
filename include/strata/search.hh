@@ -41,23 +41,27 @@ namespace strata {
 
 // --- weighting ----------------------------------------------------------------------------------
 
-enum class scheme { lucene_bm25, xapian_bm25 };
+// Two presets of one weighting, both of the BM25 family (ARCHITECTURE, "One
+// implementation per mechanism").
+enum class scheme { bm25, bm25_xapian };
 
 // A term's weighting function: score(tf, length) for one scheme.
-//   Lucene BM25 (k1 = 1.2, b = 0.75): idf · tf / (tf + k1 · (1 − b + b · len / avglen)),
+//   bm25, Lucene's and Tantivy's form (k1 = 1.2, b = 0.75) over one-byte quantized
+//     lengths: idf · tf / (tf + k1 · (1 − b + b · len / avglen)),
 //     idf = ln(1 + (N − df + 0.5) / (df + 0.5)).
-//   Xapian BM25 (k1 = 1, k2 = 0, k3 = 1, b = 0.5, min_normlen = 0.5):
+//   bm25_xapian, Xapian's BM25Weight (k1 = 1, k2 = 0, k3 = 1, b = 0.5, min_normlen = 0.5)
+//     over exact lengths:
 //     idf · (k3 + 1) · wqf / (k3 + wqf) · (k1 + 1) · tf / (K + tf),
 //     K = k1 · ((1 − b) + b · max(len / avglen, min_normlen)), idf from (N − df + 0.5) / (df + 0.5).
 struct weight {
-	scheme kind = scheme::lucene_bm25;
+	scheme kind = scheme::bm25;
 	double k1 = 1.2, b = 0.75, min_normlen = 0;
 	double idf = 0, avg = 1, inv_avg = 1;  // inv_avg = 1 / avg: one division per score
 	// Lucene BM25 scores quantized lengths, as Lucene does: norm_k[code] is k1 * (1 - b + b *
 	// decode_length(code) / avg), so a score is one table load and one division.
 	std::array<double, 256> norm_k{};
 
-	static weight lucene(const segment& seg, std::uint64_t df, double boost = 1.0) {
+	static weight bm25(const segment& seg, std::uint64_t df, double boost = 1.0) {
 		weight w;
 		w.idf = boost * std::log(1.0 + (double(seg.doc_count()) - double(df) + 0.5) / (double(df) + 0.5));
 		w.avg = std::max(1.0, seg.average_length());
@@ -66,9 +70,9 @@ struct weight {
 		return w;
 	}
 
-	static weight xapian(const segment& seg, std::uint64_t df, std::uint32_t wqf = 1) {
+	static weight bm25_xapian(const segment& seg, std::uint64_t df, std::uint32_t wqf = 1) {
 		weight w;
-		w.kind = scheme::xapian_bm25;
+		w.kind = scheme::bm25_xapian;
 		w.k1 = 1.0;
 		w.b = 0.5;
 		w.min_normlen = 0.5;
@@ -88,7 +92,7 @@ struct weight {
 
 	double operator()(std::uint32_t tf, std::uint32_t length) const noexcept {
 		if (tf == 0) { return 0.0; }
-		if (kind == scheme::lucene_bm25) { return by_norm(tf, format::encode_length(length)); }
+		if (kind == scheme::bm25) { return by_norm(tf, format::encode_length(length)); }
 		const double normlen = std::max(double(length) * inv_avg, min_normlen);
 		const double K = k1 * ((1.0 - b) + b * normlen);
 		return idf * double(tf) / (K + double(tf));
@@ -200,7 +204,7 @@ using scorer_ptr = std::unique_ptr<scorer>;
 class term_scorer final : public scorer {
 public:
 	term_scorer(const segment& seg, const format::term_info& info, double boost = 1.0)
-		: term_scorer(seg, info, weight::lucene(seg, info.df, boost)) {}
+		: term_scorer(seg, info, weight::bm25(seg, info.df, boost)) {}
 
 	term_scorer(const segment& seg, const format::term_info& info, const weight& w) : seg_(&seg), it_(seg, info), weight_(w) {
 		// Whole-list bound from the term's competitive pairs.
@@ -261,7 +265,7 @@ public:
 
 	// Lucene BM25 reads the one-byte norm; Xapian BM25 reads the exact length.
 	double score_of(ordinal_t ord, std::uint32_t wdf) const {
-		return weight_.kind == scheme::lucene_bm25 ? weight_.by_norm(wdf, seg_->norm(ord)) : weight_(wdf, seg_->length(ord));
+		return weight_.kind == scheme::bm25 ? weight_.by_norm(wdf, seg_->norm(ord)) : weight_(wdf, seg_->length(ord));
 	}
 	const segment& seg() const noexcept { return *seg_; }
 
@@ -851,7 +855,7 @@ public:
 		double idf = 0;
 		for (std::size_t k = 0; k < infos.size(); ++k) {
 			const auto& info = infos[k];
-			idf += weight::lucene(seg, info.df).idf;
+			idf += weight::bm25(seg, info.df).idf;
 			std::size_t u = 0;
 			while (u < infos_.size() && !(infos_[u].postings == info.postings && infos_[u].positions == info.positions && infos_[u].df == info.df)) { ++u; }
 			if (u == infos_.size()) {
@@ -873,7 +877,7 @@ public:
 		positions_.resize(terms_.size());
 		decoded_.assign(terms_.size(), no_more_docs);
 		counts_.resize(terms_.size());
-		weight_ = weight::lucene(seg, 1);
+		weight_ = weight::bm25(seg, 1);
 		weight_.idf = idf;
 		bound_ = idf;  // tf / (tf + norm) < 1
 		if (!term_weights_.empty()) {
@@ -1101,7 +1105,7 @@ private:
 	std::vector<std::size_t> others_;  // the terms but the lead, rarest first
 	std::vector<weight> term_weights_;
 	std::uint32_t window_ = 0;
-	weight weight_ = weight::lucene(*seg_, 1);
+	weight weight_ = weight::bm25(*seg_, 1);
 	std::uint64_t cost_ = ~std::uint64_t(0);
 	std::uint32_t freq_ = 0;
 	bool matched_ = false;

@@ -6,6 +6,17 @@ its API is coroutine-based so a host reactor never blocks on it. It is MIT-licen
 and built from small standalone libraries. Replication lives in a separate layer,
 described in [REPLICATION.md](REPLICATION.md).
 
+## One implementation per mechanism
+
+strata keeps one implementation of each mechanism: scoring, encodings, merge policies,
+query operators. Behavior compatible with Xapian, Lucene, or Tantivy is a parameter or
+preset of that implementation, never a second code path, and its default is the preset
+measured fastest on the gate corpus. The weighting has two presets, both from the BM25
+family (Robertson's Okapi formula, whose engines differ in k1, b, idf, and length
+handling): `bm25`, with Lucene's and Tantivy's parameters over one-byte quantized lengths,
+and `bm25_xapian`, Xapian's BM25Weight over exact lengths, for Xapiand's ranking
+continuity and the oracle's parity vectors.
+
 ## Layers
 
 ```
