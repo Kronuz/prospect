@@ -151,6 +151,106 @@ int main() {
 		CHECK(verdicts[0] == verdicts[1] && verdicts[1] == verdicts[2]);
 		CHECK(digests[0] == digests[1] && digests[1] == digests[2]);
 	}
+	// T2: replay after recovery and after install. A writer that stops at a commit and
+	// replays the whole log skips what it applied and ends where an uninterrupted run does.
+	for (std::uint64_t seed = 0; seed < 20; ++seed) {
+		std::vector<transaction> log;
+		for (const auto& s : workload(seed + 300, 200)) {
+			if (s.type == step::apply) { log.push_back(s.t); }
+		}
+		auto record = [](const verdict& v) {
+			std::vector<std::uint64_t> r{std::uint64_t(v.result), v.op, v.current_version};
+			r.insert(r.end(), v.docids.begin(), v.docids.end());
+			r.insert(r.end(), v.versions.begin(), v.versions.end());
+			return r;
+		};
+		std::vector<std::vector<std::uint64_t>> want;
+		std::uint64_t digest;
+		{
+			faultfs::filesystem fs;
+			faultfs::io io(fs);
+			auto ix = index::create(io, keyed, uuid_a);
+			for (std::size_t i = 0; i < log.size(); ++i) { want.push_back(record(ix.apply(log[i], {i + 1, 1}))); }
+			ix.commit();
+			digest = ix.digest();
+		}
+		const std::size_t half = log.size() / 2;
+		for (int via_install = 0; via_install < 2; ++via_install) {
+			faultfs::filesystem fs, other;
+			faultfs::io io(fs), other_io(other);
+			auto ix = index::create(io, keyed, uuid_a);
+			for (std::size_t i = 0; i < half; ++i) { ix.apply(log[i], {i + 1, 1}); }
+			ix.commit();
+			if (via_install) {
+				const std::uint64_t cp = ix.checkpoint();
+				auto b = index::create(other_io, keyed, uuid_b);
+				b.install(io, cp);
+				ix = std::move(b);
+			} else {
+				ix.close();
+				ix = index::open(io, keyed);
+			}
+			for (std::size_t i = 0; i < log.size(); ++i) {
+				const auto v = ix.apply(log[i], {i + 1, 1});
+				if (i < half) {
+					CHECK(v.result == verdict::skipped);
+				} else {
+					CHECK(record(v) == want[i]);
+				}
+			}
+			ix.commit();
+			CHECK(ix.digest() == digest);
+		}
+	}
+	// T2: a refresh between a delete and a re-add, and a merge dropping the deleted copy
+	// before its key or docid returns, under four schedules: equal verdicts and digests.
+	{
+		std::mt19937_64 r(99);
+		std::vector<transaction> log;
+		auto put = [&](operation::kind type, const std::string& key, std::uint64_t docid = 0) {
+			operation o;
+			o.type = type;
+			o.key = key;
+			o.docid = docid;
+			if (type == operation::add || type == operation::replace_key || type == operation::replace_docid) { o.doc = make_doc(r, key); }
+			log.push_back(tx_of(std::move(o)));
+		};
+		for (int k = 0; k < 6; ++k) { put(operation::add, "Q" + std::to_string(k)); }
+		put(operation::delete_key, "Q1");
+		put(operation::replace_key, "Q1");
+		put(operation::delete_docid, "", 3);
+		put(operation::replace_docid, "Q2", 3);
+		put(operation::delete_key, "Q4");
+		put(operation::add, "Q4");
+		put(operation::delete_docid, "", 6);
+		put(operation::add, "Q5");
+		std::vector<std::vector<std::uint64_t>> verdicts[4];
+		std::uint64_t digests[4];
+		for (int schedule = 0; schedule < 4; ++schedule) {
+			faultfs::filesystem fs;
+			faultfs::io io(fs);
+			auto ix = index::create(io, keyed, uuid_a);
+			for (const auto& t : log) {
+				const bool removes = t.ops[0].type == operation::delete_key || t.ops[0].type == operation::delete_docid;
+				const auto v = ix.apply(t, {});
+				std::vector<std::uint64_t> rec{std::uint64_t(v.result), v.current_version};
+				rec.insert(rec.end(), v.docids.begin(), v.docids.end());
+				rec.insert(rec.end(), v.versions.begin(), v.versions.end());
+				verdicts[schedule].push_back(rec);
+				if (schedule >= 1) { ix.refresh(); }
+				if ((schedule == 2 && removes) || schedule == 3) { ix.force_merge(1); }  // drops deleted copies
+			}
+			ix.commit();
+			digests[schedule] = ix.digest();
+			ix.close();
+			ix = index::open(io, keyed);
+			CHECK(ix.digest() == digests[schedule]);
+		}
+		for (int i = 1; i < 4; ++i) { CHECK(verdicts[i] == verdicts[0] && digests[i] == digests[0]); }
+		std::size_t accepted = 0;
+		for (const auto& v : verdicts[0]) { accepted += v[0] == verdict::accepted; }
+		CHECK(accepted == log.size());
+	}
 	// Checkpoints and install.
 	for (std::uint64_t seed = 0; seed < 30; ++seed) {
 		faultfs::filesystem fa, fb;
