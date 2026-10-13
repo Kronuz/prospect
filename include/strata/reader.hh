@@ -221,6 +221,7 @@ public:
 		if (frames == 0 || first_of(lo) > ord) { throw corrupt_segment("stored index"); }
 		const char* e = stored_.data() + index_at + 16 * std::uint64_t(lo);
 		const std::uint32_t raw_size = format::get<std::uint32_t>(e + 4);
+		if (raw_size > format::max_stored_frame) { throw corrupt_segment("stored frame size"); }
 		const std::uint64_t begin = format::get<std::uint64_t>(e + 8);
 		const std::uint64_t end = lo + 1 < frames ? format::get<std::uint64_t>(e + 24) : index_at;
 		if (begin > end || end > index_at) { throw corrupt_segment("stored frame bounds"); }

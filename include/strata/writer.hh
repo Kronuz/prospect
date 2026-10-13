@@ -231,6 +231,7 @@ public:
 		// Ordinals are 32-bit and the largest value means no more documents.
 		if (lengths_.size() >= std::size_t(no_more_docs) - 1) { throw std::length_error("strata: segment document limit"); }
 		if (docid == 0 || (!docids_.empty() && docid <= docids_.back())) { throw std::invalid_argument("strata: docids must increase within a segment"); }
+		if (stored.size() > format::max_stored_record) { throw std::invalid_argument("strata: stored record too large"); }
 		const ordinal_t ord = ordinal_t(lengths_.size());
 		versions_.push_back(version);
 		if (!key.empty()) {

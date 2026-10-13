@@ -60,6 +60,11 @@ inline constexpr std::size_t region_size = 64 * 1024;
 // Stored records are packed into zstd frames of at most this many uncompressed bytes (a
 // larger record takes a frame of its own).
 inline constexpr std::size_t stored_block_size = 64 * 1024;
+// The largest stored record a document may carry; a frame then holds at most one block
+// of records or one record this size, plus its length header, which bounds what reading
+// a frame allocates even when a file's checksums were recomputed (review C9).
+inline constexpr std::uint64_t max_stored_record = 64ull << 20;
+inline constexpr std::uint64_t max_stored_frame = stored_block_size + max_stored_record + 64;
 inline constexpr std::size_t section_alignment = 64;
 inline constexpr std::size_t block = 128;
 

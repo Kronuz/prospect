@@ -608,6 +608,7 @@ private:
 
 	// Validation that can reject runs here, before anything changes (design D10).
 	static bool valid(const document& d) {
+		if (d.stored.size() > format::max_stored_record) { return false; }
 		std::set<std::string_view> seen;
 		for (const auto& t : d.terms) {
 			if (t.term.empty() || t.term.size() > 245 || !seen.insert(t.term).second) { return false; }
