@@ -15,6 +15,7 @@
 #include "strata/writer.hh"
 
 #include <algorithm>
+#include <array>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -336,10 +337,25 @@ int dictsim(const std::string& path) {
 		std::uint64_t v = 0;
 		return std::fread(&v, 8, 1, in) == 1 ? std::optional<std::uint64_t>(v) : std::nullopt;
 	};
-	termdict::builder b;
+	// A first pass over the keys for the dictionary's alphabet.
+	std::array<bool, 256> used{};
+	std::string key;
+	while (auto n = u64()) {
+		key.resize(*n);
+		if (std::fread(key.data(), 1, *n, in) != *n) { break; }
+		for (char c : key) { used[std::uint8_t(c)] = true; }
+		std::uint64_t skip[9];
+		if (std::fread(skip, 8, 9, in) != 9) { break; }
+		std::fseek(in, long(8 * skip[8]), SEEK_CUR);
+	}
+	std::rewind(in);
+	std::string alphabet;
+	for (unsigned c = 0; c < 256; ++c) {
+		if (used[c]) { alphabet.push_back(char(c)); }
+	}
+	termdict::builder b(alphabet);
 	strata::format::term_run run;
 	std::uint64_t terms = 0;
-	std::string key;
 	while (auto n = u64()) {
 		key.resize(*n);
 		if (std::fread(key.data(), 1, *n, in) != *n) { break; }

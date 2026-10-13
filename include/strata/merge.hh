@@ -9,6 +9,7 @@
 #include "strata/writer.hh"
 
 #include <algorithm>
+#include <array>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -84,6 +85,15 @@ inline merge_plan merge_segments(std::span<const merge_source> sources, const st
 			return true;
 		});
 	}
+	// The dictionary's alphabet: every byte the sources' dictionaries use.
+	std::array<bool, 256> used{};
+	for (const auto& src : sources) {
+		for (char c : src.seg->dictionary().alphabet_bytes()) { used[std::uint8_t(c)] = true; }
+	}
+	std::string alphabet;
+	for (unsigned c = 0; c < 256; ++c) {
+		if (used[c]) { alphabet.push_back(char(c)); }
+	}
 	std::vector<std::size_t> at(sources.size(), 0);
 	std::string current;
 	struct posting {
@@ -92,7 +102,7 @@ inline merge_plan merge_segments(std::span<const merge_source> sources, const st
 		std::vector<std::uint32_t> positions;  // absolute
 	};
 	std::vector<posting> postings;
-	w.flush_from(segment_id, sink, positions_spill, [&](term_postings& tp) -> std::optional<std::string_view> {
+	w.flush_from(segment_id, sink, positions_spill, alphabet, [&](term_postings& tp) -> std::optional<std::string_view> {
 		for (;;) {
 			// The smallest term not yet merged.
 			const std::string* next = nullptr;

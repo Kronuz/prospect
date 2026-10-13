@@ -47,6 +47,7 @@
 #include "termdict.hh"
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstdint>
 #include <deque>
@@ -321,8 +322,16 @@ public:
 			if (slot.key) { keys.push_back({std::string_view(slot.key, slot.length), slot.buffer}); }
 		}
 		std::sort(keys.begin(), keys.end());
+		std::array<bool, 256> used{};
+		for (const auto& [key, _] : keys) {
+			for (char c : key) { used[std::uint8_t(c)] = true; }
+		}
+		std::string alphabet;
+		for (unsigned c = 0; c < 256; ++c) {
+			if (used[c]) { alphabet.push_back(char(c)); }
+		}
 		std::size_t next = 0;
-		flush_from(segment_id, sink, positions_spill, [&](term_postings& tp) -> std::optional<std::string_view> {
+		flush_from(segment_id, sink, positions_spill, alphabet, [&](term_postings& tp) -> std::optional<std::string_view> {
 			if (next == keys.size()) { return std::nullopt; }
 			const auto [key, buffer] = keys[next++];
 			const term_buffer& t = buffers_[buffer];
@@ -351,9 +360,10 @@ public:
 
 	// Writes the segment with terms from next(tp), which fills tp and returns the term, in
 	// strictly increasing order, or nothing at the end. Documents come from add() or
-	// add_document(); a term's ordinals name them.
+	// add_document(); a term's ordinals name them. `alphabet` holds every byte the terms
+	// use (the dictionary codes its keys over it; empty: all 256).
 	template <class Next>
-	void flush_from(const std::array<std::uint8_t, 16>& segment_id, output& sink, spill& positions_spill, Next&& next) {
+	void flush_from(const std::array<std::uint8_t, 16>& segment_id, output& sink, spill& positions_spill, std::string_view alphabet, Next&& next) {
 
 		counting_output out(sink);
 		std::vector<format::section_entry> toc;
@@ -367,7 +377,7 @@ public:
 		section_stream postings(out, region_shift);
 		counting_output spill_out(positions_spill);
 		section_stream positions(spill_out, region_shift);
-		termdict::builder dict;
+		termdict::builder dict(alphabet);
 		format::term_run run;
 		term_postings tp;
 		std::string encoded_postings, term_positions;

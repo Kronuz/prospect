@@ -2,10 +2,11 @@
 // invalid_argument) or answer, never crash, read out of bounds, or allocate past the
 // RSS limit. Base segments are built once, large enough for several skip groups, bitset
 // and FOR blocks, positions whose counts differ from wdf, positioned wdf-0 terms, and
-// stored records past one zstd frame. The input picks a base and byte changes inside its
-// sections; most inputs then recompute every checksum, so the changes reach the decoders
-// instead of stopping at verification. One base uses 64-bit skip offsets. Run with a
-// -timeout of a few seconds so a hang counts as a finding.
+// stored records past one zstd frame; one base has monotone docids, versions, and keys.
+// The input picks a base and byte changes inside its sections; most inputs then
+// recompute every checksum, so the changes reach the decoders instead of stopping at
+// verification. One base uses 64-bit skip offsets. Run with a -timeout of a few seconds
+// so a hang counts as a finding.
 #include "strata/reader.hh"
 #include "strata/search.hh"
 #include "strata/writer.hh"
@@ -17,11 +18,14 @@ namespace {
 
 const char* const vocab[] = {"the", "of", "a", "b", "c", "rare", "bool", "weighted", "nopos"};
 
-std::string build(std::uint64_t seed, std::uint32_t docs, bool wide = false) {
+// keyed: monotone docids with gaps, versions, and a key term per document (format 12's
+// docids, versions, and pk_filter sections).
+std::string build(std::uint64_t seed, std::uint32_t docs, bool wide = false, bool keyed = false) {
 	std::mt19937_64 rng(seed);
 	strata::segment_writer w;
 	w.wide_skip_offsets = wide;
 	std::vector<std::vector<std::uint32_t>> pos(std::size(vocab));
+	std::uint64_t docid = 1000;
 	for (std::uint32_t d = 0; d < docs; ++d) {
 		std::vector<strata::posting_input> in;
 		std::uint32_t at = 0, length = 0;
@@ -37,13 +41,20 @@ std::string build(std::uint64_t seed, std::uint32_t docs, bool wide = false) {
 			length += wdf;
 		}
 		std::string rec(d % 997 == 0 ? 70000 : d % 40, char('a' + d % 26));
-		w.add(d + 1, in, length, rec);
+		if (!keyed) {
+			w.add(d + 1, in, length, rec);
+			continue;
+		}
+		docid += 1 + (rng() % 8 == 0 ? rng() % 100000 : rng() % 3);
+		const std::string key = "Q" + std::to_string(docid);
+		in.push_back({key, 0, {}});
+		w.add(docid, in, length, rec, rng() % 4 == 0 ? rng() : rng() % 40, key);
 	}
 	return w.flush({});
 }
 
 const std::string& base(unsigned which) {
-	static const std::string segments[] = {build(1, 300), build(2, 9000), build(3, 20000), build(4, 9000, true)};
+	static const std::string segments[] = {build(1, 300), build(2, 9000), build(3, 20000), build(4, 9000, true), build(5, 3000, false, true)};
 	return segments[which % std::size(segments)];
 }
 
@@ -71,7 +82,15 @@ void refresh_toc_checksum(std::string& file) {
 }
 
 void exercise(const strata::segment& seg) {
-	for (strata::ordinal_t d = 0; d < seg.doc_count(); d += 1 + d / 64) { (void)seg.stored(d); }
+	for (strata::ordinal_t d = 0; d < seg.doc_count(); d += 1 + d / 64) {
+		(void)seg.stored(d);
+		const std::uint64_t id = seg.docid(d);
+		(void)seg.ordinal_of(id);
+		(void)seg.ordinal_of(id + 1);
+		(void)seg.version(d);
+		(void)seg.length(d);
+		(void)seg.may_hold_key("Q" + std::to_string(id));
+	}
 	std::vector<strata::format::term_info> infos;
 	for (const char* t : vocab) {
 		auto info = seg.term(t);
