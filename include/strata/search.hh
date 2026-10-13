@@ -366,9 +366,28 @@ public:
 		const std::size_t words = std::size_t(end - base + 63) / 64;
 		if (prefer_windows()) {
 			std::uint64_t all[64], one[64];
+			const double share = double(end - base) / double(terms_[0]->seg().doc_count());
 			for (std::size_t i = 0; i < terms_.size(); ++i) {
 				auto& it = terms_[i]->postings();
 				if (it.doc() < base) { it.advance(base); }
+				if (i) {
+					// Few candidates left (counted only up to where probing stops paying): test
+					// each by advancing to it, which a bitset block answers from its words,
+					// instead of filling the term's whole window.
+					const double limit = double(terms_[i]->cost()) * share / 128;
+					std::size_t left = 0;
+					for (std::size_t w = 0; limit >= 1 && w < words && double(left) < limit; ++w) { left += std::size_t(std::popcount(all[w])); }
+					if (limit >= 1 && double(left) < limit) {
+						if (left == 0) { break; }
+						for (std::size_t w = 0; w < words; ++w) {
+							for (std::uint64_t word = all[w]; word; word &= word - 1) {
+								const ordinal_t d = base + ordinal_t(w * 64 + std::size_t(std::countr_zero(word)));
+								if (it.advance(d) != d) { all[w] &= ~(std::uint64_t(1) << std::countr_zero(word)); }
+							}
+						}
+						continue;
+					}
+				}
 				std::uint64_t* into = i ? one : all;
 				std::fill(into, into + words, 0);
 				if (it.doc() < end) { it.fill(base, end, into); }
