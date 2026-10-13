@@ -11,6 +11,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <random>
 #include <set>
 
@@ -267,6 +268,64 @@ int main() {
 		ix = index::open(io, keyed);
 		CHECK(ix.digest() == acked);
 	}
+	// recover --to under power loss at every mutation: reopening finds the old head or
+	// the chosen generation, never a manifest between them.
+	{
+		const auto w = workload(4242, 120);
+		auto replay = [&](faultfs::io& io, std::map<std::uint64_t, std::uint64_t>& digests) {
+			auto ix = index::create(io, keyed, uuid_a);
+			for (const auto& s : w) {
+				switch (s.type) {
+				case step::apply: ix.apply(s.t, {}); break;
+				case step::refresh: ix.refresh(); break;
+				case step::merge: run_merge(ix, s); break;
+				case step::commit:
+				case step::checkpoint:
+					ix.commit();
+					digests[ix.manifest().generation] = ix.digest();
+					break;
+				}
+			}
+			ix.close();
+		};
+		std::map<std::uint64_t, std::uint64_t> digests;
+		{
+			faultfs::filesystem fs;
+			faultfs::io io(fs);
+			replay(io, digests);
+		}
+		CHECK(digests.size() >= 4);
+		const auto head = digests.rbegin()->first;
+		std::size_t tried = 0;
+		for (std::uint64_t to : {head - 1, head - 2}) {
+			std::uint64_t total;
+			{
+				faultfs::filesystem fs;
+				faultfs::io io(fs);
+				std::map<std::uint64_t, std::uint64_t> d;
+				replay(io, d);
+				const std::uint64_t base = fs.mutations();
+				CHECK(index::open(io, keyed, to).digest() == digests[to]);
+				total = fs.mutations() - base;
+			}
+			for (std::uint64_t at = 0; at <= total; ++at, ++tried) {
+				faultfs::filesystem fs;
+				faultfs::io io(fs);
+				std::map<std::uint64_t, std::uint64_t> d;
+				replay(io, d);
+				fs.power_off_after(at);
+				try {
+					auto ix = index::open(io, keyed, to);
+				} catch (const std::exception&) {
+				}
+				fs.crash(at * 7919 + to);
+				const std::uint64_t got = index::open(io, keyed).digest();
+				CHECK(got == digests[head] || got == digests[to]);
+				if (got != digests[head] && got != digests[to]) { std::fprintf(stderr, "  recover --to %llu, crash point %llu\n", (unsigned long long)to, (unsigned long long)at); }
+			}
+		}
+		CHECK(tried > 0);
+	}
 	// T1: power loss at every mutation point of seeded workloads.
 	std::size_t target = 10000;
 	if (const char* env = std::getenv("STRATA_CRASH_POINTS")) { target = std::strtoull(env, nullptr, 10); }
@@ -323,6 +382,15 @@ int main() {
 				}
 			}
 			fs.crash(seed * 1000003 + at);
+			if (at % 3 == 0) {
+				// A second power loss during the recovery that follows.
+				fs.power_off_after(at % 7);
+				try {
+					auto ix = index::open(io, keyed);
+				} catch (const std::exception&) {
+				}
+				fs.crash(seed * 1000033 + at);
+			}
 			try {
 				auto ix = index::open(io, keyed);
 				const std::uint64_t got = ix.digest();

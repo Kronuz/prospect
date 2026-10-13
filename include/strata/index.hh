@@ -1079,11 +1079,6 @@ private:
 		if (to) {
 			if (!std::binary_search(manifests.begin(), manifests.end(), *to)) { throw corrupt_index("no such manifest"); }
 			chosen = *to;
-			// Every higher manifest leaves, durably, before anything else changes (D3).
-			for (std::uint64_t g : manifests) {
-				if (g > chosen) { io_->remove(index_detail::manifest_name(g)); }
-			}
-			io_->sync_directory();
 		}
 		auto mf = io_->open_existing(index_detail::manifest_name(chosen));
 		m_ = files::decode_manifest(index_detail::read_all(*mf));
@@ -1119,6 +1114,9 @@ private:
 		m_.next_live = std::max(m_.next_live, max_live + 1);
 		m_.next_meta = std::max(m_.next_meta, max_meta + 1);
 		next_manifest_ = std::max(m_.generation, top) + 1;
+		// An older manifest becomes the head by committing its content as a new generation,
+		// so power loss leaves the old head or the chosen one, never a manifest between (D3).
+		if (chosen != manifests.back()) { commit_files(); }
 		// Orphans leave only after a successful open, under the owner lock.
 		for (const auto& n : names) {
 			if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest_tmp) { io_->remove(n); }

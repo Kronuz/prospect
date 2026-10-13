@@ -312,12 +312,15 @@ int main() {
 		ix = strata::index(strata::index::open(io, keyed));
 		for (const auto& n : fs.list()) { CHECK(n != "seg-999.sx" && n != "manifest-1.tmp"); }
 		CHECK(contents(ix).size() == 6);
-		// recover --to an older retained manifest drops the newer ones first.
+		// recover --to an older retained manifest commits its content as a newer
+		// generation, so the rollback holds when the index reopens.
 		const std::uint64_t current = ix.manifest().generation;
 		ix.close();
 		ix = strata::index(strata::index::open(io, keyed, current - 2));
+		CHECK(contents(ix).size() == 4 && ix.manifest().generation > current);
+		ix.close();
+		ix = strata::index(strata::index::open(io, keyed));
 		CHECK(contents(ix).size() == 4);
-		for (const auto& n : fs.list()) { CHECK(n != "manifest-" + std::to_string(current)); }
 	}
 	// A missing or changed file fails the open and changes nothing.
 	{
