@@ -299,6 +299,26 @@ int dictstats(const std::string& dir) {
 	return values == flags + df + cf + ordinal + postings_length + postings_offset + positions_length + positions_offset + impacts ? 0 : 1;
 }
 
+// Rebuilds the term dictionary from a segment's terms with the termdict and term-info
+// encoding this binary was built with, and prints its size: format experiments without
+// reindexing.
+int dictsim(const std::string& dir) {
+	residency::file file;
+	strata::segment seg = open(dir, file);
+	termdict::builder b;
+	strata::format::term_run run;
+	std::uint64_t terms = 0;
+	seg.scan_terms([&](std::string_view key, const strata::format::term_info& info) {
+		b.add(key, strata::format::encode_term_info(info, run, b.next_is_restart()));
+		++terms;
+		return true;
+	});
+	const auto t = b.finish();
+	std::printf("terms %llu: blocks %zu + index %zu = %zu bytes, %.2f B/term (restart interval %zu)\n", (unsigned long long)terms, t.blocks.size(), t.index.size(),
+		t.blocks.size() + t.index.size(), double(t.blocks.size() + t.index.size()) / double(terms), termdict::restart_interval);
+	return 0;
+}
+
 std::string query_of(const std::string& line) {
 	auto at = line.find("\"query\": \"");
 	if (at == std::string::npos) { return {}; }
@@ -393,6 +413,7 @@ int main(int argc, char** argv) {
 	if (mode == "serve" && argc == 3) { return serve(argv[2]); }
 	if (mode == "terms" && argc == 3) { return terms(argv[2]); }
 	if (mode == "dictstats" && argc == 3) { return dictstats(argv[2]); }
+	if (mode == "dictsim" && argc == 3) { return dictsim(argv[2]); }
 	if (mode == "verify" && argc == 3) { return verify(argv[2]); }
 	if (mode == "bench" && (argc == 5 || argc == 6)) {
 		const bool xapian = argc == 6 && std::string_view(argv[5]) == "bm25_xapian";
