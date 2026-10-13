@@ -299,23 +299,64 @@ int dictstats(const std::string& dir) {
 	return values == flags + df + cf + ordinal + postings_length + postings_offset + positions_length + positions_offset + impacts ? 0 : 1;
 }
 
-// Rebuilds the term dictionary from a segment's terms with the termdict and term-info
-// encoding this binary was built with, and prints its size: format experiments without
-// reindexing.
-int dictsim(const std::string& dir) {
+// Dictionary experiments without reindexing: dictdump writes a segment's terms and
+// infos to a file with this binary's reader; dictsim rebuilds the dictionary from that
+// file with the termdict and term-info encoding the (possibly different) binary was built
+// with, and prints its size.
+int dictdump(const std::string& dir, const std::string& path) {
 	residency::file file;
 	strata::segment seg = open(dir, file);
+	std::FILE* out = std::fopen(path.c_str(), "wb");
+	if (!out) { return 1; }
+	auto u64 = [&](std::uint64_t v) { std::fwrite(&v, 8, 1, out); };
+	seg.scan_terms([&](std::string_view key, const strata::format::term_info& t) {
+		u64(key.size());
+		std::fwrite(key.data(), 1, key.size(), out);
+		for (std::uint64_t v : {std::uint64_t(t.flags), std::uint64_t(t.df), t.cf, t.postings, t.positions, std::uint64_t(t.single_wdf), t.postings_length, t.positions_length,
+				 std::uint64_t(t.impacts.size())}) {
+			u64(v);
+		}
+		for (const auto& i : t.impacts) { u64(std::uint64_t(i.wdf) << 8 | i.length); }
+		return true;
+	});
+	std::fclose(out);
+	return 0;
+}
+
+int dictsim(const std::string& path) {
+	std::FILE* in = std::fopen(path.c_str(), "rb");
+	if (!in) { return 1; }
+	auto u64 = [&] {
+		std::uint64_t v = 0;
+		return std::fread(&v, 8, 1, in) == 1 ? std::optional<std::uint64_t>(v) : std::nullopt;
+	};
 	termdict::builder b;
 	strata::format::term_run run;
 	std::uint64_t terms = 0;
-	seg.scan_terms([&](std::string_view key, const strata::format::term_info& info) {
-		b.add(key, strata::format::encode_term_info(info, run, b.next_is_restart()));
+	std::string key;
+	while (auto n = u64()) {
+		key.resize(*n);
+		if (std::fread(key.data(), 1, *n, in) != *n) { break; }
+		strata::format::term_info t;
+		t.flags = std::uint8_t(*u64());
+		t.df = std::uint32_t(*u64());
+		t.cf = *u64();
+		t.postings = *u64();
+		t.positions = *u64();
+		t.single_wdf = std::uint32_t(*u64());
+		t.postings_length = *u64();
+		t.positions_length = *u64();
+		for (std::uint64_t k = *u64(); k; --k) {
+			const std::uint64_t v = *u64();
+			t.impacts.push_back({std::uint32_t(v >> 8), std::uint8_t(v)});
+		}
+		b.add(key, strata::format::encode_term_info(t, run, b.next_is_restart()));
 		++terms;
-		return true;
-	});
-	const auto t = b.finish();
-	std::printf("terms %llu: blocks %zu + index %zu = %zu bytes, %.2f B/term (restart interval %zu)\n", (unsigned long long)terms, t.blocks.size(), t.index.size(),
-		t.blocks.size() + t.index.size(), double(t.blocks.size() + t.index.size()) / double(terms), termdict::restart_interval);
+	}
+	std::fclose(in);
+	const auto tb = b.finish();
+	std::printf("terms %llu: blocks %zu + index %zu = %zu bytes, %.2f B/term (restart interval %zu, blocks of %zu-%zu)\n", (unsigned long long)terms, tb.blocks.size(), tb.index.size(),
+		tb.blocks.size() + tb.index.size(), double(tb.blocks.size() + tb.index.size()) / double(terms), termdict::restart_interval, termdict::min_block_entries, termdict::max_block_entries);
 	return 0;
 }
 
@@ -413,6 +454,7 @@ int main(int argc, char** argv) {
 	if (mode == "serve" && argc == 3) { return serve(argv[2]); }
 	if (mode == "terms" && argc == 3) { return terms(argv[2]); }
 	if (mode == "dictstats" && argc == 3) { return dictstats(argv[2]); }
+	if (mode == "dictdump" && argc == 4) { return dictdump(argv[2], argv[3]); }
 	if (mode == "dictsim" && argc == 3) { return dictsim(argv[2]); }
 	if (mode == "verify" && argc == 3) { return verify(argv[2]); }
 	if (mode == "bench" && (argc == 5 || argc == 6)) {
