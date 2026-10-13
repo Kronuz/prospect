@@ -7,6 +7,8 @@
 
 #include "strata/budget.hh"
 #include "strata/files.hh"
+#include "strata/merge.hh"
+#include "strata/merge_policy.hh"
 #include "strata/reader.hh"
 #include "strata/writer.hh"
 
@@ -146,6 +148,9 @@ struct index_options {
 	// version map passes a quarter of the share (D17).
 	memory_budget* budget = nullptr;
 	std::uint64_t buffer_share = ~std::uint64_t(0);
+	// Merges after each flush by `policy` when set; otherwise only merge() and force_merge().
+	bool auto_merge = false;
+	merge_policy policy;
 };
 
 class index {
@@ -225,6 +230,72 @@ public:
 	void refresh() {
 		live();
 		guarded([&] { flush(); });
+		if (opts_.auto_merge) { maybe_merge(); }
+	}
+
+	// Merges the given segments into one (searchable, not yet durable): their live
+	// documents in docid order, deleted ones dropped. Nothing is written when none is live.
+	void merge(const std::vector<std::uint64_t>& ids) {
+		live();
+		guarded([&] {
+			std::vector<merge_source> sources;
+			std::vector<std::size_t> picked;
+			for (std::size_t i = 0; i < segs_.size(); ++i) {
+				if (std::find(ids.begin(), ids.end(), segs_[i]->ref.id) != ids.end()) {
+					sources.push_back({&segs_[i]->seg, &segs_[i]->deleted});
+					picked.push_back(i);
+				}
+			}
+			if (picked.empty()) { return; }
+			const std::uint64_t id = m_.next_segment++;
+			std::array<std::uint8_t, 16> header{};
+			std::memcpy(header.data(), &id, 8);
+			std::memcpy(header.data() + 8, m_.uuid.data(), 8);
+			std::string bytes;
+			string_output out(bytes);
+			string_spill spill;
+			const auto plan = merge_segments(sources, header, out, spill, m_.key_prefix);
+			std::unique_ptr<open_segment> merged;
+			if (plan.doc_count) {
+				auto file = write_unsynced(index_detail::segment_name(id), bytes);
+				files::segment_ref ref;
+				ref.id = id;
+				ref.size = bytes.size();
+				ref.footer_crc = format::decode_footer(bytes).toc_crc;
+				ref.doc_count = plan.doc_count;
+				merged = std::make_unique<open_segment>(ref, std::move(bytes));
+				merged->unsynced = std::move(file);
+			}
+			for (std::size_t k = picked.size(); k-- > 0;) { segs_.erase(segs_.begin() + std::ptrdiff_t(picked[k])); }
+			if (merged) { segs_.push_back(std::move(merged)); }
+		});
+	}
+
+	// Merges until at most `max_segments` remain.
+	void force_merge(std::size_t max_segments = 1) {
+		live();
+		while (segs_.size() > std::max<std::size_t>(max_segments, 1)) {
+			std::vector<std::uint64_t> ids;
+			const std::size_t take = std::min(segs_.size() - max_segments + 1, opts_.policy.max_merge_at_once);
+			for (std::size_t i = 0; i < take; ++i) { ids.push_back(segs_[i]->ref.id); }
+			merge(ids);
+		}
+	}
+
+	// Runs the policy's merges until it asks for none.
+	void maybe_merge() {
+		live();
+		for (;;) {
+			std::vector<merge_policy::candidate> c;
+			for (const auto& s : segs_) {
+				std::uint64_t deleted = 0;
+				for (auto w : s->deleted) { deleted += std::uint64_t(std::popcount(w)); }
+				c.push_back({s->ref.id, s->bytes.size(), s->seg.doc_count(), deleted});
+			}
+			const auto ids = opts_.policy.find_merge(std::move(c));
+			if (ids.empty()) { return; }
+			merge(ids);
+		}
 	}
 
 	// Makes everything applied durable (design D1), then reclaims what retention allows.

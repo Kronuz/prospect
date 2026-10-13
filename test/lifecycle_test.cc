@@ -27,9 +27,19 @@ static const std::array<char, 16> uuid_b = {'b', 'b', 'b', 'b', 'b', 'b', 'b', '
 
 // One step of a workload: a transaction, or a refresh, commit, or checkpoint.
 struct step {
-	enum kind { apply, refresh, commit, checkpoint } type = apply;
+	enum kind { apply, refresh, commit, checkpoint, merge } type = apply;
 	transaction t;
+	std::size_t merge_to = 0;  // merge: at most this many segments, or 0 for the policy's merges
 };
+
+// Merges as a step asks; they change no verdict and no digest.
+static void run_merge(strata::index& ix, const step& s) {
+	if (s.merge_to) {
+		ix.force_merge(s.merge_to);
+	} else {
+		ix.maybe_merge();
+	}
+}
 
 static document make_doc(std::mt19937_64& r, const std::string& key) {
 	static const char* words[] = {"the", "of", "lord", "rings", "garden", "eden", "time", "kids"};
@@ -57,7 +67,10 @@ static std::vector<step> workload(std::uint64_t seed, std::size_t steps) {
 	for (std::size_t i = 0; i < steps; ++i) {
 		step s;
 		const auto pick = r() % 100;
-		if (pick < 8) {
+		if (pick < 4) {
+			s.type = step::merge;
+			s.merge_to = r() % 3;
+		} else if (pick < 8) {
 			s.type = step::refresh;
 		} else if (pick < 16) {
 			s.type = step::commit;
@@ -108,6 +121,10 @@ int main() {
 			auto ix = index::create(io, keyed, uuid_a);
 			std::uint64_t at = 0;
 			for (const auto& s : w) {
+				if (s.type == step::merge) {
+					run_merge(ix, s);
+					continue;
+				}
 				if (s.type != step::apply) {
 					if (schedule == 0) { ix.commit(); }  // the workload's own points become commits
 					continue;
@@ -187,6 +204,8 @@ int main() {
 			for (const auto& s : w) {
 				if (s.type == step::apply) {
 					ix.apply(s.t, {});
+				} else if (s.type == step::merge) {
+					run_merge(ix, s);
 				} else if (s.type == step::refresh) {
 					ix.refresh();
 				} else {
@@ -211,6 +230,8 @@ int main() {
 				try {
 					if (s.type == step::refresh) {
 						ix.refresh();
+					} else if (s.type == step::merge) {
+						run_merge(ix, s);
 					} else {
 						ix.commit();
 					}
@@ -265,6 +286,7 @@ int main() {
 				case step::refresh: ix.refresh(); break;
 				case step::commit: ix.commit(); break;
 				case step::checkpoint: ix.checkpoint(); break;
+				case step::merge: run_merge(ix, s); break;
 				}
 			}
 			total = fs.mutations() - base;
@@ -282,6 +304,7 @@ int main() {
 						switch (s.type) {
 						case step::apply: ix.apply(s.t, {}); break;
 						case step::refresh: ix.refresh(); break;
+						case step::merge: run_merge(ix, s); break;
 						case step::commit:
 						case step::checkpoint: {
 							const std::uint64_t d = ix.digest();
