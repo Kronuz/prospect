@@ -192,6 +192,7 @@ int main() {
 				}
 				s.term("absent");
 				for (strata::ordinal_t d = 0; d < s.doc_count(); ++d) { (void)s.stored(d); }
+				if (s.doc_count()) { (void)s.length(0); }  // the lengths verify whole on first use
 			} catch (const strata::corrupt_segment&) {
 				detected = true;
 			} catch (const termdict::corrupt&) {
@@ -201,6 +202,18 @@ int main() {
 			}
 			if (in_section && !detected) { std::fprintf(stderr, "undetected change at %zu of %zu\n", at, bad.size()); }
 			CHECK(detected || !in_section);
+		}
+		// The lengths verify whole on first use: a changed byte opens, then fails every call.
+		for (const auto& e : layout) {
+			if (e.kind != strata::format::section::lengths) { continue; }
+			std::string bad = file;
+			bad[e.offset + e.length / 2] ^= 1;
+			strata::segment s(bad);
+			for (int i = 0; i < 2; ++i) {
+				bool threw = false;
+				try { (void)s.length(0); } catch (const strata::corrupt_segment&) { threw = true; }
+				CHECK(threw);
+			}
 		}
 		// Regions are verified lazily: opening checks none; reading a term checks its own.
 		{

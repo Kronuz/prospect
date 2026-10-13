@@ -15,6 +15,10 @@
 #include "strata/writer.hh"
 
 #include <algorithm>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <charconv>
 #include <cmath>
 #include <chrono>
@@ -450,6 +454,40 @@ int bench(const std::string& dir, std::string_view command, int runs, strata::sc
 
 }  // namespace
 
+// Bytes of each section in the page cache (mincore over a fresh mapping): run after
+// serving, without dropping caches, to attribute serving memory by section.
+int resident(const std::string& dir) {
+	const std::string path = dir + "/segment.sx";
+	const int fd = ::open(path.c_str(), O_RDONLY);
+	if (fd < 0) { return 1; }
+	struct stat st;
+	::fstat(fd, &st);
+	const std::size_t size = std::size_t(st.st_size), page = std::size_t(::sysconf(_SC_PAGESIZE));
+	void* map = ::mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0);
+	::close(fd);
+	if (map == MAP_FAILED) { return 1; }
+	std::vector<unsigned char> in((size + page - 1) / page);
+	auto core = [&]<class A, class T>(int (*f)(A, std::size_t, T*)) { return f(map, size, reinterpret_cast<T*>(in.data())); };  // char* on macOS
+	if (core(&::mincore) != 0) { return 1; }
+	const std::string_view bytes(static_cast<const char*>(map), size);
+	const auto toc = strata::format::decode_toc(bytes, strata::format::decode_footer(bytes));
+	const char* names[] = {"header", "terms", "term_index", "postings", "positions", "lengths", "stored", "docids", "stats", "norms", "versions", "pk_filter"};
+	std::uint64_t total = 0;
+	for (const auto& e : toc) {
+		std::uint64_t held = 0;  // the section's bytes on resident pages
+		for (std::uint64_t p = e.offset / page; p * page < e.offset + e.length; ++p) {
+			if (in[p] & 1) { held += std::min<std::uint64_t>((p + 1) * page, e.offset + e.length) - std::max<std::uint64_t>(p * page, e.offset); }
+		}
+		total += held;
+		const auto k = std::size_t(e.kind);
+		std::printf("%-12s %12llu bytes %10.1f MB resident (%.1f%%)\n", k < std::size(names) ? names[k] : "?", (unsigned long long)e.length, double(held) / 1e6,
+			e.length ? 100.0 * double(held) / double(e.length) : 0.0);
+	}
+	std::printf("total %.1f MB resident of %.1f MB\n", double(total) / 1e6, double(size) / 1e6);
+	::munmap(map, size);
+	return 0;
+}
+
 int main(int argc, char** argv) {
 	const std::string mode = argc > 1 ? argv[1] : "";
 	if (mode == "index" && argc == 3) { return index(argv[2]); }
@@ -466,12 +504,13 @@ int main(int argc, char** argv) {
 			(unsigned long long)r.postings, (unsigned long long)r.positions, (unsigned long long)r.stored_bytes);
 		return 0;
 	}
+	if (mode == "resident" && argc == 3) { return resident(argv[2]); }
 	if (mode == "dictsim" && argc == 3) { return dictsim(argv[2]); }
 	if (mode == "verify" && argc == 3) { return verify(argv[2]); }
 	if (mode == "bench" && (argc == 5 || argc == 6)) {
 		const bool xapian = argc == 6 && std::string_view(argv[5]) == "bm25_xapian";
 		return bench(argv[2], argv[3], std::atoi(argv[4]), xapian ? strata::scheme::bm25_xapian : strata::scheme::bm25);
 	}
-	std::cerr << "usage: strata_engine index|serve|terms|dictstats|verify DIR | bench DIR COMMAND RUNS < queries\n";
+	std::cerr << "usage: strata_engine index|serve|terms|dictstats|verify|check|resident DIR | bench DIR COMMAND RUNS < queries\n";
 	return 2;
 }

@@ -36,6 +36,7 @@
 #include "termdict.hh"
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cstdint>
 #include <cstring>
@@ -72,7 +73,6 @@ public:
 			switch (e.kind) {
 			case format::section::header:
 			case format::section::term_index:
-			case format::section::lengths:
 			case format::section::norms:
 			case format::section::docids:
 			case format::section::stats:
@@ -88,7 +88,10 @@ public:
 			case format::section::term_index: term_index_ = bytes; break;
 			case format::section::postings: postings_ = bytes; break;
 			case format::section::positions: positions_ = bytes; break;
-			case format::section::lengths: lengths_ = bytes; break;
+			case format::section::lengths:
+				lengths_ = bytes;
+				lengths_crc_ = e.crc;
+				break;
 			case format::section::docids: docids_ = bytes; break;
 			case format::section::stats: stats_ = bytes; break;
 			case format::section::stored: stored_ = bytes; break;
@@ -247,13 +250,14 @@ public:
 	// How many regions have been verified.
 	std::size_t verified_regions() const noexcept { return integrity_->regions.verified(); }
 	// Verifies every byte of the sections checked on first read (terms, postings,
-	// positions, stored); throws corrupt_segment at the first region that differs.
+	// positions, stored, lengths); throws corrupt_segment at the first one that differs.
 	void verify_all() const {
 		for (const auto& e : sections_) {
 			if (e.kind == format::section::terms || e.kind == format::section::postings || e.kind == format::section::positions || e.kind == format::section::stored) {
 				if (!integrity_->regions.verify({e.offset, e.length})) { throw corrupt_segment("section checksum"); }
 			}
 		}
+		verify_lengths();
 	}
 
 	std::uint64_t doc_count() const noexcept { return doc_count_; }
@@ -264,8 +268,10 @@ public:
 	std::uint32_t min_length() const noexcept { return min_length_; }
 	std::uint32_t max_length() const noexcept { return max_length_; }
 
-	// Document length by ordinal: one lane extraction from the bit-packed block.
-	std::uint32_t length(ordinal_t ord) const noexcept {
+	// Document length by ordinal: one lane extraction from the bit-packed block. The
+	// section is verified whole on the first call (the default scheme reads norms only).
+	std::uint32_t length(ordinal_t ord) const {
+		if (integrity_->lengths_state.load(std::memory_order_acquire) != 1) [[unlikely]] { verify_lengths(); }
 		const unsigned w = length_width_;
 		if (w == 0) { return 0; }
 		const char* block = lengths_.data() + 1 + std::size_t(ord / 128) * bitpack::packed_bytes(w);
@@ -387,9 +393,15 @@ private:
 	std::vector<format::section_entry> sections_;
 	struct integrity {
 		residency::verified_regions regions;
+		std::atomic<std::uint8_t> lengths_state{0};  // 0 unverified, 1 good, 2 bad
 		std::uint64_t terms_offset = 0, postings_offset = 0, positions_offset = 0, stored_offset = 0;
 		std::string pinned_index;  // the term index, copied out of the mapping
 	};
+	void verify_lengths() const {
+		auto& state = integrity_->lengths_state;
+		if (state.load(std::memory_order_acquire) == 0) { state.store(hashes::crc32c(lengths_.data(), lengths_.size()) == lengths_crc_ ? 1 : 2, std::memory_order_release); }
+		if (state.load(std::memory_order_acquire) != 1) { throw corrupt_segment("lengths checksum"); }
+	}
 	static bool verify_terms(void* context, std::uint64_t offset, std::uint64_t length) {
 		auto* i = static_cast<integrity*>(context);
 		return i->regions.verify({i->terms_offset + offset, length});
@@ -398,6 +410,7 @@ private:
 	std::optional<termdict::reader> dict_;
 	std::uint64_t doc_count_ = 0, total_length_ = 0;
 	std::uint32_t min_length_ = 0, max_length_ = 0, max_positions_ = 0;
+	std::uint32_t lengths_crc_ = 0;
 	std::uint8_t length_width_ = 0;
 };
 

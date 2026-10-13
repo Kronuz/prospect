@@ -34,5 +34,19 @@ Tried and not kept: two bits per region in `residency` instead of a byte (one lo
 64 verified regions) measured 1.004× (`TOP_10`) and 1.001× (`COUNT`), so the per-region
 bookkeeping is not where time goes. Its model-based test stays in `residency`.
 
-Open: per-section sizes (larger regions for postings read in long runs), once the
-remaining 4% against Tantivy is attributed by section.
+## Attribution by section
+
+`strata_engine resident DIR` reports each section's bytes in the page cache after the
+same run (Tantivy's files measured the same way, by `mincore`):
+
+| | strata | Tantivy |
+|---|---:|---:|
+| Positions | 470.5 MB | 454.9 MB (`.pos`) |
+| Postings | 261.3 MB | 270.4 MB (`.idx`) |
+| Dictionary | 35.7 MB | 44.5 MB (`.term`) |
+| Lengths and norms | 15.1 MB | 5.0 MB (`.fieldnorm`) |
+| Stored | 0.2 MB | 0.2 MB |
+
+The lengths section was checked whole at open, though the default `bm25` reads only
+norms. It now verifies whole on its first use: lengths 10.1 → 0.3 MB resident, serving
+peak 583 → 573–574 MB (two runs), 1.025× Tantivy. Positions hold the rest of the gap.
