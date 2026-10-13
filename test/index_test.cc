@@ -246,6 +246,54 @@ int main() {
 		ix.commit();
 		CHECK(contents(ix).size() == 1);
 	}
+	// Merges under faults: ENOSPC leaves the index as it was and the merge succeeds once
+	// space returns; any other write failure fences, and reopening recovers the last commit.
+	for (int fault = 0; fault < 2; ++fault) {
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		auto ix = strata::index::create(io, keyed, uuid);
+		std::mt19937_64 r(10);
+		for (int i = 0; i < 4; ++i) {
+			operation o = add("Q" + std::to_string(i), "body");
+			o.doc.stored.resize(5000);
+			for (auto& c : o.doc.stored) { c = char(r()); }
+			CHECK(ix.apply(tx({o}), {}).result == verdict::accepted);
+			ix.refresh();
+		}
+		ix.apply(tx({erase("Q1")}), {});
+		ix.commit();
+		const auto good = contents(ix);
+		const auto digest = ix.digest();
+		std::vector<std::uint64_t> ids;
+		for (const auto& v : ix.segments()) { ids.push_back(v.id); }
+		CHECK(ids.size() == 4);
+		if (fault == 0) {
+			fs.set_capacity(fs.used() + 100);
+			bool space = false;
+			try {
+				ix.merge(ids);
+			} catch (const std::system_error& e) {
+				space = e.code().value() == ENOSPC;
+			}
+			CHECK(space);
+			CHECK(ix.segments().size() == ids.size() && ix.digest() == digest && contents(ix) == good);
+			fs.set_capacity(~std::uint64_t(0));
+			ix.merge(ids);
+			CHECK(ix.segments().size() == 1 && ix.digest() == digest);
+			ix.commit();
+			ix.close();
+			ix = strata::index(strata::index::open(io, keyed));
+			CHECK(contents(ix) == good && ix.segments().size() == 1);
+		} else {
+			fs.add_fault({faultfs::op::create, 1, EIO, false});
+			CHECK(throws([&] { ix.merge(ids); }));
+			CHECK(throws([&] { ix.commit(); }));  // fenced
+			fs.clear_faults();
+			ix.close();
+			ix = strata::index(strata::index::open(io, keyed));
+			CHECK(contents(ix) == good && ix.digest() == digest);
+		}
+	}
 	// Retention keeps the current manifest and two predecessors; orphans leave at open.
 	{
 		faultfs::filesystem fs;
