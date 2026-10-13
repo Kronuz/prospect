@@ -44,7 +44,7 @@ for t in 1 2 3; do
 		case $e in
 		strata) cmd="engines/strata/build/strata_engine index $dir" ;;
 		xapian-2.1.0) cmd="engines/xapian-2.1.0/xapian_engine index $dir/idx" ;;
-		*) cmd="make -C engines/$e index"; dir=engines/$e/idx ;;
+		*) dir=engines/$e/idx; rm -rf $dir; cmd="make -C engines/$e index" ;;  # idx is a make target
 		esac
 		# shellcheck disable=SC2086
 		if /usr/bin/time -v -o $out/$name.time $cmd < $CORPUS > $out/$name.log 2>&1; then
