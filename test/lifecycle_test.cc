@@ -3,8 +3,9 @@
 //     same verdicts and digests, and reopening keeps the digest.
 //   - Checkpoints and install: an installed checkpoint has the source's digest, and a
 //     crash during install opens the old content or the installed one.
-//   - Power loss at every mutation of seeded workloads: reopening succeeds and its digest
-//     is one of the commit points from the last acknowledged commit to the last attempted.
+//   - Power loss at every mutation of seeded workloads (half under a small memory budget,
+//     flushing as it fills): reopening succeeds and its digest is one of the commit points
+//     from the last acknowledged commit to the last attempted.
 // STRATA_CRASH_POINTS sets how many crash points to cover (default 10,000).
 #include "strata/faultfs.hh"
 #include "strata/index.hh"
@@ -426,18 +427,50 @@ int main() {
 		}
 		CHECK(tried > 0);
 	}
+	// The budget T1 uses flushes the buffer as it fills: the same workload holds fewer
+	// buffered documents at once under it than without it.
+	{
+		std::size_t peak[2] = {0, 0};
+		for (int budgeted = 0; budgeted < 2; ++budgeted) {
+			faultfs::filesystem fs;
+			faultfs::io io(fs);
+			byte_budget mem(32 * 1024);
+			index::options o = keyed;
+			if (budgeted) {
+				o.budget = &mem;
+				o.buffer_share = 4 * 1024;
+			}
+			auto ix = index::create(io, o, uuid_a);
+			for (const auto& s : workload(7778, 150)) {
+				if (s.type == step::apply) { ix.apply(s.t, {}); }
+				peak[budgeted] = std::max(peak[budgeted], ix.buffered_count());
+			}
+		}
+		CHECK(peak[1] < peak[0] / 2);
+	}
 	// T1: power loss at every mutation point of seeded workloads.
 	std::size_t target = 10000;
 	if (const char* env = std::getenv("STRATA_CRASH_POINTS")) { target = std::strtoull(env, nullptr, 10); }
 	std::size_t points = 0, workloads = 0;
 	for (std::uint64_t seed = 0; points < target; ++seed, ++workloads) {
 		const auto w = workload(seed + 7777, 150);
+		// Odd workloads run under a small memory budget, so the buffer also flushes when it
+		// passes its share. Each run gets a fresh budget, so runs replay alike.
+		auto options_for = [&](byte_budget& mem) {
+			index::options o = keyed;
+			if (seed % 2) {
+				o.budget = &mem;
+				o.buffer_share = 4 * 1024;
+			}
+			return o;
+		};
 		// A dry run counts the workload's mutations.
 		std::uint64_t total;
 		{
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
-			auto ix = index::create(io, keyed, uuid_a);
+			byte_budget mem(32 * 1024);
+			auto ix = index::create(io, options_for(mem), uuid_a);
 			const std::uint64_t base = fs.mutations();
 			for (const auto& s : w) {
 				switch (s.type) {
@@ -455,7 +488,8 @@ int main() {
 			faultfs::io io(fs);
 			std::set<std::uint64_t> allowed;
 			{
-				auto ix = index::create(io, keyed, uuid_a);
+				byte_budget mem(32 * 1024);
+				auto ix = index::create(io, options_for(mem), uuid_a);
 				allowed = {ix.digest()};
 				fs.power_off_after(at);
 				try {
