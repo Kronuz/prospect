@@ -163,7 +163,7 @@ and CRCs, live-docs generations, and, under groups, the applied log position.
   manifest the journal checkpoint references. Recovery never falls back silently, and
   corruption fails closed.
 - Checksums: footers and small sections at open; stored-record and compressed blocks
-  on every read; 64 KiB region checksums when the residency layer loads a region;
+  on every read; region checksums (4 KiB by default) when a read first touches a region;
   whole files on merge, replication, and scrub.
 - Decoders are memory-safe on corrupt input and fuzzed.
 

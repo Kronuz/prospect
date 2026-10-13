@@ -244,7 +244,7 @@ public:
 		if (skip > std::uint64_t(rend - p) || length > std::uint64_t(rend - p) - skip) { throw corrupt_segment("stored record bounds"); }
 		return std::string(p + skip, length);
 	}
-	// How many 64 KiB regions have been verified.
+	// How many regions have been verified.
 	std::size_t verified_regions() const noexcept { return integrity_->regions.verified(); }
 	// Verifies every byte of the sections checked on first read (terms, postings,
 	// positions, stored); throws corrupt_segment at the first region that differs.

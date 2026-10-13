@@ -57,8 +57,8 @@ inline constexpr std::uint32_t version = 12;
 inline constexpr std::size_t header_size = 32;
 inline constexpr std::size_t footer_size = 48;
 // Each section is verified per region of 2^region_shift bytes, recorded in its table of
-// contents entry (Track P15 chooses the default by measurement).
-inline constexpr std::uint8_t default_region_shift = 16;
+// contents entry (4 KiB by default: docs/perf/p15-region-size.md).
+inline constexpr std::uint8_t default_region_shift = 12;
 inline constexpr std::uint8_t min_region_shift = 12, max_region_shift = 20;
 // Stored records are packed into zstd frames of at most this many uncompressed bytes (a
 // larger record takes a frame of its own).
