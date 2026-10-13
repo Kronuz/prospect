@@ -3,11 +3,13 @@
 # 1-minute load average stays below LIMIT for QUIET_SECONDS, starts ~/bench/trials.sh in
 # the VM, and samples host load every 30 s while it runs; a sample above LIMIT stops the
 # trials, and it waits for quiet again and starts over. The default LIMIT of 6 sits above
-# the host's idle load (2.5-3.5 on 16 threads) and below a compile's (8 and up).
-#   tools/vm/quiet_trials.sh [LIMIT] [QUIET_SECONDS]
+# the host's idle load (2.5-3.5 on 16 threads) and below a compile's (8 and up). TRIALS
+# names another VM command to run the same way (bench/ab.sh, for one).
+#   [TRIALS='~/bench/ab.sh NAME A B'] tools/vm/quiet_trials.sh [LIMIT] [QUIET_SECONDS]
 set -uo pipefail
 LIMIT=${1:-6}
 QUIET=${2:-300}
+TRIALS=${TRIALS:-'~/bench/trials.sh'}
 here=$(cd "$(dirname "$0")" && pwd)
 log=${STRATA_TRIALS_LOG:-$here/../../.scratch/quiet-trials.log}
 load() { sysctl -n vm.loadavg | awk '{print $2}'; }
@@ -20,7 +22,7 @@ for attempt in $(seq 1 200); do
 		sleep 15
 	done
 	echo "$(date) attempt $attempt: quiet, starting" >> "$log"
-	"$here/linux.sh" ssh 'rm -f ~/bench/results/trials.log; setsid nohup ~/bench/trials.sh > ~/bench/results/trials.log 2>&1 < /dev/null &'
+	"$here/linux.sh" ssh 'rm -f ~/bench/results/trials.log; setsid nohup '"$TRIALS"' > ~/bench/results/trials.log 2>&1 < /dev/null &'
 	noisy=0
 	until "$here/linux.sh" ssh 'grep -q TRIALS_DONE ~/bench/results/trials.log' 2>/dev/null; do
 		l=$(load)
@@ -28,7 +30,7 @@ for attempt in $(seq 1 200); do
 		if above "$l"; then
 			noisy=1
 			# trials.sh leads its own session: stop it and everything it started.
-			"$here/linux.sh" ssh 'g=$(pgrep -f "^/bin/bash /home/strata/bench/trials.sh" | head -1); [ -n "$g" ] && kill -TERM -- -$g; sleep 2; pkill -f "strata_engine serve|do_query|java|xapian_engine"' || true
+			"$here/linux.sh" ssh 'g=$(pgrep -f "^/bin/bash /home/strata/bench/(trials|ab).sh" | head -1); [ -n "$g" ] && kill -TERM -- -$g; sleep 2; pkill -f "strata_engine serve|do_query|java|xapian_engine"' || true
 			break
 		fi
 		sleep 30
