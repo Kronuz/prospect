@@ -69,6 +69,8 @@ int main() {
 				std::string t = vocab[rng() % vocab.size()];
 				if (std::find(pick.begin(), pick.end(), t) == pick.end() && seg.term(t)) { pick.push_back(t); }
 			}
+			// Phrases may repeat a term ("a b a"): one iterator per term, a slot per position.
+			if ((kind == 4 || kind == 5) && pick.size() >= 2 && rng() % 3 == 0) { pick.push_back(pick[0]); }
 			strata::scorer_ptr q;
 			std::map<ordinal_t, double> want;
 			for (std::size_t d = 0; d < ndocs; ++d) {
