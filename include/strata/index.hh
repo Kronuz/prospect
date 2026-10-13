@@ -6,6 +6,7 @@
 #pragma once
 
 #include "strata/budget.hh"
+#include "strata/check.hh"
 #include "strata/files.hh"
 #include "strata/merge.hh"
 #include "strata/merge_policy.hh"
@@ -407,6 +408,15 @@ public:
 			add();
 		}
 		return sum;
+	}
+
+	// Checks every segment whole (check_segment) and the digest's invariants: one live copy
+	// per docid and per key, every docid at or below lastdocid. Throws at the first problem.
+	check_report check() const {
+		check_report r;
+		for (const auto& s : segs_) { check_segment(s->seg, &s->deleted, r); }
+		(void)digest();
+		return r;
 	}
 
 	// Commits and pins the manifest; the generation names the checkpoint (design D4).

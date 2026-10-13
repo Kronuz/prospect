@@ -341,6 +341,41 @@ int main() {
 		b.commit();
 		CHECK(budget.used() == 0);  // committed buffers return their bytes
 	}
+	// The offline check: a healthy index passes and reports what it read; a byte changed
+	// inside a section (which opening the index does not read) fails it.
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		std::string seg_name;
+		{
+			auto ix = strata::index::create(io, keyed, uuid);
+			for (int i = 0; i < 400; ++i) { ix.apply(tx({replace("Q" + std::to_string(i % 150), "w" + std::to_string(i % 17))}), {}); }
+			ix.commit();
+			const auto r = ix.check();
+			CHECK(r.segments == 1 && r.documents == 150 && r.terms > 150 && r.postings >= 2 * 150 && r.stored_bytes > 0);
+			for (const auto& n : fs.list()) {
+				if (n.starts_with("seg-") && n.ends_with(".sx")) { seg_name = n; }
+			}
+		}
+		const std::string bytes(fs.view(seg_name));
+		auto f = io.open_existing(seg_name);
+		std::string changed = bytes;
+		// The middle of the largest section the reader verifies on first read.
+		std::uint64_t at = 0, longest = 0;
+		for (const auto& e : strata::format::decode_toc(bytes, strata::format::decode_footer(bytes))) {
+			const bool lazy = e.kind == strata::format::section::postings || e.kind == strata::format::section::positions || e.kind == strata::format::section::terms;
+			if (lazy && e.length > longest) {
+				longest = e.length;
+				at = e.offset + e.length / 2;
+			}
+		}
+		CHECK(longest > 0);
+		changed[at] = char(changed[at] ^ 0x10);
+		f->write_at(0, changed);
+		f->sync();
+		auto ix = strata::index::open(io, keyed);
+		CHECK(throws([&] { ix.check(); }));
+	}
 	std::printf("index: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }

@@ -30,7 +30,7 @@ feature, with the reason).
 | `TestBM25Similarity` | BM25 parameter validation | weighting presets have fixed parameters | n/a until parameters are settable; scores against Lucene's own on the gate queries pending (Phase 3) |
 | `TestTermsEnum` | Term enumeration, floor blocks, common prefixes, automaton intersection | termdict's tests (random keys, golden fixture, restart runs, fuzzing); `segment_test` term iteration | partial: automaton intersection is Phase 5 (`automata`) |
 | `TestNorms` | Norm values at the byte range's edges | `segment_test` length quantization (monotone, rounding down) and lengths against the model | covered |
-| `TestAllFilesDetectMismatchedChecksum`, `TestCheckIndex` | Every file's checksum is checked; an offline index checker | `segment_test` (every changed byte detected, every truncation); `files_test` (every bit flip, every truncation); `index_test` (fail-closed open) | partial: an offline index checker is pending (Phase 3) |
+| `TestAllFilesDetectMismatchedChecksum`, `TestCheckIndex` | Every file's checksum is checked; an offline index checker | `segment_test` (every changed byte detected, every truncation); `files_test` (every bit flip, every truncation); `index_test` (fail-closed open) | covered: `index::check()` and `strata_engine check` verify every byte and decode every structure; `index_test` checks a changed byte the open does not read |
 | `TestLongPostings`, `TestBagOfPostings` | Long posting lists with and without positions | `segment_test` (up to 20,000 documents, positionless terms), `verify` on 5M | covered |
 | `TestForUtil`, `TestPForUtil`, `TestPostingsUtil` | Block encodings round-trip; integer overflow | bitpack's tests (every width, every position, `encoded_size`) and fuzzing; `segment_test` resealed overflow checks | covered |
 | `TestLucene104PostingsFormat` | The final partial block; impact serialization | `segment_test` at 127, 128, 129 documents; sized and compact impact lists | covered |
@@ -61,7 +61,6 @@ feature, with the reason).
 
 - Scores against Lucene's own on the gate queries (the `bm25` preset's claim of Lucene
   compatibility).
-- An offline index checker over every file of an index.
 - `cost()` estimates checked directly.
 - Nested WAND or the amended cost model (review C7).
 - The Phase 3 rows: Lucene's `TestIndexWriter*`, `TestTieredMergePolicy`, deletes and

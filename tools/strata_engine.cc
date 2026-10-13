@@ -3,12 +3,14 @@
 //   strata_engine serve DIR                  "COMMAND\tquery" lines -> one count per line
 //   strata_engine terms DIR                  every term and its document frequency
 //   strata_engine dictstats DIR              the term dictionary's bytes by part
+//   strata_engine check DIR                  every byte verified and every structure decoded
 //   strata_engine verify DIR < queries.txt   pruned top-k equals an exhaustive scan, k = 10, 100, 1000,
 //                                            ordinals and scores, Lucene and Xapian BM25
 //   strata_engine bench DIR COMMAND RUNS [bm25_xapian] < queries.txt
 //                                            per query: fastest of RUNS in-process runs, in µs
 // Query syntax: words are optional, +word is required, -word is excluded, "a b" is a phrase.
 #include "residency.hh"
+#include "strata/check.hh"
 #include "strata/search.hh"
 #include "strata/writer.hh"
 
@@ -455,6 +457,15 @@ int main(int argc, char** argv) {
 	if (mode == "terms" && argc == 3) { return terms(argv[2]); }
 	if (mode == "dictstats" && argc == 3) { return dictstats(argv[2]); }
 	if (mode == "dictdump" && argc == 4) { return dictdump(argv[2], argv[3]); }
+	if (mode == "check" && argc == 3) {
+		residency::file file;
+		strata::segment seg = open(argv[2], file);
+		strata::check_report r;
+		strata::check_segment(seg, nullptr, r);
+		std::printf("ok: %llu documents, %llu terms, %llu postings, %llu positions, %llu stored bytes\n", (unsigned long long)r.documents, (unsigned long long)r.terms,
+			(unsigned long long)r.postings, (unsigned long long)r.positions, (unsigned long long)r.stored_bytes);
+		return 0;
+	}
 	if (mode == "dictsim" && argc == 3) { return dictsim(argv[2]); }
 	if (mode == "verify" && argc == 3) { return verify(argv[2]); }
 	if (mode == "bench" && (argc == 5 || argc == 6)) {
