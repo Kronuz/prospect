@@ -272,31 +272,21 @@ public:
 		});
 	}
 
-	// Merges until at most `max_segments` remain.
+	// Merges until at most `max_segments` remain and none holds deletes, by the policy's
+	// forced merges.
 	void force_merge(std::size_t max_segments = 1) {
-		live();
-		while (segs_.size() > std::max<std::size_t>(max_segments, 1)) {
-			std::vector<std::uint64_t> ids;
-			const std::size_t take = std::min(segs_.size() - max_segments + 1, opts_.policy.max_merge_at_once);
-			for (std::size_t i = 0; i < take; ++i) { ids.push_back(segs_[i]->ref.id); }
-			merge(ids);
-		}
+		run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_forced_merges(std::move(c), max_segments); });
+	}
+
+	// Merges away the segments whose deleted fraction passes the policy's
+	// force_merge_deletes_pct_allowed.
+	void force_merge_deletes() {
+		run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_forced_deletes_merges(std::move(c)); });
 	}
 
 	// Runs the policy's merges until it asks for none.
 	void maybe_merge() {
-		live();
-		for (;;) {
-			std::vector<merge_policy::candidate> c;
-			for (const auto& s : segs_) {
-				std::uint64_t deleted = 0;
-				for (auto w : s->deleted) { deleted += std::uint64_t(std::popcount(w)); }
-				c.push_back({s->ref.id, s->bytes.size(), s->seg.doc_count(), deleted});
-			}
-			const auto ids = opts_.policy.find_merge(std::move(c));
-			if (ids.empty()) { return; }
-			merge(ids);
-		}
+		run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_merges(std::move(c)); });
 	}
 
 	// Makes everything applied durable (design D1), then reclaims what retention allows.
@@ -508,6 +498,23 @@ public:
 	bool has_docid(std::uint64_t docid) const { return locate_docid(docid).found; }
 
 private:
+	// Runs the merges `find` asks for, asking again after each round, until it asks none.
+	template <class Find>
+	void run_merges(Find find) {
+		live();
+		for (;;) {
+			std::vector<merge_policy::candidate> c;
+			for (const auto& s : segs_) {
+				std::uint64_t deleted = 0;
+				for (auto w : s->deleted) { deleted += std::uint64_t(std::popcount(w)); }
+				c.push_back({s->ref.id, s->bytes.size(), s->seg.doc_count(), deleted});
+			}
+			const auto merges = find(std::move(c));
+			if (merges.empty()) { return; }
+			for (const auto& ids : merges) { merge(ids); }
+		}
+	}
+
 	explicit index(kronuz::journal::IO& io) : io_(&io) {}
 
 	// --- memory -----------------------------------------------------------------------------

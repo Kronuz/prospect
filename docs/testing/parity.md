@@ -6,7 +6,7 @@ they check and re-implemented; Xapian's are never read (clean room) and enter as
 vectors (`tools/parity.cc`, the oracle repository). This first version covers the Phase 2
 scope (postings, term dictionary, stored fields, norms, scorers, collectors, counting,
 weighting, integrity), read from Lucene 10.4.0 (`releases/lucene/10.4.0`) and Tantivy
-0.26.0. Phase 3 rows (index writers, merges, deletes, crashes) follow before its gate.
+0.26.0. The Phase 3 rows (index writers, merges, deletes, crashes) follow each table.
 
 Statuses: **covered** (a strata test checks the same behavior), **partial** (some of it;
 the rest is listed), **pending** (owed, with its phase), **n/a** (strata has no such
@@ -39,6 +39,25 @@ feature, with the reason).
 | `BaseNormsFormatTestCase` | Norm values over many ranges and sparsity | `segment_test` lengths and norms against the model | covered |
 | `TestFSTs`, `TestPackedInts`, `TestDirectMonotonic` | The FST and packed integers | fst's and bitpack's tests; `segment_test` monotone docids | covered |
 
+### Lucene, Phase 3
+
+| Lucene test | What it checks | strata | Status |
+|---|---|---|---|
+| `TestTieredMergePolicy`, `BaseMergePolicyTestCase` | The segment-count budget after every flush and merge in simulated append-only and update workloads; the deleted fraction; write amplification under log(flushes)/log(1.5); equal segments merging equally (`testUnbalancedMergeSelection`); maximum-size segments left out; floor-sized merges; singleton merges reclaiming deletes; forced merges to an exact count within 1.5 times the size limit; forced deletes merges | `merge_policy_test` (each of these, with Lucene's budget formula; every merge of two or more checked balanced, since Lucene's write-amplification bound alone passes an unbalanced policy) | covered; merges pending while others run (`testForcedMergeWithPending`) and merges on commit (`testFullFlushMerges`) n/a until merges run concurrently (Phase 3R) |
+| `TestIndexWriterForceMerge`, `TestIndexWriterMerging` (`forceMergeDeletes`) | forceMerge to N segments, forceMergeDeletes thresholds | `merge_test` (`force_merge_deletes` rewrites only segments past the threshold, `force_merge(1)` leaves one segment without deletes, the digest unchanged); `merge_policy_test` forced merges | partial: temporary disk space of a forced merge is unmeasured (pending, Phase 3R disk row) |
+| `TestSegmentMerger`, `TestIndexWriterMerging` (`testLucene`) | Merged segments hold every live document and answer the same | `merge_test` (merges byte-identical to a flush of the live documents; the result answers as its sources) | covered |
+| `TestCrash`, `TestCrashCausesCorruptIndex`, `TestIndexWriterOnJRECrash` | Crashes while indexing and after close leave the last commit openable | `lifecycle_test` (power loss at 10,000 points of seeded workloads, sector-granular), `index_test` (crash during commit opens the old or the new commit) | covered |
+| `TestIndexWriterOnDiskFull`, `TestIndexWriterDelete` (`testDeletesOnDiskFull`, `testUpdatesOnDiskFull`) | Disk full during flush, commit, and merge; the index stays consistent and usable | `index_test` (ENOSPC while flushing keeps the buffer and the commit succeeds once space returns) | partial: ENOSPC during a merge pending (Phase 3) |
+| `TestIndexWriterExceptions`, `TestIndexWriterOnError` | Exceptions at every stage of indexing and commit; failed syncs | `index_test` (a failed sync fences and reopening recovers), faultfs faults before and after their effect; `lifecycle_test` | partial: faults injected at every write of a merge pending (Phase 3) |
+| `TestIndexWriterCommit`, `TestTransactions`, `TestRollback`, `TestAtomicUpdate` | Commit on close, uncommitted work invisible after a crash, two-phase commit, atomic multi-document updates | `index_test` (uncommitted work lost and nothing half-applied, rejected transactions leave no trace) | partial: an explicit rollback to the last commit and commit user data are APIs of Phase 7 (metadata files exist) |
+| `TestDeletionPolicy`, `TestSnapshotDeletionPolicy`, `TestIndexFileDeleter`, `TestNeverDelete` | Which commits are kept, snapshots, opening older commits, leftover files | `index_test` retention (current, two predecessors, pinned checkpoints; orphans removed at open), `lifecycle_test` checkpoints and install | covered; pluggable deletion policies n/a (retention is fixed by design D1) |
+| `TestIndexWriterDelete`, `TestPendingDeletes` | Deletes by term, applied on flush; deleted documents invisible; whole-segment deletes | `index_test` (delete and replace by key and docid), `multisegment_test` (search with deletes), `merge_test` (deleted documents and their terms dropped) | covered; deletes by query are Phase 4 |
+| `TestIndexingSequenceNumbers` | Sequence numbers order operations across commits | `index_test` (replayed positions, the applied position (index, applied)) | partial: concurrent writers n/a (one writer per index, design D1) |
+| `TestFlushByRamOrCountsPolicy`, `TestDocumentsWriterStallControl` | Flushes by memory, stalls under pressure | `index_test` (the memory budget: permits, pressure, two indexes sharing one budget) | partial: stalling writers under pressure pending (Phase 3R) |
+| `TestIndexWriterMaxDocs` | Document limits per index and segment | none | pending (Phase 3): ordinals are 32-bit; the limit and its errors are untested |
+| `TestStressIndexing`, `TestStressIndexing2`, `TestIndexWriterWithThreads`, `TestNRTThreads` | Concurrent indexing and searching | `concurrency_test` (TSan, concurrent reads of a segment) | partial: reads while one writer commits pending (Phase 3R) |
+| `TestAllFilesDetectTruncation`, `TestAllFilesHaveChecksumFooter` | Every file truncated is detected; every file has a checksum | `segment_test`, `files_test` (every truncation of every file) | covered |
+
 ## Tantivy
 
 | Tantivy module tests | What they check | strata | Status |
@@ -57,11 +76,20 @@ feature, with the reason).
 | `query::query_parser` | The query language | Phase 5 (`queryparser`, against Xapian's vectors) | pending, Phase 5 |
 | `query::range_query`, `fast_field`, `facet_collector`, `histogram_collector` | Ranges, fast fields, aggregations | Phase 4 | pending, Phase 4 |
 
+### Tantivy, Phase 3
+
+| Tantivy module tests | What they check | strata | Status |
+|---|---|---|---|
+| `indexer::index_writer` (commit and rollback, operation groups, lock files, deletes then merges) | Commits, rollbacks, atomic groups, the writer lock, merges after deletes | `index_test` (transactions, commits across crashes, the owner lock in `faultfs_test`), `merge_test` | partial: rollback and delete-all APIs as Lucene's rows |
+| `indexer::merger`, `indexer::segment_updater`, `indexer::merge_index_test` | Merges with and without deletes; merges keep block-max data; deleting all documents | `merge_test` (byte-identical to a flush, so impacts are the flush's); `index_test` | covered; a merge whose documents are all deleted writes no segment (`index::merge`) |
+| `indexer::log_merge_policy` | Tantivy's log merge policy | strata has one merge policy, the tiered one (ARCHITECTURE, "One implementation per mechanism") | n/a |
+| `indexer::delete_queue`, `stamper`, `doc_opstamp_mapping` | Delete ordering by operation stamp | `index_test` (versions, replay) | covered |
+
 ## Owed by Phase 3
 
 - Scores against Lucene's own on the gate queries (the `bm25` preset's claim of Lucene
   compatibility).
 - `cost()` estimates checked directly.
 - Nested WAND or the amended cost model (review C7).
-- The Phase 3 rows: Lucene's `TestIndexWriter*`, `TestTieredMergePolicy`, deletes and
-  updates, crash and corruption tests; Tantivy's indexer, merge, and delete tests.
+- From the Phase 3 rows: ENOSPC and injected faults during merges, document limits, and
+  reads while a writer commits.
