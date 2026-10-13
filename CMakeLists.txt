@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.14)
+cmake_minimum_required(VERSION 3.18)
 project(strata LANGUAGES C CXX)
 
 include(FetchContent)
@@ -22,12 +22,14 @@ FetchContent_Declare(analysis GIT_REPOSITORY https://github.com/Kronuz/analysis.
 set(COMPRESSORS_DEFLATE OFF CACHE BOOL "" FORCE)
 set(COMPRESSORS_LZ4 OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG 7a6cc22f8a4eaceefd098374c05cdc2935c0fd19)
-FetchContent_MakeAvailable(docset bitpack fst task hashes residency varint termdict unicode snowball analysis compressors)
+# Index I/O goes through kronuz::journal::IO, from cluster's completion headers only.
+FetchContent_Declare(cluster GIT_REPOSITORY https://github.com/Kronuz/cluster.git GIT_TAG ca82aada340dd86ee9deb0ddcc000c7c8501fbeb SOURCE_SUBDIR completion)
+FetchContent_MakeAvailable(docset bitpack fst task hashes residency varint termdict unicode snowball analysis compressors cluster)
 
 add_library(strata INTERFACE)
 target_include_directories(strata INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(strata INTERFACE cxx_std_20)
-target_link_libraries(strata INTERFACE docset::docset bitpack::bitpack fst::fst task::task hashes::hashes residency::residency varint::varint termdict::termdict analysis::analysis compressors::compressors)
+target_link_libraries(strata INTERFACE docset::docset bitpack::bitpack fst::fst task::task hashes::hashes residency::residency varint::varint termdict::termdict analysis::analysis compressors::compressors kronuz::completion)
 add_library(strata::strata ALIAS strata)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
@@ -42,6 +44,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(concurrency_test test/concurrency_test.cc)
   target_link_libraries(concurrency_test PRIVATE strata)
   add_test(NAME concurrency COMMAND concurrency_test)
+  add_executable(faultfs_test test/faultfs_test.cc)
+  target_link_libraries(faultfs_test PRIVATE strata)
+  add_test(NAME faultfs COMMAND faultfs_test)
   add_executable(search_test test/search_test.cc)
   target_link_libraries(search_test PRIVATE strata)
   add_test(NAME search COMMAND search_test)
