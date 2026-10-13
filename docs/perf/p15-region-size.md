@@ -50,3 +50,8 @@ same run (Tantivy's files measured the same way, by `mincore`):
 The lengths section was checked whole at open, though the default `bm25` reads only
 norms. It now verifies whole on its first use: lengths 10.1 → 0.3 MB resident, serving
 peak 583 → 573–574 MB (two runs), 1.025× Tantivy. Positions hold the rest of the gap.
+
+Tried and not kept: verifying a positions block's exact size from its header instead of
+the largest possible encoding (1,155 bytes) moved positions 470.5 → 469.9 MB and the peak
+not at all, so read-ahead verification is not what keeps positions resident. The gap
+goes to P13: fewer position bytes per phrase query.
