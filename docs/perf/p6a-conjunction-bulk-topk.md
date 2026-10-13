@@ -10,7 +10,7 @@ they move. Bounds are computed only once a threshold exists, so a query with few
 than k matches pays nothing for them (computing them always cost rare-lead queries
 150–400 µs). Scores sum in `score()`'s order, so results are bit-identical.
 
-Commit `17acc02`. Measured on the 300 intersection queries:
+Commit `03645e7`. Measured on the 300 intersection queries:
 
 | Command | Before | After | Geometric mean |
 |---|---:|---:|---:|

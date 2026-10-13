@@ -7,7 +7,7 @@ tests each by advancing to it; a bitset block answers from its words. Candidates
 counted only up to the point where probing stops paying: the term's estimated
 postings in the window over 128, about one candidate per block.
 
-Commit `f6c817b`. Measured on the 300 intersection queries, `COUNT`:
+Commit `814fc71`. Measured on the 300 intersection queries, `COUNT`:
 
 | | Before | After |
 |---|---:|---:|
