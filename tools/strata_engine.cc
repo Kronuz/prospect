@@ -18,6 +18,7 @@
 #include <chrono>
 #include <iomanip>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <string>
@@ -42,6 +43,7 @@ std::string_view id_field(std::string_view line) {
 int index(const std::string& dir) {
 	std::ios::sync_with_stdio(false);
 	strata::segment_writer w;
+	if (const char* shift = std::getenv("STRATA_REGION_SHIFT")) { w.region_shift = std::uint8_t(std::atoi(shift)); }  // for measurement
 	std::string line;
 	std::vector<std::pair<std::string_view, std::uint32_t>> tokens;  // (token, position)
 	std::vector<std::uint32_t> positions;
@@ -254,16 +256,15 @@ int dictstats(const std::string& dir) {
 		absolute += abs;
 		keys += key.size();
 		values += value.size();
-		flags += 1;
-		df += leb(t.df);
-		if (!(t.flags & strata::format::cf_is_df)) { cf += leb(t.cf); }
+		df += leb(std::uint64_t(t.df) << 5);
+		if (!(t.flags & strata::format::cf_is_df)) { cf += leb(t.flags & strata::format::single_posting ? t.single_wdf : t.cf); }
 		if (abs) {
 			postings_offset += leb(run_before.postings);
 			positions_offset += leb(run_before.positions);
 		}
 		if (t.flags & strata::format::single_posting) {
 			++single;
-			ordinal += leb(t.postings) + leb(t.single_wdf);
+			ordinal += leb(t.postings);
 		} else {
 			postings_length += leb(t.postings_length);
 		}
@@ -283,10 +284,9 @@ int dictstats(const std::string& dir) {
 	auto row = [&](const char* name, std::uint64_t bytes) { std::printf("%-36s %14llu %8.2f B/term\n", name, (unsigned long long)bytes, double(bytes) / double(terms)); };
 	std::printf("terms %llu, single-posting %llu, absolute offsets %llu\n", (unsigned long long)terms, (unsigned long long)single, (unsigned long long)absolute);
 	row("keys (raw)", keys);
-	row("value: flags", flags);
-	row("value: df", df);
-	row("value: cf (when not df)", cf);
-	row("value: single ordinal and wdf", ordinal);
+	row("value: df and flags", df);
+	row("value: cf, or a single's wdf, unless 1", cf);
+	row("value: single ordinal", ordinal);
 	row("value: postings length", postings_length);
 	row("value: postings cursor (absolute)", postings_offset);
 	row("value: positions length", positions_length);

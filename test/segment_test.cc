@@ -29,7 +29,7 @@ struct model {
 static void reseal(std::string& file) {
 	const auto footer = strata::format::decode_footer(file);
 	auto toc = strata::format::decode_toc(file, footer);
-	for (auto& e : toc) { e = strata::format::describe(e.kind, e.offset, std::string_view(file).substr(e.offset, e.length)); }
+	for (auto& e : toc) { e = strata::format::describe(e.kind, e.offset, std::string_view(file).substr(e.offset, e.length), e.region_shift); }
 	const std::string toc_bytes = strata::format::encode_toc(toc);
 	file.replace(footer.toc_offset, toc_bytes.size(), toc_bytes);
 	auto f = footer;
@@ -425,6 +425,7 @@ int main() {
 				t.flags |= strata::format::single_posting;
 				t.postings = r() % 100000;
 				t.single_wdf = std::uint32_t(r() % 9);
+				t.cf = t.single_wdf;
 			} else {
 				if (r() % 50 == 0) { postings += 64; }  // a gap
 				t.postings = postings;

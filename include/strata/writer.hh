@@ -183,19 +183,20 @@ private:
 	std::uint64_t size_ = 0;
 };
 
-// One section's bytes, checksummed as they pass (whole section and 64 KiB regions).
+// One section's bytes, checksummed as they pass (the whole section and each region).
 class section_stream {
 public:
-	explicit section_stream(counting_output& out) : out_(out), offset_(out.size()) {}
+	explicit section_stream(counting_output& out, std::uint8_t region_shift = format::default_region_shift)
+		: out_(out), offset_(out.size()), shift_(region_shift), size_(std::size_t(1) << region_shift) {}
 	void write(std::string_view bytes) {
 		out_.write(bytes);
 		crc_.update(bytes.data(), bytes.size());
 		for (std::size_t at = 0; at < bytes.size();) {
-			const std::size_t n = std::min(bytes.size() - at, format::region_size - region_fill_);
+			const std::size_t n = std::min(bytes.size() - at, size_ - region_fill_);
 			region_.update(bytes.data() + at, n);
 			region_fill_ += n;
 			at += n;
-			if (region_fill_ == format::region_size) {
+			if (region_fill_ == size_) {
 				regions_.push_back(region_.value());
 				region_ = {};
 				region_fill_ = 0;
@@ -206,12 +207,14 @@ public:
 	std::uint64_t size() const noexcept { return length_; }
 	format::section_entry finish(format::section kind) {
 		if (region_fill_) { regions_.push_back(region_.value()); }
-		return {kind, offset_, length_, crc_.value(), std::move(regions_)};
+		return {kind, offset_, length_, crc_.value(), std::move(regions_), shift_};
 	}
 
 private:
 	counting_output& out_;
 	std::uint64_t offset_, length_ = 0;
+	std::uint8_t shift_;
+	std::size_t size_;
 	hashes::Crc32c crc_, region_;
 	std::size_t region_fill_ = 0;
 	std::vector<std::uint32_t> regions_;
@@ -221,6 +224,8 @@ class segment_writer {
 public:
 	// Writes 64-bit skip offsets even where 32 bits fit (tests the wide layout).
 	bool wide_skip_offsets = false;
+	// The verification region size of every section, as a power of two.
+	std::uint8_t region_shift = format::default_region_shift;
 
 	// Adds a document and returns its ordinal. Docids strictly increase, so ordinal order
 	// is docid order. `length` is the document length used by weighting (Xapian: the sum
@@ -301,14 +306,14 @@ public:
 		std::vector<format::section_entry> toc;
 		{
 			const std::string header = format::encode_header(segment_id);
-			section_stream h(out);
+			section_stream h(out, region_shift);
 			h.write(header);
 			toc.push_back(h.finish(format::section::header));
 		}
 		out.align(format::section_alignment);
-		section_stream postings(out);
+		section_stream postings(out, region_shift);
 		counting_output spill_out(positions_spill);
-		section_stream positions(spill_out);
+		section_stream positions(spill_out, region_shift);
 		termdict::builder dict;
 		format::term_run run;
 		std::vector<std::uint32_t> ords, wdfs, counts, pos;
@@ -378,7 +383,7 @@ public:
 		format::put<std::uint32_t>(stats, max_positions_);
 		auto append = [&](format::section kind, const std::string& bytes) {
 			out.align(format::section_alignment);
-			section_stream sec(out);
+			section_stream sec(out, region_shift);
 			sec.write(bytes);
 			toc.push_back(sec.finish(kind));
 		};

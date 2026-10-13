@@ -52,7 +52,7 @@ const std::string& base(unsigned which) {
 void refresh_checksums(std::string& file) {
 	const auto footer = strata::format::decode_footer(file);
 	auto toc = strata::format::decode_toc(file, footer);
-	for (auto& e : toc) { e = strata::format::describe(e.kind, e.offset, std::string_view(file).substr(e.offset, e.length)); }
+	for (auto& e : toc) { e = strata::format::describe(e.kind, e.offset, std::string_view(file).substr(e.offset, e.length), e.region_shift); }
 	const std::string toc_bytes = strata::format::encode_toc(toc);
 	file.replace(footer.toc_offset, toc_bytes.size(), toc_bytes);
 	auto f = footer;

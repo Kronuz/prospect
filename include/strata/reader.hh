@@ -118,8 +118,8 @@ public:
 				continue;
 			}
 			for (std::size_t r = 0; r < e.region_crcs.size(); ++r) {
-				const std::uint64_t at = std::uint64_t(r) * format::region_size;
-				regions.push_back({e.offset + at, std::min<std::uint64_t>(format::region_size, e.length - at), e.region_crcs[r]});
+				const std::uint64_t at = std::uint64_t(r) << e.region_shift;
+				regions.push_back({e.offset + at, std::min<std::uint64_t>(e.region_size(), e.length - at), e.region_crcs[r]});
 			}
 			if (e.kind == format::section::terms) { integrity_->terms_offset = e.offset; }
 			if (e.kind == format::section::postings) { integrity_->postings_offset = e.offset; }

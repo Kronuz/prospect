@@ -56,7 +56,10 @@ inline constexpr char footer_magic[4] = {'S', 'E', 'N', 'D'};
 inline constexpr std::uint32_t version = 12;
 inline constexpr std::size_t header_size = 32;
 inline constexpr std::size_t footer_size = 48;
-inline constexpr std::size_t region_size = 64 * 1024;
+// Each section is verified per region of 2^region_shift bytes, recorded in its table of
+// contents entry (Track P15 chooses the default by measurement).
+inline constexpr std::uint8_t default_region_shift = 16;
+inline constexpr std::uint8_t min_region_shift = 12, max_region_shift = 20;
 // Stored records are packed into zstd frames of at most this many uncompressed bytes (a
 // larger record takes a frame of its own).
 inline constexpr std::size_t stored_block_size = 64 * 1024;
@@ -123,7 +126,9 @@ struct section_entry {
 	std::uint64_t offset = 0;
 	std::uint64_t length = 0;
 	std::uint32_t crc = 0;
-	std::vector<std::uint32_t> region_crcs;  // one per 64 KiB of the section
+	std::vector<std::uint32_t> region_crcs;  // one per region of the section
+	std::uint8_t region_shift = default_region_shift;
+	std::uint64_t region_size() const noexcept { return std::uint64_t(1) << region_shift; }
 };
 
 inline std::string encode_header(const std::array<std::uint8_t, 16>& segment_id) {
@@ -135,10 +140,11 @@ inline std::string encode_header(const std::array<std::uint8_t, 16>& segment_id)
 }
 
 // The section's CRC and its region CRCs over bytes.
-inline section_entry describe(section kind, std::uint64_t offset, std::string_view bytes) {
-	section_entry e{kind, offset, bytes.size(), hashes::crc32c(bytes.data(), bytes.size()), {}};
-	for (std::size_t at = 0; at < bytes.size(); at += region_size) {
-		e.region_crcs.push_back(hashes::crc32c(bytes.data() + at, std::min(region_size, bytes.size() - at)));
+inline section_entry describe(section kind, std::uint64_t offset, std::string_view bytes, std::uint8_t region_shift = default_region_shift) {
+	section_entry e{kind, offset, bytes.size(), hashes::crc32c(bytes.data(), bytes.size()), {}, region_shift};
+	const std::size_t size = e.region_size();
+	for (std::size_t at = 0; at < bytes.size(); at += size) {
+		e.region_crcs.push_back(hashes::crc32c(bytes.data() + at, std::min(size, bytes.size() - at)));
 	}
 	return e;
 }
@@ -148,7 +154,7 @@ inline std::string encode_toc(const std::vector<section_entry>& entries) {
 	put<std::uint32_t>(t, std::uint32_t(entries.size()));
 	for (const auto& e : entries) {
 		put<std::uint16_t>(t, std::uint16_t(e.kind));
-		put<std::uint16_t>(t, 0);
+		put<std::uint16_t>(t, e.region_shift);
 		put<std::uint64_t>(t, e.offset);
 		put<std::uint64_t>(t, e.length);
 		put<std::uint32_t>(t, e.crc);
@@ -210,12 +216,15 @@ inline std::vector<section_entry> decode_toc(std::string_view file, const footer
 		need(24);
 		section_entry e;
 		e.kind = section(get<std::uint16_t>(p));
+		const std::uint16_t shift = get<std::uint16_t>(p + 2);
+		if (shift < min_region_shift || shift > max_region_shift) { throw corrupt_segment("region size"); }
+		e.region_shift = std::uint8_t(shift);
 		e.offset = get<std::uint64_t>(p + 4);
 		e.length = get<std::uint64_t>(p + 12);
 		e.crc = get<std::uint32_t>(p + 20);
 		p += 24;
 		if (e.offset > f.toc_offset || e.length > f.toc_offset - e.offset) { throw corrupt_segment("section bounds"); }
-		std::size_t regions = (e.length + region_size - 1) / region_size;
+		const std::size_t regions = std::size_t((e.length + e.region_size() - 1) >> e.region_shift);
 		need(regions * 4);
 		for (std::size_t r = 0; r < regions; ++r) { e.region_crcs.push_back(get<std::uint32_t>(p + 4 * r)); }
 		p += regions * 4;
@@ -376,37 +385,45 @@ inline std::vector<impact> decode_impacts(const char** p, const char* end) {
 
 // Term infos in one dictionary restart run share a cursor: a term's postings and
 // positions start where the previous term's end. A run's first entry, or one after a gap,
-// stores both cursors (flag `absolute`); the rest only their lengths. Layout: [flags u8]
-// [df][cf unless cf_is_df][if absolute: postings cursor, positions cursor], then for a
-// single posting [ordinal][wdf], else [postings length]; with positions [positions
-// length]; with skip blocks (df >= 128) the impacts. Integers are LEB128.
+// stores both cursors (flag `absolute`); the rest only their lengths. Layout, integers
+// LEB128: [df << 5 | no_wdf, no_positions, counts_are_wdf, cf_is_df, absolute as bits
+// 0-4][if absolute: postings cursor, positions cursor], then for a single posting (df 1)
+// [ordinal][wdf unless 1, which cf_is_df marks], else [cf unless cf_is_df][postings
+// length]; with positions [positions length]; with skip blocks (df >= 128) the impacts.
 struct term_run {
 	std::uint64_t postings = 0, positions = 0;  // where the next term's bytes start
 	bool started = false;
 };
 
+namespace detail {
+inline constexpr std::uint8_t packed_flags[5] = {no_wdf, no_positions, counts_are_wdf, cf_is_df, absolute};
+}
+
 inline std::string encode_term_info(term_info t, term_run& run, bool restart) {
-	const bool singles = t.flags & single_posting, positionless = t.flags & no_positions;
-	const bool contiguous = run.started && (singles || t.postings == run.postings) && (positionless || t.positions == run.positions);
+	const bool single = t.flags & single_posting, positionless = t.flags & no_positions;
+	const bool contiguous = run.started && (single || t.postings == run.postings) && (positionless || t.positions == run.positions);
 	t.flags = std::uint8_t(t.flags & ~(cf_is_df | absolute));
-	if (t.cf == t.df) { t.flags |= cf_is_df; }
+	if (single ? t.single_wdf == 1 : t.cf == t.df) { t.flags |= cf_is_df; }
 	if (restart || !contiguous) {
 		t.flags |= absolute;
-		if (!singles) { run.postings = t.postings; }
+		if (!single) { run.postings = t.postings; }
 		if (!positionless) { run.positions = t.positions; }
 	}
+	std::uint64_t head = std::uint64_t(t.df) << 5;
+	for (unsigned b = 0; b < 5; ++b) {
+		if (t.flags & detail::packed_flags[b]) { head |= 1u << b; }
+	}
 	std::string out;
-	out.push_back(char(t.flags));
-	put_leb(out, t.df);
-	if (!(t.flags & cf_is_df)) { put_leb(out, t.cf); }
+	put_leb(out, head);
 	if (t.flags & absolute) {
 		put_leb(out, run.postings);
 		put_leb(out, run.positions);
 	}
-	if (singles) {
+	if (single) {
 		put_leb(out, t.postings);
-		put_leb(out, t.single_wdf);
+		if (!(t.flags & cf_is_df)) { put_leb(out, t.single_wdf); }
 	} else {
+		if (!(t.flags & cf_is_df)) { put_leb(out, t.cf); }
 		put_leb(out, t.postings_length);
 		run.postings += t.postings_length;
 	}
@@ -425,20 +442,24 @@ inline term_info decode_term_info(std::string_view bytes, term_run& run, bool wi
 	const char* p = bytes.data();
 	const char* end = p + bytes.size();
 	term_info t;
-	if (p == end) { throw corrupt_segment("term info truncated"); }
-	t.flags = std::uint8_t(*p++);
-	if (t.flags & ~0x3f) { throw corrupt_segment("term flags"); }
+	const std::uint64_t head = get_leb(&p, end);
+	if (head >> 5 == 0 || head >> 5 > 0xffffffffu) { throw corrupt_segment("term info"); }
+	t.df = std::uint32_t(head >> 5);
+	for (unsigned b = 0; b < 5; ++b) {
+		if (head >> b & 1) { t.flags |= detail::packed_flags[b]; }
+	}
+	if (t.df == 1) { t.flags |= single_posting; }
 	if (!(t.flags & absolute) && !run.started) { throw corrupt_segment("term offsets without a run"); }
-	t.df = std::uint32_t(get_leb(&p, end));
-	t.cf = t.flags & cf_is_df ? t.df : get_leb(&p, end);
 	if (t.flags & absolute) {
 		run.postings = get_leb(&p, end);
 		run.positions = get_leb(&p, end);
 	}
 	if (t.flags & single_posting) {
 		t.postings = get_leb(&p, end);
-		t.single_wdf = std::uint32_t(get_leb(&p, end));
+		t.single_wdf = t.flags & cf_is_df ? 1 : std::uint32_t(get_leb(&p, end));
+		t.cf = t.single_wdf;
 	} else {
+		t.cf = t.flags & cf_is_df ? t.df : get_leb(&p, end);
 		t.postings_length = get_leb(&p, end);
 		t.postings = run.postings;
 		if (run.postings + t.postings_length < run.postings) { throw corrupt_segment("postings range"); }
@@ -457,7 +478,7 @@ inline term_info decode_term_info(std::string_view bytes, term_run& run, bool wi
 			p = end;
 		}
 	}
-	if (p != end || t.df == 0 || ((t.flags & single_posting) != 0) != (t.df == 1)) { throw corrupt_segment("term info"); }
+	if (p != end) { throw corrupt_segment("term info"); }
 	run.started = true;
 	return t;
 }
