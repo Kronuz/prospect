@@ -6,6 +6,8 @@
 #include "strata/faultfs.hh"
 #include "strata/index.hh"
 #include "strata/searcher.hh"
+#include "strata/budget.hh"
+#include <map>
 
 #include <cstdio>
 #include <cstdlib>
@@ -218,6 +220,77 @@ int main() {
 				}
 			}
 		}
+	}
+	// live_scorer nested where parents use two-phase iteration, its counting copy, and
+	// windows that do not start on a word.
+	{
+		std::mt19937_64 r(21);
+		segment_writer w;
+		std::vector<std::vector<std::string>> docs;
+		for (std::uint32_t d = 0; d < 3000; ++d) {
+			std::vector<std::string> tokens;
+			for (std::size_t i = 0, n = 2 + r() % 8; i < n; ++i) { tokens.push_back(vocab[r() % 4]); }
+			std::map<std::string, std::vector<std::uint32_t>> pos;
+			for (std::uint32_t i = 0; i < tokens.size(); ++i) { pos[tokens[i]].push_back(i + 1); }
+			std::vector<posting_input> in;
+			for (auto& [t, p] : pos) { in.push_back({t, std::uint32_t(p.size()), p}); }
+			w.add(d + 1, in, std::uint32_t(tokens.size()));
+			docs.push_back(tokens);
+		}
+		const std::string bytes = w.flush({});
+		const segment seg(bytes);
+		std::vector<std::uint64_t> deleted((seg.doc_count() + 63) / 64, 0);
+		for (std::uint32_t d = 0; d < 3000; d += 1 + std::uint32_t(r() % 5)) { deleted[d >> 6] |= std::uint64_t(1) << (d & 63); }
+		auto dead = [&](std::uint32_t d) { return (deleted[d >> 6] >> (d & 63)) & 1; };
+		auto phrase = [&] { return std::make_unique<phrase_scorer>(seg, std::vector<format::term_info>{*seg.term("a"), *seg.term("b")}); };
+		auto live_phrase = [&] { return std::make_unique<live_scorer>(phrase(), deleted); };
+		// "a b" and "c" in live documents, by brute force.
+		std::set<ordinal_t> want;
+		for (std::uint32_t d = 0; d < 3000; ++d) {
+			bool ab = false, c = false;
+			for (std::size_t i = 0; i < docs[d].size(); ++i) {
+				ab = ab || (i + 1 < docs[d].size() && docs[d][i] == "a" && docs[d][i + 1] == "b");
+				c = c || docs[d][i] == "c";
+			}
+			if (ab && c && !dead(d)) { want.insert(d); }
+		}
+		std::vector<scorer_ptr> kids;
+		kids.push_back(live_phrase());
+		kids.push_back(std::make_unique<term_scorer>(seg, *seg.term("c")));
+		conjunction_scorer both(std::move(kids));
+		CHECK(both.two_phase());
+		std::set<ordinal_t> got;
+		for (ordinal_t d = both.next(); d != no_more_docs; d = both.next()) { got.insert(d); }
+		CHECK(got == want);
+		// The counting copy, and count() through the wrapper.
+		// (A phrase has no counting copy; a term does, and the wrapper keeps it.)
+		CHECK(!live_phrase()->fresh());
+		auto lt = std::make_unique<live_scorer>(std::make_unique<term_scorer>(seg, *seg.term("c")), deleted);
+		auto copy = lt->fresh();
+		CHECK(copy && count(*copy) == count(*lt));
+		// A window starting off a word boundary clears exactly the deleted ordinals in it.
+		auto all_c = std::make_unique<live_scorer>(std::make_unique<term_scorer>(seg, *seg.term("c")), deleted);
+		std::uint64_t bits[64] = {};
+		all_c->advance(5);
+		all_c->fill(5, 205, bits);
+		for (std::uint32_t d = 5; d < 205; ++d) {
+			const bool has_c = std::find(docs[d].begin(), docs[d].end(), "c") != docs[d].end();
+			CHECK(bool((bits[(d - 5) >> 6] >> ((d - 5) & 63)) & 1) == (has_c && !dead(d)));
+		}
+	}
+	// Budget permits: an empty permit draws nothing; move assignment settles the target.
+	{
+		memory_budget b(100);
+		memory_budget::permit none;
+		CHECK(!none.try_grow(1) && !none);
+		none.grow(5);
+		CHECK(b.used() == 0);
+		auto p = b.open(), q = b.open();
+		p.grow(30);
+		q.grow(40);
+		p = std::move(q);  // p's 30 return; q's 40 move
+		CHECK(b.used() == 40 && p.bytes() == 40);
+		CHECK(!p.try_grow(70) && p.try_grow(60) && b.used() == 100);
 	}
 	std::printf("multisegment: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
