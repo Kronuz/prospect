@@ -758,3 +758,233 @@ splits it.**
   invalidates `decoded_group_` before decoding. Before Phase 3 fences one segment and
   keeps serving others.
 - Not re-checked here: C1–C3, C5, C6, C8.
+
+## Third re-check and ruling
+
+- Date: 2026-10-13.
+- Reviewed: everything after the second re-check's commit, `cb01c65`, at strata
+  `80eadc2`:
+  - The fixes in `63a5339`; the code, tests, and fuzz target are unchanged since.
+  - `f1adaf9`; the G5 tooling (`3ec6de8`, `500ef45`, `ea5dc10`, `9dba054`);
+    `strata_engine dictstats` (`6ad6ca3`).
+  - The gate report at `c3a9387`, `f4f950f`, and `80eadc2`.
+  - `termdict` `07c97fe`, whose change from the pin `51278ef` is `bench/bench.cc` only.
+  - The raw results: `.scratch/g5/q{1..5}-{queries,terms-stratified}.json`,
+    `.scratch/fuzz-hour/*.log`, and `.scratch/quiet-trials.log` with its samples.
+  - The PLAN amendments (`e0d5497`, `eb9452f`, `d87783a`) are reviewed in
+    `docs/reviews/plan-amendments.md`.
+- Checked by:
+  - Building `80eadc2` with Homebrew LLVM 23 against the pinned libraries: the four
+    tests pass under ASan and UBSan (`-fno-sanitize-recover=undefined`), and
+    `concurrency_test` passes under TSan.
+  - Running `parity` under ASan and UBSan: 419 of 419 queries equal in counts and
+    top-10, counted and pruned; worst relative error 3.64e-16.
+  - Removing each fix in a scratch copy. Without G8's seeding, `search_test` fails its
+    pruned top-k checks (`search_test.cc:203-204`). Without G7's check, `segment_test`
+    runs past 240 s; with it, it passes in 21 s.
+  - Re-scoring the five trials with `bench/phase2/gate.py`: the report's table
+    reproduces exactly, with 0 count mismatches against Tantivy per command and trial.
+    The term strata are scored the same way.
+  - Measuring source coverage (`llvm-cov`) of the unit tests, `parity`, and the segment
+    fuzz corpus (`.scratch/seg-corpus2`, 2,561 inputs) replayed once.
+  - Not run: the benchmarks, `verify` (its 5M index is in the gate VM), and fuzzing.
+
+### Verdict
+
+**APPROVED WITH CONDITIONS.** The Phase 2 gate passes. Phase 3 implementation starts
+now, within the Phase 3 design re-check's constraints (`docs/reviews/phase-3-design.md`,
+"Re-check"), and each condition below lands by its stated point.
+
+- G1, G7, and G8 close in code, and the G7 and G8 tests fail without their fixes. One
+  of the five resealed tests G1 asked for landed; the record carries as C13.
+- G3 closes: one CPU-hour per target at format 11, zero findings.
+- G5 closes. Every class of every command is within 1.5× of the faster of Lucene and
+  Tantivy, the interval's upper bound included (worst median 1.45×, worst upper bound
+  1.48×). Counts equal Tantivy's in every trial. strata wins every class against
+  Xapian. Single-thread indexing is 1.53× Lucene and 0.84× Tantivy. The postings
+  section is 1.017× `.doc`, and `termdict` lookups are 0.65–0.70× `seekExact`. Parts
+  of its evidence carry as C14, C15, and C17.
+- The PLAN amendments landed after this gate's evidence was set. This ruling applies
+  their Phase 2 ratchet rows. Their new "Every gate" items (coverage, the test-parity
+  inventory, the scale statement) apply from the Phase 3 gate, which measures Phase 2's
+  code too (C16). The Phase 2 memory row the report omits, heap allocations per query,
+  carries as C15.
+
+### Status
+
+1. **G1. Closed in code; the test record carries (C13).**
+   - `read` rejects `first > limit || count > limit - first`, and `limit` cannot
+     overflow, since `full_blocks_ <= blocks_bytes_` (`reader.hh:855, 882-883`).
+   - A group's level-0 bytes are consumed exactly (`642`).
+   - One resealed test landed: G7's lowered last (`segment_test.cc:293-325`, with
+     `reseal` at `29-40`). The fuzz corpus reaches the other four checks the second
+     re-check listed (`reader.hh:599, 731, 793, 883`), but it is not checked in, and no
+     test replays it.
+2. **G2. Closed** (unchanged).
+3. **G3. Closed.**
+   - `fuzz_segment`: one hour at `63a5339` and format 11, under ASan and UBSan, with
+     `-timeout=10`: 64,634 runs at 17 per second, 8,851 PCs, a 1,123-input corpus, peak
+     RSS 377 MB, zero findings (`fuzz-hour/segment.log`). Five single-threaded targets
+     shared 16 hardware threads, so the hour is CPU time. `exercise` gained NEAR, a
+     phrase with per-term weights, both G8 shapes, and a base with 64-bit skip offsets
+     (`fuzz_segment.cc:20-23, 46, 118-129`).
+   - `snowball`, `analysis`, `bitpack` with `encoded_size`, and `unicode`: one hour
+     each, zero findings (76.7M, 22.8M, 324M, and 524M runs).
+   - One deviation: `-rss_limit_mb=4096`, not 2048 (`fuzz-hour/run.sh:4`). libFuzzer's
+     malloc limit defaults to the RSS limit; at 4,096 MB it does not flag the
+     4 GiB − 1 stored-frame allocation C9 leaves open, and at 2,048 it does. C9.
+   - No fuzz target builds from the repository: `CMakeLists.txt` builds tests and tools
+     only. C13.
+4. **G4. Closed** (unchanged).
+5. **G5. Closed, with C14, C15, and C17.**
+   - **Run.** Five query trials with the engine order rotated (`g5.sh:21-30`), from
+     16:11 to about 22:00 on 10-12, strata at `63a5339`, under `quiet_trials.sh` at
+     limit 6 with no stop. No sample reaches a compile's load: 689 samples, median
+     2.75, maximum 4.31.
+   - **Statistics.** `gate.py` gives each row's median and 95% bootstrap interval
+     across trials, raw and floor-subtracted, the floor flag, and the ratio to Xapian
+     (`bench/phase2/gate.py:47-77, 84, 97`). The floor is 55 µs, the smallest time of
+     any engine and query, from trial 2. It is the conservative choice: the true pipe
+     floor is at most 55 µs, and a smaller floor gives smaller ratios wherever strata
+     is slower. No class is flagged.
+   - **Query classes.** Worst medians: `TOP_1000` intersection 1.45× [1.44–1.47],
+     `TOP_100_COUNT` intersection 1.44× [1.42–1.45], `TOP_100_COUNT` negated 1.43×
+     [1.40–1.47]. Worst upper bound: `TOP_100` intersection_union, 1.48×. Counted
+     classes are within 1.5×; no `TOP_K` class passes 1.5×, and none reaches 2×.
+   - **Frequent terms.** The first review asked for a cause and a fix plan for the
+     frequent-term `TOP_10` gap whatever its class ratio, and ruling 2 asked for the
+     frontier length distribution per level as its candidate cause. The report gives
+     neither. Scored as `gate.py` scores classes: `TOP_10` frequent is 1.35× raw and
+     1.44× [1.40–1.45] floor-subtracted (370 µs against Tantivy's 273 µs; 1.00×
+     Lucene); `TOP_100` frequent is 1.47× [1.39–1.51]. Rare and medium terms have
+     medians within 1.06× in every command. C15.
+   - **Pruned against exhaustive.** `verify` on 962 + 200 queries at k = 10, 100, and
+     1,000 on the 5M index: 0 mismatches at `63a5339`. Two gaps against the first
+     review's bullet:
+     - `verify` compares scores rank by rank, not ordinals (`strata_engine.cc:312`).
+     - It builds Lucene BM25 only (`128-129`). Xapian BM25 pruning is shown by `parity`
+       on 10,000 documents, where no term spans more than three skip groups.
+
+     C14.
+   - **Indexing.** Three rotated trials per engine from a dropped page cache
+     (`g5.sh:35-62`), 22:08 to 23:12. Medians: strata 9,660 docs/s, Tantivy 11,550,
+     Lucene 6,290, Xapian 1,080. Lucene left one segment named `_0`, which a merge
+     would have renamed, so it flushed once; Tantivy's segments come from the list in
+     `meta.json`. The report gives medians only. 0.84× sits 4.5% above the 0.8× target,
+     so the per-trial times and the ratio's interval belong in the record; the `.time`,
+     `.segments`, and `.bytes` files are still in the VM. C15.
+   - **`termdict`.** Accepted as measured; the single-lookup p99 is deferred.
+     - The row's statistic is the median. Batches of 16 and 1,024 lookups, less the
+       timer's median cost, are what the VM's clock can time (`termdict`
+       `bench/bench.cc:70-94`; `SeekExact.java:57-72`). Batch medians are 0.65–0.70×
+       `seekExact`, and the batch-of-16 p50 is 0.80–0.86×.
+     - The batch-of-16 p99s (7.0–7.75 µs against 7.25–8.4 µs) measure the VM's
+       interruptions, not lookups. The hash map's batches are about a fifth as long,
+       and its p99 is 1.6–3.2 µs, as interruptions proportional to batch time predict.
+       The single-lookup p50 and p99 belong with the bare-metal rows (BENCHMARKS
+       rule 4). C17.
+     - The hash-map ratio is recorded: 4.6× its batch-median time, at 12.35 bytes per
+       key against 59.3.
+     - These runs fall outside the load-gated window, whose log ends at 23:12; an
+       interleaved ratio of 0.65–0.70× does not depend on it.
+   - **Reporting.** The commit, format, compiler and flags, VM, fsync latency, and
+     trial counts are recorded. The corpus checksum (BENCHMARKS, "Reporting") is not.
+     C15.
+6. **G6. Closed** (unchanged).
+7. **G7. Closed.** `skip_blocks` throws unless a group skip moves past `d`
+   (`search.hh:301-303`). On valid skip data, the target's preceding group ends at or
+   past `d`, so no valid segment throws. The resealed test lowers group 4's last to 0
+   and runs a pruned `top_k`, which throws (`segment_test.cc:293-325`).
+8. **G8. Closed.** Leaving linear mode pushes each essential clause at its current
+   document (`search.hh:517, 524-527`). In linear mode every child stands at or past
+   `doc_` (`613-621`), so the next `advance_matching` resumes there, and a child at
+   `no_more_docs` is not pushed (`626`). `search_test` runs `(a OR b) AND_NOT c` and
+   `(a OR b) AND_MAYBE c`, pruned and exhaustive, against brute force
+   (`search_test.cc:61-65, 92-101, 152-158`).
+9. **The record at format 11.**
+   - Postings: 1,007.9 MB against 990.6 MB, 1.017×, within 1.02×.
+   - A file whose version is one below the current one is rejected at open
+     (`segment_test.cc:326-334`), and `small.sx` pins format 11. That meets ruling 4
+     while the reader accepts one version; a reader that accepts two needs a real
+     fixture of each.
+   - Stale text in the report: the G5 row of "Review findings" names three engines, a
+     floor per run, and "pending a quiet host" (`gates/phase-2.md:137`). The `termdict`
+     line of "Open" breaks the list's indentation and gives "5.91" without a unit
+     (`212-214`). "Open" omits the postings row against Phase 3's ≤ 1.0× and the
+     conditions below. C15.
+
+### Conditions
+
+- Closed: C4 (`search.hh:460-461, 673, 1152-1155, 1165`), C6, C8
+  (`search.hh:115-117, 132-134`), C10 (the TSan run is recorded at
+  `gates/phase-2.md:177-179` and reproduced here), and C12 (`reader.hh:606`).
+- Superseded: C11. PLAN's disk ratchet sets the term dictionary at ≤ 1.0× its
+  counterpart at Phase 3 (`PLAN.md:88`).
+
+Carried into Phase 3:
+
+1. **C1. Format decisions before merge code.** wdf is closed (`phase-2.md:107-109`).
+   The docids section is validated at open (`reader.hh:127-131`), `docid(ord)` exists
+   (`139-143`), and a test covers the non-contiguous kind (`segment_test.cc:290`). The
+   docid → ordinal lookup lands with Phase 3's docids section (`phase-3.md:72-74`),
+   before merge code.
+2. **C2.** Docid tie-breaks, before hits merge across segments (Phase 3 design, D14).
+3. **C3.** Count shortcuts under deletes, with Phase 3's deletes.
+4. **C5. Open for `search_test`.** `parity`'s part is closed: its counted and pruned
+   modes compare docids under the tie rule over 419 queries, `AND_MAYBE`, `AND_NOT`,
+   and `NEAR` included (`parity.cc:225-241`). `search_test` still scores Lucene BM25
+   only (`search_test.cc:48-52`), and lacks three shapes `strata_engine` builds
+   (`strata_engine.cc:148-178`): required-plus-optional over a conjunction, exclusion
+   chains, and conjunctions of disjunctions. Before Phase 3 changes a scorer.
+5. **C7.** Conjunctions of disjunctions are measured, and WAND lands or the cost model
+   is amended, before the Phase 3 gate. Its query ratchet now holds intersection_union
+   (1.20–1.40× in the `TOP_K` and `TOP_100_COUNT` commands) to ≤ 1.0×.
+6. **C9. Open in two places.**
+   - The stored-frame allocation is bounded only by the 32-bit `raw_size`
+     (`reader.hh:175, 182`), and `decompress_zstd` allocates the frame header's content
+     size up to it (`compressors` `compressor_zstd.cc:127-131`). The stored section
+     records its largest frame's uncompressed size, and the reader rejects a larger
+     `raw_size`. It lands in the Phase 3 format, and the next segment fuzz hour runs at
+     `-rss_limit_mb=2048`.
+   - Text, with the Phase 3 format: the design's collectors section
+     (`phase-2.md:262-269`); its skip-data text (`114-124`), which gives 64-bit offsets
+     where format 11 has a width flag, 32-bit offsets, and count-headed compact pairs;
+     the stats row's "docid bounds" (`76`), which the 28-byte stats section lacks
+     (`writer.hh:358-363`); and `writer.hh`'s layout comment (`26-37`), which describes
+     format 9's level 1.
+7. **C13. Every corruption check reached by a test** (G1's record; TESTING.md,
+   "Coverage").
+   - The fuzz targets build from CMake behind an option, the corpus is checked in, and
+     a CTest replays it under ASan and UBSan.
+   - With the unit tests, `parity`, and the corpus replayed, 18 corruption checks are
+     reached by none of them: `reader.hh:261, 292, 517, 520, 533, 541, 682, 719, 721,
+     938, 940, 942` and `format.hh:179, 337, 344, 348, 353, 387`. Each gains a resealed
+     unit test or a corpus input that reaches it.
+   - A resealed unit test of the wrapped position index (a first index near 2^64),
+     since coverage of `reader.hh:883` cannot show that its wrap case runs.
+   - Before the Phase 3 format changes these decoders.
+8. **C14. `verify` as the first review specified.** At each rank the ordinal matches,
+   or the score ties within 1e-9 and the tied ordinals match as a set; and both schemes
+   run. It re-runs on the 5M index at the commit that lands it, before the first Phase 3
+   change to a query path or Track P item, since Track P keeps `verify` green.
+9. **C15. The Phase 2 record**, in the gate report:
+   - Heap bytes and allocations per query by class, from an allocation-counting build
+     at `63a5339` (PLAN, "Ratchets", Memory, Phase 2), before Phase 3 changes a query
+     path.
+   - The frequent-term stratum per command, with its cause and fix plan, and the
+     frontier length distribution per level (mean, p99, maximum), with the Phase 3
+     performance plan (`docs/reviews/plan-amendments.md`, A29).
+   - Indexing: each trial's wall time per engine and the ratio's interval, with the
+     trial files kept beside `.scratch/g5`.
+   - The corpus checksum, and the text fixes under item 9.
+10. **C16. Coverage of Phase 2's code** at TESTING.md's targets by the Phase 3 gate.
+    Measured here at `80eadc2`, with the unit tests, `parity`, and the corpus
+    replayed: `format.hh` 100% of lines and 91.5% of branches; `reader.hh` 98.7% and
+    91.4%; `search.hh` 91.2% and 87.7%; `writer.hh` 99.8% and 89.2%. The decoders'
+    branches (target 95%) and the scorers' lines and branches (95% and 90%) fall short.
+11. **C17. `termdict` single-lookup p50 and p99**, present and absent keys, at or below
+    `seekExact`'s on bare metal, at the first gate with bare-metal rows (Phase 3R,
+    BENCHMARKS rule 4).
+
+Carried to Phase 6, unchanged: the asynchronous `residency` backends verify regions as
+they load them.
