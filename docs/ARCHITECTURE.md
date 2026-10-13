@@ -243,6 +243,9 @@ and CRCs, live-docs generations, and, under groups, the applied log position.
 
 ## Distribution
 
+strata is distributed-first; [DISTRIBUTION.md](DISTRIBUTION.md) holds the scale
+contract (at least 100,000 nodes), the cluster layers, and the open decisions.
+
 A shard search returns a mergeable result: statistics, top-k hits with sort keys,
 aggregation partials, and estimate triples. Exact global scoring gathers statistics
 from all shards first, then scores with them. The shard RPC carries queries, scored
