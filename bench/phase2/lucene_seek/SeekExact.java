@@ -1,5 +1,7 @@
 // Lucene TermsEnum.seekExact on a vocabulary (one term per line): present and absent
-// keys sampled exactly as termdict_bench samples them, median ns over batches of 1024.
+// keys sampled exactly as termdict_bench samples them, median ns over batches of 1024,
+// then p50 and p99 of the per-lookup time over batches of 16, each batch timed alone
+// less the timer's median cost, as termdict_bench does.
 //   java -cp <lucene jars>:. SeekExact VOCAB INDEX_DIR
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
@@ -45,7 +47,28 @@ public class SeekExact {
 			for (int round = 0; round < 4; ++round) {
 				System.out.printf("present %8.1f ns   absent %8.1f ns%n", median(te, present), median(te, absent));
 			}
+			for (int round = 0; round < 2; ++round) {
+				double[] p = percentiles(te, present), a = percentiles(te, absent);
+				System.out.printf("batch16: present p50 %.0f p99 %.0f ns   absent p50 %.0f p99 %.0f ns%n", p[0], p[1], a[0], a[1]);
+			}
 		}
+	}
+
+	static double[] percentiles(TermsEnum te, List<BytesRef> qs) throws Exception {
+		long[] empty = new long[100000];
+		for (int i = 0; i < empty.length; ++i) { long t = System.nanoTime(); empty[i] = System.nanoTime() - t; }
+		Arrays.sort(empty);
+		double overhead = empty[empty.length / 2];
+		double[] t = new double[qs.size() / 16];
+		long sink = 0;
+		for (int b = 0; b < t.length; ++b) {
+			long a = System.nanoTime();
+			for (int i = b * 16; i < b * 16 + 16; ++i) { if (te.seekExact(qs.get(i))) { ++sink; } }
+			t[b] = (System.nanoTime() - a - overhead) / 16.0;
+		}
+		if (sink == 42) { System.out.print(""); }
+		Arrays.sort(t);
+		return new double[] {t[(int) (0.50 * (t.length - 1))], t[(int) (0.99 * (t.length - 1))]};
 	}
 
 	static double median(TermsEnum te, List<BytesRef> qs) throws Exception {

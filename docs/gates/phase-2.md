@@ -17,7 +17,7 @@ the run), with the engine order rotated per trial.
 | Xapian floor | Win every class and single-thread indexing | strata wins every class of every command (0.006–0.34× Xapian's time, floor-subtracted) and indexes 8.9× faster | Pass |
 | Single-thread indexing | ≥ 1.0× Lucene, ≥ 0.8× Tantivy, 1M documents, one segment | Three trials each, median: 9,660 docs/s, 1.53× Lucene (6,290) and 0.84× Tantivy (11,550) | Pass |
 | Postings size | Whole postings section ≤ 1.02× Lucene's `.doc` | Format 11: 1,007.9 MB against 990.6 MB, 1.017× (format 10 was 1.026×) | Pass |
-| `termdict` lookup | ≤ 1.0× Lucene's `seekExact` | 0.54× present and absent keys (645 / 686 ns against 1,190 / 1,250 ns) | Pass |
+| `termdict` lookup | ≤ 1.0× Lucene's `seekExact` | Medians of batches of 1,024, interleaved runs: 0.65–0.70× (643–659 ns present, 659–674 ns absent, against 914–1,058 ns). Over batches of 16: p50 0.80–0.86× (750 against 875–938 ns); p99 7.0–7.75 µs against 7.25–8.4 µs, set by the VM (the hash map's p99 is 1.6–3.2 µs) | Pass; p99 owed on bare metal |
 | Relevance parity | Identical match sets and BM25 top-10 within 1e-9 against the oracle | 419 of 419 queries equal in counts and top-10, counted and pruned, `AND_MAYBE`, `AND_NOT`, and `NEAR` included; worst relative error 3.6e-16 | Pass |
 | Pruned against exhaustive | `verify` on every gate query, k = 10, 100, 1,000 | 962 + 200 queries on the 5M index, 0 mismatches, at `63a5339` | Pass |
 | Analyzer | Passes every oracle vector before parity | 966 vectors and two per-code-point sweeps over all 1,114,112 code points | Pass |
@@ -209,9 +209,11 @@ contract states the `fill` window and `max_score` semantics (C8).
   worst to ≤ 1.0× (intersection, phrase, negated, and intersection_union are above
   1.3×); single-thread indexing from 0.84× to ≥ 1.0× Tantivy; serving working set from
   1.33× Tantivy's resident index pages; the term dictionary from 2.53×.
-- `termdict` p50 and p99 for present and absent keys and the hash-map ratio: the
-  benchmarks now time single lookups (`termdict` bench, `SeekExact.java`); the run is
-  pending.
+- `termdict` against a hash map: 4.6× its batch-median lookup time (650 against 140
+  ns), at 8.8 bytes per key against the map's 33. Lookup tails: the gate VM's clock
+  (HPET, 1 µs steps) cannot time one lookup, and its interruptions set every engine's
+  p99 near 7–8 µs; the single-lookup p99 belongs with the bare-metal rows
+  (BENCHMARKS rule 4).
 - The term dictionary is 2.5× Lucene's (101.6 MB for `terms` plus `term_index`,
   against 40.2 MB for `.tim`, `.tip`, and `.tmd`; 3,964,752 terms, 54% with one
   posting). Per term (`strata_engine dictstats`): keys 8.52 bytes raw; values 19.16:
