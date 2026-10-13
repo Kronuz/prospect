@@ -539,7 +539,12 @@ int main() {
 			for (int i = 0; i < 400; ++i) { ix.apply(tx({replace("Q" + std::to_string(i % 150), "w" + std::to_string(i % 17))}), {}); }
 			ix.commit();
 			const auto r = ix.check();
-			CHECK(r.segments == 1 && r.documents == 150 && r.terms > 150 && r.postings >= 2 * 150 && r.stored_bytes > 0);
+			CHECK(r.segments == 1 && r.documents == 150 && r.terms > 150 && r.postings >= 2 * 150 && r.stored_bytes > 0 && r.deleted == 0);
+			// Deleted documents are counted, not skipped.
+			for (int i = 0; i < 10; ++i) { ix.apply(tx({erase("Q" + std::to_string(i))}), {}); }
+			ix.commit();
+			const auto d = ix.check();
+			CHECK(d.documents == 150 && d.deleted == 10 && d.postings == r.postings);
 			for (const auto& n : fs.list()) {
 				if (n.starts_with("seg-") && n.ends_with(".sx")) { seg_name = n; }
 			}

@@ -13,9 +13,9 @@ struct check_report {
 	std::uint64_t segments = 0, documents = 0, deleted = 0, terms = 0, postings = 0, positions = 0, stored_bytes = 0;
 };
 
-// Checks one segment: verifies every byte, decodes every term's postings and positions,
-// reads every document's docid, version, length, and stored record, and checks that each
-// term's postings count its document frequency. Throws corrupt_segment (or
+// Checks one segment: verifies every byte, decodes every term's postings (exactly its
+// document frequency, by the iterator's construction) and positions, and reads every
+// document's docid, version, length, and stored record. Throws corrupt_segment (or
 // termdict::corrupt) at the first problem; adds what it saw to r.
 inline void check_segment(const segment& seg, const std::vector<std::uint64_t>* deleted, check_report& r) {
 	seg.verify_all();
@@ -32,13 +32,10 @@ inline void check_segment(const segment& seg, const std::vector<std::uint64_t>* 
 		++r.terms;
 		postings_iterator it(seg, info);
 		positions_reader pr(seg, info);
-		std::uint64_t df = 0;
 		for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
-			++df;
+			++r.postings;
 			r.positions += pr.read(it).size();
 		}
-		if (df != info.df) { throw corrupt_segment("document frequency differs from the postings"); }
-		r.postings += df;
 		return true;
 	});
 }

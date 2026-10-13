@@ -63,8 +63,8 @@ int main() {
 				std::string t = vocab[rng() % vocab.size()];
 				if (std::find(pick.begin(), pick.end(), t) == pick.end() && seg.term(t)) { pick.push_back(t); }
 			}
-			const int kind = int(rng() % 12);
-			const std::size_t need = kind == 11 ? 4 : kind >= 7 ? 3 : 0;
+			const int kind = int(rng() % 15);
+			const std::size_t need = kind >= 11 ? 4 : kind >= 7 ? 3 : 0;
 			while (pick.size() < need) {
 				std::string t = vocab[rng() % vocab.size()];
 				if (std::find(pick.begin(), pick.end(), t) == pick.end() && seg.term(t)) { pick.push_back(t); }
@@ -116,6 +116,31 @@ int main() {
 					if (match) {
 						for (std::size_t i = 0; i < 4; ++i) {
 							if (tf(d, pick[i])) { s += weight(pick[i])(tf(d, pick[i]), std::uint32_t(docs[d].tokens.size())); }
+						}
+					}
+					break;
+				}
+				case 12: {  // (pick[0] AND pick[1]) OR (pick[2] AND_NOT pick[3])
+					const std::uint32_t len = std::uint32_t(docs[d].tokens.size());
+					const bool both = tf(d, pick[0]) && tf(d, pick[1]), only = tf(d, pick[2]) && !tf(d, pick[3]);
+					match = both || only;
+					if (both) { s += weight(pick[0])(tf(d, pick[0]), len) + weight(pick[1])(tf(d, pick[1]), len); }
+					if (only) { s += weight(pick[2])(tf(d, pick[2]), len); }
+					break;
+				}
+				case 13: {  // (pick[0] AND_MAYBE pick[1]) OR pick[2]
+					const std::uint32_t len = std::uint32_t(docs[d].tokens.size());
+					match = tf(d, pick[0]) || tf(d, pick[2]);
+					if (tf(d, pick[0])) { s += weight(pick[0])(tf(d, pick[0]), len) + (tf(d, pick[1]) ? weight(pick[1])(tf(d, pick[1]), len) : 0.0); }
+					if (tf(d, pick[2])) { s += weight(pick[2])(tf(d, pick[2]), len); }
+					break;
+				}
+				case 14: {  // ((pick[0] OR pick[1]) AND_NOT pick[2]) AND pick[3]
+					const std::uint32_t len = std::uint32_t(docs[d].tokens.size());
+					match = (tf(d, pick[0]) || tf(d, pick[1])) && !tf(d, pick[2]) && tf(d, pick[3]);
+					if (match) {
+						for (std::size_t i : {0u, 1u, 3u}) {
+							if (tf(d, pick[i])) { s += weight(pick[i])(tf(d, pick[i]), len); }
 						}
 					}
 					break;
@@ -210,6 +235,27 @@ int main() {
 					kids.push_back(std::make_unique<strata::disjunction_scorer>(std::move(right)));
 					return std::make_unique<strata::conjunction_scorer>(std::move(kids));
 				}
+				case 12: {
+					std::vector<strata::scorer_ptr> both;
+					both.push_back(term(pick[0]));
+					both.push_back(term(pick[1]));
+					kids.push_back(std::make_unique<strata::conjunction_scorer>(std::move(both)));
+					kids.push_back(std::make_unique<strata::exclusion_scorer>(term(pick[2]), term(pick[3])));
+					return std::make_unique<strata::disjunction_scorer>(std::move(kids));
+				}
+				case 13: {
+					kids.push_back(std::make_unique<strata::required_optional_scorer>(term(pick[0]), term(pick[1])));
+					kids.push_back(term(pick[2]));
+					return std::make_unique<strata::disjunction_scorer>(std::move(kids));
+				}
+				case 14: {
+					std::vector<strata::scorer_ptr> either;
+					either.push_back(term(pick[0]));
+					either.push_back(term(pick[1]));
+					kids.push_back(std::make_unique<strata::exclusion_scorer>(std::make_unique<strata::disjunction_scorer>(std::move(either)), term(pick[2])));
+					kids.push_back(term(pick[3]));
+					return std::make_unique<strata::conjunction_scorer>(std::move(kids));
+				}
 				default: {
 					std::vector<strata::format::term_info> infos;
 					for (auto& t : pick) { infos.push_back(*seg.term(t)); }
@@ -264,6 +310,11 @@ int main() {
 			ordinal_t target = ordinal_t(rng() % ndocs);
 			auto it = want.lower_bound(target);
 			CHECK(q3->advance(target) == (it == want.end() ? strata::no_more_docs : it->first));
+			// fresh(): an unpositioned copy of a scorer already advanced counts every match;
+			// every query but phrases supports it.
+			auto copy = q3->fresh();
+			CHECK(copy || kind == 4 || kind == 5 || kind == 6);
+			if (copy) { CHECK(strata::count(*copy) == want.size()); }
 		}
 	}
 	// A phrase with a positioned term of wdf 0 (a boolean term): its frequency comes from
