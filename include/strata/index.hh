@@ -177,6 +177,7 @@ public:
 		buffer_.clear();
 		buffer_docids_.clear();
 		versions_.clear();
+		docid_keys_.clear();
 		lock_.reset();
 		fenced_ = true;
 	}
@@ -243,6 +244,165 @@ public:
 	std::uint64_t schema_version() const noexcept { return m_.schema_version; }
 	const std::map<std::string, std::string>& metadata() const noexcept { return meta_; }
 	std::size_t buffered_count() const noexcept { return buffer_.size(); }
+
+	// --- deterministic core -------------------------------------------------------------
+
+	// The logical-content digest (design D12): the sum modulo 2^64 of xxHash64 over a
+	// record per live posting, live document, `lastdocid`, schema version, and metadata
+	// entry, so equal content gives equal digests whatever its segment layout. It checks
+	// at most one live copy per docid and per key, every docid at or below `lastdocid`,
+	// and throws std::logic_error otherwise.
+	std::uint64_t digest() const {
+		std::uint64_t sum = 0;
+		std::string rec;
+		auto u32 = [&](std::uint32_t v) { rec.append(reinterpret_cast<const char*>(&v), 4); };
+		auto u64 = [&](std::uint64_t v) { rec.append(reinterpret_cast<const char*>(&v), 8); };
+		auto add = [&] {
+			sum += xxh64::hash(rec);
+			rec.clear();
+		};
+		std::set<std::uint64_t> docids;
+		std::set<std::string> keys;
+		auto document_record = [&](std::uint64_t docid, std::uint64_t version, std::uint32_t length, std::string_view stored) {
+			if (docid == 0 || docid > m_.last_docid || !docids.insert(docid).second) { throw std::logic_error("strata: digest: docid invariant"); }
+			rec.push_back('D');
+			u64(docid);
+			u64(version);
+			u32(length);
+			u32(std::uint32_t(stored.size()));
+			rec += stored;
+			add();
+		};
+		auto posting_record = [&](std::uint64_t docid, std::string_view term, std::uint32_t wdf, std::span<const std::uint32_t> positions) {
+			rec.push_back('P');
+			u64(docid);
+			u32(std::uint32_t(term.size()));
+			rec += term;
+			u32(wdf);
+			u32(std::uint32_t(positions.size()));
+			for (auto p : positions) { u32(p); }
+			add();
+		};
+		for (const auto& sp : segs_) {
+			const auto& s = *sp;
+			auto dead = [&](ordinal_t o) { return (s.deleted[o >> 6] >> (o & 63)) & 1; };
+			for (ordinal_t o = 0; o < s.seg.doc_count(); ++o) {
+				if (!dead(o)) { document_record(s.seg.docid(o), s.seg.version(o), s.seg.length(o), s.seg.stored(o)); }
+			}
+			s.seg.dictionary().scan("", [&](std::string_view term, std::string_view value) {
+				const auto info = format::decode_term_info(value);
+				postings_iterator it(s.seg, info);
+				positions_reader pr(s.seg, info);
+				const bool is_key = !m_.key_prefix.empty() && term.starts_with(m_.key_prefix);
+				for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
+					if (dead(o)) { continue; }
+					if (is_key && !keys.insert(std::string(term)).second) { throw std::logic_error("strata: digest: key invariant"); }
+					posting_record(s.seg.docid(o), term, it.wdf(), pr.read(it));
+				}
+				return true;
+			});
+		}
+		for (const auto& b : buffer_) {
+			if (b.dead) { continue; }
+			document_record(b.docid, b.version, b.doc.length, b.doc.stored);
+			if (!b.key.empty() && !keys.insert(b.key).second) { throw std::logic_error("strata: digest: key invariant"); }
+			for (const auto& t : b.doc.terms) { posting_record(b.docid, t.term, t.wdf, t.positions); }
+		}
+		rec.push_back('L');
+		u64(m_.last_docid);
+		add();
+		rec.push_back('S');
+		u64(m_.schema_version);
+		add();
+		for (const auto& [k, v] : meta_) {
+			rec.push_back('M');
+			u32(std::uint32_t(k.size()));
+			rec += k;
+			u32(std::uint32_t(v.size()));
+			rec += v;
+			add();
+		}
+		return sum;
+	}
+
+	// Commits and pins the manifest; the generation names the checkpoint (design D4).
+	std::uint64_t checkpoint() {
+		live();
+		commit();
+		const std::uint64_t generation = m_.generation;
+		// The pin lives in the next manifest; committing again makes it durable.
+		pending_pin_ = generation;
+		commit();
+		return generation;
+	}
+
+	// Unpins a checkpoint; retention reclaims it once nothing else keeps it.
+	void release(std::uint64_t generation) {
+		live();
+		pending_unpin_ = generation;
+		commit();
+	}
+
+	// Replaces this index's content with a checkpoint of another index (design D5): copies
+	// its files under fresh local names, verifies each, and commits a manifest above every
+	// existing generation. The buffer, pending deletes, and version map are discarded; the
+	// checkpoint's `lastdocid`, schema version, applied position, and index UUID are adopted.
+	// A crash at any point opens the old content or the installed one.
+	void install(kronuz::journal::IO& source, std::uint64_t generation) {
+		live();
+		files::manifest theirs;
+		{
+			auto f = source.open_existing(index_detail::manifest_name(generation));
+			theirs = files::decode_manifest(index_detail::read_all(*f));
+		}
+		auto copy = [&](const std::string& from, const std::string& to, std::uint64_t size, std::uint32_t crc, bool is_segment) {
+			auto f = source.open_existing(from);
+			std::string bytes = index_detail::read_all(*f);
+			if (bytes.size() != size) { throw corrupt_index("install: size differs: " + from); }
+			if (is_segment ? format::decode_footer(bytes).toc_crc != crc : files::trailing_crc(bytes) != crc) { throw corrupt_index("install: checksum differs: " + from); }
+			return bytes;
+		};
+		guarded([&] {
+			std::vector<std::unique_ptr<open_segment>> segs;
+			for (const auto& r : theirs.segments) {
+				std::string bytes = copy(index_detail::segment_name(r.id), "", r.size, r.footer_crc, true);
+				files::segment_ref mine = r;
+				mine.id = m_.next_segment++;
+				write_new(index_detail::segment_name(mine.id), bytes);
+				auto s = std::make_unique<open_segment>(mine, std::move(bytes));
+				if (r.live.generation) {
+					files::live_docs l = files::decode_live_docs(copy(index_detail::live_name(r.id, r.live.generation), "", r.live.size, r.live.crc, false));
+					for (std::uint64_t o : l.deleted) { s->deleted[o >> 6] |= std::uint64_t(1) << (o & 63); }
+					l.segment = mine.id;
+					l.generation = m_.next_live++;
+					const std::string lb = files::encode(l);
+					write_new(index_detail::live_name(l.segment, l.generation), lb);
+					s->ref.live = {l.generation, lb.size(), files::trailing_crc(lb)};
+				}
+				segs.push_back(std::move(s));
+			}
+			std::map<std::string, std::string> meta;
+			if (theirs.meta.generation) {
+				meta = files::decode_metadata(copy(index_detail::meta_name(theirs.meta.generation), "", theirs.meta.size, theirs.meta.crc, false)).entries;
+			}
+			segs_ = std::move(segs);
+			buffer_.clear();
+			buffer_docids_.clear();
+			versions_.clear();
+			docid_keys_.clear();
+			meta_ = std::move(meta);
+			meta_dirty_ = true;
+			m_.uuid = theirs.uuid;
+			m_.last_docid = theirs.last_docid;
+			m_.schema_version = theirs.schema_version;
+			m_.applied = theirs.applied;
+			m_.key_prefix = theirs.key_prefix;
+			m_.pinned.clear();
+			applied_since_commit_ = 1;
+			commit_files();
+		});
+		retain();
+	}
 
 	// The live document's (docid, version) for a key, if any.
 	std::optional<std::pair<std::uint64_t, std::uint64_t>> find_key(std::string_view key) const {
@@ -375,8 +535,10 @@ private:
 				segs_[it->a]->deletes_dirty = it->prev_dirty;
 				break;
 			case undo_step::version_map:
+				if (auto cur = versions_.find(it->key); cur != versions_.end()) { docid_keys_.erase(cur->second.docid); }
 				if (it->prev_key) {
 					versions_[it->key] = *it->prev_key;
+					docid_keys_[it->prev_key->docid] = it->key;
 				} else {
 					versions_.erase(it->key);
 				}
@@ -394,7 +556,10 @@ private:
 		}
 	}
 
+	// Removes a live copy; a version-map entry naming its docid goes with it.
 	void remove_copy(const location& at) {
+		const std::uint64_t docid = at.in_buffer ? buffer_[at.segment].docid : segs_[at.segment]->seg.docid(at.ord);
+		if (auto k = docid_keys_.find(docid); k != docid_keys_.end()) { set_key(std::string(k->second), std::nullopt); }
 		if (at.in_buffer) {
 			buffer_[at.segment].dead = true;
 			buffer_docids_.erase(buffer_[at.segment].docid);
@@ -409,10 +574,14 @@ private:
 	void set_key(const std::string& key, std::optional<key_entry> value) {
 		undo_step u{undo_step::version_map};
 		u.key = key;
-		if (auto it = versions_.find(key); it != versions_.end()) { u.prev_key = it->second; }
+		if (auto it = versions_.find(key); it != versions_.end()) {
+			u.prev_key = it->second;
+			docid_keys_.erase(it->second.docid);
+		}
 		undo_.push_back(std::move(u));
 		if (value) {
 			versions_[key] = *value;
+			docid_keys_[value->docid] = key;
 		} else {
 			versions_.erase(key);
 		}
@@ -598,6 +767,7 @@ private:
 		buffer_.clear();
 		buffer_docids_.clear();
 		versions_.clear();  // a cache of writer state, rebuilt from segments (I5)
+		docid_keys_.clear();
 	}
 
 	// --- commit -----------------------------------------------------------------------------
@@ -643,6 +813,8 @@ private:
 		}
 		files::manifest next = m_;
 		next.generation = next_manifest_;
+		if (pending_pin_) { next.pinned.push_back(*pending_pin_); }
+		if (pending_unpin_) { std::erase(next.pinned, *pending_unpin_); }
 		if (applied_since_commit_) { ++next.revision; }
 		next.segments.clear();
 		next.doc_count = next.total_length = next.live_count = next.live_length = 0;
@@ -663,6 +835,8 @@ private:
 		io_->sync_directory();
 		m_ = next;
 		applied_since_commit_ = 0;
+		pending_pin_.reset();
+		pending_unpin_.reset();
 	}
 
 	void write_new(const std::string& name, std::string_view bytes) { write_unsynced(name, bytes)->sync(); }
@@ -831,10 +1005,12 @@ private:
 	std::vector<buffered> buffer_;
 	std::unordered_map<std::uint64_t, std::size_t> buffer_docids_;
 	std::unordered_map<std::string, key_entry> versions_;  // the version map
+	std::unordered_map<std::uint64_t, std::string> docid_keys_;  // its entries by docid
 	std::map<std::string, std::string> meta_;
 	std::vector<undo_step> undo_;
 	std::uint64_t applied_since_commit_ = 0;
 	std::uint64_t next_manifest_ = 1;
+	std::optional<std::uint64_t> pending_pin_, pending_unpin_;
 	bool meta_dirty_ = false;
 	bool fenced_ = false;
 };
