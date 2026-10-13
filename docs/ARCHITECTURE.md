@@ -9,7 +9,8 @@ described in [REPLICATION.md](REPLICATION.md).
 ## Layers
 
 ```
- Xapiand            HTTP, schema, routing, placement, geo (HTM), sort-key functions
+ Xapiand            HTTP, schema, routing, geo (HTM), sort-key functions; hosts the
+                    coordinator (placement and membership: DISTRIBUTION.md)
  ───────────────────────────────────────────────────────────────────────────────
  strata::group      one replication group per shard (consensus + journal + core)
  strata core        Index · Snapshot · Search · Segment

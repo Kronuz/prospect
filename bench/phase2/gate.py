@@ -13,7 +13,7 @@ and with the floor subtracted from both (at least 1 us each). The ratio against 
 faster of Lucene and Tantivy is the larger of the two geometric means. Across trials:
 the median and the 95% bootstrap interval of the median. A class is flagged when the
 floor exceeds half the mean time of strata or the faster engine. Counts must equal
-Tantivy's.
+every baseline's; mismatches are reported per engine.
 """
 import json
 import math
@@ -49,7 +49,7 @@ def trial(r, floor):
     rows, mism = {}, {}
     for cmd, per in r.items():
         t = {e: {q["query"]: q for q in per[e]} for e in per}
-        mism[cmd] = sum(1 for qs, q in t["strata"].items() if q["count"] != t["tantivy-0.26"][qs]["count"])
+        mism[cmd] = {e: sum(1 for qs, q in t["strata"].items() if q["count"] != t[e][qs]["count"]) for e in t if e != "strata"}
         by = defaultdict(list)
         for qs, q in t["strata"].items():
             for tag in q["tags"]:
@@ -89,7 +89,11 @@ def main(argv):
         print("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for cmd in dict.fromkeys(cmd for r in results for cmd in r):
         if not md:
-            print(f"{cmd}  count mismatches against Tantivy: {[m[cmd] for _, m in trials if cmd in m]}")
+            per = defaultdict(list)
+            for _, m in trials:
+                for e, n in m.get(cmd, {}).items():
+                    per[e].append(n)
+            print(f"{cmd}  count mismatches: " + ", ".join(f"{e} {v}" for e, v in per.items()))
         for tag in sorted({tag for rows, _ in trials for c, tag in rows if c == cmd}):
             rows = [rows[(cmd, tag)] for rows, _ in trials if (cmd, tag) in rows]
             raw = interval([r["raw"] for r in rows])
