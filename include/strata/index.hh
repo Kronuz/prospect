@@ -289,8 +289,7 @@ public:
 			for (ordinal_t o = 0; o < s.seg.doc_count(); ++o) {
 				if (!dead(o)) { document_record(s.seg.docid(o), s.seg.version(o), s.seg.length(o), s.seg.stored(o)); }
 			}
-			s.seg.dictionary().scan("", [&](std::string_view term, std::string_view value) {
-				const auto info = format::decode_term_info(value);
+			s.seg.scan_terms([&](std::string_view term, const format::term_info& info) {
 				postings_iterator it(s.seg, info);
 				positions_reader pr(s.seg, info);
 				const bool is_key = !m_.key_prefix.empty() && term.starts_with(m_.key_prefix);

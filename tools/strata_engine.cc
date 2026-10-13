@@ -226,8 +226,8 @@ int terms(const std::string& dir) {
 	residency::file file;
 	strata::segment seg = open(dir, file);
 	std::ios::sync_with_stdio(false);
-	seg.dictionary().scan("", [](std::string_view key, std::string_view value) {
-		std::cout << key << '\t' << strata::format::decode_term_info(value).df << '\n';
+	seg.scan_terms([](std::string_view key, const strata::format::term_info& info) {
+		std::cout << key << '\t' << info.df << '\n';
 		return true;
 	});
 	return 0;
@@ -240,27 +240,39 @@ int dictstats(const std::string& dir) {
 	residency::file file;
 	strata::segment seg = open(dir, file);
 	auto leb = [](std::uint64_t v) { std::uint64_t n = 1; while (v >= 128) { v >>= 7; ++n; } return n; };
-	std::uint64_t terms = 0, single = 0, keys = 0, flags = 0, df = 0, cf = 0, cf_eq_df = 0, max_wdf = 0, impacts = 0, postings = 0, length = 0, positions = 0;
+	std::uint64_t terms = 0, single = 0, absolute = 0, keys = 0, values = 0, flags = 0, df = 0, cf = 0, ordinal = 0, impacts = 0;
+	std::uint64_t postings_length = 0, postings_offset = 0, positions_length = 0, positions_offset = 0;
+	strata::format::term_run run;
 	seg.dictionary().scan("", [&](std::string_view key, std::string_view value) {
-		const auto t = strata::format::decode_term_info(value);
+		const auto t = strata::format::decode_term_info(value, run);
+		const bool abs = t.flags & strata::format::absolute;
+		// The cursors an absolute entry stored: where its own bytes start.
+		strata::format::term_run run_before;
+		run_before.postings = (t.flags & strata::format::single_posting) ? run.postings : t.postings;
+		run_before.positions = (t.flags & strata::format::no_positions) ? run.positions : t.positions;
 		++terms;
+		absolute += abs;
 		keys += key.size();
+		values += value.size();
 		flags += 1;
 		df += leb(t.df);
-		cf += leb(t.cf);
-		cf_eq_df += t.cf == t.df ? leb(t.cf) : 0;
-		max_wdf += leb(t.max_wdf);
-		std::string imp;
-		strata::format::encode_impacts(imp, t.impacts);
-		impacts += imp.size();
-		postings += leb(t.postings);
+		if (!(t.flags & strata::format::cf_is_df)) { cf += leb(t.cf); }
+		if (abs) {
+			postings_offset += leb(run_before.postings);
+			positions_offset += leb(run_before.positions);
+		}
 		if (t.flags & strata::format::single_posting) {
 			++single;
-			length += leb(t.single_wdf);
+			ordinal += leb(t.postings) + leb(t.single_wdf);
 		} else {
-			length += leb(t.postings_length);
+			postings_length += leb(t.postings_length);
 		}
-		if (!(t.flags & strata::format::no_positions)) { positions += leb(t.positions) + leb(t.positions_length); }
+		if (!(t.flags & strata::format::no_positions)) { positions_length += leb(t.positions_length); }
+		if (t.df >= strata::format::block) {
+			std::string imp;
+			strata::format::encode_impacts(imp, t.impacts);
+			impacts += imp.size();
+		}
 		return true;
 	});
 	std::uint64_t section_terms = 0, section_index = 0;
@@ -268,24 +280,23 @@ int dictstats(const std::string& dir) {
 		if (e.kind == strata::format::section::terms) { section_terms = e.length; }
 		if (e.kind == strata::format::section::term_index) { section_index = e.length; }
 	}
-	const std::uint64_t values = flags + df + cf + max_wdf + impacts + postings + length + positions;
-	auto row = [&](const char* name, std::uint64_t bytes) { std::printf("%-34s %14llu %8.2f B/term\n", name, (unsigned long long)bytes, double(bytes) / double(terms)); };
-	std::printf("terms %llu, single-posting %llu\n", (unsigned long long)terms, (unsigned long long)single);
+	auto row = [&](const char* name, std::uint64_t bytes) { std::printf("%-36s %14llu %8.2f B/term\n", name, (unsigned long long)bytes, double(bytes) / double(terms)); };
+	std::printf("terms %llu, single-posting %llu, absolute offsets %llu\n", (unsigned long long)terms, (unsigned long long)single, (unsigned long long)absolute);
 	row("keys (raw)", keys);
 	row("value: flags", flags);
 	row("value: df", df);
-	row("value: cf", cf);
-	row("  of which cf equal to df", cf_eq_df);
-	row("value: max wdf", max_wdf);
-	row("value: competitive pairs", impacts);
-	row("value: postings offset or ordinal", postings);
-	row("value: postings length or wdf", length);
-	row("value: positions offset and length", positions);
+	row("value: cf (when not df)", cf);
+	row("value: single ordinal and wdf", ordinal);
+	row("value: postings length", postings_length);
+	row("value: postings cursor (absolute)", postings_offset);
+	row("value: positions length", positions_length);
+	row("value: positions cursor (absolute)", positions_offset);
+	row("value: competitive pairs (df >= 128)", impacts);
 	row("values total", values);
 	row("terms section", section_terms);
 	row("term_index section", section_index);
-	std::printf("%-34s %14lld %8.2f B/term\n", "structure (terms - keys - values)", (long long)section_terms - (long long)(keys + values), (double(section_terms) - double(keys + values)) / double(terms));
-	return 0;
+	std::printf("%-36s %14lld %8.2f B/term\n", "structure (terms - keys - values)", (long long)section_terms - (long long)(keys + values), (double(section_terms) - double(keys + values)) / double(terms));
+	return values == flags + df + cf + ordinal + postings_length + postings_offset + positions_length + positions_offset + impacts ? 0 : 1;
 }
 
 std::string query_of(const std::string& line) {

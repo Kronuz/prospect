@@ -310,6 +310,7 @@ public:
 		counting_output spill_out(positions_spill);
 		section_stream positions(spill_out);
 		termdict::builder dict;
+		format::term_run run;
 		std::vector<std::uint32_t> ords, wdfs, counts, pos;
 		std::string term_postings, term_positions;
 		for (auto [key, buffer] : keys) {
@@ -327,7 +328,6 @@ public:
 			format::term_info info;
 			info.df = t.df;
 			info.cf = t.cf;
-			info.max_wdf = t.max_wdf;
 			if (t.all_zero_wdf) { info.flags |= format::no_wdf; }
 			if (!t.any_positions) { info.flags |= format::no_positions; }
 			if (t.counts_are_wdf) { info.flags |= format::counts_are_wdf; }
@@ -359,7 +359,7 @@ public:
 				info.postings_length = term_postings.size();
 				postings.write(term_postings);
 			}
-			dict.add(key, format::encode_term_info(info));
+			dict.add(key, format::encode_term_info(info, run, dict.next_is_restart()));
 		}
 		toc.push_back(postings.finish(format::section::postings));
 		out.align(format::section_alignment);

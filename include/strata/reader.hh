@@ -269,12 +269,37 @@ public:
 		return std::uint32_t(v & (w == 32 ? 0xffffffffu : ((1u << w) - 1)));
 	}
 
+	// A term's info, its offsets resolved from its dictionary run and, for a term without
+	// skip blocks, its competitive pairs computed from its postings (at most 127).
 	std::optional<format::term_info> term(std::string_view key) const {
-		auto v = dict_->find(key);
+		// The run's values end with key's: the earlier ones only move the cursor.
+		format::term_run run, before;
+		std::string_view last;
+		auto v = dict_->find_run(key, [&](std::string_view value) {
+			before = run;
+			(void)format::decode_term_info(value, run, false);
+			last = value;
+		});
 		if (!v) { return std::nullopt; }
-		auto info = format::decode_term_info(*v);
+		auto info = format::decode_term_info(last, before);
 		if (info.df > doc_count_) { throw corrupt_segment("document frequency"); }
+		if (info.df < format::block) { info.impacts = tail_impacts(info); }
 		return info;
+	}
+
+	// Competitive pairs of a term without skip blocks, from its postings.
+	std::vector<format::impact> tail_impacts(const format::term_info& info) const;
+
+	// Calls f(term, info) for every term in order (impacts left empty below 128 postings)
+	// until f returns false.
+	template <class F>
+	void scan_terms(F&& f) const {
+		format::term_run run;
+		dict_->scan("", [&](std::string_view key, std::string_view value) {
+			const auto info = format::decode_term_info(value, run);
+			if (info.df > doc_count_) { throw corrupt_segment("document frequency"); }
+			return f(key, info);
+		});
 	}
 
 	std::string_view postings_bytes() const noexcept { return postings_; }
@@ -946,6 +971,13 @@ private:
 // Reads one term's position data: per-document counts (when they differ from wdf) and the
 // position stream, decoding one 128-position block at a time. Opening reads a fixed header;
 // blocks are found from the postings skip data and stepped over by their headers.
+inline std::vector<format::impact> segment::tail_impacts(const format::term_info& info) const {
+	std::vector<format::impact> pairs;
+	postings_iterator it(*this, info);
+	for (ordinal_t d = it.next(); d != no_more_docs; d = it.next()) { pairs.push_back({it.wdf(), norm(d)}); }
+	return format::competitive(std::move(pairs));
+}
+
 class positions_reader {
 public:
 	positions_reader(const segment& seg, const format::term_info& info) {

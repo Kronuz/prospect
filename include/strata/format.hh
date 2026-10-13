@@ -260,6 +260,8 @@ enum term_flags : std::uint8_t {
 	no_positions = 2,     // the term has no position stream
 	single_posting = 4,   // df == 1: ordinal and wdf inline, no postings bytes
 	counts_are_wdf = 8,   // every document's position count equals its wdf
+	cf_is_df = 16,        // cf equals df: not stored
+	absolute = 32,        // offsets stored; otherwise they follow the previous term's
 };
 
 // A competitive (wdf, length) pair: no posting in range has more wdf at less length.
@@ -272,8 +274,9 @@ struct term_info {
 	std::uint8_t flags = 0;
 	std::uint32_t df = 0;
 	std::uint64_t cf = 0;  // collection frequency: sum of wdf
-	std::uint32_t max_wdf = 0;
-	std::vector<impact> impacts;  // whole-list competitive pairs
+	// Whole-list competitive pairs; stored for terms with skip blocks (df >= 128), computed
+	// from the postings for the others (segment::term).
+	std::vector<impact> impacts;
 	std::uint64_t postings = 0;   // offset in `postings`, or the ordinal when single_posting
 	std::uint64_t positions = 0;  // offset in `positions`
 	std::uint32_t single_wdf = 0; // wdf when single_posting
@@ -371,48 +374,91 @@ inline std::vector<impact> decode_impacts(const char** p, const char* end) {
 	return out;
 }
 
-inline std::string encode_term_info(const term_info& t) {
+// Term infos in one dictionary restart run share a cursor: a term's postings and
+// positions start where the previous term's end. A run's first entry, or one after a gap,
+// stores both cursors (flag `absolute`); the rest only their lengths. Layout: [flags u8]
+// [df][cf unless cf_is_df][if absolute: postings cursor, positions cursor], then for a
+// single posting [ordinal][wdf], else [postings length]; with positions [positions
+// length]; with skip blocks (df >= 128) the impacts. Integers are LEB128.
+struct term_run {
+	std::uint64_t postings = 0, positions = 0;  // where the next term's bytes start
+	bool started = false;
+};
+
+inline std::string encode_term_info(term_info t, term_run& run, bool restart) {
+	const bool singles = t.flags & single_posting, positionless = t.flags & no_positions;
+	const bool contiguous = run.started && (singles || t.postings == run.postings) && (positionless || t.positions == run.positions);
+	t.flags = std::uint8_t(t.flags & ~(cf_is_df | absolute));
+	if (t.cf == t.df) { t.flags |= cf_is_df; }
+	if (restart || !contiguous) {
+		t.flags |= absolute;
+		if (!singles) { run.postings = t.postings; }
+		if (!positionless) { run.positions = t.positions; }
+	}
 	std::string out;
 	out.push_back(char(t.flags));
 	put_leb(out, t.df);
-	put_leb(out, t.cf);
-	put_leb(out, t.max_wdf);
-	encode_impacts(out, t.impacts);
-	put_leb(out, t.postings);
-	if (t.flags & single_posting) {
+	if (!(t.flags & cf_is_df)) { put_leb(out, t.cf); }
+	if (t.flags & absolute) {
+		put_leb(out, run.postings);
+		put_leb(out, run.positions);
+	}
+	if (singles) {
+		put_leb(out, t.postings);
 		put_leb(out, t.single_wdf);
 	} else {
 		put_leb(out, t.postings_length);
+		run.postings += t.postings_length;
 	}
-	if (!(t.flags & no_positions)) {
-		put_leb(out, t.positions);
+	if (!positionless) {
 		put_leb(out, t.positions_length);
+		run.positions += t.positions_length;
 	}
+	if (t.df >= block) { encode_impacts(out, t.impacts); }
+	run.started = true;
 	return out;
 }
 
-inline term_info decode_term_info(std::string_view bytes) {
+// Decodes one entry of a run, resolving its offsets from the run's cursor; without
+// impacts, they are skipped unread (an entry decoded only to move the cursor).
+inline term_info decode_term_info(std::string_view bytes, term_run& run, bool with_impacts = true) {
 	const char* p = bytes.data();
 	const char* end = p + bytes.size();
 	term_info t;
 	if (p == end) { throw corrupt_segment("term info truncated"); }
 	t.flags = std::uint8_t(*p++);
-	if (t.flags & ~0x0f) { throw corrupt_segment("term flags"); }
+	if (t.flags & ~0x3f) { throw corrupt_segment("term flags"); }
+	if (!(t.flags & absolute) && !run.started) { throw corrupt_segment("term offsets without a run"); }
 	t.df = std::uint32_t(get_leb(&p, end));
-	t.cf = get_leb(&p, end);
-	t.max_wdf = std::uint32_t(get_leb(&p, end));
-	t.impacts = decode_impacts(&p, end);
-	t.postings = get_leb(&p, end);
+	t.cf = t.flags & cf_is_df ? t.df : get_leb(&p, end);
+	if (t.flags & absolute) {
+		run.postings = get_leb(&p, end);
+		run.positions = get_leb(&p, end);
+	}
 	if (t.flags & single_posting) {
+		t.postings = get_leb(&p, end);
 		t.single_wdf = std::uint32_t(get_leb(&p, end));
 	} else {
 		t.postings_length = get_leb(&p, end);
+		t.postings = run.postings;
+		if (run.postings + t.postings_length < run.postings) { throw corrupt_segment("postings range"); }
+		run.postings += t.postings_length;
 	}
 	if (!(t.flags & no_positions)) {
-		t.positions = get_leb(&p, end);
 		t.positions_length = get_leb(&p, end);
+		t.positions = run.positions;
+		if (run.positions + t.positions_length < run.positions) { throw corrupt_segment("positions range"); }
+		run.positions += t.positions_length;
+	}
+	if (t.df >= block) {
+		if (with_impacts) {
+			t.impacts = decode_impacts(&p, end);
+		} else {
+			p = end;
+		}
 	}
 	if (p != end || t.df == 0 || ((t.flags & single_posting) != 0) != (t.df == 1)) { throw corrupt_segment("term info"); }
+	run.started = true;
 	return t;
 }
 

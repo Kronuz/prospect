@@ -408,6 +408,59 @@ int main() {
 		}
 	}
 
+	// Term infos in restart runs: random terms (singles, positionless, gaps, skip blocks)
+	// decode the same read in order or from their run's start, as find_run reads them.
+	{
+		std::mt19937_64 r(77);
+		std::vector<strata::format::term_info> terms;
+		std::vector<std::string> values;
+		std::vector<bool> restarts;
+		strata::format::term_run run;
+		std::uint64_t postings = 0, positions = 0;
+		for (int i = 0; i < 5000; ++i) {
+			strata::format::term_info t;
+			t.df = r() % 4 == 0 ? 1 : 2 + std::uint32_t(r() % 300);
+			t.cf = r() % 2 ? t.df : t.df + r() % 50;
+			if (t.df == 1) {
+				t.flags |= strata::format::single_posting;
+				t.postings = r() % 100000;
+				t.single_wdf = std::uint32_t(r() % 9);
+			} else {
+				if (r() % 50 == 0) { postings += 64; }  // a gap
+				t.postings = postings;
+				t.postings_length = 1 + r() % 900;
+				postings += t.postings_length;
+			}
+			if (r() % 3 == 0) {
+				t.flags |= strata::format::no_positions;
+			} else {
+				if (r() % 50 == 0) { positions += 8; }
+				t.positions = positions;
+				t.positions_length = 1 + r() % 700;
+				positions += t.positions_length;
+			}
+			if (t.df >= strata::format::block) { t.impacts = {{3, 7}, {1, 2}}; }
+			const bool restart = i == 0 || r() % 16 == 0;
+			values.push_back(strata::format::encode_term_info(t, run, restart));
+			restarts.push_back(restart);
+			terms.push_back(t);
+		}
+		auto same = [](const strata::format::term_info& a, const strata::format::term_info& b) {
+			return a.df == b.df && a.cf == b.cf && a.postings == b.postings && a.single_wdf == b.single_wdf && a.postings_length == b.postings_length &&
+				(a.flags & strata::format::no_positions || (a.positions == b.positions && a.positions_length == b.positions_length)) &&
+				a.impacts.size() == b.impacts.size();
+		};
+		strata::format::term_run in_order;
+		std::size_t start = 0;
+		for (std::size_t i = 0; i < terms.size(); ++i) {
+			CHECK(same(strata::format::decode_term_info(values[i], in_order), terms[i]));
+			if (restarts[i]) { start = i; }
+			strata::format::term_run from_run;
+			for (std::size_t j = start; j < i; ++j) { (void)strata::format::decode_term_info(values[j], from_run, false); }
+			CHECK(same(strata::format::decode_term_info(values[i], from_run), terms[i]));
+		}
+	}
+
 	// Length quantization rounds down and is monotone.
 	std::uint8_t prev = 0;
 	for (std::uint64_t n = 0; n < (1ull << 32); n = n < 4096 ? n + 1 : n * 3 / 2) {
