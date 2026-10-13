@@ -88,6 +88,12 @@ static std::vector<step> workload(std::uint64_t seed, std::size_t steps) {
 	return out;
 }
 
+static transaction tx_of(operation o) {
+	transaction t;
+	t.ops.push_back(std::move(o));
+	return t;
+}
+
 int main() {
 	index::options keyed;
 	keyed.key_prefix = "Q";
@@ -167,6 +173,78 @@ int main() {
 			const std::uint64_t got = b.digest();
 			CHECK(got == old_b || got == want);
 		}
+	}
+	// T5: disk full. A write that runs out of space leaves the index usable: freeing space
+	// and retrying the same step reaches the same digest as a run that never ran out. An
+	// fsync that fails with ENOSPC fences; reopening returns the last acknowledged commit.
+	for (std::uint64_t seed = 0; seed < 40; ++seed) {
+		const auto w = workload(seed + 500, 150);
+		std::uint64_t reference;
+		{
+			faultfs::filesystem fs;
+			faultfs::io io(fs);
+			auto ix = index::create(io, keyed, uuid_a);
+			for (const auto& s : w) {
+				if (s.type == step::apply) {
+					ix.apply(s.t, {});
+				} else if (s.type == step::refresh) {
+					ix.refresh();
+				} else {
+					ix.commit();
+				}
+			}
+			ix.commit();
+			reference = ix.digest();
+		}
+		std::mt19937_64 r(seed);
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		auto ix = index::create(io, keyed, uuid_a);
+		std::size_t full = 0;
+		for (const auto& s : w) {
+			if (s.type == step::apply) {
+				ix.apply(s.t, {});
+				continue;
+			}
+			if (r() % 2) { fs.set_capacity(fs.used() + r() % 2000); }  // nearly full
+			for (;;) {
+				try {
+					if (s.type == step::refresh) {
+						ix.refresh();
+					} else {
+						ix.commit();
+					}
+					break;
+				} catch (const std::system_error& e) {
+					CHECK(e.code().value() == ENOSPC);
+					++full;
+					fs.set_capacity(~std::uint64_t(0));  // space returns; the same step again
+				}
+			}
+			fs.set_capacity(~std::uint64_t(0));
+		}
+		ix.commit();
+		CHECK(ix.digest() == reference);
+		CHECK(full > 0 || seed % 7);  // most seeds hit a full disk at least once
+		// ENOSPC at fsync time fences; reopening gives the last acknowledged commit.
+		const std::uint64_t acked = ix.digest();
+		operation o;
+		o.type = operation::set_meta;
+		o.meta_key = "after";
+		o.meta_value = "x";
+		ix.apply(tx_of(o), {});
+		fs.add_fault({faultfs::op::sync, 1, ENOSPC, false});
+		bool fenced = false;
+		try {
+			ix.commit();
+		} catch (const index_fenced&) {
+			fenced = true;
+		}
+		CHECK(fenced);
+		fs.clear_faults();
+		ix.close();
+		ix = index::open(io, keyed);
+		CHECK(ix.digest() == acked);
 	}
 	// T1: power loss at every mutation point of seeded workloads.
 	std::size_t target = 10000;
