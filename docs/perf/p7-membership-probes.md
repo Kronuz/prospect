@@ -26,3 +26,6 @@ Not applied: exclusion counting. The excluded terms of the negated class are onl
 moderately dense (`country` in `+jordan -country -basketball`), so nearly every block
 holds a candidate and both probing and filling decode the whole list; the remaining
 cost there is filling and block validation (`check_increasing`, 6%).
+
+Re-verified with C14's `verify` at `c8f932a` (ordinals with ties as sets, Lucene and Xapian
+BM25): 962 + 200 queries, 0 mismatches.

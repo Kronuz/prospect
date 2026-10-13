@@ -17,3 +17,6 @@ Commit `03645e7`. Measured on the 300 intersection queries:
 | `TOP_10` | 274.2 ms | 242.6 ms | 0.898 |
 | `TOP_100` | 363.3 ms | 317.6 ms | 0.893 (before lazy bounds) |
 | `TOP_1000` | 471.0 ms | 396.1 ms | 0.882 |
+
+Re-verified with C14's `verify` at `c8f932a` (ordinals with ties as sets, Lucene and Xapian
+BM25): 962 + 200 queries, 0 mismatches.
