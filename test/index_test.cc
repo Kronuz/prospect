@@ -295,6 +295,52 @@ int main() {
 		f->write_at(0, changed);
 		CHECK(throws([&] { strata::index::open(io, keyed); }));
 	}
+	// The memory budget: permits draw and return bytes; two indexes sharing a small budget
+	// stay within it plus one transaction, flush into several segments, and reach the same
+	// digest as unbudgeted runs.
+	{
+		memory_budget b(1000);
+		auto p = b.open();
+		CHECK(p.try_grow(600) && b.used() == 600);
+		CHECK(!p.try_grow(500) && b.used() == 600);  // refused, nothing drawn
+		p.grow(500);                                  // forced: allocated memory is real
+		CHECK(b.used() == 1100 && b.pressure());
+		p.shrink(700);
+		CHECK(b.used() == 400 && !b.pressure());
+		{
+			auto q = std::move(p);
+			CHECK(b.used() == 400 && q.bytes() == 400 && p.bytes() == 0);
+		}
+		CHECK(b.used() == 0);  // the moved-to permit settled when it ended
+	}
+	{
+		memory_budget budget(200 * 1024);
+		index::options opts = keyed;
+		opts.budget = &budget;
+		faultfs::filesystem fa, fb, fc, fd;
+		faultfs::io ia(fa), ib(fb), ic(fc), id(fd);
+		auto a = strata::index::create(ia, opts, uuid), b = strata::index::create(ib, opts, uuid);
+		auto ra = strata::index::create(ic, keyed, uuid), rb = strata::index::create(id, keyed, uuid);  // unbudgeted
+		std::mt19937_64 r(4);
+		std::uint64_t worst = 0, largest = 0;
+		for (int i = 0; i < 4000; ++i) {
+			const std::string key = "Q" + std::to_string(r() % 3000);
+			const auto t = tx({replace(key, "body" + std::to_string(r() % 50))});
+			auto& ix = i % 2 ? a : b;
+			auto& ref = i % 2 ? ra : rb;
+			const auto before = budget.used();
+			ix.apply(t, {});
+			ref.apply(t, {});
+			largest = std::max(largest, budget.used() > before ? budget.used() - before : 0);
+			worst = std::max(worst, budget.used());
+		}
+		CHECK(worst <= budget.capacity() + largest);
+		CHECK(a.segments().size() > 2 && b.segments().size() > 2);
+		CHECK(a.digest() == ra.digest() && b.digest() == rb.digest());
+		a.commit();
+		b.commit();
+		CHECK(budget.used() == 0);  // committed buffers return their bytes
+	}
 	std::printf("index: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }

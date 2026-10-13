@@ -5,6 +5,7 @@
 // manifest and fails closed when a file it names is missing or differs.
 #pragma once
 
+#include "strata/budget.hh"
 #include "strata/files.hh"
 #include "strata/reader.hh"
 #include "strata/writer.hh"
@@ -140,6 +141,11 @@ inline void write_all(kronuz::journal::File& f, std::string_view bytes) {
 struct index_options {
 	std::string key_prefix;                 // the host's key-term prefix (Xapiand's "Q"); empty: no keys
 	std::size_t retained_predecessors = 2;  // manifests kept behind the current one (I14)
+	// The node's indexing budget, if any, and this index's share of it: the buffer flushes
+	// when the budget is under pressure, when the buffer passes its share, or when the
+	// version map passes a quarter of the share (D17).
+	memory_budget* budget = nullptr;
+	std::uint64_t buffer_share = ~std::uint64_t(0);
 };
 
 class index {
@@ -153,6 +159,7 @@ public:
 		ix.m_.uuid = uuid;
 		ix.m_.key_prefix = opts.key_prefix;
 		ix.opts_ = opts;
+		if (opts.budget) { ix.permit_ = opts.budget->open(); }
 		ix.commit();
 		return ix;
 	}
@@ -163,6 +170,7 @@ public:
 		index ix(io);
 		ix.lock_ = io.acquire_owner(false);
 		ix.opts_ = opts;
+		if (opts.budget) { ix.permit_ = opts.budget->open(); }
 		ix.recover(to);
 		return ix;
 	}
@@ -178,6 +186,8 @@ public:
 		buffer_docids_.clear();
 		versions_.clear();
 		docid_keys_.clear();
+		buffer_bytes_ = version_key_bytes_ = 0;
+		permit_ = {};
 		lock_.reset();
 		fenced_ = true;
 	}
@@ -188,6 +198,9 @@ public:
 	// skipped (replay); a rejected transaction changes nothing.
 	verdict apply(const transaction& t, files::position at) {
 		live();
+		// Stage 1 waits for room: the flush happens before this transaction, so a flush
+		// failure never loses an accepted transaction's verdict.
+		if (needs_flush()) { refresh(); }
 		verdict v;
 		if (at != files::position{} && at <= m_.applied) {
 			v.result = verdict::skipped;
@@ -198,6 +211,7 @@ public:
 		if (v.result != verdict::accepted) {
 			rollback();
 		} else {
+			charge();
 			if (t.set_schema) { set_schema(*t.set_schema); }
 			++applied_since_commit_;
 		}
@@ -389,6 +403,8 @@ public:
 			buffer_docids_.clear();
 			versions_.clear();
 			docid_keys_.clear();
+			buffer_bytes_ = version_key_bytes_ = 0;
+			if (permit_) { permit_.settle(); }
 			meta_ = std::move(meta);
 			meta_dirty_ = true;
 			m_.uuid = theirs.uuid;
@@ -412,6 +428,31 @@ public:
 
 private:
 	explicit index(kronuz::journal::IO& io) : io_(&io) {}
+
+	// --- memory -----------------------------------------------------------------------------
+
+	static std::uint64_t doc_bytes(const document& d) {
+		std::uint64_t n = sizeof(document) + 96 + d.stored.size();
+		for (const auto& t : d.terms) { n += sizeof(term_entry) + t.term.size() + 4 * t.positions.size(); }
+		return n;
+	}
+	std::uint64_t map_bytes() const { return versions_.size() * 96 + version_key_bytes_; }
+
+	// Brings the permit to what the buffer and version map hold now.
+	void charge() {
+		if (!permit_) { return; }
+		const std::uint64_t want = buffer_bytes_ + map_bytes();
+		if (want > permit_.bytes()) {
+			permit_.grow(want - permit_.bytes());
+		} else {
+			permit_.shrink(permit_.bytes() - want);
+		}
+	}
+	bool needs_flush() const {
+		if (buffer_.empty()) { return false; }
+		if (buffer_bytes_ >= opts_.buffer_share || map_bytes() >= opts_.buffer_share / 4) { return true; }
+		return opts_.budget && opts_.budget->pressure();
+	}
 
 	// --- in-memory state ------------------------------------------------------------------
 
@@ -523,6 +564,7 @@ private:
 			switch (it->type) {
 			case undo_step::buffer_push:
 				buffer_docids_.erase(buffer_.back().docid);
+				buffer_bytes_ -= doc_bytes(buffer_.back().doc);
 				buffer_.pop_back();
 				break;
 			case undo_step::buffer_dead:
@@ -533,15 +575,19 @@ private:
 				segs_[it->a]->deleted[it->ord >> 6] &= ~(std::uint64_t(1) << (it->ord & 63));
 				segs_[it->a]->deletes_dirty = it->prev_dirty;
 				break;
-			case undo_step::version_map:
+			case undo_step::version_map: {
+				const bool had = versions_.count(it->key) != 0;
 				if (auto cur = versions_.find(it->key); cur != versions_.end()) { docid_keys_.erase(cur->second.docid); }
 				if (it->prev_key) {
 					versions_[it->key] = *it->prev_key;
 					docid_keys_[it->prev_key->docid] = it->key;
-				} else {
+					if (!had) { version_key_bytes_ += 2 * it->key.size(); }
+				} else if (had) {
 					versions_.erase(it->key);
+					version_key_bytes_ -= 2 * it->key.size();
 				}
 				break;
+			}
 			case undo_step::last_docid: m_.last_docid = it->prev_value; break;
 			case undo_step::meta:
 				if (it->prev_meta) {
@@ -578,11 +624,14 @@ private:
 			docid_keys_.erase(it->second.docid);
 		}
 		undo_.push_back(std::move(u));
+		const bool had = versions_.count(key) != 0;
 		if (value) {
 			versions_[key] = *value;
 			docid_keys_[value->docid] = key;
-		} else {
+			if (!had) { version_key_bytes_ += 2 * key.size(); }
+		} else if (had) {
 			versions_.erase(key);
+			version_key_bytes_ -= 2 * key.size();
 		}
 	}
 	void bump_last_docid(std::uint64_t docid) {
@@ -716,6 +765,7 @@ private:
 			bump_last_docid(docid);
 			buffer_docids_[docid] = buffer_.size();
 			buffer_.push_back({docid, version, key.value_or(std::string()), o.doc});
+			buffer_bytes_ += doc_bytes(o.doc);
 			undo_.push_back({undo_step::buffer_push});
 			if (key) { set_key(*key, key_entry{docid, version}); }
 			v.docids.push_back(docid);
@@ -766,8 +816,11 @@ private:
 		}
 		buffer_.clear();
 		buffer_docids_.clear();
+		buffer_bytes_ = 0;
 		versions_.clear();  // a cache of writer state, rebuilt from segments (I5)
 		docid_keys_.clear();
+		version_key_bytes_ = 0;
+		if (permit_) { permit_.settle(); }
 	}
 
 	// --- commit -----------------------------------------------------------------------------
@@ -1008,6 +1061,8 @@ private:
 	std::unordered_map<std::uint64_t, std::string> docid_keys_;  // its entries by docid
 	std::map<std::string, std::string> meta_;
 	std::vector<undo_step> undo_;
+	std::uint64_t buffer_bytes_ = 0, version_key_bytes_ = 0;
+	memory_budget::permit permit_;
 	std::uint64_t applied_since_commit_ = 0;
 	std::uint64_t next_manifest_ = 1;
 	std::optional<std::uint64_t> pending_pin_, pending_unpin_;
