@@ -227,6 +227,23 @@ and CRCs, live-docs generations, and, under groups, the applied log position.
   this is latency fairness, not throughput isolation. Writes cross to the owner core
   as messages; flush and merge run on background threads or in slices.
 
+## Memory
+
+- **Ownership.** Every allocation has one owner and is freed when the owner ends
+  (RAII). There is no garbage collector: no tracing collection, no collector thread,
+  and no deferred reclamation of unbounded work. A concurrent structure that must
+  defer a free bounds both the deferred memory and the work per operation, and does
+  that work on its owner's thread.
+- **Hot paths.** Query evaluation allocates from per-core arenas reset after each
+  query, and buffers sized once per scorer (block, position, and window buffers).
+  Nothing allocates per matching document.
+- **Accounting.** Indexing memory draws from the node-wide budget (`ledger`). Serving
+  memory is reported per segment (pinned dictionaries, skip caches) and per query
+  (arena high-water mark), and both are exported as metrics.
+- **Files.** Deleting obsolete segment, journal, and checkpoint files is reclamation:
+  it runs in bounded slices on the owner core or a background thread, never as a
+  pause.
+
 ## I/O
 
 - **Default: mmap with asynchronous residency.** Zero-copy decode, no double caching.
