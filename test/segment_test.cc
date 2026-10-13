@@ -56,8 +56,9 @@ static bool throws_corrupt(const std::function<void()>& f) {
 	return false;
 }
 
-static std::string build(std::mt19937_64& rng, std::size_t docs, model& m) {
+static std::string build(std::mt19937_64& rng, std::size_t docs, model& m, std::uint8_t region_shift = strata::format::default_region_shift) {
 	strata::segment_writer w;
+	w.region_shift = region_shift;
 	// Term frequencies span tails, single blocks, and many skip groups.
 	std::vector<std::pair<std::string, double>> vocab;
 	for (int i = 0; i < 200; ++i) { vocab.push_back({"t" + std::to_string(i), i < 5 ? 0.9 : i < 20 ? 0.3 : 0.01 + 0.002 * i}); }
@@ -96,7 +97,8 @@ int main() {
 	std::mt19937_64 rng(7);
 	for (std::size_t docs : {1u, 5u, 127u, 128u, 129u, 1000u, 9000u}) {
 		model m;
-		std::string file = build(rng, docs, m);
+		// Odd sizes use 4 KiB verification regions, so lazy verification is checked at both sizes.
+		std::string file = build(rng, docs, m, docs % 2 ? 12 : 16);
 		strata::segment seg(file);
 		CHECK(seg.doc_count() == docs);
 		for (std::size_t d = 0; d < docs; ++d) { CHECK(seg.length(strata::ordinal_t(d)) == m.lengths[d]); }

@@ -110,25 +110,23 @@ public:
 		if (length_width_ > 32 || lengths_.size() != 1 + (doc_count_ + 127) / 128 * bitpack::packed_bytes(length_width_)) {
 			throw corrupt_segment("lengths size");
 		}
-		// Terms, postings, and positions are verified per 64 KiB region on first read.
-		std::vector<residency::verified_regions::region> regions;
+		// Terms, postings, positions, and stored records are verified per region on first
+		// read, each section in its own region size.
+		std::vector<residency::verified_regions::span> spans;
 		for (const auto& e : sections_) {
 			if (e.kind != format::section::terms && e.kind != format::section::postings && e.kind != format::section::positions &&
 				e.kind != format::section::stored) {
 				continue;
 			}
-			for (std::size_t r = 0; r < e.region_crcs.size(); ++r) {
-				const std::uint64_t at = std::uint64_t(r) << e.region_shift;
-				regions.push_back({e.offset + at, std::min<std::uint64_t>(e.region_size(), e.length - at), e.region_crcs[r]});
-			}
+			spans.push_back({e.offset, e.length, e.region_shift, e.region_crcs});
 			if (e.kind == format::section::terms) { integrity_->terms_offset = e.offset; }
 			if (e.kind == format::section::postings) { integrity_->postings_offset = e.offset; }
 			if (e.kind == format::section::positions) { integrity_->positions_offset = e.offset; }
 			if (e.kind == format::section::stored) { integrity_->stored_offset = e.offset; }
 		}
-		std::sort(regions.begin(), regions.end(), [](const auto& a, const auto& b) { return a.offset < b.offset; });
+		std::sort(spans.begin(), spans.end(), [](const auto& a, const auto& b) { return a.offset < b.offset; });
 		integrity_->regions = residency::verified_regions(
-			std::span<const std::byte>(reinterpret_cast<const std::byte*>(file.data()), file.size()), std::move(regions));
+			std::span<const std::byte>(reinterpret_cast<const std::byte*>(file.data()), file.size()), std::move(spans));
 		if (norms_.size() != doc_count_) { throw corrupt_segment("norms size"); }
 		validate_docids();
 		validate_versions();
@@ -409,9 +407,11 @@ public:
 		}
 		auto bytes = seg.postings_bytes();
 		if (info.postings > bytes.size() || info.postings_length > bytes.size() - info.postings) { throw corrupt_segment("postings offset"); }
-		seg.verify_postings(info.postings, info.postings_length);
 		p_ = bytes.data() + info.postings;
-		end_ = p_ + info.postings_length;  // everything read stays inside the verified range
+		end_ = p_ + info.postings_length;  // every read stays inside the term's range
+		// Bytes are verified as they are first read (P15): the header here; level 1 and the
+		// pairs below; each group's level 0, each block, and the tail when decoded.
+		need(p_, std::min<std::uint64_t>(64, info.postings_length));
 		blocks_ = df_ / format::block;
 		with_positions_ = !(info.flags & format::no_positions);
 		with_counts_ = with_positions_ && !(info.flags & format::counts_are_wdf);
@@ -438,6 +438,7 @@ public:
 			if (pairs_bytes > range || level0_bytes > range - pairs_bytes || blocks_bytes > range - pairs_bytes - level0_bytes) {
 				throw corrupt_segment("skip data bounds");
 			}
+			need(level1_, std::uint64_t(p_ - level1_) + pairs_bytes);
 			pairs_ = std::string_view(p_, pairs_bytes);
 			level0_ = p_ + pairs_bytes;
 			level0_bytes_ = level0_bytes;
@@ -660,6 +661,7 @@ public:
 		const std::uint64_t span = std::uint64_t(e.last) - first + 1, bytes = (span + 7) / 8;
 		const char* p = blocks_begin_ + e.offset;
 		if (bytes > e.bytes) { throw corrupt_segment("bitset block bounds"); }
+		need(p, e.bytes);
 		const std::uint64_t at = first - base;
 		const unsigned shift = unsigned(at % 64);
 		std::size_t n = 0;
@@ -703,6 +705,7 @@ private:
 			if (df_ % format::block == 0) {
 				tail_last_ = blocks_ ? group_last(groups_n_ - 1) : no_more_docs;
 			} else {
+				need(tail_, std::uint64_t(end_ - tail_));
 				const char* p = tail_;
 				ordinal_t prev = blocks_ ? group_last(groups_n_ - 1) : std::numeric_limits<ordinal_t>::max();
 				for (std::size_t i = 0; i < df_ % format::block; ++i) { prev += ordinal_t(format::get_leb(&p, end_)); }
@@ -747,6 +750,7 @@ private:
 		if (decoded_group_ == g) { return; }
 		decoded_group_ = std::numeric_limits<std::size_t>::max();  // entries_ is partial until the end
 		const group_fields gf = read_group(g);
+		need(level0_ + gf.level0_begin, gf.level0_end - gf.level0_begin);
 		const char* p = level0_ + gf.level0_begin;
 		const char* end = level0_ + gf.level0_end;
 		entries_n_ = 0;
@@ -809,6 +813,7 @@ private:
 		if (next_block_ < blocks_) {
 			const entry& cur = level0_entry(next_block_);
 			const char* p = blocks_begin_ + cur.offset;  // decode_group checked offset + bytes against the region
+			need(p, cur.bytes);
 			const ordinal_t base = next_block_ ? cur.base : std::numeric_limits<ordinal_t>::max();
 			std::size_t used;
 			if (cur.bitset) {
@@ -838,6 +843,7 @@ private:
 				buf_len_ = 1;
 				return doc_ = buf_ords_[0];
 			}
+			need(tail_, std::uint64_t(end_ - tail_));
 			const char* p = tail_;
 			const std::size_t n = df_ % format::block;
 			ordinal_t prev = blocks_ ? group_last(groups_n_ - 1) : std::numeric_limits<ordinal_t>::max();
@@ -935,6 +941,9 @@ private:
 		if (buf_ords_[n - 1] >= seg_->doc_count()) { throw corrupt_segment("ordinal out of range"); }
 	}
 
+	// Verifies [p, p + n) of the postings section before it is read.
+	void need(const char* p, std::uint64_t n) const { seg_->verify_postings(std::uint64_t(p - seg_->postings_bytes().data()), n); }
+
 	const segment* seg_;
 	format::term_info info_;
 	std::uint32_t df_;
@@ -987,16 +996,22 @@ public:
 		}
 		auto bytes = seg.positions_bytes();
 		if (info.positions > bytes.size() || info.positions_length > bytes.size() - info.positions) { throw corrupt_segment("positions offset"); }
-		seg.verify_positions(info.positions, info.positions_length);
+		seg_ = &seg;
 		const char* p = bytes.data() + info.positions;
-		end_ = p + info.positions_length;  // everything read stays inside the verified range
+		end_ = p + info.positions_length;  // every read stays inside the term's range
 		max_count_ = seg.max_positions();
+		// Bytes are verified as they are first read (P15): the headers here, each count and
+		// position block when decoded or stepped over, the tail on first use.
 		if (!(info.flags & format::counts_are_wdf)) {
+			need(p, std::min<std::uint64_t>(10, std::uint64_t(end_ - p)));
 			const std::uint64_t n = format::get_leb(&p, end_);
 			if (n > std::uint64_t(end_ - p)) { throw corrupt_segment("count blocks bounds"); }
 			count_blocks_ = p;
 			count_blocks_bytes_ = n;
 			p += n;
+		}
+		need(p, std::min<std::uint64_t>(format::block * 10 + 20, std::uint64_t(end_ - p)));  // count tail and both lengths
+		if (!(info.flags & format::counts_are_wdf)) {
 			for (std::size_t i = 0; i < info.df % format::block; ++i) { count_tail_.push_back(std::uint32_t(format::get_leb(&p, end_))); }
 		}
 		full_blocks_ = format::get_leb(&p, end_);
@@ -1052,6 +1067,7 @@ private:
 	const std::uint32_t* counts(bool tail, std::uint64_t offset) {
 		if (tail) { return count_tail_.data(); }
 		if (decoded_counts_ != offset) {
+			if (offset < count_blocks_bytes_) { need_block(count_blocks_ + offset, count_blocks_bytes_ - offset); }
 			if (offset >= count_blocks_bytes_ ||
 				!bitpack::decode(reinterpret_cast<const std::uint8_t*>(count_blocks_ + offset), count_blocks_bytes_ - offset, counts_buf_)) {
 				throw corrupt_segment("count block");
@@ -1070,7 +1086,10 @@ private:
 		}
 		const std::uint64_t t = i - full_blocks_ * format::block;
 		while (tail_values_.size() <= t) {
-			if (tail_p_ == nullptr) { tail_p_ = tail_; }
+			if (tail_p_ == nullptr) {
+				need(tail_, std::uint64_t(end_ - tail_));
+				tail_p_ = tail_;
+			}
 			tail_values_.push_back(std::uint32_t(format::get_leb(&tail_p_, end_)));
 		}
 		return tail_values_[t];
@@ -1087,10 +1106,12 @@ private:
 		if (at > j) { throw corrupt_segment("position block order"); }
 		for (; at < j; ++at) {
 			if (offset >= blocks_bytes_) { throw corrupt_segment("position block bounds"); }
+			need_block(blocks_ + offset, blocks_bytes_ - offset);
 			const std::size_t n = bitpack::encoded_size(reinterpret_cast<const std::uint8_t*>(blocks_ + offset), blocks_bytes_ - offset);
 			if (!n) { throw corrupt_segment("position block"); }
 			offset += n;
 		}
+		if (offset < blocks_bytes_) { need_block(blocks_ + offset, blocks_bytes_ - offset); }
 		if (offset >= blocks_bytes_ ||
 			!bitpack::decode(reinterpret_cast<const std::uint8_t*>(blocks_ + offset), blocks_bytes_ - offset, block_buf_)) {
 			throw corrupt_segment("position block");
@@ -1099,6 +1120,16 @@ private:
 		decoded_offset_ = offset;
 	}
 
+	// Verifies [p, p + n) of the positions section before it is read.
+	void need(const char* p, std::uint64_t n) const { seg_->verify_positions(std::uint64_t(p - seg_->positions_bytes().data()), n); }
+	// Verifies what reading one bitpack block at p can touch: at most a block's largest
+	// encoding (header, 32-bit values, 128 exceptions with 32 high bits).
+	void need_block(const char* p, std::uint64_t avail) const {
+		constexpr std::uint64_t largest = 2 + 4 * format::block + format::block + 1 + 4 * format::block;
+		need(p, std::min(largest, avail));
+	}
+
+	const segment* seg_ = nullptr;
 	const char* end_ = nullptr;
 	const char* count_blocks_ = nullptr;
 	const char* blocks_ = nullptr;
