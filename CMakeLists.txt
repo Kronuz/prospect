@@ -22,14 +22,15 @@ FetchContent_Declare(analysis GIT_REPOSITORY https://github.com/Kronuz/analysis.
 set(COMPRESSORS_DEFLATE OFF CACHE BOOL "" FORCE)
 set(COMPRESSORS_LZ4 OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG 7a6cc22f8a4eaceefd098374c05cdc2935c0fd19)
+FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG b4f4ce1932c8e204fb6bebd34f83f5b10de7b51c)
 # Index I/O goes through kronuz::journal::IO, from cluster's completion headers only.
 FetchContent_Declare(cluster GIT_REPOSITORY https://github.com/Kronuz/cluster.git GIT_TAG ca82aada340dd86ee9deb0ddcc000c7c8501fbeb SOURCE_SUBDIR completion)
-FetchContent_MakeAvailable(docset bitpack fst task hashes residency varint termdict unicode snowball analysis compressors cluster)
+FetchContent_MakeAvailable(docset bitpack fst task hashes residency varint termdict unicode snowball analysis compressors fusefilter cluster)
 
 add_library(strata INTERFACE)
 target_include_directories(strata INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(strata INTERFACE cxx_std_20)
-target_link_libraries(strata INTERFACE docset::docset bitpack::bitpack fst::fst task::task hashes::hashes residency::residency varint::varint termdict::termdict analysis::analysis compressors::compressors kronuz::completion)
+target_link_libraries(strata INTERFACE docset::docset bitpack::bitpack fst::fst task::task hashes::hashes residency::residency varint::varint termdict::termdict analysis::analysis compressors::compressors fusefilter::fusefilter kronuz::completion)
 add_library(strata::strata ALIAS strata)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)

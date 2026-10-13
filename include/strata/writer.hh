@@ -41,6 +41,7 @@
 #include "bitpack.hh"
 #include "compressor_zstd.h"
 #include "fst.hh"
+#include "fusefilter.hh"
 #include "hashes.hh"
 #include "strata/format.hh"
 #include "termdict.hh"
@@ -221,13 +222,26 @@ public:
 	// Writes 64-bit skip offsets even where 32 bits fit (tests the wide layout).
 	bool wide_skip_offsets = false;
 
-	// Adds a document and returns its ordinal. `length` is the document length used by
-	// weighting (Xapian: the sum of wdf over non-boolean terms).
-	// `stored` is the document's stored record, returned by segment::stored.
-	ordinal_t add(std::uint64_t docid, std::span<const posting_input> terms, std::uint32_t length, std::string_view stored = {}) {
+	// Adds a document and returns its ordinal. Docids strictly increase, so ordinal order
+	// is docid order. `length` is the document length used by weighting (Xapian: the sum
+	// of wdf over non-boolean terms). `stored` is the document's stored record, returned
+	// by segment::stored. `key` is the document's key term (one of its terms) or empty.
+	ordinal_t add(std::uint64_t docid, std::span<const posting_input> terms, std::uint32_t length, std::string_view stored = {},
+		std::uint64_t version = 0, std::string_view key = {}) {
 		// Ordinals are 32-bit and the largest value means no more documents.
 		if (lengths_.size() >= std::size_t(no_more_docs) - 1) { throw std::length_error("strata: segment document limit"); }
+		if (docid == 0 || (!docids_.empty() && docid <= docids_.back())) { throw std::invalid_argument("strata: docids must increase within a segment"); }
 		const ordinal_t ord = ordinal_t(lengths_.size());
+		versions_.push_back(version);
+		if (!key.empty()) {
+			key_hashes_.push_back(xxh64::hash(key));
+			if (keys_min_.empty() && keys_max_.empty()) {
+				keys_min_ = keys_max_ = key;
+			} else {
+				if (key < keys_min_) { keys_min_ = key; }
+				if (key > keys_max_) { keys_max_ = key; }
+			}
+		}
 		stored_ += stored;
 		stored_ends_.push_back(stored_.size());
 		lengths_.push_back(length);
@@ -376,6 +390,8 @@ public:
 			append(format::section::norms, norms);
 		}
 		append(format::section::docids, encode_docids());
+		append(format::section::versions, encode_versions());
+		if (!key_hashes_.empty()) { append(format::section::pk_filter, encode_pk_filter()); }
 		append(format::section::stored, encode_stored());
 		append(format::section::stats, stats);
 		out.align(format::section_alignment);
@@ -691,21 +707,59 @@ private:
 		return out;
 	}
 
-	// docids: [kind u8] then, for contiguous ids (docid = base + ordinal), [base u64];
-	// otherwise [count u64][docids u64 each].
+	// docids: [kind u8], then for contiguous ids (docid = base + ordinal) [base u64];
+	// for monotone ids [count u64][per 128 ordinals: first docid u64, delta offset u64]
+	// [LEB128 deltas, each at least 1, for every ordinal but a block's first].
 	std::string encode_docids() const {
 		std::string out;
 		bool contiguous = true;
 		for (std::size_t i = 1; i < docids_.size() && contiguous; ++i) { contiguous = docids_[i] == docids_[0] + i; }
 		if (contiguous) {
-			out.push_back(char(0));
+			out.push_back(char(format::docids_contiguous));
 			format::put<std::uint64_t>(out, docids_.empty() ? 1 : docids_[0]);
-		} else {
-			out.push_back(char(1));
-			format::put<std::uint64_t>(out, docids_.size());
-			for (auto d : docids_) { format::put<std::uint64_t>(out, d); }
+			return out;
 		}
-		return out;
+		out.push_back(char(format::docids_monotone));
+		format::put<std::uint64_t>(out, docids_.size());
+		std::string deltas;
+		for (std::size_t b = 0; b < docids_.size(); b += format::block) {
+			format::put<std::uint64_t>(out, docids_[b]);
+			format::put<std::uint64_t>(out, deltas.size());
+			for (std::size_t i = b + 1; i < std::min(docids_.size(), b + format::block); ++i) { format::put_leb(deltas, docids_[i] - docids_[i - 1]); }
+		}
+		return out + deltas;
+	}
+
+	// versions: [min u64][width u8][(version - min) in width bits each, little-endian bit order].
+	std::string encode_versions() const {
+		std::string out;
+		const std::uint64_t lo = versions_.empty() ? 0 : *std::min_element(versions_.begin(), versions_.end());
+		const std::uint64_t hi = versions_.empty() ? 0 : *std::max_element(versions_.begin(), versions_.end());
+		const unsigned width = unsigned(std::bit_width(hi - lo));
+		format::put<std::uint64_t>(out, lo);
+		out.push_back(char(width));
+		std::string bits((versions_.size() * width + 7) / 8, '\0');
+		for (std::size_t i = 0; i < versions_.size(); ++i) {
+			const std::uint64_t v = versions_[i] - lo;
+			for (unsigned b = 0; b < width; ++b) {
+				if (v >> b & 1) {
+					const std::size_t at = i * width + b;
+					bits[at >> 3] = char(std::uint8_t(bits[at >> 3]) | (1u << (at & 7)));
+				}
+			}
+		}
+		return out + bits;
+	}
+
+	// pk_filter: [smallest key LEB length, bytes][largest key, likewise][fuse filter over
+	// the keys' xxHash64].
+	std::string encode_pk_filter() const {
+		std::string out;
+		format::put_leb(out, keys_min_.size());
+		out += keys_min_;
+		format::put_leb(out, keys_max_.size());
+		out += keys_max_;
+		return out + fusefilter::filter8::build(key_hashes_).serialize();
 	}
 
 	std::deque<std::string> arena_;
@@ -716,6 +770,9 @@ private:
 	std::vector<std::uint64_t> stored_ends_;  // where each document's record ends
 	std::uint32_t max_positions_ = 0;        // the most positions of one term in one document
 	std::vector<std::uint64_t> docids_;
+	std::vector<std::uint64_t> versions_;
+	std::vector<std::uint64_t> key_hashes_;
+	std::string keys_min_, keys_max_;
 	std::uint64_t total_length_ = 0;
 };
 

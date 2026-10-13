@@ -28,8 +28,10 @@
 
 #include "bitpack.hh"
 #include "compressor_zstd.h"
-#include "residency.hh"
 #include "docset.hh"
+#include "fusefilter.hh"
+#include "hashes.hh"
+#include "residency.hh"
 #include "strata/format.hh"
 #include "termdict.hh"
 
@@ -74,6 +76,8 @@ public:
 			case format::section::norms:
 			case format::section::docids:
 			case format::section::stats:
+			case format::section::versions:
+			case format::section::pk_filter:
 				if (hashes::crc32c(bytes.data(), bytes.size()) != e.crc) { throw corrupt_segment("section checksum"); }
 				break;
 			default:
@@ -89,6 +93,8 @@ public:
 			case format::section::stats: stats_ = bytes; break;
 			case format::section::stored: stored_ = bytes; break;
 			case format::section::norms: norms_ = bytes; break;
+			case format::section::versions: versions_ = bytes; break;
+			case format::section::pk_filter: pk_filter_ = bytes; break;
 			default: break;
 			}
 		}
@@ -124,11 +130,9 @@ public:
 		integrity_->regions = residency::verified_regions(
 			std::span<const std::byte>(reinterpret_cast<const std::byte*>(file.data()), file.size()), std::move(regions));
 		if (norms_.size() != doc_count_) { throw corrupt_segment("norms size"); }
-		if (docids_.empty() || (docids_[0] == 0 ? docids_.size() != 9
-		                                        : docids_[0] != 1 || docids_.size() != 9 + 8 * doc_count_ ||
-		                                              format::get<std::uint64_t>(docids_.data() + 1) != doc_count_)) {
-			throw corrupt_segment("docids");
-		}
+		validate_docids();
+		validate_versions();
+		if (!pk_filter_.empty()) { open_pk_filter(); }
 		// The term index is copied out of the mapping (verified above), so later lookups never
 		// read bytes that could change or fault under the FST's unchecked traversal.
 		integrity_->pinned_index.assign(term_index_);
@@ -138,8 +142,52 @@ public:
 	// The host docid of an ordinal.
 	std::uint64_t docid(ordinal_t ord) const {
 		if (ord >= doc_count_) { throw std::out_of_range("strata: ordinal out of range"); }
-		if (docids_[0] == 0) { return format::get<std::uint64_t>(docids_.data() + 1) + ord; }
-		return format::get<std::uint64_t>(docids_.data() + 9 + 8 * std::uint64_t(ord));
+		if (docids_[0] == format::docids_contiguous) { return format::get<std::uint64_t>(docids_.data() + 1) + ord; }
+		const std::uint64_t b = ord / format::block;
+		std::uint64_t d = format::get<std::uint64_t>(docids_.data() + 9 + 16 * b);
+		const char* p = docid_deltas_ + format::get<std::uint64_t>(docids_.data() + 17 + 16 * b);
+		for (std::uint64_t i = b * format::block; i < ord; ++i) { d += format::get_leb(&p, docids_.data() + docids_.size()); }
+		return d;
+	}
+
+	// The ordinal holding docid, if any (docids increase with ordinals, validated at open).
+	std::optional<ordinal_t> ordinal_of(std::uint64_t docid) const {
+		if (doc_count_ == 0 || docid < footer_.min_docid || docid > footer_.max_docid) { return std::nullopt; }
+		if (docids_[0] == format::docids_contiguous) { return ordinal_t(docid - format::get<std::uint64_t>(docids_.data() + 1)); }
+		const std::uint64_t blocks = (doc_count_ + format::block - 1) / format::block;
+		std::uint64_t lo = 0, hi = blocks;  // the last block whose first docid <= docid
+		while (hi - lo > 1) {
+			const std::uint64_t mid = (lo + hi) / 2;
+			(format::get<std::uint64_t>(docids_.data() + 9 + 16 * mid) <= docid ? lo : hi) = mid;
+		}
+		std::uint64_t d = format::get<std::uint64_t>(docids_.data() + 9 + 16 * lo);
+		const char* p = docid_deltas_ + format::get<std::uint64_t>(docids_.data() + 17 + 16 * lo);
+		const std::uint64_t end = std::min<std::uint64_t>(doc_count_, (lo + 1) * format::block);
+		for (std::uint64_t ord = lo * format::block;; ++ord) {
+			if (d == docid) { return ordinal_t(ord); }
+			if (d > docid || ord + 1 == end) { return std::nullopt; }
+			d += format::get_leb(&p, docids_.data() + docids_.size());
+		}
+	}
+
+	// The document's version (0 when the segment's writer recorded none).
+	std::uint64_t version(ordinal_t ord) const {
+		if (ord >= doc_count_) { throw std::out_of_range("strata: ordinal out of range"); }
+		const unsigned width = std::uint8_t(versions_[8]);
+		std::uint64_t v = 0;
+		for (unsigned b = 0; b < width; ++b) {
+			const std::uint64_t at = std::uint64_t(ord) * width + b;
+			v |= std::uint64_t(std::uint8_t(versions_[9 + (at >> 3)]) >> (at & 7) & 1) << b;
+		}
+		return format::get<std::uint64_t>(versions_.data()) + v;
+	}
+
+	// Whether the segment may hold a document with this key term: inside its key range
+	// and in its filter (false positives possible, false negatives not).
+	bool may_hold_key(std::string_view key) const {
+		if (!pk_.filter) { return false; }
+		if (key < pk_.min || key > pk_.max) { return false; }
+		return pk_.filter->contains(xxh64::hash(key));
 	}
 
 	// The document's length quantized by format::encode_length (one byte, verified at open).
@@ -233,7 +281,75 @@ public:
 	const termdict::reader& dictionary() const noexcept { return *dict_; }
 
 private:
-	std::string_view file_, terms_, term_index_, postings_, positions_, lengths_, docids_, stats_, stored_, norms_;
+	// docids: the kind, then contiguous or monotone (see segment_writer::encode_docids).
+	// Monotone docids are decoded once here: each block's first docid above the previous
+	// block's last, every delta at least 1, offsets in order, no trailing bytes, and the
+	// footer's minimum and maximum equal to the first and last.
+	void validate_docids() {
+		auto bad = [] { throw corrupt_segment("docids"); };
+		if (docids_.empty()) { bad(); }
+		if (docids_[0] == format::docids_contiguous) {
+			if (docids_.size() != 9) { bad(); }
+			const std::uint64_t base = format::get<std::uint64_t>(docids_.data() + 1);
+			if (doc_count_ && (base == 0 || base != footer_.min_docid || base + (doc_count_ - 1) != footer_.max_docid || base + (doc_count_ - 1) < base)) { bad(); }
+			return;
+		}
+		if (docids_[0] != format::docids_monotone || docids_.size() < 9 || format::get<std::uint64_t>(docids_.data() + 1) != doc_count_) { bad(); }
+		const std::uint64_t blocks = (doc_count_ + format::block - 1) / format::block;
+		if (blocks > (docids_.size() - 9) / 16) { bad(); }
+		docid_deltas_ = docids_.data() + 9 + 16 * blocks;
+		const char* p = docid_deltas_;
+		const char* end = docids_.data() + docids_.size();
+		std::uint64_t last = 0;
+		for (std::uint64_t b = 0; b < blocks; ++b) {
+			std::uint64_t d = format::get<std::uint64_t>(docids_.data() + 9 + 16 * b);
+			if (d <= last || format::get<std::uint64_t>(docids_.data() + 17 + 16 * b) != std::uint64_t(p - docid_deltas_)) { bad(); }
+			if (b == 0 && d != footer_.min_docid) { bad(); }
+			for (std::uint64_t i = b * format::block + 1; i < std::min<std::uint64_t>(doc_count_, (b + 1) * format::block); ++i) {
+				const std::uint64_t delta = format::get_leb(&p, end);
+				if (delta == 0 || d + delta < d) { bad(); }
+				d += delta;
+			}
+			last = d;
+		}
+		if (p != end || (doc_count_ && last != footer_.max_docid)) { bad(); }
+	}
+
+	// versions: [min u64][width u8][packed bits]; exactly the bits doc_count needs, and no
+	// version past 2^64 - 1.
+	void validate_versions() const {
+		if (versions_.size() < 9) { throw corrupt_segment("versions"); }
+		const unsigned width = std::uint8_t(versions_[8]);
+		const std::uint64_t lo = format::get<std::uint64_t>(versions_.data());
+		const std::uint64_t mask = width >= 64 ? ~std::uint64_t(0) : (std::uint64_t(1) << width) - 1;
+		if (width > 64 || versions_.size() != 9 + (doc_count_ * width + 7) / 8 || lo > ~std::uint64_t(0) - mask) {
+			throw corrupt_segment("versions");
+		}
+	}
+
+	// pk_filter: the smallest and largest key, then the fuse filter.
+	void open_pk_filter() {
+		const char* p = pk_filter_.data();
+		const char* end = p + pk_filter_.size();
+		auto bytes = [&] {
+			const std::uint64_t n = format::get_leb(&p, end);
+			if (n > std::uint64_t(end - p)) { throw corrupt_segment("pk_filter"); }
+			std::string_view out(p, n);
+			p += n;
+			return out;
+		};
+		pk_.min = bytes();
+		pk_.max = bytes();
+		pk_.filter = fusefilter::filter8::deserialize(std::string_view(p, std::size_t(end - p)));
+		if (!pk_.filter || pk_.min > pk_.max || pk_.min.empty()) { throw corrupt_segment("pk_filter"); }
+	}
+
+	std::string_view file_, terms_, term_index_, postings_, positions_, lengths_, docids_, stats_, stored_, norms_, versions_, pk_filter_;
+	const char* docid_deltas_ = nullptr;
+	struct {
+		std::string_view min, max;
+		std::optional<fusefilter::filter8> filter;
+	} pk_;
 	format::footer footer_;
 	std::vector<format::section_entry> sections_;
 	struct integrity {

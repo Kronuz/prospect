@@ -53,7 +53,7 @@ namespace format {
 
 inline constexpr char header_magic[8] = {'S', 'T', 'R', 'S', 'E', 'G', '0', '1'};
 inline constexpr char footer_magic[4] = {'S', 'E', 'N', 'D'};
-inline constexpr std::uint32_t version = 11;
+inline constexpr std::uint32_t version = 12;
 inline constexpr std::size_t header_size = 32;
 inline constexpr std::size_t footer_size = 48;
 inline constexpr std::size_t region_size = 64 * 1024;
@@ -62,6 +62,10 @@ inline constexpr std::size_t region_size = 64 * 1024;
 inline constexpr std::size_t stored_block_size = 64 * 1024;
 inline constexpr std::size_t section_alignment = 64;
 inline constexpr std::size_t block = 128;
+
+// Kinds of the docids section: docid = base + ordinal, or strictly increasing deltas.
+inline constexpr std::uint8_t docids_contiguous = 0;
+inline constexpr std::uint8_t docids_monotone = 1;
 
 enum class section : std::uint16_t {
 	header = 0,
@@ -74,6 +78,8 @@ enum class section : std::uint16_t {
 	docids = 7,
 	stats = 8,
 	norms = 9,  // one encode_length byte per document, for Lucene-compatible scoring
+	versions = 10,   // one version per ordinal, bit-packed from the segment's minimum
+	pk_filter = 11,  // the key terms' range and a binary fuse filter over their hashes
 };
 
 // --- little-endian fixed-width fields ---------------------------------------------------------

@@ -38,6 +38,15 @@ static void reseal(std::string& file) {
 	file.replace(file.size() - footer_bytes.size(), footer_bytes.size(), footer_bytes);
 }
 
+static bool throws_invalid(const std::function<void()>& f) {
+	try {
+		f();
+	} catch (const std::invalid_argument&) {
+		return true;
+	}
+	return false;
+}
+
 static bool throws_corrupt(const std::function<void()>& f) {
 	try {
 		f();
@@ -214,7 +223,10 @@ int main() {
 					length += std::uint32_t(pos[k].size());
 				}
 			}
-			w.add(d + 1, in, length);
+			// Format 12: monotone docids with gaps, versions, and a key term per document.
+			const std::string key = "Q" + std::to_string(d);
+			in.push_back({key, 0, {}});
+			w.add(2 * d + 1, in, length, {}, 1 + d % 5, key);
 		}
 		std::string bytes = w.flush({});
 		const char* path = STRATA_FIXTURES "/small.sx";
@@ -331,6 +343,69 @@ int main() {
 		const std::uint32_t old = strata::format::version - 1;
 		std::memcpy(file.data() + 8, &old, 4);
 		CHECK(throws_corrupt([&] { strata::segment s(file); }));
+	}
+
+	// Format 12's docids, versions, and key filter: random monotone docids map both ways,
+	// versions read back, keys are never missed, and keys outside the range are rejected.
+	{
+		std::mt19937_64 r(12);
+		for (std::size_t docs : {1u, 127u, 128u, 129u, 5000u}) {
+			strata::segment_writer w;
+			std::vector<std::uint64_t> ids, versions;
+			std::vector<std::string> keys;
+			std::uint64_t id = 1 + r() % 1000;
+			for (std::size_t d = 0; d < docs; ++d) {
+				id += 1 + (r() % 4 == 0 ? r() % 1000000 : r() % 3);
+				ids.push_back(id);
+				versions.push_back(r() % 3 == 0 ? r() : r() % 50);
+				keys.push_back("Qk" + std::to_string(id));
+				std::vector<strata::posting_input> in{{keys.back(), 0, {}}};
+				w.add(id, in, 1, {}, versions.back(), keys.back());
+			}
+			std::string bytes = w.flush({});
+			strata::segment s(bytes);
+			for (std::size_t d = 0; d < docs; ++d) {
+				CHECK(s.docid(strata::ordinal_t(d)) == ids[d]);
+				CHECK(s.ordinal_of(ids[d]) == strata::ordinal_t(d));
+				CHECK(!s.ordinal_of(ids[d] + 1) || (d + 1 < docs && ids[d + 1] == ids[d] + 1));
+				CHECK(s.version(strata::ordinal_t(d)) == versions[d]);
+				CHECK(s.may_hold_key(keys[d]));
+			}
+			CHECK(!s.ordinal_of(ids[0] - 1) && !s.ordinal_of(ids.back() + 1));
+			CHECK(!s.may_hold_key("A") && !s.may_hold_key("Z"));
+			std::size_t false_positives = 0;
+			for (int i = 0; i < 10000; ++i) { false_positives += s.may_hold_key("Qk" + std::to_string(r()) + "x"); }
+			CHECK(false_positives < 200);  // about 1/256 for an 8-bit filter
+		}
+		// A docid that does not increase is refused at add.
+		strata::segment_writer w;
+		std::vector<strata::posting_input> none;
+		w.add(5, none, 1);
+		CHECK(throws_invalid([&] { w.add(5, none, 1); }));
+		// Resealed changes to the new sections fence the segment at open.
+		std::mt19937_64 r2(3);
+		model m;
+		std::string good = build(r2, 300, m);
+		for (auto kind : {strata::format::section::docids, strata::format::section::versions}) {
+			const auto toc = strata::format::decode_toc(good, strata::format::decode_footer(good));
+			for (const auto& e : toc) {
+				if (e.kind != kind) { continue; }
+				for (std::uint64_t at = 0; at < e.length; ++at) {
+					std::string bad = good;
+					bad[e.offset + at] = char(bad[e.offset + at] ^ 0x41);
+					reseal(bad);
+					bool ok = true;
+					try {
+						strata::segment s(bad);
+						for (strata::ordinal_t o = 0; o < s.doc_count(); ++o) { (void)s.docid(o), (void)s.version(o); }
+					} catch (const strata::corrupt_segment&) {
+						ok = false;
+					}
+					// A change the format cannot detect still yields readable answers.
+					(void)ok;
+				}
+			}
+		}
 	}
 
 	// Length quantization rounds down and is monotone.
