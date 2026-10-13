@@ -210,7 +210,8 @@ contract states the `fill` window and `max_score` semantics (C8).
   1.3×); single-thread indexing from 0.84× to ≥ 1.0× Tantivy; serving working set from
   1.33× Tantivy's resident index pages; the term dictionary from 2.53×.
 - `termdict` against a hash map: 4.6× its batch-median lookup time (650 against 140
-  ns), at 8.8 bytes per key against the map's 33. Lookup tails: the gate VM's clock
+  ns), at 12.35 bytes per key against the map's 59.3 (6-byte values; the full FST takes
+5.91). Lookup tails: the gate VM's clock
   (HPET, 1 µs steps) cannot time one lookup, and its interruptions set every engine's
   p99 near 7–8 µs; the single-lookup p99 belongs with the bare-metal rows
   (BENCHMARKS rule 4).
