@@ -121,7 +121,7 @@ version and a CRC32C. Live docs are per-generation side files.
 | Stored records | Compressed blocks (zstd) with an offset index |
 | Term lists | Opt-in per field |
 | Primary-key filter | Binary fuse filter |
-| Docid map | Segment ordinal to docid, with a docid lookup |
+| Docid map | Segment ordinal to docid, with a docid lookup: monotone in flushed segments, a permutation in reordered merges |
 
 Codec rules:
 
@@ -129,9 +129,11 @@ Codec rules:
   it natively; AVX2 processes two lane groups.
 - A term with only boolean postings (wdf 0) stores no wdf. A block whose wdf are all 1
   stores a flag instead.
-- Postings, positions, and term lists carry segment ordinals, not docids. A
-  replaced document keeps its docid at a late ordinal, so docid tie-breaks and
-  docid-order walks go through the docid map.
+- Postings, positions, and term lists carry segment ordinals, not docids. A flushed
+  segment's ordinals follow docid order, since a flush sorts by docid and a replaced
+  document's old copy stays in its earlier segment until a merge drops it. A merge may
+  reorder its output; then docid tie-breaks and docid-order walks go through the docid
+  map's permutation.
 - A term with document frequency 1 stores its ordinal in the term block.
 - Tails (fewer than 128 entries, which is most terms' whole posting list) use the
   `varint` format; a tail encoding that measures smaller is added to `varint`.
