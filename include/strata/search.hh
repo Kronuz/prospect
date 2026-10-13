@@ -416,6 +416,62 @@ public:
 		}
 		doc_ = d;
 	}
+	// Bulk top-k for a conjunction of terms, on the postings without virtual calls: the
+	// lead's blocks are windows, skipped whole when the summed bounds cannot compete;
+	// inside one, a document whose lead score plus the other terms' window bounds cannot
+	// compete is skipped before they move. Scores sum in score()'s order. Counting leaves
+	// this to the generic loop.
+	bool collect_top_k(top_collector& c) override {
+		if (c.counting || terms_.empty()) { return false; }
+		const std::size_t n = terms_.size();
+		auto& lead = terms_[0]->postings();
+		for (ordinal_t d = lead.next(); d != no_more_docs;) {
+			const ordinal_t end = lead.block_end(d);
+			const ordinal_t upto = end == no_more_docs ? no_more_docs - 1 : end;
+			// The window's bounds, computed once a threshold exists: at the window's start,
+			// or where one first appears inside it (bounding the rest of the window).
+			double rest = 0;
+			bool bounded = false;
+			auto bound = [&](ordinal_t from) {
+				bounded = true;
+				rest = 0;
+				for (std::size_t i = 1; i < n; ++i) { rest += terms_[i]->max_score(from, upto); }
+				return terms_[0]->max_score(from, upto) + rest;
+			};
+			if (const double min = c.min_competitive(); min > 0 && sum_upper(bound(d), n) <= min) {
+				if (end == no_more_docs) { break; }
+				d = lead.advance(end + 1);
+				continue;
+			}
+			while (d <= upto) {
+				double s = terms_[0]->score_of(d, lead.wdf());
+				if (const double min = c.min_competitive(); min > 0) {
+					if (!bounded) { bound(d); }
+					if (sum_upper(s + rest, n) <= min) {
+						d = lead.next();
+						continue;
+					}
+				}
+				bool agreed = true;
+				for (std::size_t i = 1; i < n; ++i) {
+					auto& it = terms_[i]->postings();
+					const ordinal_t e = it.advance(d);
+					if (e != d) {
+						d = lead.advance(e);
+						agreed = false;
+						break;
+					}
+					s += terms_[i]->score_of(d, it.wdf());
+				}
+				if (agreed) {
+					c.collect(d, s);
+					d = lead.next();
+				}
+			}
+		}
+		return true;
+	}
+
 	ordinal_t doc() const noexcept override { return doc_; }
 	ordinal_t next() override { return doc_ = confirm(align(children_[0]->approx_next())); }
 	ordinal_t advance(ordinal_t t) override { return doc_ = confirm(align(children_[0]->approx_advance(t))); }
