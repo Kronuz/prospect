@@ -12,7 +12,7 @@ FetchContent_Declare(bitpack GIT_REPOSITORY https://github.com/Kronuz/bitpack.gi
 FetchContent_Declare(fst GIT_REPOSITORY https://github.com/Kronuz/fst.git GIT_TAG a8d8478e8f92661ecf7e82eb85ca827155da2cad)
 FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG c3c30e49212769e1bbf424517003150de3f20682)
 FetchContent_Declare(hashes GIT_REPOSITORY https://github.com/Kronuz/hashes.git GIT_TAG abff6fa5ac0c19c0cff5509a437700d8f77be41e)
-FetchContent_Declare(termdict GIT_REPOSITORY https://github.com/Kronuz/termdict.git GIT_TAG 51278ef81c28f7f481bce23c77f5bfd964651315)
+FetchContent_Declare(termdict GIT_REPOSITORY https://github.com/Kronuz/termdict.git GIT_TAG e03ef2450cab5159ec419adbd7f235803abfd7ae)
 FetchContent_Declare(varint GIT_REPOSITORY https://github.com/Kronuz/varint.git GIT_TAG de3d05dbec86cd4c147b3177947f9c3b58312675)
 FetchContent_Declare(residency GIT_REPOSITORY https://github.com/Kronuz/residency.git GIT_TAG adc23e8c90507e2b0f4050746969b6bf9408d0d3)
 FetchContent_Declare(unicode GIT_REPOSITORY https://github.com/Kronuz/unicode.git GIT_TAG 81219c39deca91ed0186fb5eebd2afcec6f5f8c7)
