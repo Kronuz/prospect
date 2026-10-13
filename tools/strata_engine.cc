@@ -2,6 +2,7 @@
 //   strata_engine index DIR < corpus.json   one segment from JSON lines ("text": whitespace tokens)
 //   strata_engine serve DIR                  "COMMAND\tquery" lines -> one count per line
 //   strata_engine terms DIR                  every term and its document frequency
+//   strata_engine dictstats DIR              the term dictionary's bytes by part
 //   strata_engine verify DIR < queries.txt   pruned top-k equals an exhaustive scan, k = 10, 100, 1000
 //   strata_engine bench DIR COMMAND RUNS < queries.txt
 //                                            per query: fastest of RUNS in-process runs, in µs
@@ -224,6 +225,61 @@ int terms(const std::string& dir) {
 	return 0;
 }
 
+// The term dictionary's bytes by part: raw keys and each encoded term-info field, against
+// the terms and term_index sections; the difference is the dictionary's own structure
+// (negative when prefix sharing saves more than its block headers cost).
+int dictstats(const std::string& dir) {
+	residency::file file;
+	strata::segment seg = open(dir, file);
+	auto leb = [](std::uint64_t v) { std::uint64_t n = 1; while (v >= 128) { v >>= 7; ++n; } return n; };
+	std::uint64_t terms = 0, single = 0, keys = 0, flags = 0, df = 0, cf = 0, cf_eq_df = 0, max_wdf = 0, impacts = 0, postings = 0, length = 0, positions = 0;
+	seg.dictionary().scan("", [&](std::string_view key, std::string_view value) {
+		const auto t = strata::format::decode_term_info(value);
+		++terms;
+		keys += key.size();
+		flags += 1;
+		df += leb(t.df);
+		cf += leb(t.cf);
+		cf_eq_df += t.cf == t.df ? leb(t.cf) : 0;
+		max_wdf += leb(t.max_wdf);
+		std::string imp;
+		strata::format::encode_impacts(imp, t.impacts);
+		impacts += imp.size();
+		postings += leb(t.postings);
+		if (t.flags & strata::format::single_posting) {
+			++single;
+			length += leb(t.single_wdf);
+		} else {
+			length += leb(t.postings_length);
+		}
+		if (!(t.flags & strata::format::no_positions)) { positions += leb(t.positions) + leb(t.positions_length); }
+		return true;
+	});
+	std::uint64_t section_terms = 0, section_index = 0;
+	for (const auto& e : seg.sections()) {
+		if (e.kind == strata::format::section::terms) { section_terms = e.length; }
+		if (e.kind == strata::format::section::term_index) { section_index = e.length; }
+	}
+	const std::uint64_t values = flags + df + cf + max_wdf + impacts + postings + length + positions;
+	auto row = [&](const char* name, std::uint64_t bytes) { std::printf("%-34s %14llu %8.2f B/term\n", name, (unsigned long long)bytes, double(bytes) / double(terms)); };
+	std::printf("terms %llu, single-posting %llu\n", (unsigned long long)terms, (unsigned long long)single);
+	row("keys (raw)", keys);
+	row("value: flags", flags);
+	row("value: df", df);
+	row("value: cf", cf);
+	row("  of which cf equal to df", cf_eq_df);
+	row("value: max wdf", max_wdf);
+	row("value: competitive pairs", impacts);
+	row("value: postings offset or ordinal", postings);
+	row("value: postings length or wdf", length);
+	row("value: positions offset and length", positions);
+	row("values total", values);
+	row("terms section", section_terms);
+	row("term_index section", section_index);
+	std::printf("%-34s %14lld %8.2f B/term\n", "structure (terms - keys - values)", (long long)section_terms - (long long)(keys + values), (double(section_terms) - double(keys + values)) / double(terms));
+	return 0;
+}
+
 std::string query_of(const std::string& line) {
 	auto at = line.find("\"query\": \"");
 	if (at == std::string::npos) { return {}; }
@@ -294,8 +350,9 @@ int main(int argc, char** argv) {
 	if (mode == "index" && argc == 3) { return index(argv[2]); }
 	if (mode == "serve" && argc == 3) { return serve(argv[2]); }
 	if (mode == "terms" && argc == 3) { return terms(argv[2]); }
+	if (mode == "dictstats" && argc == 3) { return dictstats(argv[2]); }
 	if (mode == "verify" && argc == 3) { return verify(argv[2]); }
 	if (mode == "bench" && argc == 5) { return bench(argv[2], argv[3], std::atoi(argv[4])); }
-	std::cerr << "usage: strata_engine index|serve|terms|verify DIR | bench DIR COMMAND RUNS < queries\n";
+	std::cerr << "usage: strata_engine index|serve|terms|dictstats|verify DIR | bench DIR COMMAND RUNS < queries\n";
 	return 2;
 }
