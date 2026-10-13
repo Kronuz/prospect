@@ -3,7 +3,8 @@
 //   strata_engine serve DIR                  "COMMAND\tquery" lines -> one count per line
 //   strata_engine terms DIR                  every term and its document frequency
 //   strata_engine dictstats DIR              the term dictionary's bytes by part
-//   strata_engine verify DIR < queries.txt   pruned top-k equals an exhaustive scan, k = 10, 100, 1000
+//   strata_engine verify DIR < queries.txt   pruned top-k equals an exhaustive scan, k = 10, 100, 1000,
+//                                            ordinals and scores, Lucene and Xapian BM25
 //   strata_engine bench DIR COMMAND RUNS < queries.txt
 //                                            per query: fastest of RUNS in-process runs, in µs
 // Query syntax: words are optional, +word is required, -word is excluded, "a b" is a phrase.
@@ -117,16 +118,23 @@ parsed parse(std::string_view q) {
 }
 
 // A clause's scorer, or null when one of its terms is absent (the clause matches nothing).
-// boost is how many times the clause repeats in its group.
-strata::scorer_ptr clause_scorer(const strata::segment& seg, const std::vector<std::string>& clause, double boost = 1.0) {
+// boost is how many times the clause repeats in its group (Xapian's wqf).
+strata::scorer_ptr clause_scorer(const strata::segment& seg, const std::vector<std::string>& clause, double boost, strata::scheme scheme) {
 	std::vector<strata::format::term_info> infos;
 	for (const auto& t : clause) {
 		auto info = seg.term(t);
 		if (!info) { return nullptr; }
 		infos.push_back(*info);
 	}
-	if (infos.size() == 1) { return std::make_unique<strata::term_scorer>(seg, infos[0], boost); }
-	return std::make_unique<strata::phrase_scorer>(seg, infos);
+	const bool xapian = scheme == strata::scheme::xapian_bm25;
+	if (infos.size() == 1) {
+		if (xapian) { return std::make_unique<strata::term_scorer>(seg, infos[0], strata::weight::xapian(seg, infos[0].df, std::uint32_t(boost))); }
+		return std::make_unique<strata::term_scorer>(seg, infos[0], boost);
+	}
+	if (!xapian) { return std::make_unique<strata::phrase_scorer>(seg, infos); }
+	std::vector<strata::weight> weights;
+	for (const auto& info : infos) { weights.push_back(strata::weight::xapian(seg, info.df)); }
+	return std::make_unique<strata::phrase_scorer>(seg, infos, std::move(weights));
 }
 
 // Repeated clauses in a group merge into one with the repeat count as boost, as Lucene's
@@ -145,18 +153,18 @@ std::vector<std::pair<std::vector<std::string>, double>> merge_repeats(const std
 	return out;
 }
 
-strata::scorer_ptr build(const strata::segment& seg, const parsed& q) {
+strata::scorer_ptr build(const strata::segment& seg, const parsed& q, strata::scheme scheme = strata::scheme::lucene_bm25) {
 	std::vector<strata::scorer_ptr> must, should, must_not;
 	for (const auto& [c, boost] : merge_repeats(q.must)) {
-		auto s = clause_scorer(seg, c, boost);
+		auto s = clause_scorer(seg, c, boost, scheme);
 		if (!s) { return nullptr; }
 		must.push_back(std::move(s));
 	}
 	for (const auto& [c, boost] : merge_repeats(q.should)) {
-		if (auto s = clause_scorer(seg, c, boost)) { should.push_back(std::move(s)); }
+		if (auto s = clause_scorer(seg, c, boost, scheme)) { should.push_back(std::move(s)); }
 	}
 	for (const auto& c : q.must_not) {
-		if (auto s = clause_scorer(seg, c)) { must_not.push_back(std::move(s)); }
+		if (auto s = clause_scorer(seg, c, 1.0, scheme)) { must_not.push_back(std::move(s)); }
 	}
 	auto combine = [](std::vector<strata::scorer_ptr> v, bool all) -> strata::scorer_ptr {
 		if (v.empty()) { return nullptr; }
@@ -288,33 +296,56 @@ std::string query_of(const std::string& line) {
 	return q;
 }
 
-// For every query: the pruned top-k against a scan that scores every match, rank by rank
-// (scores within 1e-9 relative; equal scores may order differently), and the counts.
+// For every query, under both scoring schemes: the pruned top-k against a scan that
+// scores every match, and the counts. Scores agree within 1e-9 relative, rank by rank;
+// ordinals agree exactly, except that each run of hits whose scores agree within 1e-9
+// must be drawn from the scan's documents with that score (ties compare as sets, since
+// summation order can perturb near-equal scores).
 int verify(const std::string& dir) {
 	residency::file file;
 	strata::segment seg = open(dir, file);
 	std::size_t queries = 0, mismatches = 0;
+	auto close = [](double a, double b) { return std::abs(a - b) <= 1e-9 * std::max(1.0, std::max(a, b)); };
 	for (std::string line; std::getline(std::cin, line);) {
 		const std::string q = query_of(line);
 		if (q.empty()) { continue; }
 		++queries;
 		const parsed p = parse(q);
-		for (std::size_t k : {10u, 100u, 1000u}) {
-			auto pruned = build(seg, p), all = build(seg, p);
-			if (!pruned) { break; }
-			const auto hits = strata::top_k(*pruned, k);
-			std::vector<strata::hit> want;
-			std::uint64_t n = 0;
-			for (auto d = all->next(); d != strata::no_more_docs; d = all->next(), ++n) { want.push_back({d, all->score()}); }
-			std::sort(want.begin(), want.end(), [](const auto& a, const auto& b) { return a.score != b.score ? a.score > b.score : a.ord < b.ord; });
-			want.resize(std::min<std::size_t>(k, want.size()));
-			bool ok = hits.size() == want.size();
-			for (std::size_t i = 0; ok && i < hits.size(); ++i) { ok = std::abs(hits[i].score - want[i].score) <= 1e-9 * std::max(1.0, want[i].score); }
-			auto counted = build(seg, p);
-			ok = ok && strata::count(*counted) == n;
-			if (!ok) {
-				++mismatches;
-				std::cout << "MISMATCH k=" << k << '\t' << q << '\n';
+		for (const auto scheme : {strata::scheme::lucene_bm25, strata::scheme::xapian_bm25}) {
+			auto all = build(seg, p, scheme);
+			if (!all) { break; }
+			std::vector<strata::hit> scan;
+			for (auto d = all->next(); d != strata::no_more_docs; d = all->next()) { scan.push_back({d, all->score()}); }
+			std::sort(scan.begin(), scan.end(), [](const auto& a, const auto& b) { return a.score != b.score ? a.score > b.score : a.ord < b.ord; });
+			auto counted = build(seg, p, scheme);
+			bool ok = strata::count(*counted) == scan.size();
+			for (std::size_t k : {10u, 100u, 1000u}) {
+				auto pruned = build(seg, p, scheme);
+				const auto hits = strata::top_k(*pruned, k);
+				const std::size_t n = std::min<std::size_t>(k, scan.size());
+				ok = ok && hits.size() == n;
+				for (std::size_t a = 0; ok && a < n;) {
+					std::size_t b = a + 1;
+					while (b < n && close(scan[b].score, scan[a].score)) { ++b; }
+					// Every scan document with this score, beyond the cut at k too.
+					std::vector<strata::ordinal_t> tied;
+					for (std::size_t i = a; i < scan.size() && close(scan[i].score, scan[a].score); ++i) { tied.push_back(scan[i].ord); }
+					for (std::size_t i = a; i > 0 && close(scan[i - 1].score, scan[a].score); --i) { tied.push_back(scan[i - 1].ord); }
+					std::sort(tied.begin(), tied.end());
+					std::vector<strata::ordinal_t> got;
+					for (std::size_t i = a; i < b; ++i) {
+						ok = ok && close(hits[i].score, scan[i].score);
+						got.push_back(hits[i].ord);
+					}
+					std::sort(got.begin(), got.end());
+					ok = ok && std::adjacent_find(got.begin(), got.end()) == got.end() && std::includes(tied.begin(), tied.end(), got.begin(), got.end());
+					a = b;
+				}
+				if (!ok) {
+					++mismatches;
+					std::cout << "MISMATCH " << (scheme == strata::scheme::lucene_bm25 ? "lucene" : "xapian") << " k=" << k << '\t' << q << '\n';
+					break;
+				}
 			}
 		}
 	}
