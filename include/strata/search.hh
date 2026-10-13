@@ -45,6 +45,16 @@ namespace strata {
 // implementation per mechanism").
 enum class scheme { bm25, bm25_xapian };
 
+// The collection statistics weights read: one segment's, or a snapshot's across segments
+// (deleted documents included until a merge drops them, as document frequencies are).
+struct statistics {
+	std::uint64_t doc_count = 0, total_length = 0;
+	statistics() = default;
+	statistics(std::uint64_t docs, std::uint64_t length) : doc_count(docs), total_length(length) {}
+	statistics(const segment& seg) : doc_count(seg.doc_count()), total_length(seg.total_length()) {}  // NOLINT: implicit by design
+	double average_length() const noexcept { return doc_count ? double(total_length) / double(doc_count) : 0.0; }
+};
+
 // A term's weighting function: score(tf, length) for one scheme.
 //   bm25, Lucene's and Tantivy's form (k1 = 1.2, b = 0.75) over one-byte quantized
 //     lengths: idf · tf / (tf + k1 · (1 − b + b · len / avglen)),
@@ -61,26 +71,26 @@ struct weight {
 	// decode_length(code) / avg), so a score is one table load and one division.
 	std::array<double, 256> norm_k{};
 
-	static weight bm25(const segment& seg, std::uint64_t df, double boost = 1.0) {
+	static weight bm25(const statistics& st, std::uint64_t df, double boost = 1.0) {
 		weight w;
-		w.idf = boost * std::log(1.0 + (double(seg.doc_count()) - double(df) + 0.5) / (double(df) + 0.5));
-		w.avg = std::max(1.0, seg.average_length());
+		w.idf = boost * std::log(1.0 + (double(st.doc_count) - double(df) + 0.5) / (double(df) + 0.5));
+		w.avg = std::max(1.0, st.average_length());
 		w.inv_avg = 1.0 / w.avg;
 		for (unsigned c = 0; c < 256; ++c) { w.norm_k[c] = w.k1 * (1.0 - w.b + w.b * double(format::decode_length(std::uint8_t(c))) * w.inv_avg); }
 		return w;
 	}
 
-	static weight bm25_xapian(const segment& seg, std::uint64_t df, std::uint32_t wqf = 1) {
+	static weight bm25_xapian(const statistics& st, std::uint64_t df, std::uint32_t wqf = 1) {
 		weight w;
 		w.kind = scheme::bm25_xapian;
 		w.k1 = 1.0;
 		w.b = 0.5;
 		w.min_normlen = 0.5;
-		double tw = (double(seg.doc_count()) - double(df) + 0.5) / (double(df) + 0.5);
+		double tw = (double(st.doc_count) - double(df) + 0.5) / (double(df) + 0.5);
 		if (tw < 2) { tw = tw * 0.5 + 1; }  // Xapian keeps small idf positive
 		constexpr double k3 = 1.0;
 		w.idf = std::log(tw) * (k3 + 1) * wqf / (k3 + wqf) * (w.k1 + 1);
-		w.avg = seg.average_length() > 0 ? seg.average_length() : 1.0;
+		w.avg = st.average_length() > 0 ? st.average_length() : 1.0;
 		w.inv_avg = 1.0 / w.avg;
 		return w;
 	}
@@ -172,6 +182,9 @@ struct top_collector {
 	static bool better(const hit& a, const hit& b) noexcept { return a.score != b.score ? a.score > b.score : a.ord < b.ord; }
 	// Only documents scoring above this can enter (0 until k hits are known).
 	double min_competitive() const noexcept { return threshold; }
+	// A threshold known before collection starts (another segment's k-th score, made
+	// strictly lower so equal scores still enter); it never decreases.
+	void seed(double floor) noexcept { threshold = floor_ = floor; }
 	void collect(ordinal_t d, double score) {
 		if (!k || (truncated && score <= threshold)) { return; }
 		hits.push_back({d, score});
@@ -191,11 +204,11 @@ private:
 	void truncate() {
 		std::nth_element(hits.begin(), hits.begin() + std::ptrdiff_t(k - 1), hits.end(), better);
 		hits.resize(k);
-		threshold = hits[k - 1].score;  // the k-th best; every kept hit scores at least this
+		threshold = std::max(floor_, hits[k - 1].score);  // the k-th best; every kept hit scores at least this
 		truncated = true;
 	}
 	std::vector<hit> hits;
-	double threshold = 0;
+	double threshold = 0, floor_ = 0;
 	bool truncated = false;
 };
 
@@ -849,13 +862,18 @@ public:
 	// repeated in the phrase is iterated and decoded once.
 	// window > 0 makes it NEAR: the terms (repeats counted) at distinct positions, in any
 	// order, spanning fewer than window positions; NEAR needs term_weights.
-	phrase_scorer(const segment& seg, const std::vector<format::term_info>& infos, std::vector<weight> term_weights = {}, std::uint32_t window = 0)
+	// Lucene mode reads `stats` and each term's `df` (index-wide, one per phrase term) when
+	// given, else the segment's.
+	phrase_scorer(const segment& seg, const std::vector<format::term_info>& infos, std::vector<weight> term_weights = {}, std::uint32_t window = 0,
+		const statistics* stats = nullptr, std::span<const std::uint64_t> df = {})
 		: seg_(&seg), term_weights_(std::move(term_weights)), window_(window) {
 		if (window_ && term_weights_.size() != infos.size()) { throw std::invalid_argument("strata: NEAR needs a weight per term"); }
+		if (!df.empty() && df.size() != infos.size()) { throw std::invalid_argument("strata: one document frequency per phrase term"); }
+		const statistics st = stats ? *stats : statistics(seg);
 		double idf = 0;
 		for (std::size_t k = 0; k < infos.size(); ++k) {
 			const auto& info = infos[k];
-			idf += weight::bm25(seg, info.df).idf;
+			idf += weight::bm25(st, df.empty() ? info.df : df[k]).idf;
 			std::size_t u = 0;
 			while (u < infos_.size() && !(infos_[u].postings == info.postings && infos_[u].positions == info.positions && infos_[u].df == info.df)) { ++u; }
 			if (u == infos_.size()) {
@@ -877,7 +895,7 @@ public:
 		positions_.resize(terms_.size());
 		decoded_.assign(terms_.size(), no_more_docs);
 		counts_.resize(terms_.size());
-		weight_ = weight::bm25(seg, 1);
+		weight_ = weight::bm25(st, 1);
 		weight_.idf = idf;
 		bound_ = idf;  // tf / (tf + norm) < 1
 		if (!term_weights_.empty()) {
@@ -1123,7 +1141,7 @@ inline std::uint64_t count(scorer& s);
 
 // The k best hits by score (ties by ordinal), best first. With count, also the number of
 // matches; a count known from statistics leaves the collection free to prune.
-inline std::vector<hit> top_k(scorer& s, std::size_t k, std::uint64_t* count = nullptr) {
+inline std::vector<hit> top_k(scorer& s, std::size_t k, std::uint64_t* count = nullptr, double floor = 0) {
 	if (k == 0) {
 		if (count) { *count = strata::count(s); }
 		return {};
@@ -1135,7 +1153,13 @@ inline std::vector<hit> top_k(scorer& s, std::size_t k, std::uint64_t* count = n
 			count = nullptr;
 		}
 	}
-	if (top_collector c(k, count != nullptr); s.collect_top_k(c)) {
+	// A floor (a strictly lower bound on the k-th score, from other segments) prunes from
+	// the start; counting never prunes.
+	if (count) { floor = 0; }
+	if (floor > 0) { s.set_min_competitive_score(floor); }
+	top_collector c(k, count != nullptr);
+	if (floor > 0) { c.seed(floor); }
+	if (s.collect_top_k(c)) {
 		if (count) { *count = c.count; }
 		return c.finish();
 	}
@@ -1148,12 +1172,12 @@ inline std::vector<hit> top_k(scorer& s, std::size_t k, std::uint64_t* count = n
 		if (heap.size() < k) {
 			heap.push_back({d, sc});
 			std::push_heap(heap.begin(), heap.end(), worse);
-			if (heap.size() == k && !count) { s.set_min_competitive_score(heap.front().score); }
+			if (heap.size() == k && !count) { s.set_min_competitive_score(std::max(floor, heap.front().score)); }
 		} else if (k && sc > heap.front().score) {
 			std::pop_heap(heap.begin(), heap.end(), worse);
 			heap.back() = {d, sc};
 			std::push_heap(heap.begin(), heap.end(), worse);
-			if (!count) { s.set_min_competitive_score(heap.front().score); }
+			if (!count) { s.set_min_competitive_score(std::max(floor, heap.front().score)); }
 		}
 	}
 	if (count) { *count = n; }
