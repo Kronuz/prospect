@@ -13,7 +13,7 @@ cd ~/bench/search-benchmark-game
 out=~/bench/results/query-$name
 mkdir -p "$out"
 export COMMANDS="TOP_10 TOP_100 TOP_1000 TOP_100_COUNT COUNT" PATH=$HOME/.cargo/bin:$PATH CORPUS=$PWD/corpus.json
-engines=(strata tantivy-0.26 lucene-10.4.0 lucene-10.4.0-bp xapian-2.1.0)
+engines=(strata tantivy-0.26 lucene-10.4.0 lucene-10.4.0-bp xapian-2.1.0 iresearch-26.03.1 pisa-0.8.2)
 rotated() {  # rotation k of the engine list
 	local k=$1 n=${#engines[@]}
 	for i in $(seq 0 $((n - 1))); do echo -n "${engines[$(((i + k) % n))]} "; done
