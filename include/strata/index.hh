@@ -1161,11 +1161,17 @@ private:
 		// Unflushed state never lives on disk unnamed, but flushed segments awaiting a commit
 		// do; they stay.
 		for (const auto& s : segs_) { referenced.insert(index_detail::segment_name(s->ref.id)); }
-		// Manifests leave first, then the data files only they referenced.
+		// Manifests leave first, durably, then the data files only they referenced: a crash
+		// between the two never leaves a manifest naming a removed file.
+		bool removed = false;
 		for (const auto& n : names) {
 			auto p = index_detail::parse_name(n);
-			if (p && p->type == index_detail::parsed_name::manifest && !referenced.count(n)) { remove_file(n); }
+			if (p && p->type == index_detail::parsed_name::manifest && !referenced.count(n)) {
+				remove_file(n);
+				removed = true;
+			}
 		}
+		if (removed) { io_->sync_directory(); }
 		for (const auto& n : names) {
 			auto p = index_detail::parse_name(n);
 			if (p && p->type != index_detail::parsed_name::manifest && !referenced.count(n)) { remove_file(n); }

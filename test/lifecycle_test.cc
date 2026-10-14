@@ -112,10 +112,12 @@ static transaction tx_of(operation o) {
 int main() {
 	index::options keyed;
 	keyed.key_prefix = "Q";
-	// T2: replays under different schedules agree on verdicts and digests.
+	// T2: replays under different schedules agree on verdicts and digests, the digest after
+	// every transaction included (the first ten seeds).
 	for (std::uint64_t seed = 0; seed < 40; ++seed) {
 		const auto w = workload(seed, 200);
 		std::vector<std::vector<std::uint64_t>> verdicts[3];
+		std::vector<std::uint64_t> trace[3];  // the digest after every transaction (D12)
 		std::uint64_t digests[3];
 		for (int schedule = 0; schedule < 3; ++schedule) {
 			faultfs::filesystem fs;
@@ -137,6 +139,7 @@ int main() {
 				record.insert(record.end(), v.versions.begin(), v.versions.end());
 				verdicts[schedule].push_back(record);
 				if (schedule == 1) { ix.refresh(); }  // a flush after every transaction
+				if (seed < 10) { trace[schedule].push_back(ix.digest()); }
 			}
 			digests[schedule] = ix.digest();
 			if (schedule == 2) {
@@ -150,6 +153,7 @@ int main() {
 			}
 		}
 		CHECK(verdicts[0] == verdicts[1] && verdicts[1] == verdicts[2]);
+		CHECK(trace[0] == trace[1] && trace[1] == trace[2]);
 		CHECK(digests[0] == digests[1] && digests[1] == digests[2]);
 	}
 	// T2: replay after recovery and after install. A writer that stops at a commit and
