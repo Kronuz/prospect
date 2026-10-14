@@ -182,7 +182,7 @@ int main() {
 					auto sc = builder(*s.seg);
 					if (!sc) { continue; }
 					for (ordinal_t o = sc->next(); o != no_more_docs; o = sc->next()) {
-						if (((*s.deleted)[o >> 6] >> (o & 63)) & 1) { continue; }
+						if (s.deleted && ((*s.deleted)[o >> 6] >> (o & 63)) & 1) { continue; }
 						all.push_back({s.seg->docid(o), sc->score()});
 					}
 				}

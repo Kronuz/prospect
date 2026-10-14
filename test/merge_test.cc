@@ -190,7 +190,9 @@ int main() {
 		auto ix = strata::index::create(io, o, uuid);
 		auto deleted_in = [&](const index::segment_view& v) {
 			std::uint64_t n = 0;
-			for (auto w : *v.deleted) { n += std::uint64_t(std::popcount(w)); }
+			if (v.deleted) {
+				for (auto w : *v.deleted) { n += std::uint64_t(std::popcount(w)); }
+			}
 			return n;
 		};
 		auto put = [&](const std::string& key, operation::kind type) {

@@ -417,12 +417,14 @@ public:
 	struct segment_view {
 		std::uint64_t id;
 		const segment* seg;
-		const std::vector<std::uint64_t>* deleted;  // bit per ordinal
-		bool live(ordinal_t ord) const { return !(((*deleted)[ord >> 6] >> (ord & 63)) & 1); }
+		const std::vector<std::uint64_t>* deleted;  // bit per ordinal; null when none is deleted
+		bool live(ordinal_t ord) const { return !deleted || !(((*deleted)[ord >> 6] >> (ord & 63)) & 1); }
 	};
+	// Null bitmaps for segments without deletes, so searches skip the live check without
+	// scanning the bitmap.
 	std::vector<segment_view> segments() const {
 		std::vector<segment_view> out;
-		for (const auto& s : segs_) { out.push_back({s->ref.id, &s->seg, &s->deleted}); }
+		for (const auto& s : segs_) { out.push_back({s->ref.id, &s->seg, s->dead ? &s->deleted : nullptr}); }
 		return out;
 	}
 	const files::manifest& manifest() const noexcept { return m_; }
@@ -670,6 +672,7 @@ private:
 		std::string bytes;
 		segment seg;
 		std::vector<std::uint64_t> deleted;  // bit per ordinal
+		std::uint64_t dead = 0;              // bits set in deleted
 		bool deletes_dirty = false;          // deletes since its live-docs generation
 		std::unique_ptr<kronuz::journal::File> unsynced;  // flushed, awaiting the commit's sync
 		open_segment(files::segment_ref r, std::string b) : ref(r), bytes(std::move(b)), seg(bytes), deleted((seg.doc_count() + 63) / 64, 0) {}
@@ -850,6 +853,7 @@ private:
 				break;
 			case undo_step::segment_dead:
 				segs_[it->a]->deleted[it->ord >> 6] &= ~(std::uint64_t(1) << (it->ord & 63));
+				--segs_[it->a]->dead;
 				segs_[it->a]->deletes_dirty = it->prev_dirty;
 				break;
 			case undo_step::version_map: {
@@ -890,6 +894,7 @@ private:
 			auto& s = *segs_[at.segment];
 			undo_.push_back({undo_step::segment_dead, at.segment, at.ord, {}, {}, 0, {}, s.deletes_dirty});
 			s.deleted[at.ord >> 6] |= std::uint64_t(1) << (at.ord & 63);
+			++s.dead;
 			s.deletes_dirty = true;
 		}
 	}
@@ -1107,11 +1112,7 @@ private:
 	void commit_files() {
 		// A segment whose documents are all deleted leaves without a merge; retention frees
 		// its files.
-		std::erase_if(segs_, [](const auto& s) {
-			std::uint64_t dead = 0;
-			for (auto w : s->deleted) { dead += std::uint64_t(std::popcount(w)); }
-			return dead == s->seg.doc_count();
-		});
+		std::erase_if(segs_, [](const auto& s) { return s->dead == s->seg.doc_count(); });
 		// 1. New data files, synced: flushed segments, live-docs generations, metadata.
 		// Their generations come from the counters directly, so a failed commit never
 		// reuses a name.
@@ -1392,6 +1393,7 @@ private:
 					throw corrupt_index("live docs disagree with the manifest");
 				}
 				for (std::uint64_t o : l.deleted) { s->deleted[o >> 6] |= std::uint64_t(1) << (o & 63); }
+				s->dead = l.deleted.size();
 			}
 			out.segments.push_back(std::move(s));
 		}

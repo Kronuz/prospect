@@ -246,7 +246,9 @@ int main() {
 			std::uint64_t docs = 0, deleted = 0;
 			for (const auto& s : ix.segments()) {
 				docs += s.seg->doc_count();
-				for (auto w : *s.deleted) { deleted += std::uint64_t(std::popcount(w)); }
+				if (s.deleted) {
+					for (auto w : *s.deleted) { deleted += std::uint64_t(std::popcount(w)); }
+				}
 			}
 			most_deleted = std::max(most_deleted, docs ? double(deleted) / double(docs) : 0.0);
 		}
