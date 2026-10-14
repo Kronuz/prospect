@@ -84,6 +84,26 @@ static std::string live_deltas(const files::live_docs& l) {
 	return out;
 }
 
+// faultfs::io that runs `on_segment` when a segment file is created, before its bytes.
+class watch_io final : public kronuz::journal::IO {
+public:
+	watch_io(faultfs::io& inner, std::function<void()> on_segment) : inner_(&inner), on_segment_(std::move(on_segment)) {}
+	std::unique_ptr<kronuz::journal::OwnerLock> acquire_owner(bool create) override { return inner_->acquire_owner(create); }
+	std::unique_ptr<kronuz::journal::File> open_existing(std::string_view name) override { return inner_->open_existing(name); }
+	std::unique_ptr<kronuz::journal::File> create_exclusive(std::string_view name) override {
+		if (name.starts_with("seg-") && name.ends_with(".sx")) { on_segment_(); }
+		return inner_->create_exclusive(name);
+	}
+	void replace(std::string_view a, std::string_view b) override { inner_->replace(a, b); }
+	void remove(std::string_view name) override { inner_->remove(name); }
+	std::unique_ptr<kronuz::journal::DirectoryCursor> scan_directory() override { return inner_->scan_directory(); }
+	void sync_directory() override { inner_->sync_directory(); }
+
+private:
+	faultfs::io* inner_;
+	std::function<void()> on_segment_;
+};
+
 // faultfs::io, but the n-th later open_existing of one name fails once with `error`.
 class flaky_io final : public kronuz::journal::IO {
 public:
@@ -469,7 +489,11 @@ int main() {
 	}
 	// A merge on a budget with `room` to spare, the disk holding what the budget holds:
 	// it completes, or admission refuses it; the disk never does.
-	auto merge_rooms = [&](const strata::index::options& base, const std::function<void(strata::index&)>& build, std::uint64_t first, std::uint64_t last, std::uint64_t step) {
+	// With `queued` bytes, an obsolete segment of one incompressible record of that size
+	// waits in the reclaim queue (reclaim_slice 0 keeps it there across the reopen), so
+	// admission drains it during the merge.
+	auto merge_rooms = [&](const strata::index::options& base, const std::function<void(strata::index&)>& build, std::uint64_t first, std::uint64_t last, std::uint64_t step,
+						   std::uint64_t queued = 0) {
 		std::size_t merged = 0, refused = 0;
 		for (std::uint64_t room = first; room <= last; room += step) {
 			faultfs::filesystem fs;
@@ -477,7 +501,27 @@ int main() {
 			byte_budget storage(1ull << 40);
 			strata::index::options o = base;
 			o.storage = &storage;
+			if (queued) {
+				o.reclaim_slice = 0;
+				o.retained_predecessors = 0;
+			}
 			auto ix = strata::index::create(io, o, uuid);
+			if (queued) {
+				std::mt19937_64 r(queued);
+				operation big;
+				big.type = operation::replace_docid;
+				big.docid = 1ull << 50;
+				big.doc.stored.resize(queued);
+				for (auto& c : big.doc.stored) { c = char(r()); }
+				ix.apply(tx({big}), {});
+				ix.commit();
+				operation gone;
+				gone.type = operation::delete_docid;
+				gone.docid = 1ull << 50;
+				ix.apply(tx({gone}), {});
+				ix.commit();
+				CHECK(ix.reclaim_pending() == 1);
+			}
 			build(ix);
 			ix.commit();
 			std::vector<std::uint64_t> ids;
@@ -485,11 +529,24 @@ int main() {
 			byte_budget tight(storage.used() + room);  // the same index, reopened on a budget this tight
 			ix.close();
 			o.storage = &tight;
-			ix = strata::index::open(io, o);
+			// When the merged segment is created, what the budget holds beyond the files on
+			// disk must cover the whole output (review L5).
+			std::uint64_t spare = 0;
+			watch_io watched(io, [&] {
+				std::uint64_t bytes = 0;
+				for (const auto& n : fs.list()) { bytes += fs.view(n).size(); }
+				spare = tight.used() > bytes ? tight.used() - bytes : 0;
+			});
+			ix = strata::index::open(watched, o);
 			fs.set_capacity(fs.used() + (tight.capacity() - tight.used()));  // the disk has what the budget has
 			try {
 				ix.merge(ids);
 				CHECK(ix.segments().size() == 1);
+				std::uint64_t output = 0;
+				for (const auto& n : fs.list()) {
+					if (n == index_detail::segment_name(ix.segments()[0].id)) { output = fs.view(n).size(); }
+				}
+				CHECK(spare >= output);
 				++merged;
 			} catch (const std::system_error& e) {
 				CHECK(std::string(e.what()).find("no storage reserved") != std::string::npos);  // admission, not the disk
@@ -497,8 +554,8 @@ int main() {
 			}
 			ix.close();  // before `tight`, which its permit draws on, leaves scope
 		}
-		CHECK(merged > 0 && refused > 0);
-		if (!merged || !refused) { std::fprintf(stderr, "  merge rooms: %zu merged, %zu refused\n", merged, refused); }
+		CHECK(merged > 0 && (refused > 0 || queued));
+		if (!merged || (!refused && !queued)) { std::fprintf(stderr, "  merge rooms: %zu merged, %zu refused\n", merged, refused); }
 	};
 	merge_rooms(keyed, [&](strata::index& ix) {
 		for (std::uint64_t base : {1ull, 1ull << 40}) {  // two segments, docids far apart
@@ -535,6 +592,63 @@ int main() {
 		ix.refresh();
 		for (int i = 0; i < 127; ++i) { one(shared()); }
 	}, 170000, 200000, 1000);
+	// A transaction admitted by draining a queued obsolete file commits at once on a disk of
+	// the budget's size: the drain frees the file's bytes durably before they count (L8).
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		byte_budget storage(1ull << 40);
+		strata::index::options o = keyed;
+		o.storage = &storage;
+		o.reclaim_slice = 0;
+		o.retained_predecessors = 0;
+		std::mt19937_64 r(35);
+		auto record = [&](const std::string& key, std::size_t bytes) {
+			operation op = add(key, "x");
+			op.doc.stored.resize(bytes);
+			for (auto& c : op.doc.stored) { c = char(r()); }
+			return op;
+		};
+		auto ix = strata::index::create(io, o, uuid);
+		ix.apply(tx({record("Qold", 31000)}), {});
+		ix.commit();
+		ix.apply(tx({erase("Qold")}), {});
+		ix.commit();
+		CHECK(ix.reclaim_pending() == 1);
+		byte_budget tight(storage.used() + 2000);
+		ix.close();
+		o.storage = &tight;
+		ix = strata::index::open(io, o);
+		fs.set_capacity(fs.used() + (tight.capacity() - tight.used()));
+		CHECK(ix.apply(tx({record("Qnew", 10000)}), {}).result == verdict::accepted);
+		CHECK(!throws([&] { ix.commit(); }));
+		ix.close();
+	}
+	// The same merges with an obsolete segment queued: the drain inside admission keeps the
+	// merge's reservation, and counts the freed bytes once their removal is durable
+	// (review L5, L8), so the disk never refuses.
+	const std::function<void(strata::index&)> growing = [&](strata::index& ix) {
+		auto shared = [] {
+			document d;
+			for (int t = 0; t < 1000; ++t) { d.terms.push_back({"t" + std::to_string(t), 0, {}}); }
+			return d;
+		};
+		auto one = [&](document d) {
+			operation op;
+			op.type = operation::add;
+			op.doc = std::move(d);
+			CHECK(ix.apply(tx({op}), {}).result == verdict::accepted);
+		};
+		one(shared());
+		for (int i = 0; i < 1023; ++i) {
+			document d;
+			d.terms.push_back({"f", 0, {}});
+			one(std::move(d));
+		}
+		ix.refresh();
+		for (int i = 0; i < 127; ++i) { one(shared()); }
+	};
+	for (std::uint64_t queued : {20000u, 50000u, 300000u}) { merge_rooms({}, growing, 158000, 228000, 2000, queued); }
 	// ENOSPC strikes mid-file under short writes: the partial file is removed, and the same
 	// commit succeeds once space returns.
 	std::size_t mid_file = 0;

@@ -316,14 +316,8 @@ public:
 			if (storage_permit_ && !storage_permit_.try_grow(need) && !(drain() && storage_permit_.try_grow(need))) {
 				throw space_error(std::make_error_code(std::errc::no_space_on_device), "strata: no storage reserved for a merge");
 			}
-			struct release {
-				index* ix;
-				std::uint64_t n;
-				~release() {
-					ix->storage_permit_.shrink(n);
-					ix->settle_storage();
-				}
-			} held{this, storage_permit_ ? need : 0};
+			hold held{this};
+			if (storage_permit_) { held.add(need); }
 			const std::uint64_t id = m_.next_segment++;
 			std::array<std::uint8_t, 16> header{};
 			std::memcpy(header.data(), &id, 8);
@@ -337,7 +331,7 @@ public:
 				if (!storage_permit_.try_grow(more) && !(drain() && storage_permit_.try_grow(more))) {
 					throw space_error(std::make_error_code(std::errc::no_space_on_device), "strata: no storage reserved for a merge's output");
 				}
-				held.n += more;
+				held.add(more);
 			}
 			std::unique_ptr<open_segment> merged;
 			if (plan.doc_count) {
@@ -612,14 +606,8 @@ public:
 		if (storage_permit_ && !storage_permit_.try_grow(need) && !(drain() && storage_permit_.try_grow(need))) {
 			throw std::system_error(std::make_error_code(std::errc::no_space_on_device), "strata: no storage reserved for an install");
 		}
-		struct release {
-			index* ix;
-			std::uint64_t n;
-			~release() {
-				ix->storage_permit_.shrink(n);
-				ix->settle_storage();
-			}
-		} held{this, storage_permit_ ? need : 0};
+		hold held{this};
+		if (storage_permit_) { held.add(need); }
 		guarded([&] {
 			for (auto& s : got.segments) {
 				files::segment_ref mine = s->ref;
@@ -784,6 +772,21 @@ private:
 
 	// --- storage accounting (T5) -------------------------------------------------------------
 
+	// Bytes a merge or install reserved for what it writes: settle_storage() counts them, so
+	// a drain while it runs keeps them; they go when it ends.
+	struct hold {
+		index* ix;
+		std::uint64_t n = 0;
+		void add(std::uint64_t bytes) {
+			n += bytes;
+			ix->held_ += bytes;
+		}
+		~hold() {
+			ix->held_ -= n;
+			ix->settle_storage();
+		}
+	};
+
 	void track(const std::string& name, std::uint64_t size) {
 		auto& at = files_[name];
 		on_disk_ += size - at;
@@ -793,11 +796,18 @@ private:
 		io_->remove(name);
 		forget_file(name);
 	}
+	// A removed file's bytes stay counted until a directory sync makes its removal durable:
+	// filesystems release the blocks then, not at the unlink.
 	void forget_file(const std::string& name) {
 		if (auto it = files_.find(name); it != files_.end()) {
 			on_disk_ -= it->second;
+			unlinked_ += it->second;
 			files_.erase(it);
 		}
+	}
+	void sync_dir() {
+		io_->sync_directory();
+		unlinked_ = 0;
 	}
 	// A bound on a segment's fixed bytes, apart from its documents and terms: the header,
 	// footer, and table of contents, each section's alignment and region checksums, and the
@@ -822,8 +832,16 @@ private:
 
 	// Reclaims every queued file for admission that is short of space; false if none was.
 	bool drain() {
-		if (reclaim_.empty()) { return false; }
+		if (reclaim_.empty() && !unlinked_) { return false; }
 		reclaim();
+		if (unlinked_) {
+			try {
+				sync_dir();
+			} catch (const std::system_error&) {
+				return false;  // the removals stay counted; a later sync frees them
+			}
+			settle_storage();
+		}
 		return true;
 	}
 
@@ -833,7 +851,7 @@ private:
 		if (!storage_permit_) { return; }
 		manifest_bytes_ = files::encode(m_).size() + 160 * segs_.size();
 		allowance_ = commit_allowance();
-		const std::uint64_t want = on_disk_ + reserved_ + allowance_;
+		const std::uint64_t want = on_disk_ + unlinked_ + reserved_ + allowance_ + held_;
 		if (want > storage_permit_.bytes()) {
 			storage_permit_.grow(want - storage_permit_.bytes());
 		} else {
@@ -1234,7 +1252,7 @@ private:
 			next.live_length += s->ref.live_length;
 		}
 		// 2-5. Directory, the manifest under a temporary name, the rename, the directory.
-		io_->sync_directory();
+		sync_dir();
 		const std::string tmp = index_detail::manifest_name(next.generation) + ".tmp";
 		const std::string bytes = files::encode(next);
 		++next_manifest_;  // a failed attempt's name is never reused
@@ -1242,7 +1260,7 @@ private:
 		io_->replace(tmp, index_detail::manifest_name(next.generation));
 		files_.erase(tmp);
 		files_[index_detail::manifest_name(next.generation)] = bytes.size();
-		io_->sync_directory();
+		sync_dir();
 		m_ = next;
 		applied_since_commit_ = 0;
 		pending_pin_.reset();
@@ -1311,7 +1329,7 @@ private:
 				}
 			}
 			if (sync_owed_) {
-				io_->sync_directory();
+				sync_dir();
 				sync_owed_ = false;
 			}
 		} catch (const std::system_error&) {
@@ -1373,7 +1391,7 @@ private:
 		for (const auto& n : names) {
 			if (index_detail::parse_name(n)) { io_->remove(n); }
 		}
-		io_->sync_directory();
+		sync_dir();
 	}
 
 	void recover(std::optional<std::uint64_t> to) {
@@ -1534,6 +1552,8 @@ private:
 	bool sync_owed_ = false;  // manifests removed since the last directory sync
 	std::uint64_t media_retries_ = 0;
 	std::uint64_t on_disk_ = 0, reserved_ = 0;
+	std::uint64_t unlinked_ = 0;  // removed, awaiting a directory sync to be freed
+	std::uint64_t held_ = 0;      // reserved by a merge or install while it writes
 	std::uint64_t allowance_ = 0, manifest_bytes_ = 0;  // the commit allowance, and its manifest's part
 	std::uint64_t applied_since_commit_ = 0;
 	std::uint64_t next_manifest_ = 1;
