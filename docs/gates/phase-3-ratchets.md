@@ -5,8 +5,9 @@ unmeasured are listed at the end.
 
 ## Indexing, 1 thread (gate VM, Linux x86_64)
 
-Run on the gate VM with `bench/index_trials.sh p3` and `tools/vm/quiet_trials.sh`, at
-strata 7c7a9b7. The corpus is the 1M-document file from the search-benchmark-game. Each
+Run on the gate VM with `bench/index_trials.sh p3` and `tools/vm/quiet_trials.sh`, using
+the VM's synced source tree as built at 06:48 on 2026-10-14 (Phase 3 lifecycle code; the copy
+carries no commit id). The corpus is the 1M-document file from the search-benchmark-game. Each
 engine ran three trials, with the engine order rotated and the page cache dropped before
 each unit.
 
