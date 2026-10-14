@@ -419,6 +419,11 @@ public:
 	}
 	std::size_t reclaim_pending() const noexcept { return reclaim_.size(); }
 
+	// The kept manifest (a pin or a retained predecessor) whose read failed in the last
+	// retention round, which then removed nothing; retention resumes once it reads or the
+	// pin is released. A host reports it: a damaged pinned checkpoint stops reclamation.
+	std::optional<std::uint64_t> retention_blocked() const noexcept { return retention_blocked_; }
+
 	// Reads that failed or failed their checks once and passed when read again.
 	std::uint64_t media_retries() const noexcept { return media_retries_; }
 
@@ -1284,6 +1289,7 @@ private:
 	// manifest names is queued for reclaim(). Works from the files on record, with no
 	// directory scan.
 	void retain() {
+		retention_blocked_.reset();
 		std::set<std::uint64_t> keep(m_.pinned.begin(), m_.pinned.end());
 		keep.insert(m_.generation);
 		std::vector<std::uint64_t> manifests;
@@ -1303,7 +1309,10 @@ private:
 		for (std::uint64_t g : keep) {
 			if (g != m_.generation && !files_.count(index_detail::manifest_name(g))) { continue; }
 			const auto* names = manifest_files(g);
-			if (!names) { return; }  // a kept manifest it cannot read: remove nothing this round
+			if (!names) {  // a kept manifest it cannot read: remove nothing this round
+				retention_blocked_ = g;
+				return;
+			}
 			referenced.insert(names->begin(), names->end());
 		}
 		// Flushed segments awaiting a commit are on disk but not yet named by a manifest.
@@ -1320,12 +1329,7 @@ private:
 			for (const auto& n : obsolete) {
 				if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest) {
 					sync_owed_ = true;
-					try {
-						remove_file(n);
-					} catch (const std::system_error& e) {
-						if (e.code().value() != ENOENT) { throw; }
-						forget_file(n);
-					}
+					remove_file(n);  // IO::remove: a missing file is a success
 				}
 			}
 			if (sync_owed_) {
@@ -1551,6 +1555,7 @@ private:
 	std::set<std::string> queued_;
 	bool sync_owed_ = false;  // manifests removed since the last directory sync
 	std::uint64_t media_retries_ = 0;
+	std::optional<std::uint64_t> retention_blocked_;
 	std::uint64_t on_disk_ = 0, reserved_ = 0;
 	std::uint64_t unlinked_ = 0;  // removed, awaiting a directory sync to be freed
 	std::uint64_t held_ = 0;      // reserved by a merge or install while it writes

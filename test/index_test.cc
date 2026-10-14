@@ -1238,6 +1238,147 @@ int main() {
 		target.install(io, pinned);
 		CHECK(target.digest() == digest);
 	}
+	// A kept manifest that never reads (a damaged pinned checkpoint) stops retention, which
+	// the index reports; releasing the pin resumes it (condition 13).
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		auto ix = strata::index::create(io, keyed, uuid);
+		ix.apply(tx({add("Qa", "a")}), {});
+		const std::uint64_t pinned = ix.checkpoint();
+		const auto name = strata::index_detail::manifest_name(pinned);
+		std::string bytes(fs.view(name));
+		bytes[bytes.size() / 2] ^= 1;
+		io.remove(name);
+		{
+			auto f = io.create_exclusive(name);
+			strata::index_detail::write_all(*f, bytes);
+			f->sync();
+		}
+		io.sync_directory();
+		ix.commit();
+		ix.close();
+		ix = strata::index::open(io, keyed);  // a fresh index reads the damaged manifest
+		auto strata_files = [&] {
+			std::size_t n = 0;
+			for (const auto& f : fs.list()) { n += strata::index_detail::parse_name(f).has_value(); }
+			return n;
+		};
+		for (int i = 0; i < 30; ++i) {
+			ix.apply(tx({replace("Qa", "a" + std::to_string(i))}), {});
+			ix.commit();
+		}
+		CHECK(ix.retention_blocked() == pinned && strata_files() > 30);
+		ix.release(pinned);
+		ix.commit();
+		ix.reclaim(UINT64_MAX);
+		CHECK(!ix.retention_blocked() && strata_files() < 12);
+	}
+	// A head that pins a checkpoint whose manifest retention already removed (recover --to a
+	// manifest from before the release): retention skips it and keeps reclaiming
+	// (condition 14).
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		std::uint64_t listing;
+		{
+			auto ix = strata::index::create(io, keyed, uuid);
+			ix.apply(tx({add("Qa", "a")}), {});
+			const std::uint64_t pinned = ix.checkpoint();
+			for (int i = 0; i < 4; ++i) {
+				ix.apply(tx({replace("Qa", "b" + std::to_string(i))}), {});
+				ix.commit();
+			}
+			ix.release(pinned);
+			ix.commit();
+			listing = 0;  // a retained predecessor that still lists the pin
+			for (const auto& n : fs.list()) {
+				if (auto p = strata::index_detail::parse_name(n); p && p->type == strata::index_detail::parsed_name::manifest &&
+					strata::files::decode_manifest(fs.view(n)).pinned == std::vector<std::uint64_t>{pinned}) {
+					listing = p->a;
+				}
+			}
+			CHECK(listing != 0);
+			for (const auto& n : fs.list()) { CHECK(n != strata::index_detail::manifest_name(pinned)); }
+		}
+		auto ix = strata::index::open(io, keyed, listing);
+		for (int i = 0; i < 50; ++i) {
+			ix.apply(tx({replace("Qa", "c" + std::to_string(i))}), {});
+			ix.commit();
+		}
+		ix.reclaim(UINT64_MAX);
+		std::size_t n = 0;
+		for (const auto& f : fs.list()) { n += strata::index_detail::parse_name(f).has_value(); }
+		CHECK(!ix.retention_blocked() && n < 20);
+	}
+	// A merge whose admission drains through a failing truncate or unlink is not fenced; the
+	// file stays queued (condition 14, condition 10's merge half).
+	for (faultfs::op kind : {faultfs::op::truncate, faultfs::op::remove}) {
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		byte_budget storage(1ull << 40);
+		strata::index::options o = keyed;
+		o.storage = &storage;
+		o.reclaim_slice = 0;
+		o.reclaim_step = 4096;
+		o.retained_predecessors = 0;
+		std::mt19937_64 r(14);
+		auto ix = strata::index::create(io, o, uuid);
+		operation big = add("Qold", "x");
+		big.doc.stored.resize(40000);
+		for (auto& c : big.doc.stored) { c = char(r()); }
+		ix.apply(tx({big}), {});
+		ix.commit();
+		ix.apply(tx({erase("Qold")}), {});
+		ix.commit();
+		for (int s = 0; s < 2; ++s) {
+			std::vector<operation> ops;
+			for (int i = 0; i < 20; ++i) { ops.push_back(add("Q" + std::to_string(s * 20 + i), "y")); }
+			ix.apply(tx(ops), {});
+			ix.refresh();
+		}
+		ix.commit();
+		CHECK(ix.reclaim_pending() == 1);
+		std::vector<std::uint64_t> ids;
+		for (const auto& v : ix.segments()) { ids.push_back(v.id); }
+		byte_budget tight(storage.used() + 1000);  // the merge needs the drain
+		ix.close();
+		o.storage = &tight;
+		ix = strata::index::open(io, o);
+		fs.add_fault({kind, 1, EIO, false});
+		try {
+			ix.merge(ids);
+		} catch (const std::system_error& e) {
+			CHECK(std::string(e.what()).find("no storage reserved") != std::string::npos);
+		}
+		fs.clear_faults();
+		CHECK(ix.reclaim_pending() == 1);  // the failed removal stays queued
+		(void)ix.apply(tx({add("Qz", "z")}), {});  // accepted or no_space, never fenced
+		CHECK(!throws([&] { ix.commit(); }));  // not fenced
+		ix.close();
+	}
+	// A queued file that is gone before its truncation opens it is forgotten, not an error.
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		strata::index::options o = keyed;
+		o.reclaim_slice = 0;
+		o.reclaim_step = 4096;
+		o.retained_predecessors = 0;
+		std::mt19937_64 r(15);
+		auto ix = strata::index::create(io, o, uuid);
+		operation big = add("Qold", "x");
+		big.doc.stored.resize(40000);
+		for (auto& c : big.doc.stored) { c = char(r()); }
+		ix.apply(tx({big}), {});
+		ix.commit();
+		const auto gone = strata::index_detail::segment_name(ix.segments().at(0).id);
+		ix.apply(tx({erase("Qold")}), {});
+		ix.commit();
+		CHECK(ix.reclaim_pending() == 1);
+		io.remove(gone);
+		CHECK(!throws([&] { ix.reclaim(UINT64_MAX); }) && ix.reclaim_pending() == 0);
+	}
 	// A failed truncate, unlink, or directory sync after the commit point neither fails
 	// commit() nor loses the commit; the file stays queued and a later round reclaims it.
 	for (faultfs::op kind : {faultfs::op::truncate, faultfs::op::remove, faultfs::op::sync_directory}) {

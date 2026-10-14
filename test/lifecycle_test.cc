@@ -624,8 +624,11 @@ int main() {
 				ix.apply(transaction{{del}}, {});
 				ix.commit();
 				CHECK(ix.segments().empty());
+				for (int i = 0; i < 3; ++i) { ix.commit(); }  // past the retained predecessors: no segment left
+				ix.reclaim(~std::uint64_t(0));
 			}
 			for (const auto& n : dfs.list()) {
+				CHECK(!n.starts_with("seg-"));  // only metadata beside the manifests
 				if (n.starts_with("manifest-")) { dio.remove(n); }
 			}
 			bool uncreated = false;
