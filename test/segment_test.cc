@@ -732,6 +732,147 @@ int main() {
 		std::printf("  resealed sweep: %llu changes, %llu fenced\n", (unsigned long long)changes, (unsigned long long)fenced);
 		CHECK(changes > 1000 && fenced > changes / 10);
 	}
+	// C13 (Phase 2 review): a resealed skip group whose first position index is near 2^64.
+	// Reading a document whose index wraps fences; no read returns other positions.
+	{
+		strata::segment_writer w;
+		w.wide_skip_offsets = true;
+		for (std::uint32_t d = 0; d < 300; ++d) {
+			std::vector<std::uint32_t> pos{d + 1};  // each document's one position is distinct
+			std::vector<strata::posting_input> in{{"p", 1, pos}};
+			w.add(d + 1, in, 1);
+		}
+		const std::string good = w.flush({});
+		// Group 0's first position index (offset 2 of a wide level-1 entry) set to `first`.
+		auto with_first = [&](std::uint64_t first) {
+			std::string file = good;
+			strata::segment s(file);
+			const auto info = *s.term("p");
+			const char* p = s.postings_bytes().data() + info.postings;
+			const char* end = p + info.postings_length;
+			(void)strata::format::get_leb(&p, end);  // groups
+			CHECK(*p++ == 1);                          // wide offsets
+			for (int i = 0; i < 5; ++i) { (void)strata::format::get_leb(&p, end); }
+			std::memcpy(file.data() + (p - file.data()) + 8 + 16, &first, 8);
+			reseal(file);
+			return file;
+		};
+		// 64 below 2^64: the second block's first index wraps (the group decode fences).
+		// 140 below: the blocks' firsts fit, and a document's index wraps inside block 1.
+		strata::segment good_seg(good);
+		for (std::uint64_t below : {64u, 140u}) {
+			const std::string file = with_first(~std::uint64_t(0) - (below - 1));
+			strata::segment bad_seg(file);
+			std::size_t fenced = 0;
+			for (strata::ordinal_t target : {strata::ordinal_t(150), strata::ordinal_t(250)}) {
+				strata::postings_iterator g(good_seg, *good_seg.term("p")), b(bad_seg, *bad_seg.term("p"));
+				strata::positions_reader gp(good_seg, *good_seg.term("p")), bp(bad_seg, *bad_seg.term("p"));
+				g.advance(target);
+				const auto want = gp.read(g);
+				try {
+					b.advance(target);
+					const auto got = bp.read(b);
+					CHECK(std::vector<std::uint32_t>(got.begin(), got.end()) == std::vector<std::uint32_t>(want.begin(), want.end()));
+				} catch (const strata::corrupt_segment&) {
+					++fenced;
+				}
+			}
+			CHECK(fenced == 2);
+		}
+	}
+	// C13: or_bitset's checks, reached through a window count. A dense term with no wdf and
+	// no positions keeps bitset blocks whose level-0 entries are (delta, bytes, pairs). A
+	// bit flipped in block 2 fails its count; 8 bytes moved from block 2's length to block
+	// 3's keep the group's total and fail block 2's bounds.
+	{
+		strata::segment_writer w;
+		for (std::uint32_t d = 0; d < 5000; ++d) {
+			std::vector<std::uint32_t> none;
+			std::vector<strata::posting_input> in;
+			if (d % 10 != 0) { in.push_back({"dense", 0, none}); }  // 90%: bitset blocks (all would be one constant FOR block)
+			if (d % 3 == 0) { in.push_back({"m3", 0, none}); }
+			if (d % 5 == 0) { in.push_back({"m5", 0, none}); }
+			w.add(d + 1, in, 1);
+		}
+		const std::string good = w.flush({});
+		// The offsets of each block's length LEB in level 0, and of each block's bytes.
+		std::vector<std::size_t> length_at, block_at;
+		std::vector<std::uint64_t> lengths;
+		{
+			strata::segment s(good);
+			const auto info = *s.term("dense");
+			const char* base = good.data();
+			const char* p = s.postings_bytes().data() + info.postings;
+			const char* end = p + info.postings_length;
+			const std::uint64_t groups = strata::format::get_leb(&p, end);
+			const bool wide = *p++ == 1;
+			const std::uint64_t pairs = strata::format::get_leb(&p, end), level0 = strata::format::get_leb(&p, end);
+			(void)strata::format::get_leb(&p, end);  // blocks bytes
+			p += groups * (8 + (wide ? 8 : 4) * 2) + pairs;
+			const char* level0_end = p + level0;
+			const char* blocks = level0_end;
+			while (p < level0_end) {
+				(void)strata::format::get_leb(&p, level0_end);  // last delta
+				length_at.push_back(std::size_t(p - base));
+				const std::uint64_t bytes = strata::format::get_leb(&p, level0_end);
+				CHECK(bytes & 1);  // a bitset block
+				block_at.push_back(std::size_t(blocks - base));
+				lengths.push_back(bytes >> 1);
+				blocks += bytes >> 1;
+				(void)strata::format::skip_sized_impacts(&p, level0_end);
+			}
+		}
+		CHECK(lengths.size() >= 4 && lengths[2] < 64 && lengths[3] + 8 < 64);  // one-byte LEBs
+		auto window_count = [](const std::string& file) {
+			strata::segment s(file);
+			std::vector<strata::scorer_ptr> kids;
+			for (const char* t : {"dense", "m3", "m5"}) { kids.push_back(std::make_unique<strata::term_scorer>(s, *s.term(t))); }
+			strata::disjunction_scorer any(std::move(kids));
+			return strata::count(any);
+		};
+		std::uint64_t any = 0;
+		for (std::uint32_t d = 0; d < 5000; ++d) { any += d % 10 != 0 || d % 3 == 0 || d % 5 == 0; }
+		CHECK(window_count(good) == any);
+		std::string flipped = good;
+		flipped[block_at[2] + 3] ^= 0x10;
+		reseal(flipped);
+		CHECK(throws_corrupt([&] { (void)window_count(flipped); }));
+		std::string moved = good;
+		moved[length_at[2]] = char((lengths[2] - 8) << 1 | 1);
+		moved[length_at[3]] = char((lengths[3] + 8) << 1 | 1);
+		reseal(moved);
+		CHECK(throws_corrupt([&] { (void)window_count(moved); }));
+	}
+	// Reader edges: an empty segment's lookups, zero-width and 32-bit lengths, advancing an
+	// exhausted iterator, and a term whose postings fill whole blocks with no tail.
+	{
+		const std::string empty = strata::segment_writer{}.flush({});
+		strata::segment e(empty);
+		CHECK(e.doc_count() == 0 && !e.ordinal_of(5) && !e.term("x"));
+		strata::segment_writer zero, wide;
+		std::vector<std::uint32_t> none;
+		for (std::uint32_t d = 0; d < 300; ++d) {
+			std::vector<strata::posting_input> in{{"t", 1, none}};
+			zero.add(d + 1, in, 0);
+			wide.add(d + 1, in, d == 7 ? 0xfffffff0u : d);
+		}
+		const std::string zero_bytes = zero.flush({}), wide_bytes = wide.flush({});
+		strata::segment z(zero_bytes), wd(wide_bytes);
+		CHECK(z.length(5) == 0 && wd.length(7) == 0xfffffff0u && wd.length(8) == 8);
+		strata::segment_writer full;
+		for (std::uint32_t d = 0; d < 512; ++d) {
+			std::vector<strata::posting_input> in{{d % 2 ? "half" : "other", 1, none}};
+			full.add(d + 1, in, 1);
+		}
+		const std::string full_bytes = full.flush({});
+		strata::segment f(full_bytes);
+		strata::postings_iterator it(f, *f.term("half"));  // 256 postings: two full blocks
+		CHECK(f.term("half")->df == 256);
+		strata::ordinal_t last = strata::no_more_docs;
+		for (auto d = it.next(); d != strata::no_more_docs; d = it.next()) { last = d; }
+		CHECK(last == 511);
+		CHECK(it.advance(600) == strata::no_more_docs && it.block_end(0) != 0);
+	}
 	// add_tokens gives the same segment as add with the tokens grouped by term: same bytes.
 	{
 		std::mt19937_64 r(31);

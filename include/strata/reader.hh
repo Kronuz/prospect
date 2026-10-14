@@ -615,7 +615,10 @@ public:
 			sum_pos_ = 0;
 			sum_ = positions_start().first_index;
 		}
-		for (; sum_pos_ < pos_; ++sum_pos_) { sum_ += counts[sum_pos_]; }
+		for (; sum_pos_ < pos_; ++sum_pos_) {
+			if (sum_ + counts[sum_pos_] < sum_) { throw corrupt_segment("position index"); }  // wraps past 2^64
+			sum_ += counts[sum_pos_];
+		}
 		return sum_;
 	}
 
@@ -795,7 +798,9 @@ private:
 			e.bitset = bytes & 1;
 			e.base = last;  // the previous block's last ordinal (none before the first)
 			if (with_positions_) {
-				first_position += format::get_leb(&p, end);
+				const std::uint64_t delta = format::get_leb(&p, end);
+				if (first_position + delta < first_position) { throw corrupt_segment("position index"); }
+				first_position += delta;
 				pos_offset += format::get_leb(&p, end);
 				if (with_counts_) { count_offset += format::get_leb(&p, end); }
 			}
@@ -1126,7 +1131,7 @@ private:
 			at = decoded_block_;
 			offset = decoded_offset_;
 		}
-		for (; at < j; ++at) {  // j >= at: a document's positions start at or after its block's first
+		for (; at < j; ++at) {  // j >= at: position indexes never wrap (position_index, decode_group)
 			if (offset >= blocks_bytes_) { throw corrupt_segment("position block bounds"); }
 			need_block(blocks_ + offset, blocks_bytes_ - offset);
 			const std::size_t n = bitpack::encoded_size(reinterpret_cast<const std::uint8_t*>(blocks_ + offset), blocks_bytes_ - offset);
