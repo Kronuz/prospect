@@ -46,7 +46,7 @@ create)
 	;;
 start)
 	qemu-system-x86_64 -accel hvf -cpu host -smp "$cpus" -m "$mem" \
-		-drive file="$dir/disk.qcow2",if=virtio,cache=none \
+		-drive file="$dir/disk.qcow2",if=virtio,cache=none,discard=unmap,detect-zeroes=unmap \
 		-drive file="$dir/seed.iso",media=cdrom,readonly=on \
 		-netdev user,id=net0,hostfwd=tcp:127.0.0.1:"$port"-:22 -device virtio-net-pci,netdev=net0 \
 		-display none -serial file:"$dir/console.log" -monitor none \
