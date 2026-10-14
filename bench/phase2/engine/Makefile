@@ -1,8 +1,10 @@
 # strata as a search-benchmark-game engine; copy to engines/strata.
-# STRATA_SRC points at a strata checkout; LIBS at sibling Kronuz library checkouts.
+# STRATA_SRC points at a strata checkout; LIBS at sibling Kronuz library checkouts, used
+# instead of the pinned commits when present.
 STRATA_SRC ?= $(HOME)/libs/strata
 LIBS ?= $(HOME)/libs
-OVERRIDES := $(foreach l,docset bitpack fst task hashes residency varint termdict unicode snowball analysis fusefilter completion metrics,-DFETCHCONTENT_SOURCE_DIR_$(shell echo $(l) | tr a-z A-Z)=$(LIBS)/$(l))
+# Only the checkouts that exist; without any, strata builds at its pinned commits.
+OVERRIDES := $(foreach l,docset bitpack fst task hashes residency varint termdict unicode snowball analysis fusefilter completion metrics,$(if $(wildcard $(LIBS)/$(l)),-DFETCHCONTENT_SOURCE_DIR_$(shell echo $(l) | tr a-z A-Z)=$(LIBS)/$(l)))
 
 clean:
 	rm -fr idx build
