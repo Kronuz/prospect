@@ -616,6 +616,12 @@ int main() {
 		CHECK(throws_corrupt([&] { (void)any_sized_impact(list({2 << 1, 4, 2, 1, 1, 1}), no_match); }));        // full, truncated
 		CHECK(throws_corrupt([&] { (void)any_sized_impact(list({1 << 1 | 1, 1, 1, 7}), no_match); }));          // bytes past the pairs
 		CHECK(!any_sized_impact(list({1 << 1 | 1, 1, 1}), no_match));
+		auto skip = [](const std::string& bytes) { const char* p = bytes.data(); (void)skip_sized_impacts(&p, p + bytes.size()); };
+		auto decode = [](const std::string& bytes) { const char* p = bytes.data(); std::vector<impact> v; (void)decode_impacts(&p, p + bytes.size(), v); };
+		CHECK(throws_corrupt([&] { skip(list({257 << 1 | 1}, std::string(514, '\1'))); }));  // more pairs than lengths
+		CHECK(throws_corrupt([&] { skip(list({0 << 1 | 1})); }));                              // no pairs
+		CHECK(throws_corrupt([&] { decode(list({0})); }));                                       // no pairs
+		CHECK(throws_corrupt([&] { decode(list({257}, std::string(514, '\1'))); }));           // more pairs than lengths
 		// Stored records.
 		std::mt19937_64 r5(5);
 		model m5;
