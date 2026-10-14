@@ -485,12 +485,20 @@ inline term_info decode_term_info(std::string_view bytes, term_run& run, bool wi
 
 // The competitive pairs of a list of (wdf, length) pairs: its Pareto frontier (higher
 // wdf, lower length), highest wdf first. At most 256 pairs, one per length code.
-inline std::vector<impact> competitive(std::vector<impact> pairs) {
-	std::sort(pairs.begin(), pairs.end(), [](const impact& a, const impact& b) { return a.wdf != b.wdf ? a.wdf > b.wdf : a.length < b.length; });
+inline std::vector<impact> competitive(const std::vector<impact>& pairs) {
+	// Lengths are one byte: the highest wdf at each length, then one pass from the shortest
+	// keeps each length whose wdf beats every shorter one's. No sort.
+	std::array<std::uint64_t, 256> best{};  // wdf + 1 at each length; 0 for none
+	for (const auto& p : pairs) { best[p.length] = std::max<std::uint64_t>(best[p.length], std::uint64_t(p.wdf) + 1); }
 	std::vector<impact> frontier;
-	for (const auto& p : pairs) {
-		if (frontier.empty() || p.length < frontier.back().length) { frontier.push_back(p); }
+	std::uint64_t beat = 0;
+	for (unsigned length = 0; length < 256; ++length) {
+		if (best[length] > beat) {
+			beat = best[length];
+			frontier.push_back({std::uint32_t(beat - 1), std::uint8_t(length)});
+		}
 	}
+	std::reverse(frontier.begin(), frontier.end());  // highest wdf first
 	if (frontier.empty()) { frontier.push_back({}); }
 	return frontier;
 }

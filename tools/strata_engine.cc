@@ -52,9 +52,7 @@ int index(const std::string& dir) {
 	strata::segment_writer w;
 	if (const char* shift = std::getenv("STRATA_REGION_SHIFT")) { w.region_shift = std::uint8_t(std::atoi(shift)); }  // for measurement
 	std::string line;
-	std::vector<std::pair<std::string_view, std::uint32_t>> tokens;  // (token, position)
-	std::vector<std::uint32_t> positions;
-	std::vector<strata::posting_input> in;
+	std::vector<strata::segment_writer::token> tokens;
 	std::uint64_t n = 0;
 	while (std::getline(std::cin, line)) {
 		if (line.empty()) { continue; }
@@ -67,18 +65,7 @@ int index(const std::string& dir) {
 			if (j > i) { tokens.push_back({text.substr(i, j - i), ++pos}); }
 			i = j + 1;
 		}
-		// Group a document's tokens by sorting: each term's positions end up contiguous.
-		std::sort(tokens.begin(), tokens.end());
-		positions.clear();
-		for (const auto& t : tokens) { positions.push_back(t.second); }
-		in.clear();
-		for (std::size_t i = 0; i < tokens.size();) {
-			std::size_t j = i;
-			while (j < tokens.size() && tokens[j].first == tokens[i].first) { ++j; }
-			in.push_back({tokens[i].first, std::uint32_t(j - i), std::span<const std::uint32_t>(positions.data() + i, j - i)});
-			i = j;
-		}
-		w.add(++n, in, pos, id_field(line));
+		w.add_tokens(++n, tokens, pos, id_field(line));
 		if (n % 100000 == 0) { std::cerr << n << '\n'; }
 	}
 	{

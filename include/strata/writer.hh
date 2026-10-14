@@ -246,60 +246,47 @@ public:
 	// is docid order. `length` is the document length used by weighting (Xapian: the sum
 	// of wdf over non-boolean terms). `stored` is the document's stored record, returned
 	// by segment::stored. `key` is the document's key term (one of its terms) or empty.
+	// Each term appears once, with its wdf and its positions in increasing order.
 	ordinal_t add(std::uint64_t docid, std::span<const posting_input> terms, std::uint32_t length, std::string_view stored = {},
 		std::uint64_t version = 0, std::string_view key = {}) {
-		// Ordinals are 32-bit and the largest value means no more documents.
-		if (lengths_.size() >= std::size_t(no_more_docs) - 1) { throw std::length_error("strata: segment document limit"); }
-		if (docid == 0 || (!docids_.empty() && docid <= docids_.back())) { throw std::invalid_argument("strata: docids must increase within a segment"); }
-		if (stored.size() > format::max_stored_record) { throw std::invalid_argument("strata: stored record too large"); }
-		const ordinal_t ord = ordinal_t(lengths_.size());
-		versions_.push_back(version);
-		if (!key.empty()) {
-			key_hashes_.push_back(xxh64::hash(key));
-			if (keys_min_.empty() && keys_max_.empty()) {
-				keys_min_ = keys_max_ = key;
-			} else {
-				if (key < keys_min_) { keys_min_ = key; }
-				if (key > keys_max_) { keys_max_ = key; }
-			}
-		}
-		stored_ += stored;
-		stored_ends_.push_back(stored_.size());
-		lengths_.push_back(length);
-		docids_.push_back(docid);
-		total_length_ += length;
+		const ordinal_t ord = begin_document(docid, length, stored, version, key);
 		for (const auto& in : terms) {
 			term_buffer& t = buffer_for(in.term);
 			if (t.df && t.last == ord) { throw std::invalid_argument("strata: term repeated within a document"); }
-			format::put_leb(t.ords, t.df ? ord - t.last : ord + 1);
-			format::put_leb(t.wdfs, in.wdf);
-			t.last = ord;
-			++t.df;
-			t.cf += in.wdf;
-			t.max_wdf = std::max(t.max_wdf, in.wdf);
-			if (in.wdf) { t.all_zero_wdf = false; }
-			if (!in.positions.empty()) { t.any_positions = true; }
-			// Counts are kept only once one differs from its wdf; until then they are the wdfs,
-			// whose LEB128 stream is the same bytes.
-			if (t.counts_are_wdf && in.positions.size() != in.wdf) {
-				t.counts_are_wdf = false;
-				t.counts.assign(t.wdfs, 0, t.wdfs.size() - leb_size(in.wdf));
-			}
-			if (!t.counts_are_wdf) { format::put_leb(t.counts, in.positions.size()); }
-			max_positions_ = std::max(max_positions_, std::uint32_t(in.positions.size()));
-			std::uint32_t prev = 0;
-			for (auto p : in.positions) {
-				format::put_leb(t.positions, p - prev);
-				prev = p;
-			}
+			open_posting(t, ord);
+			for (auto p : in.positions) { add_position(t, p); }
+			close_posting(t, in.wdf, std::uint32_t(in.positions.size()));
 		}
+		return ord;
+	}
+
+	// The same from a document's tokens in order, as a tokenizer produces them: each
+	// occurrence of a term adds one to its wdf and its position to its positions, so
+	// nothing has to group them first. Positions increase.
+	struct token {
+		std::string_view term;
+		std::uint32_t position;
+	};
+	ordinal_t add_tokens(std::uint64_t docid, std::span<const token> tokens, std::uint32_t length, std::string_view stored = {},
+		std::uint64_t version = 0, std::string_view key = {}) {
+		const ordinal_t ord = begin_document(docid, length, stored, version, key);
+		touched_.clear();
+		for (const auto& tk : tokens) {
+			term_buffer& t = buffer_for(tk.term);
+			if (!t.df || t.last != ord) {
+				open_posting(t, ord);
+				touched_.push_back(&t);
+			}
+			add_position(t, tk.position);
+		}
+		for (term_buffer* t : touched_) { close_posting(*t, t->open_count, t->open_count); }
 		return ord;
 	}
 
 	// Adds a document's per-document data only, for a writer whose terms come from
 	// flush_from (a merge); returns its ordinal.
 	ordinal_t add_document(std::uint64_t docid, std::uint32_t length, std::string_view stored = {}, std::uint64_t version = 0, std::string_view key = {}) {
-		return add(docid, std::span<const posting_input>{}, length, stored, version, key);
+		return begin_document(docid, length, stored, version, key);
 	}
 
 	std::size_t doc_count() const noexcept { return lengths_.size(); }
@@ -483,9 +470,65 @@ private:
 		std::string ords, wdfs, counts, positions;  // LEB128 streams while buffering
 		ordinal_t last = 0;
 		std::uint32_t df = 0, max_wdf = 0;
+		std::uint32_t open_count = 0, open_prev = 0;  // the open posting: positions so far, the last one
 		std::uint64_t cf = 0;
 		bool all_zero_wdf = true, any_positions = false, counts_are_wdf = true;
 	};
+
+	// The per-document data; returns the document's ordinal.
+	ordinal_t begin_document(std::uint64_t docid, std::uint32_t length, std::string_view stored, std::uint64_t version, std::string_view key) {
+		// Ordinals are 32-bit and the largest value means no more documents.
+		if (lengths_.size() >= std::size_t(no_more_docs) - 1) { throw std::length_error("strata: segment document limit"); }
+		if (docid == 0 || (!docids_.empty() && docid <= docids_.back())) { throw std::invalid_argument("strata: docids must increase within a segment"); }
+		if (stored.size() > format::max_stored_record) { throw std::invalid_argument("strata: stored record too large"); }
+		const ordinal_t ord = ordinal_t(lengths_.size());
+		versions_.push_back(version);
+		if (!key.empty()) {
+			key_hashes_.push_back(xxh64::hash(key));
+			if (keys_min_.empty() && keys_max_.empty()) {
+				keys_min_ = keys_max_ = key;
+			} else {
+				if (key < keys_min_) { keys_min_ = key; }
+				if (key > keys_max_) { keys_max_ = key; }
+			}
+		}
+		stored_ += stored;
+		stored_ends_.push_back(stored_.size());
+		lengths_.push_back(length);
+		docids_.push_back(docid);
+		total_length_ += length;
+		return ord;
+	}
+
+	// A term's posting in document ord: opened, given its positions in order, then closed
+	// with its wdf and position count.
+	void open_posting(term_buffer& t, ordinal_t ord) {
+		format::put_leb(t.ords, t.df ? ord - t.last : ord + 1);
+		t.last = ord;
+		++t.df;
+		t.open_count = 0;
+		t.open_prev = 0;
+	}
+	void add_position(term_buffer& t, std::uint32_t p) {
+		format::put_leb(t.positions, p - t.open_prev);
+		t.open_prev = p;
+		++t.open_count;
+	}
+	void close_posting(term_buffer& t, std::uint32_t wdf, std::uint32_t count) {
+		format::put_leb(t.wdfs, wdf);
+		t.cf += wdf;
+		t.max_wdf = std::max(t.max_wdf, wdf);
+		if (wdf) { t.all_zero_wdf = false; }
+		if (count) { t.any_positions = true; }
+		// Counts are kept only once one differs from its wdf; until then they are the wdfs,
+		// whose LEB128 stream is the same bytes.
+		if (t.counts_are_wdf && count != wdf) {
+			t.counts_are_wdf = false;
+			t.counts.assign(t.wdfs, 0, t.wdfs.size() - leb_size(wdf));
+		}
+		if (!t.counts_are_wdf) { format::put_leb(t.counts, count); }
+		max_positions_ = std::max(max_positions_, count);
+	}
 
 	// Open addressing with linear probing over stored hashes; grows at half load.
 	struct slot {
@@ -835,6 +878,7 @@ private:
 	std::deque<std::string> arena_;
 	std::vector<slot> table_;
 	std::deque<term_buffer> buffers_;
+	std::vector<term_buffer*> touched_;  // add_tokens: the document's open postings
 	std::vector<std::uint32_t> lengths_;
 	std::string stored_;                     // stored records, concatenated
 	std::vector<std::uint64_t> stored_ends_;  // where each document's record ends

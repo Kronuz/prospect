@@ -732,6 +732,26 @@ int main() {
 		std::printf("  resealed sweep: %llu changes, %llu fenced\n", (unsigned long long)changes, (unsigned long long)fenced);
 		CHECK(changes > 1000 && fenced > changes / 10);
 	}
+	// add_tokens gives the same segment as add with the tokens grouped by term: same bytes.
+	{
+		std::mt19937_64 r(31);
+		const char* words[] = {"a", "b", "c", "d", "e", "rare", "the", "of"};
+		strata::segment_writer grouped, streamed;
+		for (std::uint32_t d = 0; d < 3000; ++d) {
+			std::vector<strata::segment_writer::token> tokens;
+			const std::uint32_t n = 1 + std::uint32_t(r() % 40);
+			for (std::uint32_t i = 0; i < n; ++i) { tokens.push_back({words[r() % std::size(words)], i + 1 + std::uint32_t(r() % 2)}); }
+			for (std::size_t i = 1; i < tokens.size(); ++i) { tokens[i].position = std::max(tokens[i].position, tokens[i - 1].position + 1); }
+			std::map<std::string_view, std::vector<std::uint32_t>> by_term;
+			for (const auto& t : tokens) { by_term[t.term].push_back(t.position); }
+			std::vector<strata::posting_input> in;
+			for (const auto& [term, positions] : by_term) { in.push_back({term, std::uint32_t(positions.size()), positions}); }
+			const std::string stored(d % 7, 's');
+			grouped.add(d + 1, in, n, stored);
+			streamed.add_tokens(d + 1, tokens, n, stored);
+		}
+		CHECK(grouped.flush({}) == streamed.flush({}));
+	}
 	// Term infos in restart runs: random terms (singles, positionless, gaps, skip blocks)
 	// decode the same read in order or from their run's start, as find_run reads them.
 	{
