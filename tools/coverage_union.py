@@ -14,8 +14,9 @@ when a build with single-byte coverage (`--confirm`, a flag per region and no
 expressions) took it; otherwise it is listed as unconfirmed and counts as uncovered.
 
   coverage_union.py LLVM_BIN PROFDATA BINARY... [--confirm PROFDATA BINARY...] [--list]
+      [--headers /include/strata/]
 
-`--list` prints, per header, the uncovered lines and the branch outcomes not taken.
+`--headers` selects the headers measured, by path fragment. `--list` prints, per header, the uncovered lines and the branch outcomes not taken.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 SATURATED = 1 << 62
+HEADERS = "/include/strata/"
 
 Key = tuple[int, int, int]
 
@@ -50,7 +52,7 @@ def export(llvm: Path, profdata: str, binary: str, form: str) -> str:
 
 
 def strata_header(name: str) -> str:
-    return name.rsplit("/", 1)[-1] if "/include/strata/" in name else ""
+    return name.rsplit("/", 1)[-1] if HEADERS in name else ""
 
 
 class Build:
@@ -93,7 +95,12 @@ def saturated(counts: list[int]) -> bool:
 
 
 def main() -> int:
+    global HEADERS
     args = sys.argv[1:]
+    if "--headers" in args:
+        at = args.index("--headers")
+        HEADERS = args[at + 1]
+        del args[at : at + 2]
     listing = "--list" in args
     args = [a for a in args if a != "--list"]
     confirm_args: list[str] = []
