@@ -24,6 +24,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <system_error>
 #include <unordered_map>
 #include <vector>
 
@@ -69,6 +70,12 @@ struct verdict {
 
 // The writer stopped after a durability failure; reopen to continue (design D2).
 struct index_fenced : std::runtime_error {
+	using std::runtime_error::runtime_error;
+};
+
+// The directory holds no committed index: no manifest and no segment, only what an
+// interrupted create leaves. create() runs again over it.
+struct index_not_created : std::runtime_error {
 	using std::runtime_error::runtime_error;
 };
 
@@ -171,9 +178,17 @@ public:
 	using options = index_options;
 
 	// Creates an empty index in an empty directory and commits its first manifest.
+	// Creates an index in an empty directory, or over what an interrupted create left; a
+	// directory holding a manifest or a segment is refused.
 	static index create(kronuz::journal::IO& io, const options& opts, const std::array<char, 16>& uuid) {
 		index ix(io);
-		ix.lock_ = io.acquire_owner(true);
+		try {
+			ix.lock_ = io.acquire_owner(true);
+		} catch (const std::system_error& e) {
+			if (e.code().value() != EEXIST) { throw; }
+			ix.lock_ = io.acquire_owner(false);
+			ix.clear_uncreated();
+		}
 		ix.m_.uuid = uuid;
 		ix.m_.key_prefix = opts.key_prefix;
 		ix.opts_ = opts;
@@ -187,7 +202,17 @@ public:
 	// closed when a file it names is missing or differs, then deletes orphans.
 	static index open(kronuz::journal::IO& io, const options& opts = {}, std::optional<std::uint64_t> to = std::nullopt) {
 		index ix(io);
-		ix.lock_ = io.acquire_owner(false);
+		try {
+			ix.lock_ = io.acquire_owner(false);
+		} catch (const std::system_error& e) {
+			// No owner lock: a create lost before its first file survived, or not an index.
+			if (e.code().value() != ENOENT) { throw; }
+			std::vector<std::string> names;
+			auto cursor = io.scan_directory();
+			while (auto n = cursor->next()) { names.push_back(*n); }
+			if (uncreated(names)) { throw index_not_created("strata: no index was committed here"); }
+			throw corrupt_index("no owner lock");
+		}
 		ix.opts_ = opts;
 		if (opts.budget) { ix.permit_ = opts.budget->open(); }
 		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
@@ -1243,6 +1268,30 @@ private:
 
 	// --- recovery ---------------------------------------------------------------------------
 
+	// Whether names are what an interrupted create leaves: none a manifest, a segment, or
+	// live docs.
+	static bool uncreated(const std::vector<std::string>& names) {
+		for (const auto& n : names) {
+			auto p = index_detail::parse_name(n);
+			if (p && p->type != index_detail::parsed_name::meta && p->type != index_detail::parsed_name::manifest_tmp) { return false; }
+		}
+		return true;
+	}
+	// Removes an interrupted create's files, durably, under the owner lock; throws when the
+	// directory holds a committed index or a segment.
+	void clear_uncreated() {
+		std::vector<std::string> names;
+		{
+			auto cursor = io_->scan_directory();
+			while (auto n = cursor->next()) { names.push_back(*n); }
+		}
+		if (!uncreated(names)) { throw std::system_error(std::make_error_code(std::errc::file_exists), "strata: the directory holds an index"); }
+		for (const auto& n : names) {
+			if (index_detail::parse_name(n)) { io_->remove(n); }
+		}
+		io_->sync_directory();
+	}
+
 	void recover(std::optional<std::uint64_t> to) {
 		std::vector<std::string> names;
 		{
@@ -1269,7 +1318,10 @@ private:
 		for (const auto& n : names) {
 			if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest) { manifests.push_back(p->a); }
 		}
-		if (manifests.empty()) { throw corrupt_index("no manifest"); }
+		if (manifests.empty()) {
+			if (uncreated(names)) { throw index_not_created("strata: no index was committed here"); }
+			throw corrupt_index("no manifest");
+		}
 		std::sort(manifests.begin(), manifests.end());
 		std::uint64_t chosen = manifests.back();
 		if (to) {

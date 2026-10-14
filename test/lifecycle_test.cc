@@ -3,9 +3,10 @@
 //     same verdicts and digests, and reopening keeps the digest.
 //   - Checkpoints and install: an installed checkpoint has the source's digest, and a
 //     crash during install opens the old content or the installed one.
-//   - Power loss at every mutation of seeded workloads (half under a small memory budget,
-//     flushing as it fills): reopening succeeds and its digest is one of the commit points
-//     from the last acknowledged commit to the last attempted.
+//   - Power loss at every mutation of seeded workloads applied at log positions (half
+//     under a small memory budget, flushing as it fills): reopening succeeds, its digest
+//     and applied position are one of the commit points from the last acknowledged commit
+//     to the last attempted, and replaying the whole log reaches the uninterrupted digest.
 // STRATA_CRASH_POINTS sets how many crash points to cover (default 10,000).
 #include "strata/faultfs.hh"
 #include "strata/index.hh"
@@ -510,6 +511,80 @@ int main() {
 		}
 		CHECK(total > 10);
 	}
+	// create under power loss at every mutation (condition 2): the directory then opens as
+	// the empty index, or as one that was never created, and create runs again over it. A
+	// directory with a segment but no manifest stays corrupt, and create refuses an index.
+	{
+		std::mt19937_64 cr(5);
+		auto add_op = [&](const std::string& key) {
+			operation o;
+			o.type = operation::replace_key;
+			o.key = key;
+			o.doc = make_doc(cr, key);
+			return o;
+		};
+		auto throws = [](const auto& f) {
+			try {
+				f();
+			} catch (...) {
+				return true;
+			}
+			return false;
+		};
+		std::uint64_t total, empty;
+		{
+			faultfs::filesystem fs;
+			faultfs::io io(fs);
+			const std::uint64_t base = fs.mutations();
+			auto ix = index::create(io, keyed, uuid_a);
+			total = fs.mutations() - base;
+			empty = ix.digest();
+		}
+		std::size_t reran = 0;
+		for (std::uint64_t at = 0; at <= total; ++at) {
+			faultfs::filesystem fs;
+			faultfs::io io(fs);
+			fs.power_off_after(at);
+			try {
+				auto ix = index::create(io, keyed, uuid_a);
+			} catch (const std::exception&) {
+			}
+			fs.crash(at * 41 + 3);
+			std::optional<strata::index> ix;
+			try {
+				ix.emplace(index::open(io, keyed));
+				CHECK(ix->digest() == empty);
+			} catch (const index_not_created&) {
+				++reran;
+				ix.emplace(index::create(io, keyed, uuid_a));
+			}
+			CHECK(ix->apply(transaction{{add_op("Qk")}}, {}).result == verdict::accepted);
+			ix->commit();
+			ix->close();
+			CHECK(index::open(io, keyed).digest() != empty);
+		}
+		CHECK(total >= 5 && reran > 0);
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		{
+			auto ix = index::create(io, keyed, uuid_a);
+			ix.apply(transaction{{add_op("Qk")}}, {});
+			ix.commit();
+		}
+		CHECK(throws([&] { index::create(io, keyed, uuid_a); }));  // an index is there
+		for (const auto& n : fs.list()) {
+			if (n.starts_with("manifest-")) { io.remove(n); }
+		}
+		bool corrupt = false;
+		try {
+			index::open(io, keyed);
+		} catch (const corrupt_index&) {
+			corrupt = true;
+		}
+		CHECK(corrupt);  // segments without a manifest
+		CHECK(throws([&] { index::create(io, keyed, uuid_a); }));
+		std::printf("  create: %llu crash points, %zu created again\n", (unsigned long long)total + 1, reran);
+	}
 	// T1: power loss at every mutation point of seeded workloads.
 	std::size_t target = 10000;
 	if (const char* env = std::getenv("STRATA_CRASH_POINTS")) { target = std::strtoull(env, nullptr, 10); }
@@ -526,17 +601,18 @@ int main() {
 			}
 			return o;
 		};
-		// A dry run counts the workload's mutations.
-		std::uint64_t total;
+		// A dry run counts the workload's mutations and gives the uninterrupted digest.
+		std::uint64_t total, final_digest;
 		{
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
 			byte_budget mem(32 * 1024);
 			auto ix = index::create(io, options_for(mem), uuid_a);
 			const std::uint64_t base = fs.mutations();
+			std::uint64_t log = 0;
 			for (const auto& s : w) {
 				switch (s.type) {
-				case step::apply: ix.apply(s.t, {}); break;
+				case step::apply: ix.apply(s.t, {++log, 1}); break;
 				case step::refresh: ix.refresh(); break;
 				case step::commit: ix.commit(); break;
 				case step::checkpoint: ix.checkpoint(); break;
@@ -544,32 +620,35 @@ int main() {
 				}
 			}
 			total = fs.mutations() - base;
+			final_digest = ix.digest();
 		}
 		for (std::uint64_t at = 0; at <= total && points < target; ++at, ++points) {
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
-			std::set<std::uint64_t> allowed;
+			// Commit points as (digest, applied log position) pairs (condition 1).
+			std::set<std::pair<std::uint64_t, files::position>> allowed;
 			{
 				byte_budget mem(32 * 1024);
 				auto ix = index::create(io, options_for(mem), uuid_a);
-				allowed = {ix.digest()};
+				allowed = {{ix.digest(), ix.manifest().applied}};
 				fs.power_off_after(at);
+				std::uint64_t log = 0;
 				try {
 					for (const auto& s : w) {
 						switch (s.type) {
-						case step::apply: ix.apply(s.t, {}); break;
+						case step::apply: ix.apply(s.t, {++log, 1}); break;
 						case step::refresh: ix.refresh(); break;
 						case step::merge: run_merge(ix, s); break;
 						case step::commit:
 						case step::checkpoint: {
-							const std::uint64_t d = ix.digest();
-							allowed.insert(d);  // attempted
+							const std::pair point{ix.digest(), ix.manifest().applied};
+							allowed.insert(point);  // attempted
 							if (s.type == step::commit) {
 								ix.commit();
 							} else {
 								ix.checkpoint();
 							}
-							allowed = {d};  // acknowledged: nothing older is allowed
+							allowed = {point};  // acknowledged: nothing older is allowed
 							break;
 						}
 						}
@@ -589,9 +668,16 @@ int main() {
 			}
 			try {
 				auto ix = index::open(io, keyed);
-				const std::uint64_t got = ix.digest();
+				const std::pair got{ix.digest(), ix.manifest().applied};
 				CHECK(allowed.count(got));
 				if (!allowed.count(got)) { std::fprintf(stderr, "  workload %llu crash point %llu\n", (unsigned long long)seed, (unsigned long long)at); }
+				// Replaying the whole log skips what the recovered index applied and ends
+				// where the uninterrupted run does.
+				std::uint64_t log = 0;
+				for (const auto& s : w) {
+					if (s.type == step::apply) { ix.apply(s.t, {++log, 1}); }
+				}
+				CHECK(ix.digest() == final_digest);
 			} catch (const std::exception& e) {
 				CHECK(!"inconsistent open after power loss");
 				std::fprintf(stderr, "  workload %llu crash point %llu: %s\n", (unsigned long long)seed, (unsigned long long)at, e.what());
