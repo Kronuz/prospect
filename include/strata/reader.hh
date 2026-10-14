@@ -107,8 +107,6 @@ public:
 		max_positions_ = format::get<std::uint32_t>(stats_.data() + 24);
 		doc_count_ = format::get<std::uint64_t>(stats_.data());
 		total_length_ = format::get<std::uint64_t>(stats_.data() + 8);
-		min_length_ = format::get<std::uint32_t>(stats_.data() + 16);
-		max_length_ = format::get<std::uint32_t>(stats_.data() + 20);
 		if (doc_count_ != footer_.doc_count) { throw corrupt_segment("document count"); }
 		if (lengths_.empty()) { throw corrupt_segment("lengths"); }
 		length_width_ = std::uint8_t(lengths_[0]);
@@ -267,8 +265,6 @@ public:
 	std::uint32_t max_positions() const noexcept { return max_positions_; }
 	std::uint64_t total_length() const noexcept { return total_length_; }
 	double average_length() const noexcept { return doc_count_ ? double(total_length_) / double(doc_count_) : 0.0; }
-	std::uint32_t min_length() const noexcept { return min_length_; }
-	std::uint32_t max_length() const noexcept { return max_length_; }
 
 	// Document length by ordinal: one lane extraction from the bit-packed block. The
 	// section is verified whole on the first call (the default scheme reads norms only).
@@ -431,7 +427,7 @@ private:
 	std::unique_ptr<integrity> integrity_ = std::make_unique<integrity>();  // stable address for dict_
 	std::optional<termdict::reader> dict_;
 	std::uint64_t doc_count_ = 0, total_length_ = 0;
-	std::uint32_t min_length_ = 0, max_length_ = 0, max_positions_ = 0;
+	std::uint32_t max_positions_ = 0;
 	std::uint32_t lengths_crc_ = 0;
 	std::uint8_t length_width_ = 0;
 };
@@ -610,7 +606,6 @@ public:
 	std::size_t index_in_block() const noexcept { return pos_; }
 	bool in_tail() const noexcept { return tail_done_; }
 	std::size_t blocks() const noexcept { return blocks_; }
-	std::size_t tail_count() const noexcept { return df_ % format::block; }
 
 	// Where the current postings block's positions start: the index of its first position
 	// in the term's stream and the byte offset of the position block holding it; and the
@@ -1107,7 +1102,7 @@ public:
 			const std::uint64_t stop = std::min<std::uint64_t>(first + count, (j + 1) * format::block);
 			for (const std::uint32_t* v = block_buf_ + i % format::block; i < stop; ++i) { *o++ = at += *v++; }
 		}
-		for (; i < first + count; ++i) { *o++ = at += value(i, start); }
+		for (; i < first + count; ++i) { *o++ = at += tail_value(i); }
 		return {out_.get(), count};
 	}
 
@@ -1125,13 +1120,8 @@ private:
 		return counts_buf_;
 	}
 
-	// Position i of the stream; start locates the postings block's first position block.
-	std::uint32_t value(std::uint64_t i, const postings_iterator::position_start& start) {
-		const std::uint64_t j = i / format::block;
-		if (j < full_blocks_) {
-			if (decoded_block_ != j) { decode_block(j, start); }
-			return block_buf_[i % format::block];
-		}
+	// Position i of the stream's tail (i at or past the full blocks).
+	std::uint32_t tail_value(std::uint64_t i) {
 		const std::uint64_t t = i - full_blocks_ * format::block;
 		while (tail_values_.size() <= t) {
 			if (tail_p_ == nullptr) {
