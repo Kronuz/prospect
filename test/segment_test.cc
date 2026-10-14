@@ -417,6 +417,40 @@ int main() {
 			while (it.next() != strata::no_more_docs) {}
 		}));
 	}
+	// The bulk walks prime an iterator not yet started: for_each_until and fill from the
+	// first posting give what next() would.
+	{
+		strata::segment_writer w;
+		std::vector<std::uint32_t> none;
+		for (std::uint32_t d = 0; d < 300; ++d) {
+			if (d % 3 == 0) {
+				std::vector<strata::posting_input> in{{"t", 1 + d % 4, none}};
+				w.add(d + 1, in, 1);
+			} else {
+				std::vector<strata::posting_input> in{{"u", 1, none}};
+				w.add(d + 1, in, 1);
+			}
+		}
+		const std::string file = w.flush({});
+		strata::segment seg(file);
+		std::vector<strata::ordinal_t> expected;
+		{
+			strata::postings_iterator it(seg, *seg.term("t"));
+			for (auto o = it.next(); o != strata::no_more_docs; o = it.next()) { expected.push_back(o); }
+		}
+		std::vector<strata::ordinal_t> walked;
+		strata::postings_iterator a(seg, *seg.term("t"));
+		a.for_each_until(300, [&](strata::ordinal_t o, std::uint32_t) { walked.push_back(o); });
+		CHECK(walked == expected);
+		std::vector<std::uint64_t> bits(5, 0);
+		strata::postings_iterator b(seg, *seg.term("t"));
+		b.fill(0, 300, bits.data());
+		std::vector<strata::ordinal_t> set;
+		for (strata::ordinal_t o = 0; o < 300; ++o) {
+			if ((bits[o >> 6] >> (o & 63)) & 1) { set.push_back(o); }
+		}
+		CHECK(set == expected);
+	}
 	// A file of another format version is rejected at open.
 	{
 		std::mt19937_64 r(3);
