@@ -381,7 +381,7 @@ int main() {
 
 	// Resealed corruption that verification cannot see. A skip group's last ordinal lowered
 	// below the previous group's: a pruned term query that skips to that group throws
-	// instead of advancing in place forever.
+	// instead of advancing in place forever, and so does a plain walk that reaches it.
 	{
 		strata::segment_writer w;
 		const std::uint32_t docs = 128 * 32 * 6;  // six skip groups
@@ -410,6 +410,11 @@ int main() {
 			strata::segment bad(file);
 			strata::term_scorer t(bad, *bad.term("a"));
 			strata::top_k(t, 10);
+		}));
+		CHECK(throws_corrupt([&] {
+			strata::segment bad(file);
+			strata::postings_iterator it(bad, *bad.term("a"));
+			while (it.next() != strata::no_more_docs) {}
 		}));
 	}
 	// A file of another format version is rejected at open.

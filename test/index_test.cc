@@ -70,6 +70,47 @@ static std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> contents(c
 	return out;
 }
 
+// A live-docs file in the delta encoding whatever its size, deltas wrapping as unsigned.
+static std::string live_deltas(const files::live_docs& l) {
+	using namespace files::detail;
+	std::string out(files::live_magic, 8);
+	put(out, files::version);
+	for (std::uint64_t v : {l.segment, l.generation, l.doc_count, l.live_count, l.live_length}) { put(out, v); }
+	std::string deltas;
+	for (std::size_t i = 0; i < l.deleted.size(); ++i) { put(deltas, i ? l.deleted[i] - l.deleted[i - 1] : l.deleted[i]); }
+	put(out, 1);
+	put_bytes(out, deltas);
+	seal(out);
+	return out;
+}
+
+// faultfs::io, but the n-th later open_existing of one name fails once with `error`.
+class flaky_io final : public kronuz::journal::IO {
+public:
+	explicit flaky_io(faultfs::io& inner) : inner_(&inner) {}
+	void arm(std::string name, int nth, int error) {
+		name_ = std::move(name);
+		left_ = nth;
+		error_ = error;
+	}
+	bool fired() const { return left_ == 0; }
+	std::unique_ptr<kronuz::journal::OwnerLock> acquire_owner(bool create) override { return inner_->acquire_owner(create); }
+	std::unique_ptr<kronuz::journal::File> open_existing(std::string_view name) override {
+		if (left_ && name == name_ && --left_ == 0) { throw std::system_error(error_, std::generic_category(), "flaky open"); }
+		return inner_->open_existing(name);
+	}
+	std::unique_ptr<kronuz::journal::File> create_exclusive(std::string_view name) override { return inner_->create_exclusive(name); }
+	void replace(std::string_view a, std::string_view b) override { inner_->replace(a, b); }
+	void remove(std::string_view name) override { inner_->remove(name); }
+	std::unique_ptr<kronuz::journal::DirectoryCursor> scan_directory() override { return inner_->scan_directory(); }
+	void sync_directory() override { inner_->sync_directory(); }
+
+private:
+	faultfs::io* inner_;
+	std::string name_;
+	int left_ = 0, error_ = 0;
+};
+
 static bool throws(const std::function<void()>& f) {
 	try {
 		f();
@@ -412,14 +453,40 @@ int main() {
 		CHECK(!disk_full && accepted > 5 && accepted < 1000);
 		std::printf("  admission: %d one-document commits on a 64 KiB disk\n", accepted);
 	}
-	std::size_t merged = 0, refused = 0;
-	for (std::uint64_t room : {0u, 4000u, 8000u, 16000u, 32000u, 64000u, 128000u}) {
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
-		byte_budget storage(1ull << 40);
-		strata::index::options o = keyed;
-		o.storage = &storage;
-		auto ix = strata::index::create(io, o, uuid);
+	// A merge on a budget with `room` to spare, the disk holding what the budget holds:
+	// it completes, or admission refuses it; the disk never does.
+	auto merge_rooms = [&](const strata::index::options& base, const std::function<void(strata::index&)>& build, std::uint64_t first, std::uint64_t last, std::uint64_t step) {
+		std::size_t merged = 0, refused = 0;
+		for (std::uint64_t room = first; room <= last; room += step) {
+			faultfs::filesystem fs;
+			faultfs::io io(fs);
+			byte_budget storage(1ull << 40);
+			strata::index::options o = base;
+			o.storage = &storage;
+			auto ix = strata::index::create(io, o, uuid);
+			build(ix);
+			ix.commit();
+			std::vector<std::uint64_t> ids;
+			for (const auto& v : ix.segments()) { ids.push_back(v.id); }
+			byte_budget tight(storage.used() + room);  // the same index, reopened on a budget this tight
+			ix.close();
+			o.storage = &tight;
+			ix = strata::index::open(io, o);
+			fs.set_capacity(fs.used() + (tight.capacity() - tight.used()));  // the disk has what the budget has
+			try {
+				ix.merge(ids);
+				CHECK(ix.segments().size() == 1);
+				++merged;
+			} catch (const std::system_error& e) {
+				CHECK(std::string(e.what()).find("no storage reserved") != std::string::npos);  // admission, not the disk
+				++refused;
+			}
+			ix.close();  // before `tight`, which its permit draws on, leaves scope
+		}
+		CHECK(merged > 0 && refused > 0);
+		if (!merged || !refused) { std::fprintf(stderr, "  merge rooms: %zu merged, %zu refused\n", merged, refused); }
+	};
+	merge_rooms(keyed, [&](strata::index& ix) {
 		for (std::uint64_t base : {1ull, 1ull << 40}) {  // two segments, docids far apart
 			for (std::uint64_t d = 0; d < 2000; ++d) {
 				operation op;
@@ -430,25 +497,30 @@ int main() {
 			}
 			ix.refresh();
 		}
-		ix.commit();
-		std::vector<std::uint64_t> ids;
-		for (const auto& v : ix.segments()) { ids.push_back(v.id); }
-		byte_budget tight(storage.used() + room);  // the same index, reopened on a budget this tight
-		ix.close();
-		o.storage = &tight;
-		ix = strata::index::open(io, o);
-		fs.set_capacity(fs.used() + (tight.capacity() - tight.used()));  // the disk has what the budget has
-		try {
-			ix.merge(ids);
-			CHECK(ix.segments().size() == 1);
-			++merged;
-		} catch (const std::system_error& e) {
-			CHECK(std::string(e.what()).find("no storage reserved") != std::string::npos);  // admission, not the disk
-			++refused;
+	}, 80000, 92000, 200);
+	// Postings can grow when merged: a term on A's first document and B's 127 is a tail of
+	// small deltas in B and one block in the merge, as wide as the jump across A.
+	merge_rooms({}, [&](strata::index& ix) {
+		auto shared = [] {
+			document d;
+			for (int t = 0; t < 1000; ++t) { d.terms.push_back({"t" + std::to_string(t), 0, {}}); }
+			return d;
+		};
+		auto one = [&](document d) {
+			operation op;
+			op.type = operation::add;
+			op.doc = std::move(d);
+			CHECK(ix.apply(tx({op}), {}).result == verdict::accepted);
+		};
+		one(shared());
+		for (int i = 0; i < 1023; ++i) {
+			document d;
+			d.terms.push_back({"f", 0, {}});
+			one(std::move(d));
 		}
-		ix.close();  // before `tight`, which its permit draws on, leaves scope
-	}
-	CHECK(merged > 0 && refused > 0);
+		ix.refresh();
+		for (int i = 0; i < 127; ++i) { one(shared()); }
+	}, 170000, 200000, 1000);
 	// ENOSPC strikes mid-file under short writes: the partial file is removed, and the same
 	// commit succeeds once space returns.
 	std::size_t mid_file = 0;
@@ -569,11 +641,36 @@ int main() {
 				}
 				rewrite(io, strata::index_detail::manifest_name(g), strata::files::encode(m));
 			},
-			[&](faultfs::filesystem& fs, faultfs::io& io, std::uint64_t g) {  // a live count unlike its entry
+			[&](faultfs::filesystem& fs, faultfs::io& io, std::uint64_t g) {  // a live count unlike its entry, totals in step
 				auto m = manifest_of(fs, g);
 				for (auto& r : m.segments) {
-					if (r.live.generation) { --r.live_count; }
+					if (r.live.generation) {
+						--r.live_count;
+						--m.live_count;
+					}
 				}
+				rewrite(io, strata::index_detail::manifest_name(g), strata::files::encode(m));
+			},
+			[&](faultfs::filesystem& fs, faultfs::io& io, std::uint64_t g) {  // live docs whose delta wraps back onto an ordinal
+				auto m = manifest_of(fs, g);
+				for (auto& r : m.segments) {
+					if (!r.live.generation) { continue; }
+					const auto name = strata::index_detail::live_name(r.id, r.live.generation);
+					auto l = strata::files::decode_live_docs(fs.view(name));
+					l.deleted = {0, 2, 0};
+					m.live_count -= r.live_count;
+					l.live_count = r.live_count = r.doc_count - 3;
+					m.live_count += r.live_count;
+					const std::string lb = live_deltas(l);
+					rewrite(io, name, lb);
+					r.live.size = lb.size();
+					r.live.crc = strata::files::trailing_crc(lb);
+				}
+				rewrite(io, strata::index_detail::manifest_name(g), strata::files::encode(m));
+			},
+			[&](faultfs::filesystem& fs, faultfs::io& io, std::uint64_t g) {  // a manifest under another generation's name
+				auto m = manifest_of(fs, g);
+				m.generation = g + 5;
 				rewrite(io, strata::index_detail::manifest_name(g), strata::files::encode(m));
 			},
 			[&](faultfs::filesystem& fs, faultfs::io& io, std::uint64_t g) {  // a segment's document count unlike its entry
@@ -629,6 +726,63 @@ int main() {
 		target.close();
 		target = strata::index::open(tio, keyed);
 		CHECK(target.digest() == source.digest());
+	}
+	// install's admission covers its commit's metadata file and manifest: on a disk of the
+	// budget's size, an install completes or admission refuses it; the disk never does.
+	{
+		faultfs::filesystem sfs;
+		faultfs::io sio(sfs);
+		auto source = strata::index::create(sio, keyed, uuid);
+		for (int s = 0; s < 3; ++s) {
+			std::vector<operation> ops;
+			for (int i = 0; i < 20; ++i) { ops.push_back(add("Q" + std::to_string(s * 20 + i), "x")); }
+			source.apply(tx(ops), {});
+			source.refresh();
+		}
+		source.apply(tx({erase("Q5")}), {});
+		for (int k = 0; k < 32; ++k) {
+			operation m;
+			m.type = operation::set_meta;
+			m.meta_key = "schema" + std::to_string(k);
+			m.meta_value = std::string(1024, char('a' + k % 26));
+			source.apply(tx({m}), {});
+		}
+		const std::uint64_t cp = source.checkpoint();
+		std::uint64_t copy = 0;
+		for (const auto& r : source.manifest().segments) { copy += r.size + r.live.size; }
+		std::size_t installed = 0, refused = 0;
+		for (std::uint64_t slack = 0; slack <= 48000; slack += 1000) {
+			std::uint64_t capacity;
+			{
+				faultfs::filesystem fs;
+				faultfs::io io(fs);
+				byte_budget big(1ull << 40);
+				auto o = keyed;
+				o.storage = &big;
+				auto t = strata::index::create(io, o, uuid);
+				t.apply(tx({add("Qt", "t")}), {});
+				t.commit();
+				capacity = big.used() + copy + slack;
+			}
+			faultfs::filesystem tfs(capacity);
+			faultfs::io tio(tfs);
+			byte_budget storage(capacity);
+			auto o = keyed;
+			o.storage = &storage;
+			auto target = strata::index::create(tio, o, uuid);
+			target.apply(tx({add("Qt", "t")}), {});
+			target.commit();
+			try {
+				target.install(sio, cp);
+				CHECK(target.digest() == source.digest());
+				++installed;
+			} catch (const std::system_error& e) {
+				CHECK(std::string(e.what()).find("no storage reserved") != std::string::npos);  // admission, not the disk
+				++refused;
+			}
+			target.close();
+		}
+		CHECK(installed > 0 && refused > 0);
 	}
 	// Retention keeps the current manifest and two predecessors; orphans leave at open.
 	{
@@ -901,6 +1055,86 @@ int main() {
 		}
 		std::printf("  reclamation: %llu crash points\n", (unsigned long long)points);
 	}
+	// Retention removes nothing in a round where a kept manifest cannot be read: a transient
+	// EIO or EMFILE on a pinned checkpoint's manifest, during an open or a commit, leaves
+	// the checkpoint whole, and a later round reclaims what is obsolete.
+	for (int error : {EIO, EMFILE}) {
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		std::uint64_t pinned, digest;
+		{
+			auto ix = strata::index::create(io, keyed, uuid);
+			ix.apply(tx({add("Qa", "a"), add("Qb", "b")}), {});
+			pinned = ix.checkpoint();
+			digest = ix.digest();
+			ix.apply(tx({erase("Qa"), add("Qc", "c")}), {});
+			ix.force_merge(1);
+			for (int i = 0; i < 4; ++i) { ix.commit(); }
+		}
+		const std::string name = strata::index_detail::manifest_name(pinned);
+		auto on_disk = [&] {
+			const auto names = fs.list();
+			return std::find(names.begin(), names.end(), name) != names.end();
+		};
+		flaky_io f(io);
+		f.arm(name, 2, error);  // the open's first read tracks the file; the second is retention's
+		auto ix = strata::index::open(f, keyed);
+		CHECK(f.fired() && on_disk() && ix.manifest().pinned == std::vector<std::uint64_t>{pinned});
+		f.arm(name, 1, error);
+		ix.apply(tx({add("Qd", "d")}), {});
+		ix.commit();
+		CHECK(f.fired() && on_disk());
+		ix.apply(tx({add("Qe", "e")}), {});
+		ix.commit();  // reads it, and reclaims what no kept manifest names
+		ix.reclaim(UINT64_MAX);
+		std::uint64_t manifests = 0;
+		for (const auto& n : fs.list()) {
+			if (auto p = strata::index_detail::parse_name(n); p && p->type == strata::index_detail::parsed_name::manifest) { ++manifests; }
+		}
+		CHECK(on_disk() && manifests == 1 + keyed.retained_predecessors + 1 && ix.reclaim_pending() == 0);
+		faultfs::filesystem tfs;
+		faultfs::io tio(tfs);
+		auto target = strata::index::create(tio, keyed, uuid);
+		target.install(io, pinned);
+		CHECK(target.digest() == digest);
+	}
+	// A failed truncate, unlink, or directory sync after the commit point neither fails
+	// commit() nor loses the commit; the file stays queued and a later round reclaims it.
+	for (faultfs::op kind : {faultfs::op::truncate, faultfs::op::remove, faultfs::op::sync_directory}) {
+		std::size_t returned = 0;
+		for (std::uint64_t nth = 1; nth <= 6; ++nth) {
+			strata::index::options o = keyed;
+			o.retained_predecessors = 0;
+			o.reclaim_step = 4096;
+			faultfs::filesystem fs;
+			faultfs::io io(fs);
+			auto ix = strata::index::create(io, o, uuid);
+			ix.apply(tx({add("Qa", std::string(40000, 'a'))}), {});
+			ix.commit();
+			ix.apply(tx({erase("Qa"), add("Qb", "b")}), {1, 1});
+			fs.add_fault({kind, nth, EIO, false});
+			try {
+				ix.commit();
+				++returned;
+			} catch (const strata::index_fenced&) {
+				fs.clear_faults();
+				continue;  // a failure before the commit point
+			}
+			fs.clear_faults();
+			ix.apply(tx({add("Qc", "c")}), {2, 1});
+			ix.commit();
+			ix.reclaim(UINT64_MAX);
+			CHECK(ix.reclaim_pending() == 0);
+			std::uint64_t bytes = 0;
+			for (const auto& n : fs.list()) { bytes += fs.view(n).size(); }
+			CHECK(bytes < 20000);  // the 40,000-byte segment is gone
+			ix.close();
+			fs.crash(nth);
+			auto again = strata::index::open(io, o);
+			CHECK(again.find_key("Qb") && !again.find_key("Qa"));
+		}
+		CHECK(returned > 0);
+	}
 	// Binding checks (review condition 4): an intact file from another generation or another
 	// index under a name the manifest gives, or a manifest resealed with entries its files
 	// do not match, fails the open with that check's error and changes nothing on disk.
@@ -1011,6 +1245,36 @@ int main() {
 			CHECK(theirs.size() == r.live.size);
 			put(io, strata::index_detail::live_name(r.id, r.live.generation), theirs);
 		}, "live docs differ from the manifest");
+		auto relive = [&](faultfs::filesystem& fs, faultfs::io& io, const std::function<void(strata::files::live_docs&)>& change, bool deltas) {
+			auto m = manifest_of(fs);
+			auto& r = m.segments[0];
+			const auto name = strata::index_detail::live_name(r.id, r.live.generation);
+			auto l = strata::files::decode_live_docs(fs.view(name));
+			change(l);
+			const std::string lb = deltas ? live_deltas(l) : strata::files::encode(l);
+			put(io, name, lb);
+			r.live.size = lb.size();
+			r.live.crc = strata::files::trailing_crc(lb);
+			reseal(fs, io, m);
+		};
+		expect("live docs of another segment, resealed", [&](auto& fs, auto& io, auto&) {
+			relive(fs, io, [](auto& l) { ++l.segment; }, false);
+		}, "live docs disagree with the manifest");
+		expect("a resealed live count, totals in step", [&](auto& fs, auto& io, auto&) {
+			auto m = manifest_of(fs);
+			--m.segments[0].live_count;
+			--m.live_count;
+			reseal(fs, io, m);
+		}, "live docs disagree with the manifest");
+		expect("a resealed live length, totals in step", [&](auto& fs, auto& io, auto&) {
+			auto m = manifest_of(fs);
+			--m.segments[0].live_length;
+			--m.live_length;
+			reseal(fs, io, m);
+		}, "live docs disagree with the manifest");
+		expect("live docs whose delta wraps back onto an ordinal", [&](auto& fs, auto& io, auto&) {
+			relive(fs, io, [](auto& l) { l.deleted.push_back(l.deleted.front()); --l.live_count; }, true);
+		}, "ordinal past the document count");
 		expect("metadata of another generation", [&](auto& fs, auto& io, auto&) {
 			const auto m = manifest_of(fs);
 			const auto older = std::string(fs.view(strata::index_detail::meta_name(m.meta.generation - 1)));

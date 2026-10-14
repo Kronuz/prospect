@@ -517,9 +517,11 @@ int main() {
 		}
 		CHECK(total > 10);
 	}
-	// create under power loss at every mutation (condition 2): the directory then opens as
-	// the empty index, or as one that was never created, and create runs again over it. A
-	// directory with a segment but no manifest stays corrupt, and create refuses an index.
+	// create under power loss at every mutation, under several crash seeds (condition 2):
+	// the directory then opens as the empty index, or as one that was never created, and
+	// create runs again over it. A directory with a segment but no manifest stays corrupt;
+	// create refuses an index, also one whose owner lock is gone, and an index whose
+	// documents were all deleted does not read as never created when its manifests are lost.
 	{
 		std::mt19937_64 cr(5);
 		auto add_op = [&](const std::string& key) {
@@ -546,28 +548,30 @@ int main() {
 			total = fs.mutations() - base;
 			empty = ix.digest();
 		}
-		std::size_t reran = 0;
+		std::size_t reran = 0, crashes = 0;
 		for (std::uint64_t at = 0; at <= total; ++at) {
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
-			fs.power_off_after(at);
-			try {
-				auto ix = index::create(io, keyed, uuid_a);
-			} catch (const std::exception&) {
+			for (std::uint64_t seed = 0; seed < 50; ++seed, ++crashes) {
+				faultfs::filesystem fs;
+				faultfs::io io(fs);
+				fs.power_off_after(at);
+				try {
+					auto ix = index::create(io, keyed, uuid_a);
+				} catch (const std::exception&) {
+				}
+				fs.crash(at * 41 + seed * 7919 + 3);
+				std::optional<strata::index> ix;
+				try {
+					ix.emplace(index::open(io, keyed));
+					CHECK(ix->digest() == empty);
+				} catch (const index_not_created&) {
+					++reran;
+					ix.emplace(index::create(io, keyed, uuid_a));
+				}
+				CHECK(ix->apply(transaction{{add_op("Qk")}}, {}).result == verdict::accepted);
+				ix->commit();
+				ix->close();
+				CHECK(index::open(io, keyed).digest() != empty);
 			}
-			fs.crash(at * 41 + 3);
-			std::optional<strata::index> ix;
-			try {
-				ix.emplace(index::open(io, keyed));
-				CHECK(ix->digest() == empty);
-			} catch (const index_not_created&) {
-				++reran;
-				ix.emplace(index::create(io, keyed, uuid_a));
-			}
-			CHECK(ix->apply(transaction{{add_op("Qk")}}, {}).result == verdict::accepted);
-			ix->commit();
-			ix->close();
-			CHECK(index::open(io, keyed).digest() != empty);
 		}
 		CHECK(total >= 5 && reran > 0);
 		faultfs::filesystem fs;
@@ -589,7 +593,51 @@ int main() {
 		}
 		CHECK(corrupt);  // segments without a manifest
 		CHECK(throws([&] { index::create(io, keyed, uuid_a); }));
-		std::printf("  create: %llu crash points, %zu created again\n", (unsigned long long)total + 1, reran);
+		{
+			faultfs::filesystem lfs;
+			faultfs::io lio(lfs);
+			{
+				auto ix = index::create(lio, keyed, uuid_a);
+				for (int i = 0; i < 4; ++i) {
+					ix.apply(transaction{{add_op("Q" + std::to_string(i))}}, {});
+					ix.commit();
+				}
+			}
+			lio.remove("owner.lock");
+			CHECK(throws([&] { index::create(lio, keyed, uuid_a); }));  // an index without its lock
+		}
+		{
+			faultfs::filesystem dfs;
+			faultfs::io dio(dfs);
+			{
+				auto ix = index::create(dio, keyed, uuid_a);
+				ix.apply(transaction{{add_op("Qd")}}, {});
+				operation m;
+				m.type = operation::set_meta;
+				m.meta_key = "m";
+				m.meta_value = "v";
+				ix.apply(transaction{{m}}, {});
+				ix.commit();
+				operation del;
+				del.type = operation::delete_key;
+				del.key = "Qd";
+				ix.apply(transaction{{del}}, {});
+				ix.commit();
+				CHECK(ix.segments().empty());
+			}
+			for (const auto& n : dfs.list()) {
+				if (n.starts_with("manifest-")) { dio.remove(n); }
+			}
+			bool uncreated = false;
+			try {
+				index::open(dio, keyed);
+			} catch (const index_not_created&) {
+				uncreated = true;
+			} catch (const corrupt_index&) {
+			}
+			CHECK(!uncreated && throws([&] { index::create(dio, keyed, uuid_a); }));
+		}
+		std::printf("  create: %llu crash points under %zu crashes, %zu created again\n", (unsigned long long)total + 1, crashes, reran);
 	}
 	// T1: power loss at every mutation point of seeded workloads.
 	std::size_t target = 10000;

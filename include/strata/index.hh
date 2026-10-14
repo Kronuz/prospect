@@ -16,6 +16,8 @@
 #include "completion/io.h"
 
 #include <algorithm>
+#include <bit>
+#include <cerrno>
 #include <charconv>
 #include <deque>
 #include <cstdint>
@@ -177,9 +179,8 @@ class index {
 public:
 	using options = index_options;
 
-	// Creates an empty index in an empty directory and commits its first manifest.
-	// Creates an index in an empty directory, or over what an interrupted create left; a
-	// directory holding a manifest or a segment is refused.
+	// Creates an empty index and commits its first manifest, in an empty directory or over
+	// what an interrupted create left (removed first); any other strata file is refused.
 	static index create(kronuz::journal::IO& io, const options& opts, const std::array<char, 16>& uuid) {
 		index ix(io);
 		try {
@@ -187,8 +188,8 @@ public:
 		} catch (const std::system_error& e) {
 			if (e.code().value() != EEXIST) { throw; }
 			ix.lock_ = io.acquire_owner(false);
-			ix.clear_uncreated();
 		}
+		ix.clear_uncreated();
 		ix.m_.uuid = uuid;
 		ix.m_.key_prefix = opts.key_prefix;
 		ix.opts_ = opts;
@@ -304,10 +305,9 @@ public:
 				}
 			}
 			if (picked.empty()) { return; }
-			// Storage admission: a bound on the output. Postings, positions, stored records,
-			// and terms shrink or stay; docids re-encode at up to 10 bytes a document plus 16 a
-			// block (sources far apart lose the contiguous form), versions at up to 8, and the
-			// segment's fixed bytes come once.
+			// Storage admission: an estimate of the output (the sources' bytes, docids at up to
+			// 10 bytes a document plus 16 a block, versions at up to 8, the fixed bytes once),
+			// grown to the output's real size before it is written, which can exceed it.
 			std::uint64_t need = segment_overhead;
 			for (std::size_t i : picked) {
 				const std::uint64_t docs = segs_[i]->seg.doc_count();
@@ -332,6 +332,13 @@ public:
 			string_output out(bytes);
 			string_spill spill;
 			const auto plan = merge_segments(sources, header, out, spill, m_.key_prefix);
+			if (storage_permit_ && bytes.size() > need) {
+				const std::uint64_t more = bytes.size() - need;
+				if (!storage_permit_.try_grow(more) && !(drain() && storage_permit_.try_grow(more))) {
+					throw space_error(std::make_error_code(std::errc::no_space_on_device), "strata: no storage reserved for a merge's output");
+				}
+				held.n += more;
+			}
 			std::unique_ptr<open_segment> merged;
 			if (plan.doc_count) {
 				auto file = write_unsynced(index_detail::segment_name(id), bytes);
@@ -392,17 +399,23 @@ public:
 			const std::string name = reclaim_.front();
 			auto it = files_.find(name);
 			std::uint64_t size = it == files_.end() ? 0 : it->second;
-			if (size > opts_.reclaim_step) {
-				auto f = io_->open_existing(name);
-				while (size > opts_.reclaim_step && freed < bytes) {
-					size -= opts_.reclaim_step;
-					f->truncate(size);
-					track(name, size);
-					freed += opts_.reclaim_step;
+			try {
+				if (size > opts_.reclaim_step) {
+					auto f = io_->open_existing(name);
+					while (size > opts_.reclaim_step && freed < bytes) {
+						size -= opts_.reclaim_step;
+						f->truncate(size);
+						track(name, size);
+						freed += opts_.reclaim_step;
+					}
+					if (size > opts_.reclaim_step) { break; }
 				}
-				if (size > opts_.reclaim_step) { break; }
+				remove_file(name);
+			} catch (const std::system_error& e) {
+				// The commits stand; the file stays queued for a later round, unless it is gone.
+				if (e.code().value() != ENOENT) { break; }
+				forget_file(name);
 			}
-			remove_file(name);
 			freed += size;
 			queued_.erase(name);
 			reclaim_.pop_front();
@@ -556,8 +569,10 @@ public:
 		}
 		if (theirs.generation != generation) { throw corrupt_index("install: manifest generation differs from its name"); }
 		auto got = load_files(source, theirs, true);
-		std::uint64_t need = 0;
-		for (const auto& s : got.segments) { need += s->bytes.size() + s->ref.live.size; }
+		// The copy, re-encoded live docs (16 bytes for their new names' fields), and the
+		// commit's metadata file and manifest.
+		std::uint64_t need = theirs.meta.size + 96 + files::encode(theirs).size() + 160 * theirs.segments.size();
+		for (const auto& s : got.segments) { need += s->bytes.size() + (s->ref.live.generation ? s->ref.live.size + 16 : 0); }
 		if (storage_permit_ && !storage_permit_.try_grow(need) && !(drain() && storage_permit_.try_grow(need))) {
 			throw std::system_error(std::make_error_code(std::errc::no_space_on_device), "strata: no storage reserved for an install");
 		}
@@ -740,6 +755,9 @@ private:
 	}
 	void remove_file(const std::string& name) {
 		io_->remove(name);
+		forget_file(name);
+	}
+	void forget_file(const std::string& name) {
 		if (auto it = files_.find(name); it != files_.end()) {
 			on_disk_ -= it->second;
 			files_.erase(it);
@@ -1215,7 +1233,10 @@ private:
 		std::erase_if(manifest_files_, [&](const auto& e) { return !keep.count(e.first); });
 		std::set<std::string> referenced;
 		for (std::uint64_t g : keep) {
-			for (const auto& n : manifest_files(g)) { referenced.insert(n); }
+			if (g != m_.generation && !files_.count(index_detail::manifest_name(g))) { continue; }
+			const auto* names = manifest_files(g);
+			if (!names) { return; }  // a kept manifest it cannot read: remove nothing this round
+			referenced.insert(names->begin(), names->end());
 		}
 		// Flushed segments awaiting a commit are on disk but not yet named by a manifest.
 		for (const auto& s : segs_) { referenced.insert(index_detail::segment_name(s->ref.id)); }
@@ -1225,14 +1246,27 @@ private:
 		for (const auto& [n, size] : files_) {
 			if (!referenced.count(n) && !queued_.count(n)) { obsolete.push_back(n); }
 		}
-		bool removed = false;
-		for (const auto& n : obsolete) {
-			if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest) {
-				remove_file(n);
-				removed = true;
+		// A failure here leaves the commits standing: nothing is queued until a later round
+		// removes the manifests and syncs the directory.
+		try {
+			for (const auto& n : obsolete) {
+				if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest) {
+					sync_owed_ = true;
+					try {
+						remove_file(n);
+					} catch (const std::system_error& e) {
+						if (e.code().value() != ENOENT) { throw; }
+						forget_file(n);
+					}
+				}
 			}
+			if (sync_owed_) {
+				io_->sync_directory();
+				sync_owed_ = false;
+			}
+		} catch (const std::system_error&) {
+			return;
 		}
-		if (removed) { io_->sync_directory(); }
 		for (const auto& n : obsolete) {
 			if (auto p = index_detail::parse_name(n); p && p->type != index_detail::parsed_name::manifest) {
 				reclaim_.push_back(n);
@@ -1241,21 +1275,20 @@ private:
 		}
 	}
 	// The files manifest `g` names (itself included), read once from disk for an older one;
-	// empty when it cannot be read, since an unreadable manifest keeps nothing alive.
-	const std::vector<std::string>& manifest_files(std::uint64_t g) {
+	// null when it cannot be read, and only a successful read is cached.
+	const std::vector<std::string>* manifest_files(std::uint64_t g) {
 		if (g == m_.generation) {
 			auto& names = manifest_files_[g];
 			names = names_of(m_);
-			return names;
+			return &names;
 		}
-		if (auto it = manifest_files_.find(g); it != manifest_files_.end()) { return it->second; }
-		auto& names = manifest_files_[g];
+		if (auto it = manifest_files_.find(g); it != manifest_files_.end()) { return &it->second; }
 		try {
 			auto f = io_->open_existing(index_detail::manifest_name(g));
-			names = names_of(files::decode_manifest(index_detail::read_all(*f)));
+			return &(manifest_files_[g] = names_of(files::decode_manifest(index_detail::read_all(*f))));
 		} catch (const std::exception&) {
+			return nullptr;
 		}
-		return names;
 	}
 	static std::vector<std::string> names_of(const files::manifest& mf) {
 		std::vector<std::string> names{index_detail::manifest_name(mf.generation)};
@@ -1269,12 +1302,12 @@ private:
 
 	// --- recovery ---------------------------------------------------------------------------
 
-	// Whether names are what an interrupted create leaves: none a manifest, a segment, or
-	// live docs.
+	// Whether names are only what an interrupted create leaves: the first metadata file and
+	// the first manifest's temporary.
 	static bool uncreated(const std::vector<std::string>& names) {
 		for (const auto& n : names) {
 			auto p = index_detail::parse_name(n);
-			if (p && p->type != index_detail::parsed_name::meta && p->type != index_detail::parsed_name::manifest_tmp) { return false; }
+			if (p && !(p->a == 1 && (p->type == index_detail::parsed_name::meta || p->type == index_detail::parsed_name::manifest_tmp))) { return false; }
 		}
 		return true;
 	}
@@ -1393,7 +1426,8 @@ private:
 					throw corrupt_index("live docs disagree with the manifest");
 				}
 				for (std::uint64_t o : l.deleted) { s->deleted[o >> 6] |= std::uint64_t(1) << (o & 63); }
-				s->dead = l.deleted.size();
+				s->dead = 0;
+				for (std::uint64_t w : s->deleted) { s->dead += std::uint64_t(std::popcount(w)); }
 			}
 			out.segments.push_back(std::move(s));
 		}
@@ -1425,6 +1459,7 @@ private:
 	std::map<std::uint64_t, std::vector<std::string>> manifest_files_;  // a retained manifest's files
 	std::deque<std::string> reclaim_;  // obsolete data files, oldest first
 	std::set<std::string> queued_;
+	bool sync_owed_ = false;  // manifests removed since the last directory sync
 	std::uint64_t on_disk_ = 0, reserved_ = 0;
 	std::uint64_t allowance_ = 0, manifest_bytes_ = 0;  // the commit allowance, and its manifest's part
 	std::uint64_t applied_since_commit_ = 0;
