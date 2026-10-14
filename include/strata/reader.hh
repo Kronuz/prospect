@@ -326,6 +326,17 @@ public:
 		}
 	}
 
+	// Calls f(term, value) for every term from `from` in order until f returns false; a
+	// dictionary block that fails its region check throws corrupt_segment.
+	template <class F>
+	void scan_dictionary(std::string_view from, F&& f) const {
+		try {
+			dict_->scan(from, std::forward<F>(f));
+		} catch (const termdict::corrupt&) {
+			throw corrupt_segment("terms checksum");
+		}
+	}
+
 	std::string_view postings_bytes() const noexcept { return postings_; }
 	std::string_view positions_bytes() const noexcept { return positions_; }
 	const termdict::reader& dictionary() const noexcept { return *dict_; }

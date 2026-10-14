@@ -41,7 +41,7 @@ inline merge_plan merge_segments(std::span<const merge_source> sources, const st
 	std::vector<std::unordered_map<ordinal_t, std::string>> keys(sources.size());
 	if (!key_prefix.empty()) {
 		for (std::size_t s = 0; s < sources.size(); ++s) {
-			sources[s].seg->dictionary().scan(key_prefix, [&](std::string_view term, std::string_view) {
+			sources[s].seg->scan_dictionary(key_prefix, [&](std::string_view term, std::string_view) {
 				if (!term.starts_with(key_prefix)) { return false; }
 				auto info = sources[s].seg->term(term);
 				postings_iterator it(*sources[s].seg, *info);

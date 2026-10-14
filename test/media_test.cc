@@ -130,6 +130,16 @@ int main() {
 						CHECK(*d == reference);  // never a wrong answer
 						++sticky_unread;
 					}
+					// A merge reads the key terms and every posting: it fails only as corruption
+					// (condition 16), never with another library's error.
+					try {
+						ix.force_merge(1);
+					} catch (const corrupt_segment&) {
+					} catch (const corrupt_index&) {
+					} catch (const std::exception& e) {
+						CHECK(false);
+						std::fprintf(stderr, "  merge over sticky %s at %llu of %s: %s\n", kind == faultfs::media::bit_flip ? "flip" : "EIO", (unsigned long long)at, name.c_str(), e.what());
+					}
 				} catch (const corrupt_index&) {
 					++sticky_open_failed;
 				} catch (const corrupt_segment&) {

@@ -395,13 +395,19 @@ public:
 			std::uint64_t size = it == files_.end() ? 0 : it->second;
 			try {
 				if (size > opts_.reclaim_step) {
+					// Truncated bytes count as free once the file's sync makes the truncation durable.
 					auto f = io_->open_existing(name);
-					while (size > opts_.reclaim_step && freed < bytes) {
+					std::uint64_t cut = 0;
+					while (size > opts_.reclaim_step && freed + cut < bytes) {
 						size -= opts_.reclaim_step;
 						f->truncate(size);
 						track(name, size);
-						freed += opts_.reclaim_step;
+						truncated_ += opts_.reclaim_step;
+						cut += opts_.reclaim_step;
 					}
+					f->sync();
+					truncated_ -= cut;
+					freed += cut;
 					if (size > opts_.reclaim_step) { break; }
 				}
 				remove_file(name);
@@ -769,6 +775,7 @@ private:
 			if (e.code().value() != ENOSPC) { throw; }
 			f.reset();
 			io_->remove(name);
+			sync_dir();  // the partial file's space returns once its removal is durable
 			throw space_error(e.code(), e.what());
 		}
 		track(name, bytes.size());
@@ -856,7 +863,7 @@ private:
 		if (!storage_permit_) { return; }
 		manifest_bytes_ = files::encode(m_).size() + 160 * segs_.size();
 		allowance_ = commit_allowance();
-		const std::uint64_t want = on_disk_ + unlinked_ + reserved_ + allowance_ + held_;
+		const std::uint64_t want = on_disk_ + unlinked_ + truncated_ + reserved_ + allowance_ + held_;
 		if (want > storage_permit_.bytes()) {
 			storage_permit_.grow(want - storage_permit_.bytes());
 		} else {
@@ -1462,7 +1469,8 @@ private:
 		std::unique_ptr<kronuz::journal::File> f;
 		try {
 			f = io.open_existing(name);
-		} catch (const std::system_error&) {
+		} catch (const std::system_error& e) {
+			if (e.code().value() != ENOENT) { throw; }  // read_checked tells the medium's errors from the host's
 			throw corrupt_index("missing file: " + name);
 		}
 		std::string bytes = index_detail::read_all(*f);
@@ -1482,7 +1490,7 @@ private:
 	};
 	// Runs a read and its checks, and once more if either fails: an unreliable read (a
 	// transient media fault) passes the second time; damage on the medium fails both, and
-	// a read error then reports as corrupt_index.
+	// an EIO then reports as corrupt_index, while other errors stay what they are.
 	template <class F>
 	static auto read_checked(F&& f, std::uint64_t* retries) -> decltype(f()) {
 		try {
@@ -1495,7 +1503,10 @@ private:
 		try {
 			return f();
 		} catch (const std::system_error& e) {
-			throw corrupt_index(std::string("unreadable: ") + e.what());  // the medium, after a retry
+			// Only a read error is the medium's; a lack of descriptors, memory, or permission is
+			// the host's, and a healthy shard must not read as damaged.
+			if (e.code().value() != EIO) { throw; }
+			throw corrupt_index(std::string("unreadable: ") + e.what());
 		}
 	}
 	static loaded_files load_files(kronuz::journal::IO& io, const files::manifest& m, bool whole, std::uint64_t* retries = nullptr) {
@@ -1558,6 +1569,7 @@ private:
 	std::optional<std::uint64_t> retention_blocked_;
 	std::uint64_t on_disk_ = 0, reserved_ = 0;
 	std::uint64_t unlinked_ = 0;  // removed, awaiting a directory sync to be freed
+	std::uint64_t truncated_ = 0;  // truncated in this reclaim step, awaiting the file's sync
 	std::uint64_t held_ = 0;      // reserved by a merge or install while it writes
 	std::uint64_t allowance_ = 0, manifest_bytes_ = 0;  // the commit allowance, and its manifest's part
 	std::uint64_t applied_since_commit_ = 0;

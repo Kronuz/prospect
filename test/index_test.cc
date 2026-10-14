@@ -108,15 +108,19 @@ private:
 class flaky_io final : public kronuz::journal::IO {
 public:
 	explicit flaky_io(faultfs::io& inner) : inner_(&inner) {}
-	void arm(std::string name, int nth, int error) {
+	void arm(std::string name, int nth, int error, int times = 1) {
 		name_ = std::move(name);
 		left_ = nth;
 		error_ = error;
+		times_ = times;
 	}
 	bool fired() const { return left_ == 0; }
 	std::unique_ptr<kronuz::journal::OwnerLock> acquire_owner(bool create) override { return inner_->acquire_owner(create); }
 	std::unique_ptr<kronuz::journal::File> open_existing(std::string_view name) override {
-		if (left_ && name == name_ && --left_ == 0) { throw std::system_error(error_, std::generic_category(), "flaky open"); }
+		if (left_ && name == name_ && --left_ == 0) {
+			if (--times_ > 0) { left_ = 1; }  // the next open of it fails too
+			throw std::system_error(error_, std::generic_category(), "flaky open");
+		}
 		return inner_->open_existing(name);
 	}
 	std::unique_ptr<kronuz::journal::File> create_exclusive(std::string_view name) override { return inner_->create_exclusive(name); }
@@ -128,7 +132,7 @@ public:
 private:
 	faultfs::io* inner_;
 	std::string name_;
-	int left_ = 0, error_ = 0;
+	int left_ = 0, error_ = 0, times_ = 1;
 };
 
 // A live-docs file in the bitset encoding for a document count near 2^64, with an empty
@@ -622,6 +626,70 @@ int main() {
 		fs.set_capacity(fs.used() + (tight.capacity() - tight.used()));
 		CHECK(ix.apply(tx({record("Qnew", 10000)}), {}).result == verdict::accepted);
 		CHECK(!throws([&] { ix.commit(); }));
+		ix.close();
+	}
+	// L8, truncation: reclaim's truncation steps count as free once the truncated file is
+	// synced. A budget and a disk of 80,000 bytes, an obsolete 40,000-byte segment truncated
+	// in 4,096-byte steps 8,192 bytes per commit, then one record of each size: every
+	// admitted commit succeeds.
+	{
+		std::size_t admitted = 0;
+		for (std::size_t n = 500; n <= 40000; n += 500) {
+			faultfs::filesystem fs(80000);
+			faultfs::io io(fs);
+			byte_budget storage(80000);
+			strata::index::options o = keyed;
+			o.storage = &storage;
+			o.reclaim_step = 4096;
+			o.reclaim_slice = 8192;
+			o.retained_predecessors = 0;
+			std::mt19937_64 r(43);
+			auto big = [&](const std::string& key, std::size_t bytes) {
+				operation op = add(key, "x");
+				op.doc.stored.resize(bytes);
+				for (auto& c : op.doc.stored) { c = char(r()); }
+				return op;
+			};
+			auto ix = strata::index::create(io, o, uuid);
+			ix.apply(tx({big("Qold", 40000)}), {});
+			ix.commit();
+			ix.apply(tx({erase("Qold")}), {});
+			ix.commit();
+			if (ix.apply(tx({big("Qnew", n)}), {}).result != verdict::accepted) { continue; }
+			++admitted;
+			CHECK(!throws([&] { ix.commit(); }));
+			ix.close();
+		}
+		CHECK(admitted > 40);
+	}
+	// L8, partial files: a file removed after ENOSPC mid-write frees its bytes once its
+	// removal is durable, so the commit succeeds as space returns.
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		byte_budget storage(1ull << 40);
+		strata::index::options o = keyed;
+		o.storage = &storage;
+		auto ix = strata::index::create(io, o, uuid);
+		fs.set_capacity(fs.used() + 3000);
+		fs.short_writes(97);
+		std::mt19937_64 r(44);
+		operation op = add("Qa", "x");
+		op.doc.stored.resize(10000);
+		for (auto& c : op.doc.stored) { c = char(r()); }
+		CHECK(ix.apply(tx({op}), {}).result == verdict::accepted);
+		std::uint64_t capacity = fs.used() + 3000;
+		int attempts = 0;
+		bool committed = false;
+		for (; attempts <= 30 && !committed; ++attempts) {
+			try {
+				ix.commit();
+				committed = true;
+			} catch (const std::system_error&) {
+				fs.set_capacity(capacity += 1000);
+			}
+		}
+		CHECK(committed && attempts <= 12);
 		ix.close();
 	}
 	// The same merges with an obsolete segment queued: the drain inside admission keeps the
@@ -1237,6 +1305,30 @@ int main() {
 		auto target = strata::index::create(tio, keyed, uuid);
 		target.install(io, pinned);
 		CHECK(target.digest() == digest);
+	}
+	// Condition 15: only an EIO that survives the retry reads as damage; a lack of file
+	// descriptors or memory, or a refused permission, stays what it is.
+	for (int error : {EMFILE, ENFILE, ENOMEM, EACCES, EIO}) {
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		std::string segment;
+		{
+			auto ix = strata::index::create(io, keyed, uuid);
+			ix.apply(tx({add("Qa", "a")}), {});
+			ix.commit();
+			segment = strata::index_detail::segment_name(ix.segments().at(0).id);
+		}
+		flaky_io f(io);
+		f.arm(segment, 2, error, 2);  // the open's size check passes; both loading reads fail
+		std::string what = "none";
+		try {
+			strata::index::open(f, keyed);
+		} catch (const strata::corrupt_index&) {
+			what = "corrupt";
+		} catch (const std::system_error& e) {
+			what = e.code().value() == error ? "itself" : "another error";
+		}
+		CHECK(what == (error == EIO ? "corrupt" : "itself"));
 	}
 	// A kept manifest that never reads (a damaged pinned checkpoint) stops retention, which
 	// the index reports; releasing the pin resumes it (condition 13).
