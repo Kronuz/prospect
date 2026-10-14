@@ -111,6 +111,20 @@ private:
 	int left_ = 0, error_ = 0;
 };
 
+// A live-docs file in the bitset encoding for a document count near 2^64, with an empty
+// body: a size computed as (count + 7) / 8 wraps to 0 and would accept it.
+static std::string live_wrapping_bitset(std::uint64_t segment, std::uint64_t generation) {
+	using namespace files::detail;
+	std::string out(files::live_magic, 8);
+	put(out, files::version);
+	const std::uint64_t docs = ~std::uint64_t(0);
+	for (std::uint64_t v : {segment, generation, docs, docs, std::uint64_t(0)}) { put(out, v); }
+	put(out, 0);
+	put_bytes(out, "");
+	seal(out);
+	return out;
+}
+
 static bool throws(const std::function<void()>& f) {
 	try {
 		f();
@@ -662,6 +676,18 @@ int main() {
 					l.live_count = r.live_count = r.doc_count - 3;
 					m.live_count += r.live_count;
 					const std::string lb = live_deltas(l);
+					rewrite(io, name, lb);
+					r.live.size = lb.size();
+					r.live.crc = strata::files::trailing_crc(lb);
+				}
+				rewrite(io, strata::index_detail::manifest_name(g), strata::files::encode(m));
+			},
+			[&](faultfs::filesystem& fs, faultfs::io& io, std::uint64_t g) {  // live docs whose bitset size wraps near 2^64
+				auto m = manifest_of(fs, g);
+				for (auto& r : m.segments) {
+					if (!r.live.generation) { continue; }
+					const auto name = strata::index_detail::live_name(r.id, r.live.generation);
+					const std::string lb = live_wrapping_bitset(r.id, r.live.generation);
 					rewrite(io, name, lb);
 					r.live.size = lb.size();
 					r.live.crc = strata::files::trailing_crc(lb);
@@ -1283,6 +1309,15 @@ int main() {
 		expect("live docs of another segment, resealed", [&](auto& fs, auto& io, auto&) {
 			relive(fs, io, [](auto& l) { ++l.segment; }, false);
 		}, "live docs disagree with the manifest");
+		expect("live docs whose bitset size wraps near 2^64", [&](auto& fs, auto& io, auto&) {
+			auto m = manifest_of(fs);
+			auto& r = m.segments[0];
+			const std::string lb = live_wrapping_bitset(r.id, r.live.generation);
+			put(io, strata::index_detail::live_name(r.id, r.live.generation), lb);
+			r.live.size = lb.size();
+			r.live.crc = strata::files::trailing_crc(lb);
+			reseal(fs, io, m);
+		}, "bitset size");
 		expect("a resealed live count, totals in step", [&](auto& fs, auto& io, auto&) {
 			auto m = manifest_of(fs);
 			--m.segments[0].live_count;
