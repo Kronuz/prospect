@@ -6,13 +6,16 @@
 //   - Power loss at every mutation of seeded workloads applied at log positions (half
 //     under a small memory budget, flushing as it fills): reopening succeeds, its digest
 //     and applied position are one of the commit points from the last acknowledged commit
-//     to the last attempted, and replaying the whole log reaches the uninterrupted digest.
+//     to the last attempted, and replaying the whole log reaches the uninterrupted digest;
+//     the index then merges, commits, and reopens to the same digest. At every 50th point,
+//     a second power loss after each mutation of the recovery.
 // STRATA_CRASH_POINTS sets how many crash points to cover (default 10,000).
 #include "strata/faultfs.hh"
 #include "strata/index.hh"
 
 #include <cstdio>
 #include <cstdlib>
+#include <deque>
 #include <map>
 #include <random>
 #include <set>
@@ -30,7 +33,7 @@ static const std::array<char, 16> uuid_b = {'b', 'b', 'b', 'b', 'b', 'b', 'b', '
 
 // One step of a workload: a transaction, or a refresh, commit, or checkpoint.
 struct step {
-	enum kind { apply, refresh, commit, checkpoint, merge } type = apply;
+	enum kind { apply, refresh, commit, checkpoint, release, merge } type = apply;
 	transaction t;
 	std::size_t merge_to = 0;  // merge: at most this many segments, or 0 for the policy's merges
 };
@@ -79,6 +82,8 @@ static std::vector<step> workload(std::uint64_t seed, std::size_t steps) {
 			s.type = step::commit;
 		} else if (pick < 18) {
 			s.type = step::checkpoint;
+		} else if (pick < 20) {
+			s.type = step::release;  // the oldest checkpoint still pinned
 		} else {
 			const std::size_t ops = 1 + r() % 3;
 			for (std::size_t k = 0; k < ops; ++k) {
@@ -390,6 +395,7 @@ int main() {
 					ix.commit();
 					digests[ix.manifest().generation] = ix.digest();
 					break;
+				case step::release: break;
 				}
 			}
 			ix.close();
@@ -588,7 +594,7 @@ int main() {
 	// T1: power loss at every mutation point of seeded workloads.
 	std::size_t target = 10000;
 	if (const char* env = std::getenv("STRATA_CRASH_POINTS")) { target = std::strtoull(env, nullptr, 10); }
-	std::size_t points = 0, workloads = 0;
+	std::size_t points = 0, workloads = 0, recovery_points = 0;
 	for (std::uint64_t seed = 0; points < target; ++seed, ++workloads) {
 		const auto w = workload(seed + 7777, 150);
 		// Odd workloads run under a small memory budget, so the buffer also flushes when it
@@ -601,6 +607,38 @@ int main() {
 			}
 			return o;
 		};
+		using point = std::pair<std::uint64_t, files::position>;  // (digest, applied position)
+		// Runs the workload at log positions, releasing the oldest pinned checkpoint at each
+		// release step. With `allowed`, it tracks the commit points recovery may return:
+		// the last acknowledged and any attempted after it.
+		auto run_workload = [&](strata::index& ix, std::set<point>* allowed) {
+			std::uint64_t log = 0;
+			std::deque<std::uint64_t> pins;
+			for (const auto& s : w) {
+				switch (s.type) {
+				case step::apply: ix.apply(s.t, {++log, 1}); break;
+				case step::refresh: ix.refresh(); break;
+				case step::merge: run_merge(ix, s); break;
+				case step::commit:
+				case step::checkpoint:
+				case step::release: {  // each commits
+					if (s.type == step::release && pins.empty()) { break; }
+					const point p{ix.digest(), ix.manifest().applied};
+					if (allowed) { allowed->insert(p); }  // attempted
+					if (s.type == step::commit) {
+						ix.commit();
+					} else if (s.type == step::checkpoint) {
+						pins.push_back(ix.checkpoint());
+					} else {
+						ix.release(pins.front());
+						pins.pop_front();
+					}
+					if (allowed) { *allowed = {p}; }  // acknowledged: nothing older is allowed
+					break;
+				}
+				}
+			}
+		};
 		// A dry run counts the workload's mutations and gives the uninterrupted digest.
 		std::uint64_t total, final_digest;
 		{
@@ -609,81 +647,95 @@ int main() {
 			byte_budget mem(32 * 1024);
 			auto ix = index::create(io, options_for(mem), uuid_a);
 			const std::uint64_t base = fs.mutations();
-			std::uint64_t log = 0;
-			for (const auto& s : w) {
-				switch (s.type) {
-				case step::apply: ix.apply(s.t, {++log, 1}); break;
-				case step::refresh: ix.refresh(); break;
-				case step::commit: ix.commit(); break;
-				case step::checkpoint: ix.checkpoint(); break;
-				case step::merge: run_merge(ix, s); break;
-				}
-			}
+			run_workload(ix, nullptr);
 			total = fs.mutations() - base;
 			final_digest = ix.digest();
 		}
-		for (std::uint64_t at = 0; at <= total && points < target; ++at, ++points) {
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
-			// Commit points as (digest, applied log position) pairs (condition 1).
-			std::set<std::pair<std::uint64_t, files::position>> allowed;
+		// The state power loss after `at` mutations leaves; returns the allowed commit points.
+		auto crashed = [&](faultfs::filesystem& fs, faultfs::io& io, std::uint64_t at) {
+			std::set<point> allowed;
 			{
 				byte_budget mem(32 * 1024);
 				auto ix = index::create(io, options_for(mem), uuid_a);
 				allowed = {{ix.digest(), ix.manifest().applied}};
 				fs.power_off_after(at);
-				std::uint64_t log = 0;
 				try {
-					for (const auto& s : w) {
-						switch (s.type) {
-						case step::apply: ix.apply(s.t, {++log, 1}); break;
-						case step::refresh: ix.refresh(); break;
-						case step::merge: run_merge(ix, s); break;
-						case step::commit:
-						case step::checkpoint: {
-							const std::pair point{ix.digest(), ix.manifest().applied};
-							allowed.insert(point);  // attempted
-							if (s.type == step::commit) {
-								ix.commit();
-							} else {
-								ix.checkpoint();
-							}
-							allowed = {point};  // acknowledged: nothing older is allowed
-							break;
-						}
-						}
-					}
+					run_workload(ix, &allowed);
 				} catch (const std::exception&) {
 				}
 			}
 			fs.crash(seed * 1000003 + at);
-			if (at % 3 == 0) {
-				// A second power loss during the recovery that follows.
-				fs.power_off_after(at % 7);
-				try {
-					auto ix = index::open(io, keyed);
-				} catch (const std::exception&) {
-				}
-				fs.crash(seed * 1000033 + at);
-			}
+			return allowed;
+		};
+		// Opens after the crash: the recovered pair is an allowed commit point, replaying the
+		// whole log reaches the uninterrupted digest (condition 1), and the index keeps
+		// working: a full merge, a commit, and a reopen to the same digest (condition 3).
+		auto recovered = [&](faultfs::io& io, const std::set<point>& allowed, std::uint64_t at) {
 			try {
 				auto ix = index::open(io, keyed);
-				const std::pair got{ix.digest(), ix.manifest().applied};
+				const point got{ix.digest(), ix.manifest().applied};
 				CHECK(allowed.count(got));
 				if (!allowed.count(got)) { std::fprintf(stderr, "  workload %llu crash point %llu\n", (unsigned long long)seed, (unsigned long long)at); }
-				// Replaying the whole log skips what the recovered index applied and ends
-				// where the uninterrupted run does.
 				std::uint64_t log = 0;
 				for (const auto& s : w) {
 					if (s.type == step::apply) { ix.apply(s.t, {++log, 1}); }
 				}
 				CHECK(ix.digest() == final_digest);
+				ix.force_merge(1);
+				ix.commit();
+				const std::uint64_t d = ix.digest();
+				ix.close();
+				CHECK(index::open(io, keyed).digest() == d);
 			} catch (const std::exception& e) {
 				CHECK(!"inconsistent open after power loss");
 				std::fprintf(stderr, "  workload %llu crash point %llu: %s\n", (unsigned long long)seed, (unsigned long long)at, e.what());
 			}
+		};
+		for (std::uint64_t at = 0; at <= total && points < target; ++at, ++points) {
+			{
+				faultfs::filesystem fs;
+				faultfs::io io(fs);
+				const auto allowed = crashed(fs, io, at);
+				if (at % 3 == 0) {
+					// A second power loss during the recovery that follows.
+					fs.power_off_after(at % 7);
+					try {
+						auto ix = index::open(io, keyed);
+					} catch (const std::exception&) {
+					}
+					fs.crash(seed * 1000033 + at);
+				}
+				recovered(io, allowed, at);
+			}
+			// At every 50th point, a second power loss after each mutation of the recovery.
+			if (at % 50 == 0) {
+				std::uint64_t steps;
+				{
+					faultfs::filesystem fs;
+					faultfs::io io(fs);
+					crashed(fs, io, at);
+					const std::uint64_t base = fs.mutations();
+					try {
+						auto ix = index::open(io, keyed);
+					} catch (const std::exception&) {
+					}
+					steps = fs.mutations() - base;
+				}
+				for (std::uint64_t k = 0; k < steps; ++k, ++recovery_points) {
+					faultfs::filesystem fs;
+					faultfs::io io(fs);
+					const auto allowed = crashed(fs, io, at);
+					fs.power_off_after(k);
+					try {
+						auto ix = index::open(io, keyed);
+					} catch (const std::exception&) {
+					}
+					fs.crash(seed * 1000039 + at * 31 + k);
+					recovered(io, allowed, at);
+				}
+			}
 		}
 	}
-	std::printf("lifecycle: %zu crash points over %zu workloads: %s\n", points, workloads, failures ? "FAILED" : "ok");
+	std::printf("lifecycle: %zu crash points over %zu workloads, %zu inside recoveries: %s\n", points, workloads, recovery_points, failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }
