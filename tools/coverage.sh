@@ -24,7 +24,8 @@ head -n "$docs" "$COV_CORPUS" | "$B/strata_engine" index "$B/cov-idx" | tail -1
 "$B/strata_engine" verify "$B/cov-idx" < "$COV_QUERIES" | tail -1
 unset LLVM_PROFILE_FILE
 "$LLVM/llvm-profdata" merge -sparse "$B"/prof/*.profraw -o "$B/all.profdata"
-objs=()
-for b in "$B"/*_test "$B"/fuzz_*_replay "$B/parity" "$B/strata_engine"; do objs+=(${objs:+-object} "$b"); done
-"$LLVM/llvm-cov" report "${objs[@]}" -instr-profile="$B/all.profdata" 2>/dev/null | grep -E "include/strata|TOTAL" |
-	awk '{n = split($1, a, "/"); printf "%-18s lines %7s  branches %7s\n", a[n], $10, $13}'
+# Union over the binaries: llvm-cov report keeps one binary's counters for an inline
+# function several instantiate, so a check one test reaches could read as unreached.
+bins=()
+for b in "$B"/*_test "$B"/fuzz_*_replay "$B/parity" "$B/strata_engine"; do bins+=("$b"); done
+python3 "$root/tools/coverage_union.py" "$LLVM" "$B/all.profdata" "${bins[@]}"
