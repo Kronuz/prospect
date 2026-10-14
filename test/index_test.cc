@@ -8,8 +8,8 @@
 #include <cstdlib>
 #include <functional>
 #include <map>
-#include <set>
 #include <random>
+#include <set>
 
 static int failures = 0;
 #define CHECK(cond) \
@@ -403,6 +403,51 @@ int main() {
 		CHECK(storage.used() == 0);
 		auto ix = strata::index::open(io, o);
 		CHECK(storage.used() > on_disk(fs) && storage.used() - on_disk(fs) < 4096);
+	}
+	// A failed truncation round (condition 18): a truncate or the file's sync fails mid-round,
+	// and once reclamation finishes the permit holds what a fault-free run holds.
+	{
+		auto beyond = [&](faultfs::op kind, std::uint64_t nth, bool fault) {
+			faultfs::filesystem fs;
+			faultfs::io io(fs);
+			byte_budget storage(1ull << 40);
+			strata::index::options o = keyed;
+			o.storage = &storage;
+			o.reclaim_step = 4096;
+			o.reclaim_slice = 0;
+			o.retained_predecessors = 0;
+			auto ix = strata::index::create(io, o, uuid);
+			std::mt19937_64 r(9);
+			std::string body(40000, '\0');
+			for (auto& c : body) { c = char(r()); }
+			operation old;
+			old.type = operation::add;
+			old.doc.terms.push_back({"Qold", 0, {}});
+			old.doc.stored = body;
+			ix.apply(tx({old}), {});
+			ix.commit();
+			ix.apply(tx({erase("Qold")}), {});
+			ix.commit();
+			if (fault) { fs.add_fault({kind, nth, EIO, false}); }
+			try {
+				ix.reclaim(8192);
+			} catch (const std::exception&) {
+			}
+			fs.clear_faults();
+			while (ix.reclaim_pending()) { ix.reclaim(8192); }
+			ix.apply(tx({add("Qa", "a")}), {});
+			ix.commit();
+			ix.commit();
+			std::uint64_t bytes = 0;
+			for (const auto& n : fs.list()) {
+				if (strata::index_detail::parse_name(n)) { bytes += fs.view(n).size(); }
+			}
+			return (long long)storage.used() - (long long)bytes;
+		};
+		const auto control = beyond(faultfs::op::truncate, 1, false);
+		CHECK(beyond(faultfs::op::truncate, 1, true) == control);
+		CHECK(beyond(faultfs::op::truncate, 2, true) == control);
+		CHECK(beyond(faultfs::op::sync, 1, true) == control);
 	}
 	// Admission rejects with no_space and changes nothing; what it admitted commits without
 	// ENOSPC on a disk of the budget's size; merges wait for room; once another index on

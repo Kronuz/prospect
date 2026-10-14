@@ -393,11 +393,12 @@ public:
 			const std::string name = reclaim_.front();
 			auto it = files_.find(name);
 			std::uint64_t size = it == files_.end() ? 0 : it->second;
+			std::unique_ptr<kronuz::journal::File> f;
+			std::uint64_t cut = 0;
 			try {
 				if (size > opts_.reclaim_step) {
 					// Truncated bytes count as free once the file's sync makes the truncation durable.
-					auto f = io_->open_existing(name);
-					std::uint64_t cut = 0;
+					f = io_->open_existing(name);
 					while (size > opts_.reclaim_step && freed + cut < bytes) {
 						size -= opts_.reclaim_step;
 						f->truncate(size);
@@ -412,6 +413,15 @@ public:
 				}
 				remove_file(name);
 			} catch (const std::system_error& e) {
+				// A failed round releases what it counted as truncated; the file's size is
+				// whatever the truncations left.
+				if (cut) {
+					truncated_ -= cut;
+					try {
+						track(name, f->size());
+					} catch (const std::system_error&) {
+					}
+				}
 				// The commits stand; the file stays queued for a later round, unless it is gone.
 				if (e.code().value() != ENOENT) { break; }
 				forget_file(name);
