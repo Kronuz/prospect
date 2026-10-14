@@ -767,6 +767,20 @@ int main() {
 		auto ix = strata::index::open(io, keyed);
 		CHECK(throws([&] { ix.check(); }));
 	}
+	// With auto_merge, a commit merges what its flush adds, so an index driven only by
+	// commits stays within the policy's tiers.
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		auto o = keyed;
+		o.auto_merge = true;
+		auto ix = strata::index::create(io, o, uuid);
+		for (int i = 0; i < 40; ++i) {
+			CHECK(ix.apply(tx({add("Q" + std::to_string(i), "body")}), {}).result == verdict::accepted);
+			ix.commit();
+		}
+		CHECK(ix.segments().size() < 20 && contents(ix).size() == 40);
+	}
 	std::printf("index: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }

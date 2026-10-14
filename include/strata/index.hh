@@ -344,10 +344,9 @@ public:
 	// fences the writer.
 	void commit() {
 		live();
-		guarded([&] {
-			flush();
-			commit_files();
-		});
+		guarded([&] { flush(); });
+		if (opts_.auto_merge) { maybe_merge(); }
+		guarded([&] { commit_files(); });
 		retain();
 		settle_storage();
 	}
