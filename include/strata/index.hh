@@ -219,19 +219,27 @@ public:
 			v.result = verdict::skipped;
 			return v;
 		}
-		// Storage admission: the transaction's estimated bytes, or no_space.
-		const std::uint64_t reserve = storage_permit_ ? estimate_bytes(t) : 0;
+		// Storage admission: the transaction's estimated bytes (and a segment's fixed bytes
+		// when it starts a buffer), then any growth of the commit allowance it causes (a
+		// first delete in a segment adds a live-docs file), or no_space.
+		const std::uint64_t reserve = storage_permit_ ? estimate_bytes(t) + (buffer_.empty() ? segment_overhead : 0) : 0;
 		if (reserve && !storage_permit_.try_grow(reserve)) {
 			v.result = verdict::no_space;
 			return v;
 		}
 		undo_.clear();
 		v = evaluate(t);
+		std::uint64_t allowance = allowance_;
+		if (v.result == verdict::accepted && storage_permit_) {
+			allowance = commit_allowance();
+			if (allowance > allowance_ && !storage_permit_.try_grow(allowance - allowance_)) { v.result = verdict::no_space; }
+		}
 		if (v.result != verdict::accepted) {
 			rollback();
 			storage_permit_.shrink(reserve);
 		} else {
 			reserved_ += reserve;
+			allowance_ = std::max(allowance, allowance_);
 			charge();
 			if (t.set_schema) { set_schema(*t.set_schema); }
 			++applied_since_commit_;
@@ -263,9 +271,15 @@ public:
 				}
 			}
 			if (picked.empty()) { return; }
-			// Storage admission: the sources' bytes bound the output's.
-			std::uint64_t need = 0;
-			for (std::size_t i : picked) { need += segs_[i]->bytes.size(); }
+			// Storage admission: a bound on the output. Postings, positions, stored records,
+			// and terms shrink or stay; docids re-encode at up to 10 bytes a document plus 16 a
+			// block (sources far apart lose the contiguous form), versions at up to 8, and the
+			// segment's fixed bytes come once.
+			std::uint64_t need = segment_overhead;
+			for (std::size_t i : picked) {
+				const std::uint64_t docs = segs_[i]->seg.doc_count();
+				need += segs_[i]->bytes.size() + 18 * docs + 16 * (docs / format::block + 1);
+			}
 			if (storage_permit_ && !storage_permit_.try_grow(need)) {
 				throw space_error(std::make_error_code(std::errc::no_space_on_device), "strata: no storage reserved for a merge");
 			}
@@ -667,10 +681,34 @@ private:
 			files_.erase(it);
 		}
 	}
-	// Brings the storage permit to the files' bytes plus what admission reserved.
+	// A bound on a segment's fixed bytes, apart from its documents and terms: the header,
+	// footer, and table of contents, each section's alignment and region checksums, and the
+	// term index's and key filter's least sizes. (A one-document segment takes 1,088.)
+	static constexpr std::uint64_t segment_overhead = 4096;
+
+	// A bound on the files the next commit writes besides segments: a manifest with one
+	// more segment entry, a live-docs file for each segment with deletes since its last
+	// one, and a metadata file when the metadata changed. Each index holds it standing, so
+	// a commit that frees space can always be written.
+	std::uint64_t commit_allowance() const {
+		std::uint64_t n = manifest_bytes_ + 256;
+		for (const auto& s : segs_) {
+			if (s->deletes_dirty) { n += 96 + (std::uint64_t(s->seg.doc_count()) + 7) / 8; }
+		}
+		if (meta_dirty_ || !m_.meta.generation) {
+			n += 96;
+			for (const auto& [k, v] : meta_) { n += k.size() + v.size() + 20; }
+		}
+		return n;
+	}
+
+	// Brings the storage permit to the files' bytes, what admission reserved, and the
+	// commit allowance.
 	void settle_storage() {
 		if (!storage_permit_) { return; }
-		const std::uint64_t want = on_disk_ + reserved_;
+		manifest_bytes_ = files::encode(m_).size() + 160 * segs_.size();
+		allowance_ = commit_allowance();
+		const std::uint64_t want = on_disk_ + reserved_ + allowance_;
 		if (want > storage_permit_.bytes()) {
 			storage_permit_.grow(want - storage_permit_.bytes());
 		} else {
@@ -1261,6 +1299,7 @@ private:
 	byte_budget::permit storage_permit_;
 	std::map<std::string, std::uint64_t> files_;  // the index's files and their sizes
 	std::uint64_t on_disk_ = 0, reserved_ = 0;
+	std::uint64_t allowance_ = 0, manifest_bytes_ = 0;  // the commit allowance, and its manifest's part
 	std::uint64_t applied_since_commit_ = 0;
 	std::uint64_t next_manifest_ = 1;
 	std::optional<std::uint64_t> pending_pin_, pending_unpin_;

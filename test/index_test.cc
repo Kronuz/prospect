@@ -294,8 +294,9 @@ int main() {
 			CHECK(contents(ix) == good && ix.digest() == digest);
 		}
 	}
-	// Storage admission (T5). The index holds its files' bytes: after a commit, the
-	// budget's use equals the bytes of the files on disk, across reopens too.
+	// Storage admission (T5). The index holds its files' bytes and the standing allowance
+	// for its next commit's files: after a commit, the budget's use is the bytes on disk
+	// plus a small allowance (a manifest and nothing pending), across reopens too.
 	{
 		auto on_disk = [](const faultfs::filesystem& fs) {
 			std::uint64_t n = 0;
@@ -317,11 +318,11 @@ int main() {
 				if (i % 40 == 39) { ix.commit(); }
 			}
 			ix.commit();
-			CHECK(storage.used() == on_disk(fs));
+			CHECK(storage.used() > on_disk(fs) && storage.used() - on_disk(fs) < 4096);
 		}
 		CHECK(storage.used() == 0);
 		auto ix = strata::index::open(io, o);
-		CHECK(storage.used() == on_disk(fs));
+		CHECK(storage.used() > on_disk(fs) && storage.used() - on_disk(fs) < 4096);
 	}
 	// Admission rejects with no_space and changes nothing; what it admitted commits without
 	// ENOSPC on a disk of the budget's size; merges wait for room; once another index on
@@ -383,6 +384,98 @@ int main() {
 		ix = strata::index::open(io, o);
 		CHECK(contents(ix).size() == before.size() + 1);
 	}
+	// Admission covers what it admits (review findings 9-11): on a disk exactly the budget's
+	// size, one-document commits run until admission says no_space and the disk never does;
+	// a merge of segments with distant docids is refused by admission or fits.
+	{
+		const std::uint64_t capacity = 64 * 1024;
+		faultfs::filesystem fs(capacity);
+		faultfs::io io(fs);
+		byte_budget storage(capacity);
+		strata::index::options o = keyed;
+		o.storage = &storage;
+		auto ix = strata::index::create(io, o, uuid);
+		int accepted = 0;
+		bool disk_full = false;
+		for (int i = 0; i < 1000; ++i) {
+			const auto v = ix.apply(tx({add("Q" + std::to_string(i), "b" + std::to_string(i))}), {});
+			if (v.result == verdict::no_space) { break; }
+			++accepted;
+			try {
+				ix.commit();
+			} catch (const std::system_error&) {
+				disk_full = true;
+				break;
+			}
+		}
+		CHECK(!disk_full && accepted > 5 && accepted < 1000);
+		std::printf("  admission: %d one-document commits on a 64 KiB disk\n", accepted);
+	}
+	std::size_t merged = 0, refused = 0;
+	for (std::uint64_t room : {0u, 4000u, 8000u, 16000u, 32000u, 64000u, 128000u}) {
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		byte_budget storage(1ull << 40);
+		strata::index::options o = keyed;
+		o.storage = &storage;
+		auto ix = strata::index::create(io, o, uuid);
+		for (std::uint64_t base : {1ull, 1ull << 40}) {  // two segments, docids far apart
+			for (std::uint64_t d = 0; d < 2000; ++d) {
+				operation op;
+				op.type = operation::replace_docid;
+				op.docid = base + d;
+				op.doc = doc("", "w" + std::to_string(d % 7));
+				ix.apply(tx({op}), {});
+			}
+			ix.refresh();
+		}
+		ix.commit();
+		std::vector<std::uint64_t> ids;
+		for (const auto& v : ix.segments()) { ids.push_back(v.id); }
+		byte_budget tight(storage.used() + room);  // the same index, reopened on a budget this tight
+		ix.close();
+		o.storage = &tight;
+		ix = strata::index::open(io, o);
+		fs.set_capacity(fs.used() + (tight.capacity() - tight.used()));  // the disk has what the budget has
+		try {
+			ix.merge(ids);
+			CHECK(ix.segments().size() == 1);
+			++merged;
+		} catch (const std::system_error& e) {
+			CHECK(std::string(e.what()).find("no storage reserved") != std::string::npos);  // admission, not the disk
+			++refused;
+		}
+	}
+	CHECK(merged > 0 && refused > 0);
+	// ENOSPC strikes mid-file under short writes: the partial file is removed, and the same
+	// commit succeeds once space returns.
+	std::size_t mid_file = 0;
+	for (std::uint64_t room = 0; room < 3000; room += 211) {
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		fs.short_writes(97);
+		auto ix = strata::index::create(io, keyed, uuid);
+		operation big = add("Qb", "b");
+		big.doc.stored.assign(2500, 'x');
+		ix.apply(tx({big, add("Qc", "c")}), {});
+		fs.set_capacity(fs.used() + room);
+		try {
+			ix.commit();
+		} catch (const std::system_error& e) {
+			CHECK(e.code().value() == ENOSPC);
+			++mid_file;
+			// The partial file is gone: every segment file left is whole.
+			for (const auto& name : fs.list()) {
+				if (name.starts_with("seg-")) { CHECK(!throws([&] { (void)strata::format::decode_footer(fs.view(name)); })); }
+			}
+			fs.set_capacity(~std::uint64_t(0));
+			ix.commit();
+		}
+		ix.close();
+		ix = strata::index::open(io, keyed);
+		CHECK(contents(ix).size() == 2);
+	}
+	CHECK(mid_file > 3);
 	// ENOSPC at every point of a commit's files (segment, live docs, metadata, manifest):
 	// the commit fails without fencing, and succeeds as a reference commit does once space
 	// returns.
