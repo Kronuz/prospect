@@ -901,6 +901,135 @@ int main() {
 		}
 		std::printf("  reclamation: %llu crash points\n", (unsigned long long)points);
 	}
+	// Binding checks (review condition 4): an intact file from another generation or another
+	// index under a name the manifest gives, or a manifest resealed with entries its files
+	// do not match, fails the open with that check's error and changes nothing on disk.
+	{
+		// An index of keys Q0..Q9 with bodies of `letter`: two commits, so a segment carries
+		// two live-docs generations and the metadata two, all retained.
+		auto build = [&](faultfs::io& io, char letter, const std::array<char, 16>& id, int first_deleted) {
+			auto ix = strata::index::create(io, keyed, id);
+			std::vector<operation> ops;
+			for (int i = 0; i < 10; ++i) { ops.push_back(add("Q" + std::to_string(i), std::string(4, letter))); }
+			CHECK(ix.apply(tx(ops), {}).result == verdict::accepted);
+			operation m;
+			m.type = operation::set_meta;
+			m.meta_key = "m";
+			m.meta_value = "v1";
+			ix.apply(tx({m}), {});
+			ix.commit();
+			ix.apply(tx({erase("Q" + std::to_string(first_deleted))}), {});
+			m.meta_value = "v2";
+			ix.apply(tx({m}), {});
+			ix.commit();
+			ix.apply(tx({erase("Q" + std::to_string(first_deleted + 1))}), {});
+			m.meta_value = "v3";
+			ix.apply(tx({m}), {});
+			ix.commit();
+		};
+		auto put = [](faultfs::io& io, const std::string& name, std::string_view bytes) {
+			try {
+				io.remove(name);
+			} catch (const std::exception&) {
+			}
+			auto f = io.create_exclusive(name);
+			strata::index_detail::write_all(*f, bytes);
+			f->sync();
+			io.sync_directory();
+		};
+		auto head = [](faultfs::filesystem& fs) {
+			std::string best;
+			std::uint64_t top = 0;
+			for (const auto& n : fs.list()) {
+				if (auto p = strata::index_detail::parse_name(n); p && p->type == strata::index_detail::parsed_name::manifest && p->a >= top) {
+					top = p->a;
+					best = n;
+				}
+			}
+			return best;
+		};
+		auto snapshot_of = [](faultfs::filesystem& fs) {
+			std::map<std::string, std::string> out;
+			for (const auto& n : fs.list()) { out[n] = std::string(fs.view(n)); }
+			return out;
+		};
+		const std::array<char, 16> other = {'o', 't', 'h', 'e', 'r'};
+		// Each case: damage, then the open must fail with `want` and leave every file as it was.
+		auto expect = [&](const char* what, const std::function<void(faultfs::filesystem&, faultfs::io&, faultfs::filesystem&)>& damage, const std::string& want) {
+			faultfs::filesystem fs, ofs;
+			faultfs::io io(fs), oio(ofs);
+			build(io, 'a', uuid, 1);
+			build(oio, 'b', other, 3);
+			damage(fs, io, ofs);
+			const auto before = snapshot_of(fs);
+			std::string got;
+			try {
+				strata::index::open(io, keyed);
+			} catch (const std::exception& e) {
+				got = e.what();
+			}
+			CHECK(got.find(want) != std::string::npos);
+			CHECK(snapshot_of(fs) == before);
+			if (got.find(want) == std::string::npos) { std::fprintf(stderr, "  %s: got \"%s\"\n", what, got.c_str()); }
+		};
+		auto manifest_of = [&](faultfs::filesystem& fs) { return strata::files::decode_manifest(fs.view(head(fs))); };
+		auto reseal = [&](faultfs::filesystem& fs, faultfs::io& io, const strata::files::manifest& m) { put(io, head(fs), strata::files::encode(m)); };
+		expect("segment of another size", [&](auto& fs, auto& io, auto&) {
+			const auto mine = manifest_of(fs);
+			const auto& r = mine.segments[0];
+			put(io, strata::index_detail::segment_name(r.id), std::string(fs.view(strata::index_detail::segment_name(r.id))) + std::string(8, '\0'));
+		}, "file size differs from the manifest");
+		expect("another index's segment of the same size", [&](auto& fs, auto& io, auto& ofs) {
+			const auto mine = manifest_of(fs);
+			const auto& r = mine.segments[0];
+			const auto theirs_m = manifest_of(ofs);
+			const auto theirs = std::string(ofs.view(strata::index_detail::segment_name(theirs_m.segments[0].id)));
+			CHECK(theirs.size() == r.size);
+			put(io, strata::index_detail::segment_name(r.id), theirs);
+		}, "segment differs from its manifest entry");
+		expect("a resealed document count", [&](auto& fs, auto& io, auto&) {
+			auto m = manifest_of(fs);
+			m.segments[0].doc_count += 1;
+			m.doc_count += 1;  // the manifest's own totals still agree
+			reseal(fs, io, m);
+		}, "segment document count");
+		expect("live docs of another generation, resealed", [&](auto& fs, auto& io, auto&) {
+			auto m = manifest_of(fs);
+			auto& r = m.segments[0];
+			const auto older = std::string(fs.view(strata::index_detail::live_name(r.id, r.live.generation - 1)));
+			put(io, strata::index_detail::live_name(r.id, r.live.generation), older);
+			r.live.size = older.size();
+			r.live.crc = strata::files::trailing_crc(older);
+			reseal(fs, io, m);
+		}, "live docs disagree with the manifest");
+		expect("another index's live docs of the same size", [&](auto& fs, auto& io, auto& ofs) {
+			const auto mine = manifest_of(fs);
+			const auto& r = mine.segments[0];
+			const auto theirs_m = manifest_of(ofs);
+			const auto& o = theirs_m.segments[0];
+			const auto theirs = std::string(ofs.view(strata::index_detail::live_name(o.id, o.live.generation)));
+			CHECK(theirs.size() == r.live.size);
+			put(io, strata::index_detail::live_name(r.id, r.live.generation), theirs);
+		}, "live docs differ from the manifest");
+		expect("metadata of another generation", [&](auto& fs, auto& io, auto&) {
+			const auto m = manifest_of(fs);
+			const auto older = std::string(fs.view(strata::index_detail::meta_name(m.meta.generation - 1)));
+			CHECK(older.size() == m.meta.size);
+			put(io, strata::index_detail::meta_name(m.meta.generation), older);
+		}, "metadata differs from the manifest");
+		expect("metadata of another generation, resealed", [&](auto& fs, auto& io, auto&) {
+			auto m = manifest_of(fs);
+			const auto older = std::string(fs.view(strata::index_detail::meta_name(m.meta.generation - 1)));
+			put(io, strata::index_detail::meta_name(m.meta.generation), older);
+			m.meta.crc = strata::files::trailing_crc(older);
+			reseal(fs, io, m);
+		}, "metadata generation");
+		expect("a manifest under a newer name", [&](auto& fs, auto& io, auto&) {
+			const auto name = head(fs);
+			const auto p = strata::index_detail::parse_name(name);
+			put(io, strata::index_detail::manifest_name(p->a + 5), std::string(fs.view(name)));
+		}, "manifest generation differs from its name");
+	}
 	std::printf("index: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }
