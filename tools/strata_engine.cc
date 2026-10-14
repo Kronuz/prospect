@@ -522,6 +522,8 @@ strata::document tokens_document(std::string_view id, std::string_view text) {
 int churn(const std::string& dir) {
 	std::ios::sync_with_stdio(false);
 	std::filesystem::create_directories(dir);
+	// PosixIO refuses a directory others can write; a umask of 002 leaves group write on.
+	std::filesystem::permissions(dir, std::filesystem::perms::group_write | std::filesystem::perms::others_write, std::filesystem::perm_options::remove);
 	kronuz::journal::PosixIO io(dir);
 	strata::index::options o;
 	o.key_prefix = "Q";
