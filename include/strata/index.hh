@@ -152,6 +152,7 @@ struct index_options {
 	// The node's storage, if any (T5): the index holds its files' bytes and reserves each
 	// transaction's estimated bytes at admission and each merge's sources' live bytes
 	// before it starts; a transaction that does not fit is rejected with no_space.
+	// Both budgets must outlive every index that draws on them.
 	byte_budget* storage = nullptr;
 	// Merges after each flush by `policy` when set; otherwise only merge() and force_merge().
 	bool auto_merge = false;

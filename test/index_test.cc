@@ -445,6 +445,7 @@ int main() {
 			CHECK(std::string(e.what()).find("no storage reserved") != std::string::npos);  // admission, not the disk
 			++refused;
 		}
+		ix.close();  // before `tight`, which its permit draws on, leaves scope
 	}
 	CHECK(merged > 0 && refused > 0);
 	// ENOSPC strikes mid-file under short writes: the partial file is removed, and the same
