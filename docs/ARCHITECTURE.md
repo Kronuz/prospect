@@ -256,7 +256,8 @@ and CRCs, live-docs generations, and, under groups, the applied log position.
   (arena high-water mark), and both are exported as metrics.
 - **Files.** Deleting obsolete segment, journal, and checkpoint files is reclamation:
   it runs in bounded slices on the owner core or a background thread, never as a
-  pause.
+  pause. A large file is truncated in steps before it is unlinked, because freeing
+  costs 7–130 ms per GiB depending on the filesystem (`docs/perf/reclamation.md`).
 
 ## I/O
 

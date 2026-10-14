@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <functional>
 #include <map>
+#include <set>
 #include <random>
 
 static int failures = 0;
@@ -258,7 +259,7 @@ int main() {
 			o.doc.stored.resize(5000);
 			for (auto& c : o.doc.stored) { c = char(r()); }
 			CHECK(ix.apply(tx({o}), {}).result == verdict::accepted);
-			ix.refresh();
+			if (i != 0) { ix.refresh(); }  // Q0 and Q1 share a segment, so the delete leaves it
 		}
 		ix.apply(tx({erase("Q1")}), {});
 		ix.commit();
@@ -266,7 +267,7 @@ int main() {
 		const auto digest = ix.digest();
 		std::vector<std::uint64_t> ids;
 		for (const auto& v : ix.segments()) { ids.push_back(v.id); }
-		CHECK(ids.size() == 4);
+		CHECK(ids.size() == 3);
 		if (fault == 0) {
 			fs.set_capacity(fs.used() + 100);
 			bool space = false;
@@ -780,6 +781,125 @@ int main() {
 			ix.commit();
 		}
 		CHECK(ix.segments().size() < 20 && contents(ix).size() == 40);
+	}
+	// Reclamation: a segment whose documents are all deleted leaves at the commit without a
+	// merge, and obsolete files leave reclaim_step bytes at a time, about reclaim_slice per
+	// commit; power lost at any point of it leaves the commit's content and no file that
+	// the next open does not reclaim.
+	{
+		auto o = keyed;
+		o.retained_predecessors = 0;
+		o.reclaim_step = 4096;
+		o.reclaim_slice = 8192;
+		std::mt19937_64 r(11);
+		auto big = [&](const std::string& key) {
+			operation op = add(key, "body");
+			op.doc.stored.resize(40000);
+			for (auto& c : op.doc.stored) { c = char(r()); }
+			return op;
+		};
+		auto ids = [](const strata::index& ix) {
+			std::set<std::uint64_t> out;
+			for (const auto& v : ix.segments()) { out.insert(v.id); }
+			return out;
+		};
+		// Builds a committed index with a big segment (Q0, Q1) and a small one (Q2), then
+		// deletes Q0 and Q1; returns the big segment's file name and size.
+		auto setup = [&](faultfs::io& io, strata::index& ix) {
+			CHECK(ix.apply(tx({big("Q0"), big("Q1")}), {}).result == verdict::accepted);
+			ix.refresh();
+			const auto first = ids(ix);
+			CHECK(ix.apply(tx({add("Q2", "kept")}), {}).result == verdict::accepted);
+			ix.commit();
+			const std::string dead = "seg-" + std::to_string(*first.begin()) + ".sx";
+			const std::uint64_t size = io.open_existing(dead)->size();
+			CHECK(ix.apply(tx({erase("Q0"), erase("Q1")}), {}).result == verdict::accepted);
+			return std::pair{dead, size};
+		};
+		{
+			faultfs::filesystem fs;
+			faultfs::io io(fs);
+			auto ix = strata::index::create(io, o, uuid);
+			const auto [dead, size] = setup(io, ix);
+			CHECK(size > 80000);
+			const auto kept = ids(ix);
+			ix.commit();
+			std::set<std::uint64_t> left = ids(ix);
+			CHECK(left.size() == 1 && kept.count(*left.begin()));  // dropped, nothing merged
+			CHECK(contents(ix).size() == 1);
+			CHECK(ix.reclaim_pending() == 1 && io.open_existing(dead)->size() == size - 8192);
+			CHECK(ix.reclaim(4096) == 4096 && io.open_existing(dead)->size() == size - 12288);
+			ix.reclaim();
+			CHECK(ix.reclaim_pending() == 0 && throws([&] { io.open_existing(dead); }));
+		}
+		// Admission drains queued files when space is short.
+		{
+			faultfs::filesystem fs;
+			faultfs::io io(fs);
+			strata::byte_budget storage(1 << 30);
+			auto so = o;
+			so.storage = &storage;
+			so.reclaim_slice = 0;
+			auto ix = strata::index::create(io, so, uuid);
+			const auto [dead, size] = setup(io, ix);
+			ix.commit();
+			CHECK(ix.reclaim_pending() == 1);
+			strata::byte_budget tight(storage.used() - size / 2);  // holds what is live, not the queued file
+			ix.close();
+			so.storage = &tight;
+			ix = strata::index::open(io, so);
+			CHECK(ix.reclaim_pending() == 1);
+			CHECK(ix.apply(tx({add("Q5", "new")}), {}).result == verdict::accepted);
+			CHECK(ix.reclaim_pending() == 0 && throws([&] { io.open_existing(dead); }));
+			ix.close();
+		}
+		// Power lost after every mutation of the commit and its reclamation.
+		std::uint64_t points = 0;
+		{
+			faultfs::filesystem fs;
+			faultfs::io io(fs);
+			auto ix = strata::index::create(io, o, uuid);
+			setup(io, ix);
+			const auto from = fs.mutations();
+			ix.commit();
+			ix.reclaim();
+			points = fs.mutations() - from;
+		}
+		CHECK(points > 20);
+		for (std::uint64_t n = 0; n < points; ++n) {
+			faultfs::filesystem fs;
+			faultfs::io io(fs);
+			std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> before, after;
+			{
+				auto ix = strata::index::create(io, o, uuid);
+				setup(io, ix);
+				before = contents(ix);  // the deletes are applied, not committed
+				fs.power_off_after(n);
+				try {
+					ix.commit();
+					ix.reclaim();
+				} catch (const std::exception&) {
+				}
+			}
+			fs.crash(n);
+			auto ix = strata::index::open(io, o);
+			const auto now = contents(ix);
+			CHECK(now.size() == 3 || now == before);
+			ix.reclaim();
+			ix.commit();
+			std::set<std::string> named{"owner.lock"};
+			for (const auto& f : fs.list()) {
+				if (f.starts_with("manifest-") || f == "owner.lock") { named.insert(f); }
+			}
+			std::size_t data = 0;
+			for (const auto& f : fs.list()) { data += !named.count(f); }
+			CHECK(data == ix.segments().size() + 1);  // each segment and the metadata file
+			if (failures) {
+				std::fprintf(stderr, "  power lost after mutation %llu of %llu\n", (unsigned long long)n, (unsigned long long)points);
+				break;
+			}
+		}
+		std::printf("  reclamation: %llu crash points\n", (unsigned long long)points);
 	}
 	std::printf("index: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
