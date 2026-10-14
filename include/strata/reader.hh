@@ -290,11 +290,16 @@ public:
 		// The run's values end with key's: the earlier ones only move the cursor.
 		format::term_run run, before;
 		std::string_view last;
-		auto v = dict_->find_run(key, [&](std::string_view value) {
-			before = run;
-			(void)format::decode_term_info(value, run, false);
-			last = value;
-		});
+		std::optional<std::string_view> v;
+		try {
+			v = dict_->find_run(key, [&](std::string_view value) {
+				before = run;
+				(void)format::decode_term_info(value, run, false);
+				last = value;
+			});
+		} catch (const termdict::corrupt&) {
+			throw corrupt_segment("terms checksum");  // a dictionary block failed its region check
+		}
 		if (!v) { return std::nullopt; }
 		auto info = format::decode_term_info(last, before);
 		if (info.df > doc_count_) { throw corrupt_segment("document frequency"); }
@@ -310,11 +315,15 @@ public:
 	template <class F>
 	void scan_terms(F&& f) const {
 		format::term_run run;
-		dict_->scan("", [&](std::string_view key, std::string_view value) {
-			const auto info = format::decode_term_info(value, run);
-			if (info.df > doc_count_) { throw corrupt_segment("document frequency"); }
-			return f(key, info);
-		});
+		try {
+			dict_->scan("", [&](std::string_view key, std::string_view value) {
+				const auto info = format::decode_term_info(value, run);
+				if (info.df > doc_count_) { throw corrupt_segment("document frequency"); }
+				return f(key, info);
+			});
+		} catch (const termdict::corrupt&) {
+			throw corrupt_segment("terms checksum");
+		}
 	}
 
 	std::string_view postings_bytes() const noexcept { return postings_; }

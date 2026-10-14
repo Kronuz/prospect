@@ -425,6 +425,42 @@ public:
 	}
 	std::size_t reclaim_pending() const noexcept { return reclaim_.size(); }
 
+	// Reads that failed or failed their checks once and passed when read again.
+	std::uint64_t media_retries() const noexcept { return media_retries_; }
+
+	// After a search meets corrupt_segment: verifies every committed segment in memory, and
+	// reads one that fails again from its file, verified whole, in its place. Returns the
+	// ids whose file is damaged too, for the host to fence and repair from a checkpoint or
+	// a replica. Like a merge, it invalidates segment views.
+	std::vector<std::uint64_t> heal() {
+		live();
+		std::vector<std::uint64_t> damaged;
+		for (auto& s : segs_) {
+			if (s->unsynced) { continue; }  // built in memory, never read from disk
+			try {
+				s->seg.verify_all();
+				continue;
+			} catch (const corrupt_segment&) {
+			}
+			try {
+				auto fresh = read_checked([&] { return load_segment(*io_, s->ref, true); }, nullptr);
+				fresh->deleted = std::move(s->deleted);
+				fresh->dead = s->dead;
+				fresh->deletes_dirty = s->deletes_dirty;
+				fresh->ref = s->ref;
+				s = std::move(fresh);
+				++media_retries_;
+			} catch (const corrupt_index&) {
+				damaged.push_back(s->ref.id);
+			} catch (const corrupt_segment&) {
+				damaged.push_back(s->ref.id);
+			} catch (const std::system_error&) {
+				damaged.push_back(s->ref.id);
+			}
+		}
+		return damaged;
+	}
+
 	// --- reading --------------------------------------------------------------------------
 
 	struct segment_view {
@@ -568,7 +604,7 @@ public:
 			theirs = files::decode_manifest(index_detail::read_all(*f));
 		}
 		if (theirs.generation != generation) { throw corrupt_index("install: manifest generation differs from its name"); }
-		auto got = load_files(source, theirs, true);
+		auto got = load_files(source, theirs, true, &media_retries_);
 		// The copy, re-encoded live docs (16 bytes for their new names' fields), and the
 		// commit's metadata file and manifest.
 		std::uint64_t need = theirs.meta.size + 96 + files::encode(theirs).size() + 160 * theirs.segments.size();
@@ -1376,11 +1412,10 @@ private:
 			if (!std::binary_search(manifests.begin(), manifests.end(), *to)) { throw corrupt_index("no such manifest"); }
 			chosen = *to;
 		}
-		auto mf = io_->open_existing(index_detail::manifest_name(chosen));
-		m_ = files::decode_manifest(index_detail::read_all(*mf));
+		m_ = read_checked([&] { return files::decode_manifest(index_detail::read_all(*io_->open_existing(index_detail::manifest_name(chosen)))); }, &media_retries_);
 		if (m_.generation != chosen) { throw corrupt_index("manifest generation differs from its name"); }
 		// Every file the manifest names must exist and agree with its entry.
-		auto files_of = load_files(*io_, m_, false);
+		auto files_of = load_files(*io_, m_, false, &media_retries_);
 		segs_ = std::move(files_of.segments);
 		meta_ = std::move(files_of.meta);
 		if (!opts_.key_prefix.empty() && opts_.key_prefix != m_.key_prefix) { throw std::invalid_argument("strata: the index's key prefix differs"); }
@@ -1423,36 +1458,59 @@ private:
 		std::vector<std::unique_ptr<open_segment>> segments;
 		std::map<std::string, std::string> meta;
 	};
-	static loaded_files load_files(kronuz::journal::IO& io, const files::manifest& m, bool whole) {
+	// Runs a read and its checks, and once more if either fails: an unreliable read (a
+	// transient media fault) passes the second time; damage on the medium fails both, and
+	// a read error then reports as corrupt_index.
+	template <class F>
+	static auto read_checked(F&& f, std::uint64_t* retries) -> decltype(f()) {
+		try {
+			return f();
+		} catch (const corrupt_index&) {
+		} catch (const corrupt_segment&) {
+		} catch (const std::system_error&) {
+		}
+		if (retries) { ++*retries; }
+		try {
+			return f();
+		} catch (const std::system_error& e) {
+			throw corrupt_index(std::string("unreadable: ") + e.what());  // the medium, after a retry
+		}
+	}
+	static loaded_files load_files(kronuz::journal::IO& io, const files::manifest& m, bool whole, std::uint64_t* retries = nullptr) {
 		loaded_files out;
 		for (const auto& r : m.segments) {
-			std::string bytes = read_named(io, index_detail::segment_name(r.id), r.size);
-			if (format::decode_footer(bytes).toc_crc != r.footer_crc) { throw corrupt_index("segment differs from its manifest entry"); }
-			auto s = std::make_unique<open_segment>(r, std::move(bytes));
-			if (s->seg.doc_count() != r.doc_count) { throw corrupt_index("segment document count"); }
-			if (whole) { s->seg.verify_all(); }
-			if (r.live.generation) {
-				const std::string lb = read_named(io, index_detail::live_name(r.id, r.live.generation), r.live.size);
-				if (files::trailing_crc(lb) != r.live.crc) { throw corrupt_index("live docs differ from the manifest"); }
-				const files::live_docs l = files::decode_live_docs(lb);
-				if (l.segment != r.id || l.generation != r.live.generation || l.doc_count != r.doc_count || l.live_count != r.live_count ||
-					l.live_length != r.live_length) {
-					throw corrupt_index("live docs disagree with the manifest");
-				}
-				for (std::uint64_t o : l.deleted) { s->deleted[o >> 6] |= std::uint64_t(1) << (o & 63); }
-				s->dead = 0;
-				for (std::uint64_t w : s->deleted) { s->dead += std::uint64_t(std::popcount(w)); }
-			}
-			out.segments.push_back(std::move(s));
+			out.segments.push_back(read_checked([&] { return load_segment(io, r, whole); }, retries));
 		}
 		if (m.meta.generation) {
-			const std::string mb = read_named(io, index_detail::meta_name(m.meta.generation), m.meta.size);
-			if (files::trailing_crc(mb) != m.meta.crc) { throw corrupt_index("metadata differs from the manifest"); }
-			const files::metadata md = files::decode_metadata(mb);
-			if (md.generation != m.meta.generation) { throw corrupt_index("metadata generation"); }
-			out.meta = md.entries;
+			out.meta = read_checked([&] {
+				const std::string mb = read_named(io, index_detail::meta_name(m.meta.generation), m.meta.size);
+				if (files::trailing_crc(mb) != m.meta.crc) { throw corrupt_index("metadata differs from the manifest"); }
+				const files::metadata md = files::decode_metadata(mb);
+				if (md.generation != m.meta.generation) { throw corrupt_index("metadata generation"); }
+				return md.entries;
+			}, retries);
 		}
 		return out;
+	}
+	static std::unique_ptr<open_segment> load_segment(kronuz::journal::IO& io, const files::segment_ref& r, bool whole) {
+		std::string bytes = read_named(io, index_detail::segment_name(r.id), r.size);
+		if (format::decode_footer(bytes).toc_crc != r.footer_crc) { throw corrupt_index("segment differs from its manifest entry"); }
+		auto s = std::make_unique<open_segment>(r, std::move(bytes));
+		if (s->seg.doc_count() != r.doc_count) { throw corrupt_index("segment document count"); }
+		if (whole) { s->seg.verify_all(); }
+		if (r.live.generation) {
+			const std::string lb = read_named(io, index_detail::live_name(r.id, r.live.generation), r.live.size);
+			if (files::trailing_crc(lb) != r.live.crc) { throw corrupt_index("live docs differ from the manifest"); }
+			const files::live_docs l = files::decode_live_docs(lb);
+			if (l.segment != r.id || l.generation != r.live.generation || l.doc_count != r.doc_count || l.live_count != r.live_count ||
+				l.live_length != r.live_length) {
+				throw corrupt_index("live docs disagree with the manifest");
+			}
+			for (std::uint64_t o : l.deleted) { s->deleted[o >> 6] |= std::uint64_t(1) << (o & 63); }
+			s->dead = 0;
+			for (std::uint64_t w : s->deleted) { s->dead += std::uint64_t(std::popcount(w)); }
+		}
+		return s;
 	}
 
 	kronuz::journal::IO* io_;
@@ -1474,6 +1532,7 @@ private:
 	std::deque<std::string> reclaim_;  // obsolete data files, oldest first
 	std::set<std::string> queued_;
 	bool sync_owed_ = false;  // manifests removed since the last directory sync
+	std::uint64_t media_retries_ = 0;
 	std::uint64_t on_disk_ = 0, reserved_ = 0;
 	std::uint64_t allowance_ = 0, manifest_bytes_ = 0;  // the commit allowance, and its manifest's part
 	std::uint64_t applied_since_commit_ = 0;
