@@ -448,6 +448,64 @@ int main() {
 		}
 		CHECK(peak[1] < peak[0] / 2);
 	}
+	// install under power loss at every mutation, on a checkpoint with several segments,
+	// live docs, and metadata; every third point loses power again during the recovery.
+	// Reopening finds the target's old content or the installed one.
+	{
+		faultfs::filesystem sfs;
+		faultfs::io sio(sfs);
+		auto source = index::create(sio, keyed, uuid_a);
+		for (const auto& s : workload(9090, 160)) {
+			if (s.type == step::apply) { source.apply(s.t, {}); }
+			if (s.type == step::refresh) { source.refresh(); }
+		}
+		const std::uint64_t cp = source.checkpoint();
+		const std::uint64_t installed = source.digest();
+		CHECK(source.segments().size() >= 2);
+		auto prepare = [&](faultfs::io& io) {
+			auto ix = index::create(io, keyed, uuid_b);
+			for (const auto& s : workload(9091, 40)) {
+				if (s.type == step::apply) { ix.apply(s.t, {}); }
+			}
+			ix.commit();
+			return ix;
+		};
+		std::uint64_t total, old;
+		{
+			faultfs::filesystem fs;
+			faultfs::io io(fs);
+			auto ix = prepare(io);
+			old = ix.digest();
+			const std::uint64_t base = fs.mutations();
+			ix.install(sio, cp);
+			total = fs.mutations() - base;
+			CHECK(ix.digest() == installed);
+		}
+		for (std::uint64_t at = 0; at <= total; ++at) {
+			faultfs::filesystem fs;
+			faultfs::io io(fs);
+			{
+				auto ix = prepare(io);
+				fs.power_off_after(at);
+				try {
+					ix.install(sio, cp);
+				} catch (const std::exception&) {
+				}
+			}
+			fs.crash(at * 31 + 5);
+			if (at % 3 == 0) {
+				fs.power_off_after(at % 7);
+				try {
+					auto ix = index::open(io, keyed);
+				} catch (const std::exception&) {
+				}
+				fs.crash(at * 37 + 11);
+			}
+			const std::uint64_t got = index::open(io, keyed).digest();
+			CHECK(got == old || got == installed);
+		}
+		CHECK(total > 10);
+	}
 	// T1: power loss at every mutation point of seeded workloads.
 	std::size_t target = 10000;
 	if (const char* env = std::getenv("STRATA_CRASH_POINTS")) { target = std::strtoull(env, nullptr, 10); }

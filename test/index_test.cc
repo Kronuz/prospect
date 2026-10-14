@@ -430,6 +430,111 @@ int main() {
 		}
 		CHECK(failed > 20);
 	}
+	// install holds a checkpoint to what an open holds its head to: a checkpoint whose
+	// files disagree with their entries, or that cannot be read, is refused before the
+	// target changes, and the target stays unfenced.
+	{
+		auto build_source = [&](faultfs::filesystem& fs, faultfs::io& io) {
+			auto ix = strata::index::create(io, keyed, uuid);
+			for (int i = 0; i < 10; ++i) { ix.apply(tx({add("Q" + std::to_string(i), "s" + std::to_string(i))}), {}); }
+			ix.refresh();
+			for (int i = 10; i < 20; ++i) { ix.apply(tx({add("Q" + std::to_string(i), "s" + std::to_string(i))}), {}); }
+			ix.apply(tx({erase("Q3"), erase("Q12")}), {});
+			operation meta;
+			meta.type = operation::set_meta;
+			meta.meta_key = "m";
+			meta.meta_value = "v";
+			ix.apply(tx({meta}), {});
+			const std::uint64_t cp = ix.checkpoint();
+			(void)fs;
+			return std::pair{std::move(ix), cp};
+		};
+		auto rewrite = [](faultfs::io& io, const std::string& name, const std::string& bytes) {
+			io.remove(name);
+			auto f = io.create_exclusive(name);
+			f->write_at(0, bytes);
+			f->sync();
+		};
+		auto manifest_of = [](faultfs::filesystem& fs, std::uint64_t g) { return strata::files::decode_manifest(fs.view(strata::index_detail::manifest_name(g))); };
+		// One damage per case, applied to the source; the target must refuse it unchanged.
+		const std::function<void(faultfs::filesystem&, faultfs::io&, std::uint64_t)> damages[] = {
+			[&](faultfs::filesystem& fs, faultfs::io& io, std::uint64_t g) {  // live docs past their segment's document count
+				auto m = manifest_of(fs, g);
+				for (auto& r : m.segments) {
+					if (!r.live.generation) { continue; }
+					const auto name = strata::index_detail::live_name(r.id, r.live.generation);
+					auto l = strata::files::decode_live_docs(fs.view(name));
+					l.doc_count = 4096;
+					l.live_count = 4096 - l.deleted.size() - 1;
+					l.deleted.push_back(4000);
+					const std::string lb = strata::files::encode(l);
+					rewrite(io, name, lb);
+					r.live.size = lb.size();
+					r.live.crc = strata::files::trailing_crc(lb);
+				}
+				rewrite(io, strata::index_detail::manifest_name(g), strata::files::encode(m));
+			},
+			[&](faultfs::filesystem& fs, faultfs::io& io, std::uint64_t g) {  // a live count unlike its entry
+				auto m = manifest_of(fs, g);
+				for (auto& r : m.segments) {
+					if (r.live.generation) { --r.live_count; }
+				}
+				rewrite(io, strata::index_detail::manifest_name(g), strata::files::encode(m));
+			},
+			[&](faultfs::filesystem& fs, faultfs::io& io, std::uint64_t g) {  // a segment's document count unlike its entry
+				auto m = manifest_of(fs, g);
+				++m.segments[0].doc_count;
+				rewrite(io, strata::index_detail::manifest_name(g), strata::files::encode(m));
+			},
+			[&](faultfs::filesystem& fs, faultfs::io& io, std::uint64_t g) {  // a damaged postings region
+				auto m = manifest_of(fs, g);
+				const auto name = strata::index_detail::segment_name(m.segments[0].id);
+				std::string bytes(fs.view(name));
+				for (const auto& e : strata::format::decode_toc(bytes, strata::format::decode_footer(bytes))) {
+					if (e.kind == strata::format::section::postings) { bytes[e.offset + e.length / 2] ^= 1; }
+				}
+				rewrite(io, name, bytes);
+			},
+			[&](faultfs::filesystem& fs, faultfs::io& io, std::uint64_t g) {  // a file missing from the source
+				io.remove(strata::index_detail::segment_name(manifest_of(fs, g).segments[0].id));
+			},
+		};
+		for (const auto& damage : damages) {
+			faultfs::filesystem sfs, tfs;
+			faultfs::io sio(sfs), tio(tfs);
+			auto [source, cp] = build_source(sfs, sio);
+			auto target = strata::index::create(tio, keyed, uuid);
+			target.apply(tx({add("Qt", "t")}), {});
+			target.commit();
+			const auto before = target.digest();
+			const auto generation = target.manifest().generation;
+			damage(sfs, sio, cp);
+			bool refused = false;
+			try {
+				target.install(sio, cp);
+			} catch (const strata::corrupt_index&) {
+				refused = true;
+			} catch (const strata::corrupt_segment&) {
+				refused = true;
+			}
+			CHECK(refused && target.digest() == before && target.manifest().generation == generation);
+			CHECK(target.apply(tx({add("Qu", "u")}), {}).result == verdict::accepted);  // not fenced
+			target.commit();
+			target.close();
+			target = strata::index::open(tio, keyed);
+			CHECK(contents(target).size() == 2);
+		}
+		// The same checkpoint, undamaged, installs and reopens.
+		faultfs::filesystem sfs, tfs;
+		faultfs::io sio(sfs), tio(tfs);
+		auto [source, cp] = build_source(sfs, sio);
+		auto target = strata::index::create(tio, keyed, uuid);
+		target.install(sio, cp);
+		CHECK(target.digest() == source.digest() && target.metadata().at("m") == "v");
+		target.close();
+		target = strata::index::open(tio, keyed);
+		CHECK(target.digest() == source.digest());
+	}
 	// Retention keeps the current manifest and two predecessors; orphans leave at open.
 	{
 		faultfs::filesystem fs;

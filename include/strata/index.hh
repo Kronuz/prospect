@@ -462,11 +462,14 @@ public:
 		commit();
 	}
 
-	// Replaces this index's content with a checkpoint of another index (design D5): copies
-	// its files under fresh local names, verifies each, and commits a manifest above every
-	// existing generation. The buffer, pending deletes, and version map are discarded; the
-	// checkpoint's `lastdocid`, schema version, applied position, and index UUID are adopted.
-	// A crash at any point opens the old content or the installed one.
+	// Replaces this index's content with the checkpoint `generation` of the index at
+	// `source` (design D5). The checkpoint is read and checked whole, as an open checks its
+	// head, before anything here changes: a bad checkpoint or a failure reading it throws
+	// and leaves this index as it was, unfenced. Storage admission reserves the copy
+	// (ENOSPC otherwise). The files are written under fresh local names and commit as a
+	// manifest above every existing generation; the buffer, pending deletes, and version
+	// map are discarded, and the checkpoint's last docid, schema version, applied position,
+	// and UUID are adopted. A crash at any point opens the old content or the installed one.
 	void install(kronuz::journal::IO& source, std::uint64_t generation) {
 		live();
 		files::manifest theirs;
@@ -474,44 +477,52 @@ public:
 			auto f = source.open_existing(index_detail::manifest_name(generation));
 			theirs = files::decode_manifest(index_detail::read_all(*f));
 		}
-		auto copy = [&](const std::string& from, const std::string& to, std::uint64_t size, std::uint32_t crc, bool is_segment) {
-			auto f = source.open_existing(from);
-			std::string bytes = index_detail::read_all(*f);
-			if (bytes.size() != size) { throw corrupt_index("install: size differs: " + from); }
-			if (is_segment ? format::decode_footer(bytes).toc_crc != crc : files::trailing_crc(bytes) != crc) { throw corrupt_index("install: checksum differs: " + from); }
-			return bytes;
-		};
+		if (theirs.generation != generation) { throw corrupt_index("install: manifest generation differs from its name"); }
+		auto got = load_files(source, theirs, true);
+		std::uint64_t need = 0;
+		for (const auto& s : got.segments) { need += s->bytes.size() + s->ref.live.size; }
+		if (storage_permit_ && !storage_permit_.try_grow(need)) {
+			throw std::system_error(std::make_error_code(std::errc::no_space_on_device), "strata: no storage reserved for an install");
+		}
+		struct release {
+			index* ix;
+			std::uint64_t n;
+			~release() {
+				ix->storage_permit_.shrink(n);
+				ix->settle_storage();
+			}
+		} held{this, storage_permit_ ? need : 0};
 		guarded([&] {
-			std::vector<std::unique_ptr<open_segment>> segs;
-			for (const auto& r : theirs.segments) {
-				std::string bytes = copy(index_detail::segment_name(r.id), "", r.size, r.footer_crc, true);
-				files::segment_ref mine = r;
+			for (auto& s : got.segments) {
+				files::segment_ref mine = s->ref;
 				mine.id = m_.next_segment++;
-				write_new(index_detail::segment_name(mine.id), bytes);
-				auto s = std::make_unique<open_segment>(mine, std::move(bytes));
-				if (r.live.generation) {
-					files::live_docs l = files::decode_live_docs(copy(index_detail::live_name(r.id, r.live.generation), "", r.live.size, r.live.crc, false));
-					for (std::uint64_t o : l.deleted) { s->deleted[o >> 6] |= std::uint64_t(1) << (o & 63); }
+				mine.live = {};
+				write_new(index_detail::segment_name(mine.id), s->bytes);
+				if (s->ref.live.generation) {
+					files::live_docs l;
 					l.segment = mine.id;
 					l.generation = m_.next_live++;
+					l.doc_count = s->seg.doc_count();
+					for (ordinal_t o = 0; o < s->seg.doc_count(); ++o) {
+						if ((s->deleted[o >> 6] >> (o & 63)) & 1) { l.deleted.push_back(o); }
+					}
+					l.live_count = s->ref.live_count;
+					l.live_length = s->ref.live_length;
 					const std::string lb = files::encode(l);
 					write_new(index_detail::live_name(l.segment, l.generation), lb);
-					s->ref.live = {l.generation, lb.size(), files::trailing_crc(lb)};
+					mine.live = {l.generation, lb.size(), files::trailing_crc(lb)};
 				}
-				segs.push_back(std::move(s));
+				s->ref = mine;
 			}
-			std::map<std::string, std::string> meta;
-			if (theirs.meta.generation) {
-				meta = files::decode_metadata(copy(index_detail::meta_name(theirs.meta.generation), "", theirs.meta.size, theirs.meta.crc, false)).entries;
-			}
-			segs_ = std::move(segs);
+			segs_ = std::move(got.segments);
 			buffer_.clear();
 			buffer_docids_.clear();
 			versions_.clear();
 			docid_keys_.clear();
 			buffer_bytes_ = version_key_bytes_ = 0;
+			reserved_ = 0;  // the discarded buffer's reservations
 			if (permit_) { permit_.settle(); }
-			meta_ = std::move(meta);
+			meta_ = std::move(got.meta);
 			meta_dirty_ = true;
 			m_.uuid = theirs.uuid;
 			m_.last_docid = theirs.last_docid;
@@ -1160,30 +1171,10 @@ private:
 		auto mf = io_->open_existing(index_detail::manifest_name(chosen));
 		m_ = files::decode_manifest(index_detail::read_all(*mf));
 		if (m_.generation != chosen) { throw corrupt_index("manifest generation differs from its name"); }
-		// Every file the manifest names must exist with its size and checksum.
-		for (const auto& r : m_.segments) {
-			std::string bytes = read_named(index_detail::segment_name(r.id), r.size);
-			if (format::decode_footer(bytes).toc_crc != r.footer_crc) { throw corrupt_index("segment differs from its manifest entry"); }
-			auto s = std::make_unique<open_segment>(r, std::move(bytes));
-			if (s->seg.doc_count() != r.doc_count) { throw corrupt_index("segment document count"); }
-			if (r.live.generation) {
-				const std::string lb = read_named(index_detail::live_name(r.id, r.live.generation), r.live.size);
-				if (files::trailing_crc(lb) != r.live.crc) { throw corrupt_index("live docs differ from the manifest"); }
-				const files::live_docs l = files::decode_live_docs(lb);
-				if (l.segment != r.id || l.generation != r.live.generation || l.doc_count != r.doc_count || l.live_count != r.live_count) {
-					throw corrupt_index("live docs disagree with the manifest");
-				}
-				for (std::uint64_t o : l.deleted) { s->deleted[o >> 6] |= std::uint64_t(1) << (o & 63); }
-			}
-			segs_.push_back(std::move(s));
-		}
-		if (m_.meta.generation) {
-			const std::string mb = read_named(index_detail::meta_name(m_.meta.generation), m_.meta.size);
-			if (files::trailing_crc(mb) != m_.meta.crc) { throw corrupt_index("metadata differs from the manifest"); }
-			const files::metadata md = files::decode_metadata(mb);
-			if (md.generation != m_.meta.generation) { throw corrupt_index("metadata generation"); }
-			meta_ = md.entries;
-		}
+		// Every file the manifest names must exist and agree with its entry.
+		auto files_of = load_files(*io_, m_, false);
+		segs_ = std::move(files_of.segments);
+		meta_ = std::move(files_of.meta);
 		if (!opts_.key_prefix.empty() && opts_.key_prefix != m_.key_prefix) { throw std::invalid_argument("strata: the index's key prefix differs"); }
 		opts_.key_prefix = m_.key_prefix;
 		// Counters start above every name on disk, so no name is ever reused (D3).
@@ -1202,16 +1193,56 @@ private:
 		settle_storage();
 	}
 
-	std::string read_named(const std::string& name, std::uint64_t size) {
+	static std::string read_named(kronuz::journal::IO& io, const std::string& name, std::uint64_t size) {
 		std::unique_ptr<kronuz::journal::File> f;
 		try {
-			f = io_->open_existing(name);
+			f = io.open_existing(name);
 		} catch (const std::system_error&) {
 			throw corrupt_index("missing file: " + name);
 		}
 		std::string bytes = index_detail::read_all(*f);
 		if (bytes.size() != size) { throw corrupt_index("file size differs from the manifest: " + name); }
 		return bytes;
+	}
+
+	// Every file a manifest names, read from io and checked against its entry: each
+	// segment's size, footer checksum, and document count (and every byte, when `whole`);
+	// each live-docs file's checksum, segment, generation, document count, live count, and
+	// live length; the metadata file's checksum and generation. recover and install share
+	// it, so a checkpoint is held to what an open is. Throws corrupt_index (or
+	// corrupt_segment) at the first file that disagrees; changes nothing.
+	struct loaded_files {
+		std::vector<std::unique_ptr<open_segment>> segments;
+		std::map<std::string, std::string> meta;
+	};
+	static loaded_files load_files(kronuz::journal::IO& io, const files::manifest& m, bool whole) {
+		loaded_files out;
+		for (const auto& r : m.segments) {
+			std::string bytes = read_named(io, index_detail::segment_name(r.id), r.size);
+			if (format::decode_footer(bytes).toc_crc != r.footer_crc) { throw corrupt_index("segment differs from its manifest entry"); }
+			auto s = std::make_unique<open_segment>(r, std::move(bytes));
+			if (s->seg.doc_count() != r.doc_count) { throw corrupt_index("segment document count"); }
+			if (whole) { s->seg.verify_all(); }
+			if (r.live.generation) {
+				const std::string lb = read_named(io, index_detail::live_name(r.id, r.live.generation), r.live.size);
+				if (files::trailing_crc(lb) != r.live.crc) { throw corrupt_index("live docs differ from the manifest"); }
+				const files::live_docs l = files::decode_live_docs(lb);
+				if (l.segment != r.id || l.generation != r.live.generation || l.doc_count != r.doc_count || l.live_count != r.live_count ||
+					l.live_length != r.live_length) {
+					throw corrupt_index("live docs disagree with the manifest");
+				}
+				for (std::uint64_t o : l.deleted) { s->deleted[o >> 6] |= std::uint64_t(1) << (o & 63); }
+			}
+			out.segments.push_back(std::move(s));
+		}
+		if (m.meta.generation) {
+			const std::string mb = read_named(io, index_detail::meta_name(m.meta.generation), m.meta.size);
+			if (files::trailing_crc(mb) != m.meta.crc) { throw corrupt_index("metadata differs from the manifest"); }
+			const files::metadata md = files::decode_metadata(mb);
+			if (md.generation != m.meta.generation) { throw corrupt_index("metadata generation"); }
+			out.meta = md.entries;
+		}
+		return out;
 	}
 
 	kronuz::journal::IO* io_;
