@@ -1135,6 +1135,29 @@ int main() {
 		}
 		CHECK(returned > 0);
 	}
+	// ENOSPC on a later file of a commit's batch, then a successful retry, then power loss:
+	// the retry makes every file the manifest names durable.
+	for (std::uint64_t seed = 0; seed < 20; ++seed) {
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		auto ix = strata::index::create(io, keyed, uuid);
+		for (int s = 0; s < 3; ++s) {
+			std::vector<operation> ops;
+			for (int i = 0; i < 4; ++i) { ops.push_back(add("Q" + std::to_string(s * 4 + i), "x")); }
+			ix.apply(tx(ops), {});
+			ix.refresh();
+		}
+		ix.commit();
+		ix.apply(tx({erase("Q0"), erase("Q4"), erase("Q8")}), {});  // a live-docs file per segment
+		const auto want = contents(ix);
+		fs.add_fault({faultfs::op::write, 2, ENOSPC, false});
+		CHECK(throws([&] { ix.commit(); }));
+		fs.clear_faults();
+		ix.commit();
+		ix.close();
+		fs.crash(seed);
+		CHECK(contents(strata::index::open(io, keyed)) == want);
+	}
 	// Binding checks (review condition 4): an intact file from another generation or another
 	// index under a name the manifest gives, or a manifest resealed with entries its files
 	// do not match, fails the open with that check's error and changes nothing on disk.

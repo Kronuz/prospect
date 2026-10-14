@@ -1131,14 +1131,17 @@ private:
 		// A segment whose documents are all deleted leaves without a merge; retention frees
 		// its files.
 		std::erase_if(segs_, [](const auto& s) { return s->dead == s->seg.doc_count(); });
-		// 1. New data files, synced: flushed segments, live-docs generations, metadata.
-		// Their generations come from the counters directly, so a failed commit never
-		// reuses a name.
+		// 1. New data files, synced together: flushed segments, live-docs generations,
+		// metadata. Their generations come from the counters directly, so a failed commit
+		// never reuses a name.
+		// Nothing changes until every file is durable, so a failed write or sync leaves the
+		// next commit to write them again under new names.
+		std::vector<kronuz::journal::File*> files;
+		std::vector<std::unique_ptr<kronuz::journal::File>> written;
+		std::vector<std::pair<open_segment*, files::live_docs>> lives;
+		std::optional<files::metadata> md;
 		for (auto& s : segs_) {
-			if (s->unsynced) {
-				s->unsynced->sync();
-				s->unsynced.reset();
-			}
+			if (s->unsynced) { files.push_back(s->unsynced.get()); }
 			if (s->deletes_dirty) {
 				files::live_docs l;
 				l.segment = s->ref.id;
@@ -1149,24 +1152,35 @@ private:
 				}
 				l.live_count = l.doc_count - l.deleted.size();
 				l.live_length = live_length(*s);
-				const std::string bytes = files::encode(l);
-				write_new(index_detail::live_name(l.segment, l.generation), bytes);
-				s->ref.live = {l.generation, bytes.size(), files::trailing_crc(bytes)};
-				s->ref.live_count = l.live_count;
-				s->ref.live_length = l.live_length;
-				s->deletes_dirty = false;
-			} else if (!s->ref.live.generation) {
+				written.push_back(write_unsynced(index_detail::live_name(l.segment, l.generation), files::encode(l)));
+				lives.emplace_back(s.get(), std::move(l));
+			}
+		}
+		if (meta_dirty_ || !m_.meta.generation) {
+			md.emplace();
+			md->generation = m_.next_meta++;
+			md->entries = meta_;
+			written.push_back(write_unsynced(index_detail::meta_name(md->generation), files::encode(*md)));
+		}
+		for (const auto& f : written) { files.push_back(f.get()); }
+		io_->sync_files(files);
+		for (auto& s : segs_) { s->unsynced.reset(); }
+		for (auto& [s, l] : lives) {
+			const std::string bytes = files::encode(l);
+			s->ref.live = {l.generation, bytes.size(), files::trailing_crc(bytes)};
+			s->ref.live_count = l.live_count;
+			s->ref.live_length = l.live_length;
+			s->deletes_dirty = false;
+		}
+		for (auto& s : segs_) {
+			if (!s->ref.live.generation) {
 				s->ref.live_count = s->seg.doc_count();
 				s->ref.live_length = s->seg.total_length();
 			}
 		}
-		if (meta_dirty_ || !m_.meta.generation) {
-			files::metadata md;
-			md.generation = m_.next_meta++;
-			md.entries = meta_;
-			const std::string bytes = files::encode(md);
-			write_new(index_detail::meta_name(md.generation), bytes);
-			m_.meta = {md.generation, bytes.size(), files::trailing_crc(bytes)};
+		if (md) {
+			const std::string bytes = files::encode(*md);
+			m_.meta = {md->generation, bytes.size(), files::trailing_crc(bytes)};
 			meta_dirty_ = false;
 		}
 		files::manifest next = m_;

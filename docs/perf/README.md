@@ -13,4 +13,5 @@ Gate numbers come from the harness under `bench/phase2/g5.sh`.
 | [Presets](bm25-presets.md) | `bm25` against `bm25_xapian` as the default | every `TOP_K` class | `bm25` faster: `bm25_xapian` 1.14–1.16× its time |
 | [P12](p12-term-dictionary.md) | Term dictionary: offsets from runs, packed values and entries | disk (dictionary) | 2.53× to 0.992× Lucene |
 | [Reclamation](reclamation.md) | Whole-segment drop at commit, stepped file removal, merges at commit | disk under deletes, foreground stalls | FIFO without merges: 7.5× fewer bytes held; with merges, no change (write amplification 2.0); freeing costs 7–130 ms per GiB across platforms |
+| [Commit barriers](commit-barriers.md) | A commit's data files made durable with one batched sync (`IO::sync_files`) | commit latency | commit phase median: macOS 187 → 106 ms, Linux ext4 24.8 → 16.2 ms; FreeBSD unchanged |
 | [P15](p15-region-size.md) | Verified regions of 4 KiB instead of 64 KiB | serving memory | peak 677 → 574 MB (with lengths verified on first use; 1.025× Tantivy); queries within a few percent |

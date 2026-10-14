@@ -24,7 +24,7 @@ set(COMPRESSORS_LZ4 OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG 7a6cc22f8a4eaceefd098374c05cdc2935c0fd19)
 FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG b4f4ce1932c8e204fb6bebd34f83f5b10de7b51c)
 # Index I/O goes through kronuz::journal::IO, from the completion library.
-FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG 373f02a219a91e32af035abf6fb909a8211aef8b)
+FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG 64d958b0f416fdd576c1dc7916176eec131b25cd)
 FetchContent_MakeAvailable(docset bitpack fst task hashes residency varint termdict unicode snowball analysis compressors fusefilter completion)
 
 add_library(strata INTERFACE)
