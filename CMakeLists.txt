@@ -8,7 +8,7 @@ include(FetchContent)
 set(TASK_ASIO OFF CACHE BOOL "" FORCE)
 # Each building block is pinned to the commit its Phase 1 gate numbers were measured at.
 FetchContent_Declare(docset GIT_REPOSITORY https://github.com/Kronuz/docset.git GIT_TAG 4e4d73fda4b53583122e8b1a976b96c496cee3b2)
-FetchContent_Declare(bitpack GIT_REPOSITORY https://github.com/Kronuz/bitpack.git GIT_TAG 0ce26911f8e8ab0d59f7de1930efcec83f9f7d12)
+FetchContent_Declare(bitpack GIT_REPOSITORY https://github.com/Kronuz/bitpack.git GIT_TAG fb68e7f6f6eff725bdac123b6cc37a6c633aa9f8)
 FetchContent_Declare(fst GIT_REPOSITORY https://github.com/Kronuz/fst.git GIT_TAG a8d8478e8f92661ecf7e82eb85ca827155da2cad)
 FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG c3c30e49212769e1bbf424517003150de3f20682)
 FetchContent_Declare(hashes GIT_REPOSITORY https://github.com/Kronuz/hashes.git GIT_TAG abff6fa5ac0c19c0cff5509a437700d8f77be41e)
