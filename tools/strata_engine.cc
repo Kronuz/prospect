@@ -8,10 +8,17 @@
 //                                            ordinals and scores, Lucene and Xapian BM25
 //   strata_engine bench DIR COMMAND RUNS [bm25_xapian] < queries.txt
 //                                            per query: fastest of RUNS in-process runs, in µs
+//   strata_engine churn DIR < ops            the soak's op stream through strata::index (bench/soak):
+//                                            "P\tid\ttext" upserts, "D\tid" deletes, "C" commits and
+//                                            prints "C\tµs\tsegments", "Q\tCOMMAND\tquery" prints
+//                                            "Q\tµs\tresult"
 // Query syntax: words are optional, +word is required, -word is excluded, "a b" is a phrase.
+#include "completion/posix.h"
 #include "residency.hh"
+#include "strata/index.hh"
 #include "strata/check.hh"
 #include "strata/search.hh"
+#include "strata/searcher.hh"
 #include "strata/writer.hh"
 
 #include <algorithm>
@@ -26,7 +33,9 @@
 #include <iomanip>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
+#include <unordered_map>
 #include <iostream>
 #include <string>
 
@@ -491,6 +500,100 @@ int resident(const std::string& dir) {
 	return 0;
 }
 
+// A document of whitespace tokens: each distinct token with its wdf and positions, the
+// key term (wdf 0), and the id stored.
+strata::document tokens_document(std::string_view id, std::string_view text) {
+	std::unordered_map<std::string_view, std::vector<std::uint32_t>> at;
+	std::uint32_t pos = 0;
+	for (std::size_t i = 0; i < text.size();) {
+		std::size_t j = text.find(' ', i);
+		if (j == std::string_view::npos) { j = text.size(); }
+		if (j > i) { at[text.substr(i, j - i)].push_back(++pos); }
+		i = j + 1;
+	}
+	strata::document d;
+	d.terms.push_back({"Q" + std::string(id), 0, {}});
+	for (auto& [t, positions] : at) { d.terms.push_back({std::string(t), std::uint32_t(positions.size()), std::move(positions)}); }
+	d.length = pos;
+	d.stored = std::string(id);
+	return d;
+}
+
+int churn(const std::string& dir) {
+	std::ios::sync_with_stdio(false);
+	std::filesystem::create_directories(dir);
+	kronuz::journal::PosixIO io(dir);
+	strata::index::options o;
+	o.key_prefix = "Q";
+	o.auto_merge = true;
+	const std::array<char, 16> uuid{'s', 't', 'r', 'a', 't', 'a', '-', 's', 'o', 'a', 'k'};
+	auto ix = strata::index::create(io, o, uuid);
+	using clock = std::chrono::steady_clock;
+	auto us = [](clock::time_point t) { return std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - t).count(); };
+	strata::transaction t;
+	auto apply = [&] {
+		if (t.ops.empty()) { return; }
+		if (ix.apply(t, {}).result != strata::verdict::accepted) { std::cerr << "rejected\n"; std::exit(1); }
+		t.ops.clear();
+	};
+	std::string line;
+	while (std::getline(std::cin, line)) {
+		const std::string_view l = line;
+		if (l.empty()) { continue; }
+		const std::size_t a = l.find('\t'), b = a == std::string_view::npos ? a : l.find('\t', a + 1);
+		switch (l[0]) {
+		case 'P': {
+			strata::operation op;
+			op.type = strata::operation::replace_key;
+			op.key = "Q" + std::string(l.substr(a + 1, b - a - 1));
+			op.doc = tokens_document(l.substr(a + 1, b - a - 1), l.substr(b + 1));
+			t.ops.push_back(std::move(op));
+			if (t.ops.size() == 1000) { apply(); }
+			break;
+		}
+		case 'D': {
+			strata::operation op;
+			op.type = strata::operation::delete_key;
+			op.key = "Q" + std::string(l.substr(a + 1));
+			t.ops.push_back(std::move(op));
+			if (t.ops.size() == 1000) { apply(); }
+			break;
+		}
+		case 'C': {
+			apply();
+			const auto start = clock::now();
+			ix.commit();
+			std::cout << "C\t" << us(start) << '\t' << ix.segments().size() << std::endl;
+			break;
+		}
+		case 'Q': {
+			const std::string_view command = l.substr(a + 1, b - a - 1), query = l.substr(b + 1);
+			const auto start = clock::now();
+			std::vector<strata::segment_snapshot> segs;
+			for (const auto& v : ix.segments()) { segs.push_back({v.seg, v.deleted}); }
+			const parsed q = parse(query);
+			auto builder = [&](const strata::segment& seg) { return build(seg, q); };
+			std::uint64_t result = 1;
+			if (command == "COUNT") {
+				result = strata::search_count(segs, builder);
+			} else {
+				std::size_t k = 0;
+				std::from_chars(command.data() + 4, command.data() + command.size(), k);
+				std::uint64_t n = 0;
+				(void)strata::search(segs, builder, k, command.ends_with("_COUNT") ? &n : nullptr);
+				if (command.ends_with("_COUNT")) { result = n; }
+			}
+			std::cout << "Q\t" << us(start) << '\t' << result << std::endl;
+			break;
+		}
+		}
+	}
+	apply();
+	ix.commit();
+	std::cout.flush();
+	return 0;
+}
+
 int main(int argc, char** argv) {
 	const std::string mode = argc > 1 ? argv[1] : "";
 	if (mode == "index" && argc == 3) { return index(argv[2]); }
@@ -510,10 +613,11 @@ int main(int argc, char** argv) {
 	if (mode == "resident" && argc == 3) { return resident(argv[2]); }
 	if (mode == "dictsim" && argc == 3) { return dictsim(argv[2]); }
 	if (mode == "verify" && argc == 3) { return verify(argv[2]); }
+	if (mode == "churn" && argc == 3) { return churn(argv[2]); }
 	if (mode == "bench" && (argc == 5 || argc == 6)) {
 		const bool xapian = argc == 6 && std::string_view(argv[5]) == "bm25_xapian";
 		return bench(argv[2], argv[3], std::atoi(argv[4]), xapian ? strata::scheme::bm25_xapian : strata::scheme::bm25);
 	}
-	std::cerr << "usage: strata_engine index|serve|terms|dictstats|verify|check|resident DIR | bench DIR COMMAND RUNS < queries\n";
+	std::cerr << "usage: strata_engine index|serve|terms|dictstats|verify|check|resident|churn DIR | bench DIR COMMAND RUNS < queries\n";
 	return 2;
 }
