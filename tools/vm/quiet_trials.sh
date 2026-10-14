@@ -10,6 +10,7 @@ set -uo pipefail
 LIMIT=${1:-6}
 QUIET=${2:-300}
 TRIALS=${TRIALS:-'~/bench/trials.sh'}
+script=$(basename "${TRIALS%% *}")  # the VM script TRIALS runs, stopped on noise
 here=$(cd "$(dirname "$0")" && pwd)
 log=${STRATA_TRIALS_LOG:-$here/../../.scratch/quiet-trials.log}
 load() { sysctl -n vm.loadavg | awk '{print $2}'; }
@@ -29,8 +30,8 @@ for attempt in $(seq 1 200); do
 		echo "$(date +%s) $l" >> "$log.samples"
 		if above "$l"; then
 			noisy=1
-			# trials.sh leads its own session: stop it and everything it started.
-			"$here/linux.sh" ssh 'g=$(pgrep -f "^/bin/bash /home/strata/bench/(trials|ab).sh" | head -1); [ -n "$g" ] && kill -TERM -- -$g; sleep 2; pkill -f "strata_engine serve|do_query|java|xapian_engine"' || true
+			# The trials script leads its own session: stop it and everything it started.
+			"$here/linux.sh" ssh 'g=$(pgrep -f "^/bin/bash /home/strata/bench/'"$script"'" | head -1); [ -n "$g" ] && kill -TERM -- -$g; sleep 2; pkill -f "strata_engine|do_query|java|xapian_engine"' || true
 			break
 		fi
 		sleep 30
