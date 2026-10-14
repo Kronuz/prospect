@@ -15,8 +15,8 @@ struct check_report {
 
 // Checks one segment: verifies every byte, decodes every term's postings (exactly its
 // document frequency, by the iterator's construction) and positions, and reads every
-// document's docid, version, length, and stored record. Throws corrupt_segment (or
-// termdict::corrupt) at the first problem; adds what it saw to r.
+// document's docid, version, length, and stored record. Throws corrupt_segment at the
+// first problem; adds what it saw to r.
 inline void check_segment(const segment& seg, const std::vector<std::uint64_t>* deleted, check_report& r) {
 	seg.verify_all();
 	++r.segments;
