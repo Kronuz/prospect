@@ -1320,6 +1320,19 @@ int main() {
 		}
 		flaky_io f(io);
 		f.arm(segment, 2, error, 2);  // the open's size check passes; both loading reads fail
+		std::string first = "none";  // the open's size check itself fails twice (condition 15)
+		{
+			flaky_io g(io);
+			g.arm(segment, 1, error, 2);
+			try {
+				strata::index::open(g, keyed);
+			} catch (const strata::corrupt_index&) {
+				first = "corrupt";
+			} catch (const std::system_error& e) {
+				first = e.code().value() == error ? "itself" : "another error";
+			}
+		}
+		CHECK(first == (error == EIO ? "corrupt" : "itself"));
 		std::string what = "none";
 		try {
 			strata::index::open(f, keyed);
