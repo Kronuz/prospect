@@ -839,3 +839,190 @@ These parts stand as written:
 | Index sorting (D14) | The format reservation, inside R1 | R16's ruling on Lucene's configuration; Track P otherwise |
 | Benchmark engine code | Lucene, Tantivy, and Xapian engines on `geonames`, once the host's trials finish | R16's corpus subset, query sets, and configurations before any gate run |
 | Document size (chunked transactions, frame runs) | Nothing in Phase 4 | R19: a Track C design coordinated with Detent; the continuation flag in R1 |
+
+## Revision check 1
+
+- Date: 2026-10-15.
+- Reviewed: `docs/design/phase-4.md` revision 1 at strata `b124431` (local, not
+  pushed), with that commit's changes to `limits.md`, PLAN, FEASIBILITY, ARCHITECTURE,
+  DISTRIBUTION, and `workload-profiles.md`.
+- Checked against: this review's R1–R20 and conditions 1–5; `include/strata/{format,
+  reader,index}.hh` at `b3f0e52`; Xapiand `src/database/handler.h` (MIT) for collapse.
+- Checked by reading. Nothing was built or run.
+
+### Verdict
+
+**APPROVE WITH CONDITIONS.** The revision answers R1–R20 point by point, and R1–R7, the
+format-13 gate, close except for three points:
+
+- the slot table's home (N1);
+- index versus data dimensions in points (N2);
+- the version of a keyless document (N3).
+
+N1 and N2 are format, and they land in the design before the slot-table and points
+on-disk code. Format-13 code may start now on everything else. The freeze still waits
+for Phase 3's per-section disk rows and D15's result (`phase-4.md:41-43`), as
+condition 1 requires.
+
+The new D1 is sound in shape: a lifecycle core with compile-time section plugins. It
+restructures the Phase 3 code that the open ratchet rows measure, so it carries
+conditions of its own (N4). Delete by query (D16) is new, and its apply semantics are
+not yet deterministic as written (N5).
+
+### Status
+
+Closed as specified:
+
+- **R1** (`39-78`): the four new sections; the reserved fields; the mandatory,
+  required, and free groups; structure flags checked against the table of contents;
+  unknown kinds as corruption; the freeze after the disk rows and D15.
+- **R2** (`80-107`): the strata-owned table changed by `declare_slot`; typed
+  declarations; append-only rules; stage-1 rejections; self-describing segments; the
+  collision rule, with dense host slots in Phase 7. Open: N1.
+- **R3** (`109-135`): the map; dates as `f64` seconds (about 0.24 µs near the present
+  checks: the ulp at 2^30.7 s is 2^-22 s); typed tuples across shards; Xapiand's
+  replacement and DUMP/RESTORE, with PLAN `501-502` and DISTRIBUTION changed.
+- **R4** (`137-162`): presence with rank in `docset`; 33–64-bit widths in `bitpack`;
+  multiplicity per type; the block size as a recorded preset; statistics under deletes;
+  exact sums.
+- **R5** (`164-231`): up to 8 dimensions recorded per tree; leaf size per tree;
+  pooled materialization; `Kronuz/bkd`; 2-D interval trees; every candidate with its
+  shape path and host or core split; all eight measurement rows; the keep rule;
+  staging; H3 out. Open: N2 and N6.
+- **R6** (`344-351`): the key term leaves the term dictionary; `versions` alone;
+  the filter inside `keys`; snapshot range scans.
+- **R7** (`52`, `315`): `term_lists` in format 13.
+- **R8** (`199-205`, `233-244`): the bound contract, per-block bounds, a versioned wire
+  form, and one closed dot-product primitive, with DISTRIBUTION amended (`78-80`).
+- **R9** (`257-273`). Missing values sort last in either direction, which matches the
+  keymaker's smallest-on-empty and largest-on-empty sentinels.
+- **R10** (`275-288`). The whole value list as the key agrees with Xapiand passing one
+  slot as `collapse_key` (`handler.h:129-130`). Open: one text point in N7.
+- **R11** (`290-308`).
+- **R12** (`310-332`). Open: N8.
+- **R13** (`334-342`).
+- **R14** (`353-363`): the four sources in order, by key and by docid; the guarantee
+  per mode; landing before Phase 3R's gate.
+- **R15** (`377-388`), **R16** (`431-449`), **R17** (`371-375`, `390-395`,
+  `406-429`), **R19** (`397-404`, `limits.md:41-58`), and **R20** (`75-78`, text fixed).
+- **R18** (`limits.md:15-39`). Open: the reference columns, N9.
+
+### New required changes
+
+1. **N1. The slot table does not belong in the manifest** (`83`). Every commit
+   rewrites the manifest (`phase-3.md:101-108`). Xapiand's dynamic fields can declare
+   tens of thousands of slots. At 100,000 declarations of about 16 bytes, each commit
+   writes about 1.6 MB of table that did not change, and at 1,000 indexes per node that
+   multiplies across group commits (`phase-3.md:360-362`). The table takes a generation
+   file of its own, like metadata (`meta-<gen>.kv`, `phase-3.md:92-95`). The manifest
+   records its generation, size, and CRC, and the file is written only when a
+   declaration lands. The manifest's own format version changes with format 13, and the
+   design says so: the slot-table reference and the values generation (`54-57`) are
+   manifest fields.
+2. **N2. Index dimensions and data dimensions** (`166-168`, `197`). Lucene separates
+   them: up to 8 index dimensions and up to 16 data dimensions. Its 7-dimension triangle
+   encoding depends on that split. Candidate 4's triangles of unit vectors carry three
+   vertices of three coordinates each, 9 values, and index at most a 6-value box.
+   "Decoders accept up to 8 dimensions" cannot hold them. Each tree records index
+   dimensions (up to 8) and data dimensions (up to 16), and `limits.md:31` follows.
+3. **N3. The version of a keyless document** (`66`). `version(ord)` returns 0, but an
+   expected version of 0 means "must be absent" (`phase-3.md:228-229`). A replace by
+   docid with expected version 0 on a live keyless document would then read as absent.
+   The design states that expected-version checks on documents without a version
+   reject deterministically, or that keyless segments carry no conditional operations at
+   all.
+4. **N4. D1's conditions** (`19-37`).
+   - **One list per layer.** "Keys and versions" is in the core (`24`) and `keys` is a
+     plugin (`27`). The design states the split: the core owns key semantics (the
+     version map, newest-first lookup, version checks), and the `keys` plugin owns the
+     encoding behind a lookup interface the core calls.
+   - **The plugin interface is written down before the refactor code.** What a plugin
+     receives: the ordinal permutation and docid map of a merge or reorder, the live
+     docs, and the slot directory. What it returns: its section's bytes, its structure
+     flag, and digest records that are independent of segmentation, so T2 still holds.
+     Also how a plugin reads format N − 1 under a compile-time registry: one plugin,
+     two layouts, selected by the segment's version.
+   - **Measured, not asserted.** "Costs nothing per query; the gate's query rows are the
+     proof" (`35-36`) needs a before/after comparison. The refactor lands after
+     Phase 3's ratchet rows are recorded at a stated commit. It is then measured against
+     those rows, every query class and both indexing rows, at least five interleaved
+     trials, and shows no regression outside the noise band. Otherwise it moves the
+     baseline that Phase 3's gate is measuring.
+   - **Phase 3R builds on the core's interface.** The refactor lands before Phase 3R's
+     `strata::group` code depends on the index API, or after it, with the interface
+     unchanged. The design picks one.
+5. **N5. Delete by query is not yet deterministic** (`371-375`).
+   - **Buffered documents.** "Evaluated at apply on the index state at that position"
+     includes documents that are only in the write buffers, which no query can search
+     today. Either apply flushes first, which makes a refresh part of apply, or the
+     delete is recorded and applied to each buffer at its flush, as Lucene applies
+     buffered delete queries. The verdict's count must not depend on which one, or on
+     flush timing.
+   - **The query class.** Only boolean match semantics are allowed: no top-k, no score
+     or percent cutoff, no pruning, no deadline, no partial result. Anything else makes
+     replicas disagree.
+   - **Resources.** Phase 3 forbids memory or time from rejecting an accepted
+     transaction (`phase-3.md:251-253`). The match set streams into pending live docs
+     without a query budget, and the overlay and undo log of a delete matching millions
+     of documents is bounded and charged to the indexing budget, with stage 1 waiting as
+     it does at the limit.
+   - **Check:** T2's digest and verdict equality, with delete by query against buffered,
+     flushing, merging, and published documents under every flush schedule.
+6. **N6. Candidate 3 and the primitive** (`196`, `199-204`). Latitude-longitude boxes
+   against triangles are not dot products of unit vectors. If candidate 3 is kept, its
+   core relations either reduce to the primitive or amend DISTRIBUTION again. The design
+   states which before engine code for candidate 3. Also, the keep rule's "both corpora"
+   (`228`) means `geonames` and the shape corpus, since `nyc_taxis` is not used for geo
+   (`221-222`).
+7. **N7. The collapse key's canonical order** (`278`). For `binary` slots, Xapian
+   compares the stored bytes in their stored order. A canonical (sorted) order collapses
+   [a, b] with [b, a], where Xapian does not, unless Xapiand's StringList is itself
+   sorted. `binary` keys use stored order; sets use sorted order.
+8. **N8. The exact accumulators** (`317-320`).
+   - **Squares.** `x * x` rounds in `f64`, so accumulating rounded squares is not exact.
+     Each square enters as its error-free pair (product, `fma(x, x, −product)`).
+   - **Size.** A dense superaccumulator over `f64`'s exponent range is about 2,100 bits
+     (about 270 bytes) per accumulator. Per bucket, with `sum` and a sum of squares
+     under 10^5 histogram buckets, that is about 54 MB. The design states the
+     representation (dense, or sparse limbs) and its bytes per bucket, charged to the
+     query budget.
+   - **Histogram edges.** "Computed in the mapped integer domain" holds for integer
+     intervals only. For an `f64` interval such as 0.1, the bucket is
+     floor((v − offset) / interval) in IEEE arithmetic, which is deterministic across
+     x86_64 and arm64 only with no contraction and no fast-math. The design gives the
+     formula and builds these files with `-ffp-contract=off`.
+   - **Nesting.** An iterative decoder bounds parsing. The evaluation of nested
+     sub-aggregations is also iterative, or bounded by a stack check; a fuzz input of
+     depth 10^6 is in the corpus.
+9. **N9. limits.md's Phase 4 rows carry the references** (`limits.md:26-39`). The rule
+   is "at least the largest", so each row shows Lucene's, Tantivy's, and Xapian's value
+   as the earlier rows do. For example:
+   - dimensions: Lucene's 8 index and 16 data;
+   - buckets: Elasticsearch's `search.max_buckets`, which the "no count limit" row
+     exceeds by its stated mechanism;
+   - `collapse_max`: Xapian's 32-bit `doccount`.
+
+### Findings
+
+1. **Standalone durability** (`workload-profiles.md`, item 8) changes when a standalone
+   transaction is acknowledged: at the turn log's fsync, not at `commit()`. Phase 3's T1
+   defines acknowledgment at `commit()` (`phase-3.md:427-428`), and it depends on C2's
+   journal format, which Track C has not frozen. It has no format-13 effect. When it
+   lands, T1 and T2 rerun under the new definition.
+2. **Two trees per geo slot** (`194-195`). Under candidates 1 and 2, point documents go
+   in a 1-D tree and shape documents in a 2-D interval tree, so a field that mixes them
+   queries both. A point is the degenerate interval [c, c]. The measurement includes
+   one 2-D tree holding both kinds, so that one structure per slot is an option.
+
+### Which code starts now
+
+| Item | Starts now | Waits for |
+|---|---|---|
+| Format-13 sections: `keys`, `values` (presence, columns, statistics), `term_lists`, structure flags, the table-of-contents rules | Yes, behind fixtures that are not yet frozen | The freeze: Phase 3's disk rows and D15 |
+| Slot table and `declare_slot` | The operation and its stage-1 rules | N1 before its file format |
+| `points` on disk | 1-D and 2-D interval trees | N2 before the tree header |
+| D1 refactor | The plugin interface in the design | N4: Phase 3's ratchet rows recorded, then a before/after measurement |
+| Delete by query | Nothing | N5 |
+| Aggregations | Collectors and partials | N8 before the accumulator and histogram code |
+| Geo | D15's offline rows | N6 before candidate 3's engine code |
+| Everything else in the previous table | As that table states, with R1–R7 now closed | — |
