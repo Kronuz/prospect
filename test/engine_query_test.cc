@@ -163,6 +163,8 @@ static void check_against_scan(const std::vector<doc_hit>& hits, const std::vect
 	auto close = [](double a, double b) { return std::abs(a - b) <= 1e-9 * std::max(1.0, std::max(a, b)); };
 	const std::size_t n = std::min(k, all.size());
 	CHECK(hits.size() == n);
+	// R1 on the engine's own scores: equal scores come in docid order.
+	for (std::size_t i = 1; i < hits.size(); ++i) { CHECK(hits[i - 1].score != hits[i].score || hits[i - 1].docid < hits[i].docid); }
 	for (std::size_t a = 0; a < n && hits.size() == n;) {
 		std::size_t b = a + 1;
 		while (b < n && close(all[b].score, all[a].score)) { ++b; }
@@ -173,8 +175,10 @@ static void check_against_scan(const std::vector<doc_hit>& hits, const std::vect
 			got_ids.push_back(hits[i].docid);
 		}
 		std::sort(got_ids.begin(), got_ids.end());
+		// The scan's tie order binds only where the engine scored the group bit for bit
+		// as the scan did; a pruned path may sum in another order, an ulp apart.
 		bool exact = true;
-		for (std::size_t i = a; i < b; ++i) { exact = exact && all[i].score == all[a].score; }
+		for (std::size_t i = a; i < b; ++i) { exact = exact && all[i].score == all[a].score && hits[i].score == all[i].score; }
 		if (exact) { CHECK(got_ids == want_ids); }
 		a = b;
 	}
