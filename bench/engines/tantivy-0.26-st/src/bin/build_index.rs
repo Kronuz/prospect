@@ -31,7 +31,8 @@ fn main_inner(output_dir: &Path) -> tantivy::Result<()> {
     let mut i = 0;
     {
         let mut index_writer = index
-            .writer_with_num_threads(1, 2_000_000_000)
+            // TANTIVY_HEAP_MB sets the indexing heap, calibrated to equal peak memory.
+            .writer_with_num_threads(1, std::env::var("TANTIVY_HEAP_MB").ok().and_then(|v| v.parse::<usize>().ok()).map_or(2_000_000_000, |mb| mb << 20))
             .expect("failed to create index writer");
         let stdin = std::io::stdin();
 
@@ -56,6 +57,10 @@ fn main_inner(output_dir: &Path) -> tantivy::Result<()> {
 
         index_writer.commit()?;
         index_writer.wait_merging_threads()?;
+    }
+    // NO_MERGE=1 keeps the segments the merge policy left (Phase 3's "before merging" rows).
+    if std::env::var("NO_MERGE").map(|v| v == "1").unwrap_or(false) {
+        return Ok(());
     }
     let segment_ids = index.searchable_segment_ids()?;
     let mut index_writer: IndexWriter<TantivyDocument> = index

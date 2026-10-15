@@ -36,9 +36,13 @@ public class BuildIndex {
 
 		// KEYED=1: each document is upserted by its id (T4's "keys in every engine").
 		final boolean keyed = "1".equals(System.getenv("KEYED"));
+		// NO_MERGE=1 keeps the segments the merge policy left (Phase 3's "before merging"
+		// rows); LUCENE_RAM_MB sets the RAM buffer, calibrated to equal peak memory.
+		final boolean noMerge = "1".equals(System.getenv("NO_MERGE"));
+		final double ramMb = System.getenv("LUCENE_RAM_MB") != null ? Double.parseDouble(System.getenv("LUCENE_RAM_MB")) : 2047;
 		final StandardAnalyzer standardAnalyzer = new StandardAnalyzer(CharArraySet.EMPTY_SET);
 		final IndexWriterConfig config = new IndexWriterConfig(standardAnalyzer)
-				.setRAMBufferSizeMB(2047).setRAMPerThreadHardLimitMB(2047)
+				.setRAMBufferSizeMB(ramMb).setRAMPerThreadHardLimitMB((int) Math.min(ramMb, 2047))
 				.setOpenMode(OpenMode.CREATE);
 
 		try (Directory dir = FSDirectory.open(outputPath);
@@ -116,8 +120,10 @@ public class BuildIndex {
 			for (Thread thread : threads) {
 				thread.join();
 			}
-			System.out.println("Merge");
-			writer.forceMerge(1, true);
+			if (!noMerge) {
+				System.out.println("Merge");
+				writer.forceMerge(1, true);
+			}
 		}
 	}
 }
