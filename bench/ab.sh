@@ -23,6 +23,8 @@ for t in 1 2 3 4 5; do
 	for set in queries terms-stratified; do
 		unit=q$t-$set
 		[ -f $out/$unit.json ] && continue
+		# A server of the previous unit may still hold the index's owner lock.
+		while pgrep -f "[s]trata_engine serve" >/dev/null; do sleep 1; done
 		echo "$(date +%T) $unit: $order"
 		# shellcheck disable=SC2086
 		python3 src/client.py $set.txt $order > $out/$unit.log 2>&1 && cp results.json $out/$unit.json || echo "UNIT_FAILED $unit"
