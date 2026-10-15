@@ -16,8 +16,10 @@ import org.apache.lucene.document.Document;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.StoredField;
+import org.apache.lucene.document.StringField;
 import org.apache.lucene.document.TextField;
 import org.apache.lucene.index.IndexWriter;
+import org.apache.lucene.index.Term;
 import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.IndexWriterConfig.OpenMode;
 import org.apache.lucene.store.Directory;
@@ -32,6 +34,8 @@ public class BuildIndex {
 	public static void main(String[] args) throws Exception {
 		final Path outputPath = Paths.get(args[0]);
 
+		// KEYED=1: each document is upserted by its id (T4's "keys in every engine").
+		final boolean keyed = "1".equals(System.getenv("KEYED"));
 		final StandardAnalyzer standardAnalyzer = new StandardAnalyzer(CharArraySet.EMPTY_SET);
 		final IndexWriterConfig config = new IndexWriterConfig(standardAnalyzer)
 				.setRAMBufferSizeMB(2047).setRAMPerThreadHardLimitMB(2047)
@@ -48,7 +52,7 @@ public class BuildIndex {
 			for (int i = 0; i < threads.length; ++i) {
 
 				final Document document = new Document();
-				StoredField idField = new StoredField("id", "");
+				Field idField = keyed ? new StringField("id", "", Field.Store.YES) : new StoredField("id", "");
 				TextField textField = new TextField("text", "", Field.Store.NO);
 				NumericDocValuesField sortField = new NumericDocValuesField("sort_field", 0);
 
@@ -84,7 +88,11 @@ public class BuildIndex {
 						textField.setStringValue(text);
 						sortField.setLongValue(sortValue);
 						try {
-							writer.addDocument(document);
+							if (keyed) {
+								writer.updateDocument(new Term("id", id), document);
+							} else {
+								writer.addDocument(document);
+							}
 							final int numIndexed = indexed.getAndIncrement();
 							if (numIndexed % 100_000 == 0) {
 							    System.out.println("Indexed: " + numIndexed);

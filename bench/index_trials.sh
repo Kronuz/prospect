@@ -5,7 +5,9 @@
 # warm.
 # Units with a result are skipped, so tools/vm/quiet_trials.sh can stop and restart it.
 # Results in ~/bench/results/index-NAME: wall time, peak RSS, bytes, segments.
-#   index_trials.sh NAME
+# ENGINES overrides the engine list, DOCS the corpus size (a count, or "all" for the full
+# corpus), and KEYED=1 makes every engine upsert by id (T4), passed to each indexer.
+#   [ENGINES="strata tantivy-0.26-st"] [DOCS=all] [KEYED=1] index_trials.sh NAME
 set -u
 name=${1:-run}
 cd ~/bench/search-benchmark-game
@@ -16,13 +18,18 @@ os=$(uname -s)
 # GNU time -v on Linux; BSD time -l elsewhere (real seconds, peak RSS in bytes on macOS
 # and in KB on FreeBSD).
 if [ "$os" = Linux ]; then time_flag=-v; stat_size=-c%s; else time_flag=-l; stat_size=-f%z; fi
-[ -f corpus-1m.json ] || head -1000000 corpus.json > corpus-1m.json
-export CORPUS=$PWD/corpus-1m.json
-engines=(strata tantivy-0.26-st lucene-10.4.0-st xapian-2.1.0)
+docs=${DOCS:-1000000}
+if [ "$docs" = all ]; then export CORPUS=$PWD/corpus.json; else
+	[ -f corpus-$docs.json ] || head -$docs corpus.json > corpus-$docs.json
+	export CORPUS=$PWD/corpus-$docs.json
+fi
+export KEYED=${KEYED:-0}
+read -r -a engines <<< "${ENGINES:-strata tantivy-0.26-st lucene-10.4.0-st xapian-2.1.0}"
+count=${#engines[@]}
 for e in "${engines[@]}"; do make -s -C engines/$e compile > /dev/null 2>&1; done
 for t in 1 2 3; do
-	for i in 0 1 2 3; do
-		e=${engines[$(((i + t - 1) % 4))]}
+	for i in $(seq 0 $((count - 1))); do
+		e=${engines[$(((i + t - 1) % count))]}
 		unit=i$t-$e
 		[ -f $out/$unit.bytes ] && continue
 		echo "$(date +%T) $unit"

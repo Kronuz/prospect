@@ -4,6 +4,7 @@
 //   xapian_engine churn DIR < ops              strata's soak op stream (bench/soak/soak.py): upserts and
 //                                              deletes by a "Q"-prefixed id term, commits, queries
 // The corpus is pre-normalized (lowercase words separated by spaces), so terms are whitespace tokens.
+#include <cstdlib>
 #include <xapian.h>
 
 #include <charconv>
@@ -33,6 +34,8 @@ std::string_view json_field(std::string_view line, std::string_view key) {
 int index(const std::string& dir) {
 	// Builds into DIR.build, then compacts into DIR (a single merged database, like the other engines).
 	Xapian::WritableDatabase db(dir + ".build", Xapian::DB_CREATE_OR_OVERWRITE);
+	const char* keyed_env = std::getenv("KEYED");
+	const bool keyed = keyed_env && std::string_view(keyed_env) == "1";
 	std::string line;
 	std::uint64_t n = 0, skipped = 0;
 	while (std::getline(std::cin, line)) {
@@ -52,7 +55,14 @@ int index(const std::string& dir) {
 		std::from_chars(sf.data(), sf.data() + sf.size(), sort);
 		doc.add_value(0, Xapian::sortable_serialise(static_cast<double>(sort)));
 		doc.set_data(std::string(json_field(line, "id")));
-		db.add_document(doc);
+		if (keyed) {
+			// KEYED=1: each document is upserted by its id term (T4's "keys in every engine").
+			const std::string key = "Q" + std::string(json_field(line, "id"));
+			doc.add_boolean_term(key);
+			db.replace_document(key, doc);
+		} else {
+			db.add_document(doc);
+		}
 		if (++n % 100000 == 0) std::cerr << n << '\n';
 	}
 	db.commit();

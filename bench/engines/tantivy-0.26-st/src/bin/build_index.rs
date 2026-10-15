@@ -2,7 +2,8 @@ use futures::executor::block_on;
 use std::env;
 use std::io::BufRead;
 use std::path::Path;
-use tantivy::schema::{Schema, STORED, TEXT, FAST};
+use tantivy::schema::{Schema, STORED, STRING, TEXT, FAST, Value};
+use tantivy::Term;
 use tantivy::{Index, IndexWriter, TantivyDocument};
 
 fn main() {
@@ -12,7 +13,9 @@ fn main() {
 
 fn create_schema() -> Schema {
     let mut schema_builder = Schema::builder();
-    schema_builder.add_text_field("id", STORED);
+    // KEYED=1: each document is upserted by its id (T4's "keys in every engine").
+    let keyed = std::env::var("KEYED").map(|v| v == "1").unwrap_or(false);
+    schema_builder.add_text_field("id", if keyed { STRING | STORED } else { STORED.into() });
     schema_builder.add_text_field("text", TEXT);
     schema_builder.add_u64_field("sort_field", FAST);
     schema_builder.build()
@@ -22,6 +25,7 @@ fn main_inner(output_dir: &Path) -> tantivy::Result<()> {
     env_logger::init();
 
     let schema = create_schema();
+    let keyed = std::env::var("KEYED").map(|v| v == "1").unwrap_or(false);
     let index = Index::create_in_dir(output_dir, schema.clone()).expect("failed to create index");
 
     let mut i = 0;
@@ -41,6 +45,12 @@ fn main_inner(output_dir: &Path) -> tantivy::Result<()> {
                 println!("{}", i);
             }
             let doc = TantivyDocument::parse_json(&schema, &line)?;
+            if keyed {
+                let id_field = schema.get_field("id").unwrap();
+                if let Some(id) = doc.get_first(id_field).and_then(|v| v.as_str()) {
+                    index_writer.delete_term(Term::from_field_text(id_field, id));
+                }
+            }
             index_writer.add_document(doc).unwrap();
         }
 
