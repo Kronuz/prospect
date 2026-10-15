@@ -1,7 +1,7 @@
 # Phase 4 design: structured data
 
-Revision 1, answering the architect's review (`docs/reviews/phase-4-design.md`, R1–R20
-and its conditions). Phase 4 adds what Xapiand's values, sorting, ranges, geo, and
+Revision 2, answering the architect's review (`docs/reviews/phase-4-design.md`: R1–R20,
+its conditions, and revision check 1's N1–N9). Phase 4 adds what Xapiand's values, sorting, ranges, geo, and
 aggregations need, on the Phase 3 index: ordered numeric keys, a slot table, doc values
 by slot, points, a geo index chosen by measurement, scored filters, computed sort keys,
 collapse, Xapian's estimate triple and percent, aggregations, and delete by query. From
@@ -21,20 +21,31 @@ description; if its Apache-2.0 library is used instead, its notice ships in `NOT
 strata is two layers with one boundary, and format 13 draws it:
 
 - **The lifecycle core**: the write buffer, immutable segments, manifests and commits,
-  merges, live docs, keys and versions, snapshots, durability, the memory budgets, and
-  the deterministic interface (`apply`, `checkpoint`, `install`, the digest). It treats
-  a segment as a set of typed sections and knows nothing about search.
-- **Section plugins**: keys, stored records, terms and postings, doc values, points,
-  and term lists. Each plugin builds its section at flush, merges it from live
-  documents, verifies it at open, and contributes digest records. Plugins never touch
-  the lifecycle.
+  merges, live docs, the version map and key resolution (which docid a key names),
+  snapshots, durability, the memory budgets, and the deterministic interface (`apply`,
+  `checkpoint`, `install`, the digest). It treats a segment as a set of typed sections
+  and knows nothing about search.
+- **Section plugins**: the `keys` and `versions` sections' encoding, stored records,
+  terms and postings, doc values, points, and term lists. Plugins never touch the
+  lifecycle.
+
+**The plugin interface.** At flush and merge a plugin receives the segment's documents
+in output order (the permutation and the old-to-new docid map at a merge), the live
+docs of each input, and the slot directory; it returns its section's bytes, its
+structure flag, and its digest records, which depend only on live documents' content,
+never on segmentation. At open it receives its section's bytes and the segment's
+version, and a plugin that reads format N − 1 does so itself; the core never
+translates sections.
 
 A segment with only `keys` and `stored` is a sorted key-value store with versions,
 snapshots, and atomic batches (the `document` profile, measured against RocksDB in
 `workload-profiles.md`); adding sections makes it the search engine. The registry is
-resolved at compile time (CRTP), so it costs nothing per query; the gate's query rows
-are the proof. Whether the core becomes a library of its own is decided after format 13
-freezes.
+resolved at compile time (CRTP), meant to cost nothing per query. That is measured:
+the refactor lands after Phase 3's ratchet rows are recorded, and a before-and-after run
+of every query class and both indexing rows (five interleaved trials or more) shows no
+regression. It lands before Phase 3R's code depends on the index API, so Phase 3R
+builds on the final boundary. Whether the core becomes a library of its own is decided
+after format 13 freezes.
 
 ## Format 13 (D2; R1, R20)
 
@@ -63,7 +74,9 @@ header, so a record can span frames (R19); the width of persisted exact accumula
   when Lucene-compatible scoring is configured; `versions` whenever `keys` is present.
 - **Free:** `stored`, `values`, `points`, and `term_lists`.
 
-A keyless segment has no `versions`, and `version(ord)` is 0. A segment without
+A keyless segment has no `versions`, and `version(ord)` is 0. A conditional operation
+(an expected version) names a key, so it never applies to a keyless document; one
+aimed at a keyless index rejects deterministically in stage 1. A segment without
 `lengths` (the `log` and `document` profiles) has no scored text fields.
 
 **Structure flags.** The footer records the structures the segment was built with, and
@@ -80,7 +93,10 @@ and Track D8's rolling upgrades make indexes outlive a binary.
 ## The slot table (D3; R2)
 
 strata owns the slot table; the core has no schema code, so this is a table, not a
-schema. It lives in the manifest and changes only through a new transaction operation,
+schema. It lives in its own generation file, `slots-<gen>.kv`, which the manifest
+references as it references metadata generations (the manifest's format version changes
+with format 13), so a commit rewrites the table only when it changed. It changes only
+through a new transaction operation,
 `declare_slot`, so a declaration is replicated, ordered with documents, and replayed
 like them. Xapiand's dynamic fields declare a slot in the transaction of the first
 document that uses it.
@@ -163,9 +179,9 @@ Per slot and segment:
 
 ## Points (D5; R5)
 
-A point slot indexes `uint64_t` keys of up to 8 dimensions in a BKD tree. Each tree
-records its dimension count and bytes per dimension; decoders accept up to 8 dimensions,
-the most Lucene's points take. Phase 4 builds the dimension counts D15 keeps, and
+A point slot indexes `uint64_t` values in a BKD tree with up to 8 index dimensions (the
+ones the tree splits on) and up to 16 data dimensions (the values stored per point), as
+Lucene's points take. Each tree records both counts and the bytes per dimension. Phase 4 builds the dimension counts D15 keeps, and
 quantization and its error are stated for the kept geo form.
 
 - Leaves hold up to 512 points with their ordinals, sorted by the split dimension; each
@@ -194,7 +210,7 @@ shape-document path:
 | 1. HTM ranges | One cell id, 1-D tree | Covering ranges, 2-D interval tree | Coverings | Range intersection |
 | 2. S2 cell ids | One cell id, 1-D tree | Covering ranges, 2-D interval tree | Coverings | Range intersection |
 | 3. Latitude and longitude | 2-D tree | Triangles, 7-D tree (`LatLonShape`'s route) | Tessellation | Box and triangle relations |
-| 4. Unit vectors | 3-D tree | Triangles of unit vectors, ≤ 8-D tree | Tessellation | Box and plane relations |
+| 4. Unit vectors | 3-D tree | Triangles of unit vectors (9 data dimensions, ≤ 8 index dimensions) | Tessellation | Box and plane relations |
 
 **Geometry in the core** is one closed numeric primitive, and DISTRIBUTION.md's "no
 geometry in the core" is amended to allow it: dot products of stored unit vectors
@@ -202,7 +218,10 @@ geometry in the core" is amended to allow it: dot products of stored unit vector
 normals. A circle is a dot product against a threshold; a convex polygon is the signs of
 dot products with its edge planes; the centroid-angle weight and the distance key are
 the `acos` of a dot product. The host decomposes non-convex polygons into convex pieces.
-A document's centroids live in a declared slot of three `f64` (D3).
+A document's centroids live in a declared slot of three `f64` (D3). Candidate 3's
+box-against-triangle relations in latitude and longitude are not dot products; if it is
+kept, they reduce to the primitive (by testing the triangle's unit-vector form), or
+DISTRIBUTION is amended again with the measurement that justified it.
 
 **What the measurement includes,** each row on all four axes, in `docs/perf/`:
 
@@ -225,9 +244,12 @@ A document's centroids live in a declared slot of three `f64` (D3).
 8. Dependency cost: S2 implemented from its published description, or the library's
    build and license cost stated. HTM's `cartesian` dependency stays on the host side.
 
-**The keep rule:** the kept candidate meets every Phase 4 ratchet row on both corpora,
+**The keep rule:** the kept candidate meets every Phase 4 ratchet row on `geonames` and
+the shape corpus,
 and among those, the geo classes' geometric mean decides. Rows 1, 2, 4, and 5 run
-offline first; a candidate eliminated there gets no engine code. H3 leaves Phase 4,
+offline first; a candidate eliminated there gets no engine code. A fifth arrangement is
+measured with them: one 2-D interval tree holding both point documents (as degenerate
+intervals) and shape coverings, so a slot needs one tree. H3 leaves Phase 4,
 since Xapiand has no geo bucket aggregation.
 
 ## Scored filters (D6; R8)
@@ -275,8 +297,9 @@ Xapiand uses them.
 ## Collapse (D9; R10)
 
 `collapse_max` by a slot keeps at most N documents per collapse key, the best ranked.
-The key is the slot's complete value list in canonical order, which is Xapian's
-semantics (it compares the slot's stored bytes); the seam inventory confirms Xapiand
+The key is the slot's complete value list, which is Xapian's semantics (it compares the
+slot's stored bytes): in canonical order for `bytes` and numeric slots, and in stored
+order for `binary` slots, so [a, b] and [b, a] are different keys there; the seam inventory confirms Xapiand
 needs no per-value collapse.
 
 - Per-document collapse counts are exact in exhaustive mode and lower bounds under
@@ -315,9 +338,14 @@ Collectors over doc values: `count`, `sum`, `avg`, `min`, `max`, `stats`,
 under buckets; and `_terms` over format 13's `term_lists`.
 
 - **Exact across splits:** integer sums in 128 bits; `f64` sums and sums of squares in
-  an exact accumulator (a fixed-point superaccumulator), rounded once when the result
-  is formed; `median` and `mode` from exact (value → count) partials; histogram buckets
-  computed in the mapped integer domain, so x86_64 and arm64 agree on edges. Xapiand
+  an exact accumulator (a fixed-point superaccumulator, about 270 bytes dense; with sum
+  and sum of squares per bucket, 10^5 histogram buckets take about 54 MB, charged to
+  the query budget), rounded once when the result is formed. A square enters as the
+  error-free pair (x·x, fma(x, x, −x·x)), since a plain x·x already rounds. `median`
+  and `mode` come from exact (value → count) partials.
+- **Histogram edges:** integer intervals bucket in the mapped integer domain; a
+  fractional `f64` interval buckets by floor((x − offset) / interval), compiled with
+  `-ffp-contract=off`, so x86_64 and arm64 agree on every edge. Xapiand
   computes on doubles and warns past 2^53; strata's results differ only there, and the
   documentation says so.
 - **Terms partials are complete per shard,** so one shard and many give byte-equal
@@ -325,8 +353,9 @@ under buckets; and `_terms` over format 13's `term_lists`.
   over ordinals and merges by bytes, with no global ordinals.
 - **Calendar intervals** (months, years, time zones) are host-computed range
   aggregations; the core has fixed intervals only.
-- **No nesting cap:** the request decoder is iterative and its state is charged to the
-  query budget, so depth is bounded by memory, not by a copied number.
+- **No nesting cap:** the request decoder and the evaluation of nested
+  sub-aggregations are both iterative, and their state is charged to the query budget,
+  so depth is bounded by memory, not by a copied number; a fuzz input nests 10^6 deep.
 - Aggregations are exhaustive over the documents that match; Xapian's `MatchSpy` sees
   only those its matcher considers. Every aggregation request in the E2E suite
   considers every match, so the change is not observable there.
@@ -373,6 +402,15 @@ Phase 4 code; otherwise it is Track P.
 An operation that deletes every live document matching a query, evaluated at apply on
 the index state at that position, so replicas agree; the count is in the verdict. The
 test-parity inventory assigns it to Phase 4.
+
+- **Buffered documents** match through the same in-buffer index that real-time get
+  reads (D13), at apply, so the count never depends on when a buffer flushes.
+- **Plain boolean matching only:** no top-k, cutoffs, pruning, deadlines, or partial
+  results; a query that needs any of them rejects in stage 1.
+- **Memory:** the match set streams into the live-docs deletions per segment; it is
+  charged to the indexing budget and never rejects for memory, as a delete by key never
+  does.
+- **Check:** digest and verdict equality under every flush schedule in T2.
 
 ## Determinism and the write path (D17; R15)
 
