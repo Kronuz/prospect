@@ -135,7 +135,10 @@ with deletes (`STRATA_DELETE_EVERY`) must stay at zero mismatches.
 | P6-6 | Skip a segment whose query bound cannot beat the floor, from the whole-list bounds already in `term_info::impacts` (sum for conjunctions and disjunctions, the include side for exclusions), before opening postings | `searcher.hh:112-118`, a bound pass beside `build` | Cost 11 and the construction in cost 8 for segments that cannot compete | `TOP_10` latency, many small segments |
 | P6-7 | `COUNT` of one term over segments without deletes is the snapshot df (from P6-3's table), as the single-segment path already does | `strata_engine.cc:339-343` beside `:317-321` | No scorer or postings opened for term `COUNT` | `COUNT` term class |
 
-Status. P6-1 is implemented, not yet measured: `top_collector::collect` and the
+Status. R5, P6-3 (`strata::term_table`, `segment::find_term`), and P6-7 (single-word
+`COUNT` from the table, `tools/engine_query.hh`) are implemented, not yet measured; the
+engine's query layer lives in `tools/engine_query.hh`, tested by `engine_query_test`.
+P6-1 is implemented, not yet measured: `top_collector::collect` and the
 generic loop drop hits at or below a seeded floor, and `search` turns each segment's
 hits into (score, docid), re-sorting them if a segment's ordinals are not in docid
 order, then merges the two sorted runs linearly up to k (review R1). Owed before it

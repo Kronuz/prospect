@@ -245,6 +245,23 @@ int main() {
 				}
 			}
 		}
+		// Single-word counts (P6-7): document frequencies in segments without deletes,
+		// counted in the others, equal to the scan and to today's path.
+		for (const char* w : vocab) {
+			const std::string word(w);
+			for (const std::string& text : {word, "+" + word, word + " " + word, "+" + word + " " + word, "\"" + word + "\""}) {
+				const engine::parsed q = engine::parse(text);
+				CHECK(engine::single_term(q) && *engine::single_term(q) == word);
+				reference_stats ref(segs);
+				auto reference = [&](const segment& seg) { return reference_build(seg, q, scheme::bm25, ref); };
+				const std::uint64_t n = engine::count_snapshot(segs, q);
+				CHECK(n == scan(segs, q, scheme::bm25).size());
+				CHECK(n == search_count(segs, reference));
+				CHECK(engine::run(std::span<const segment_snapshot>(segs), "COUNT", text) == n);
+			}
+			CHECK(!engine::single_term(engine::parse(word + " -" + word)));
+			CHECK(!engine::single_term(engine::parse(word + " b")) || word == "b");
+		}
 		for (int qn = 0; qn < 150; ++qn) {
 			const std::string text = random_query(r);
 			const engine::parsed q = engine::parse(text);

@@ -123,6 +123,13 @@ public:
 	// The term's document frequency over every segment, deleted documents included.
 	std::uint64_t df(std::string_view term) { return column(term).df; }
 
+	// The term's document frequency in one of the snapshot's segments (0 when absent),
+	// without computing its competitive pairs.
+	std::uint64_t df(const segment& seg, std::string_view term) {
+		const auto& e = column(term).infos[index_of(seg)];
+		return e ? e->df : 0;
+	}
+
 	// The term's info in one of the snapshot's segments, ready for a scorer; null when
 	// the segment lacks it.
 	const format::term_info* info(const segment& seg, std::string_view term) {

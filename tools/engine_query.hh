@@ -168,11 +168,36 @@ inline std::vector<strata::doc_hit> search_snapshot(std::span<const strata::segm
 	return strata::search(segs, builder, k, count);
 }
 
-// The number of live matches of a query over an index's segments.
+// The one word a query reduces to (every clause that word, nothing excluded), or null.
+inline const std::string* single_term(const parsed& q) {
+	if (!q.must_not.empty()) { return nullptr; }
+	const std::string* t = nullptr;
+	for (const auto* group : {&q.must, &q.should}) {
+		for (const auto& c : *group) {
+			if (c.size() != 1 || (t && *t != c[0])) { return nullptr; }
+			t = &c[0];
+		}
+	}
+	return t;
+}
+
+// The number of live matches of a query over an index's segments. A single word's count
+// in a segment without deletes is its document frequency there, from the term table (P6-7).
 inline std::uint64_t count_snapshot(std::span<const strata::segment_snapshot> segs, const parsed& q, strata::scheme scheme = strata::scheme::bm25) {
 	strata::term_table table(segs);
 	auto builder = [&](const strata::segment& seg) { return build(seg, q, scheme, &table); };
-	return strata::search_count(segs, builder);
+	const std::string* term = single_term(q);
+	if (!term) { return strata::search_count(segs, builder); }
+	std::uint64_t n = 0;
+	for (const auto& s : segs) {
+		if (!s.any_deleted()) {
+			n += table.df(*s.seg, *term);
+			continue;
+		}
+		const strata::segment_snapshot one[] = {s};
+		n += strata::search_count(one, builder);
+	}
+	return n;
 }
 
 // A query over an index's segments, as serve and churn answer it: the count for COUNT and
