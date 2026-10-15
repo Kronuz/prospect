@@ -396,9 +396,17 @@ private:
 // Documents every child matches; score = sum.
 class conjunction_scorer final : public scorer {
 public:
+	// Children iterate cheapest first but their scores sum in the given order, so a
+	// document scores the same in every segment whatever the terms' frequencies there.
 	explicit conjunction_scorer(std::vector<scorer_ptr> children)
-		: children_(std::move(children)), started_(children_.size(), false), window_bounds_(children_.size(), 0.0) {
-		std::sort(children_.begin(), children_.end(), [](const scorer_ptr& a, const scorer_ptr& b) { return a->cost() < b->cost(); });
+		: started_(children.size(), false), window_bounds_(children.size(), 0.0), rank_(children.size()), parts_(children.size()) {
+		std::vector<std::size_t> by_cost(children.size());
+		for (std::size_t i = 0; i < by_cost.size(); ++i) { by_cost[i] = i; }
+		std::stable_sort(by_cost.begin(), by_cost.end(), [&](std::size_t a, std::size_t b) { return children[a]->cost() < children[b]->cost(); });
+		for (std::size_t i = 0; i < by_cost.size(); ++i) {
+			children_.push_back(std::move(children[by_cost[i]]));
+			rank_[i] = by_cost[i];
+		}
 		for (const auto& c : children_) {
 			bound_ += c->max_score_total();
 			two_phase_ = two_phase_ || c->two_phase();
@@ -507,7 +515,7 @@ public:
 				continue;
 			}
 			while (d <= upto) {
-				double s = terms_[0]->score_of(d, lead.wdf());
+				const double s = parts_[rank_[0]] = terms_[0]->score_of(d, lead.wdf());
 				if (const double min = c.min_competitive(); min > 0) {
 					if (!bounded) { bound(d); }
 					if (sum_upper(s + rest, n) <= min) {
@@ -524,10 +532,10 @@ public:
 						agreed = false;
 						break;
 					}
-					s += terms_[i]->score_of(d, it.wdf());
+					parts_[rank_[i]] = terms_[i]->score_of(d, it.wdf());
 				}
 				if (agreed) {
-					c.collect(d, s);
+					c.collect(d, sum_parts());
 					d = lead.next();
 				}
 			}
@@ -550,9 +558,9 @@ public:
 	std::uint64_t cost() const noexcept override { return children_[0]->cost(); }
 	void set_min_competitive_score(double s) override { min_ = s; }
 	double score() override {
-		double s = lead_scored_ == doc_ ? lead_score_ : children_[0]->score();
-		for (std::size_t i = 1; i < children_.size(); ++i) { s += children_[i]->score(); }
-		return s;
+		parts_[rank_[0]] = lead_scored_ == doc_ ? lead_score_ : children_[0]->score();
+		for (std::size_t i = 1; i < children_.size(); ++i) { parts_[rank_[i]] = children_[i]->score(); }
+		return sum_parts();
 	}
 	double max_score(ordinal_t from, ordinal_t upto) override {
 		double s = 0;
@@ -624,9 +632,17 @@ private:
 		return no_more_docs;
 	}
 
+	double sum_parts() const noexcept {
+		double s = parts_[0];
+		for (std::size_t i = 1; i < parts_.size(); ++i) { s += parts_[i]; }
+		return s;
+	}
+
 	std::vector<scorer_ptr> children_;
 	std::vector<std::uint8_t> started_;  // whether each child has been positioned
 	std::vector<double> window_bounds_;
+	std::vector<std::size_t> rank_;      // each child's position in the given order
+	std::vector<double> parts_;          // the current document's scores, in the given order
 	ordinal_t doc_ = 0, window_end_ = no_more_docs, lead_scored_ = no_more_docs;
 	double bound_ = 0, min_ = 0, rest_bound_ = 0, lead_score_ = 0;
 	bool two_phase_ = false;
