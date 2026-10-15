@@ -82,13 +82,16 @@ private:
 	std::array<char, 1 << 20> buffer_{}; std::size_t at_ = 0, end_ = 0;
 };
 
+std::uint64_t skipped_terms = 0;
+
 strata::document tokens_document(std::string_view id, std::string_view text) {
 	std::unordered_map<std::string_view, std::vector<std::uint32_t>> at;
 	std::uint32_t pos = 0;
 	for (std::size_t i = 0; i < text.size();) {
 		std::size_t j = text.find(' ', i);
 		if (j == std::string_view::npos) { j = text.size(); }
-		if (j > i) { at[text.substr(i, j - i)].push_back(++pos); }
+		// Terms over 245 bytes are dropped, as Xapian, Lucene, and Tantivy drop them.
+		if (j - i > 245) { ++skipped_terms; } else if (j > i) { at[text.substr(i, j - i)].push_back(++pos); }
 		i = j + 1;
 	}
 	strata::document d;
@@ -121,7 +124,10 @@ int index(const std::string& dir) {
 	strata::transaction t;
 	auto apply = [&] {
 		if (t.ops.empty()) { return; }
-		if (ix.apply(t, {}).result != strata::verdict::accepted) { std::cerr << "rejected\n"; std::exit(1); }
+		if (const auto v = ix.apply(t, {}); v.result != strata::verdict::accepted) {
+			std::cerr << "rejected: verdict " << int(v.result) << " at operation " << v.op << " (key " << t.ops[v.op].key << ")\n";
+			std::exit(1);
+		}
 		t.ops.clear();
 	};
 	std::string line;
@@ -154,7 +160,7 @@ int index(const std::string& dir) {
 		apply();
 	}
 	ix.commit();
-	std::cerr << "index: " << n << " documents, " << deleted << " deleted, " << ix.segments().size() << " segments\n";
+	std::cerr << "index: " << n << " documents, " << deleted << " deleted, " << ix.segments().size() << " segments, " << skipped_terms << " terms over 245 bytes skipped\n";
 	return 0;
 }
 
