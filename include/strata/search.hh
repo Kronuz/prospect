@@ -185,8 +185,10 @@ struct top_collector {
 	// A threshold known before collection starts (another segment's k-th score, made
 	// strictly lower so equal scores still enter); it never decreases.
 	void seed(double floor) noexcept { threshold = floor_ = floor; }
+	// A seeded floor filters from the first hit; otherwise filtering starts at the first
+	// truncation.
 	void collect(ordinal_t d, double score) {
-		if (!k || (truncated && score <= threshold)) { return; }
+		if (!k || ((truncated || floor_ > 0) && score <= threshold)) { return; }
 		hits.push_back({d, score});
 		if (hits.size() >= 2 * k) { truncate(); }
 	}
@@ -1154,7 +1156,7 @@ inline std::vector<hit> top_k(scorer& s, std::size_t k, std::uint64_t* count = n
 		}
 	}
 	// A floor (a strictly lower bound on the k-th score, from other segments) prunes from
-	// the start; counting never prunes.
+	// the start, and no hit at or below it is kept; counting never prunes.
 	if (count) { floor = 0; }
 	if (floor > 0) { s.set_min_competitive_score(floor); }
 	top_collector c(k, count != nullptr);
@@ -1169,6 +1171,7 @@ inline std::vector<hit> top_k(scorer& s, std::size_t k, std::uint64_t* count = n
 		++n;
 		if (heap.size() == k && count && s.current_bound() <= heap.front().score) { continue; }  // counted, cannot compete
 		double sc = s.score();
+		if (floor > 0 && sc <= floor) { continue; }  // cannot enter the top k across segments
 		if (heap.size() < k) {
 			heap.push_back({d, sc});
 			std::push_heap(heap.begin(), heap.end(), worse);

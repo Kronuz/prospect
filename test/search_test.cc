@@ -302,6 +302,35 @@ int main() {
 					CHECK(pruned[i].ord == best[i].second || std::abs(pruned[i].score + best[i].first) <= 1e-9);
 				}
 			}
+			// A seeded floor (another segment's k-th score) keeps no hit at or below it; above
+			// it, the hits are the unfloored top k's prefix. Floors sit below every score,
+			// above every score, and in gaps between distinct scores, so the prefix is exact.
+			if (round % 3 == 0) {
+				for (std::size_t k : {1u, 10u, 100u, 1000u}) {
+					auto q6 = build();
+					const auto full = strata::top_k(*q6, k);
+					std::vector<std::size_t> gaps;
+					for (std::size_t j = 0; j + 1 < full.size(); ++j) {
+						if (full[j].score - full[j + 1].score > 1e-9 * std::max(1.0, full[j].score)) { gaps.push_back(j); }
+					}
+					std::vector<double> floors = {1e-300, 1e300};
+					if (!gaps.empty()) {
+						for (std::size_t j : {gaps.front(), gaps[gaps.size() / 2], gaps.back()}) { floors.push_back((full[j].score + full[j + 1].score) / 2); }
+					}
+					for (const double floor : floors) {
+						auto q7 = build();
+						const auto got = strata::top_k(*q7, k, nullptr, floor);
+						std::size_t n_above = 0;
+						while (n_above < full.size() && full[n_above].score > floor) { ++n_above; }
+						CHECK(got.size() == n_above);
+						for (std::size_t i = 0; i < got.size() && i < n_above; ++i) {
+							CHECK(got[i].score > floor);
+							CHECK(std::abs(got[i].score - full[i].score) <= 1e-9 * std::max(1.0, full[i].score));
+							CHECK(got[i].ord == full[i].ord || std::abs(got[i].score - full[i].score) <= 1e-9);
+						}
+					}
+				}
+			}
 			// count(): exact, inclusion-exclusion, or windowed fill
 			auto q5 = build();
 			CHECK(strata::count(*q5) == want.size());

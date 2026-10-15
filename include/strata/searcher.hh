@@ -6,6 +6,7 @@
 
 #include "strata/search.hh"
 
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <limits>
@@ -104,9 +105,10 @@ using scorer_builder = std::function<scorer_ptr(const segment&)>;
 
 // The k best documents across segments, best first, ties by docid; with count, also the
 // number of live matches. Each segment after the first prunes below the k-th score found
-// so far, made strictly lower, so a document tying it with a smaller docid still enters.
+// so far, made strictly lower, so a document tying it with a smaller docid still enters;
+// a segment returns only hits above that floor.
 inline std::vector<doc_hit> search(std::span<const segment_snapshot> segs, const scorer_builder& build, std::size_t k, std::uint64_t* count = nullptr) {
-	std::vector<doc_hit> best;
+	std::vector<doc_hit> best, seg_hits, merged;
 	auto better = [](const doc_hit& a, const doc_hit& b) { return a.score != b.score ? a.score > b.score : a.docid < b.docid; };
 	if (count) { *count = 0; }
 	for (const auto& s : segs) {
@@ -117,9 +119,23 @@ inline std::vector<doc_hit> search(std::span<const segment_snapshot> segs, const
 		std::uint64_t n = 0;
 		const auto hits = top_k(*q, k, count ? &n : nullptr, floor);
 		if (count) { *count += n; }
-		for (const auto& h : hits) { best.push_back({s.seg->docid(h.ord), h.score}); }
-		std::sort(best.begin(), best.end(), better);
-		if (best.size() > k) { best.resize(k); }
+		if (hits.empty()) { continue; }
+		// Hits leave the segment as (score, docid). They arrive sorted by (score, ordinal),
+		// which is docid order unless the segment's ordinals are permuted; then ties re-sort.
+		seg_hits.clear();
+		for (const auto& h : hits) { seg_hits.push_back({s.seg->docid(h.ord), h.score}); }
+		if (!std::is_sorted(seg_hits.begin(), seg_hits.end(), better)) { std::sort(seg_hits.begin(), seg_hits.end(), better); }
+		// Both runs are sorted by (score descending, docid ascending): one linear merge, cut at k.
+		merged.clear();
+		std::size_t i = 0, j = 0;
+		while (merged.size() < k && (i < best.size() || j < seg_hits.size())) {
+			if (j < seg_hits.size() && (i == best.size() || better(seg_hits[j], best[i]))) {
+				merged.push_back(seg_hits[j++]);
+			} else {
+				merged.push_back(best[i++]);
+			}
+		}
+		best.swap(merged);
 	}
 	return best;
 }

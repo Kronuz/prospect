@@ -7,7 +7,14 @@
 #include "strata/index.hh"
 #include "strata/searcher.hh"
 #include "strata/budget.hh"
+#include <algorithm>
+#include <cmath>
+#include <limits>
 #include <map>
+#include <memory>
+#include <span>
+#include <string>
+#include <vector>
 
 #include <cstdio>
 #include <cstdlib>
@@ -103,6 +110,46 @@ static scorer_ptr build(const segment& seg, const query& q, const statistics& st
 	}
 }
 
+// Every live match of every segment, scored without pruning, best first (ties by docid).
+static std::vector<doc_hit> scan(std::span<const segment_snapshot> segs, const scorer_builder& builder) {
+	std::vector<doc_hit> all;
+	for (const auto& s : segs) {
+		auto sc = builder(*s.seg);
+		if (!sc) { continue; }
+		for (ordinal_t o = sc->next(); o != no_more_docs; o = sc->next()) {
+			if (s.deleted && ((*s.deleted)[o >> 6] >> (o & 63)) & 1) { continue; }
+			all.push_back({s.seg->docid(o), sc->score()});
+		}
+	}
+	std::sort(all.begin(), all.end(), [](const doc_hit& a, const doc_hit& b) { return a.score != b.score ? a.score > b.score : a.docid < b.docid; });
+	return all;
+}
+
+// Ranks agree with the scan on score; each run of equal scores is drawn from the scan's
+// documents with that score, the smallest docids first (ties by docid), including a run
+// cut at the k-th position.
+static void check_against_scan(const std::vector<doc_hit>& hits, const std::vector<doc_hit>& all, std::size_t k) {
+	auto close = [](double a, double b) { return std::abs(a - b) <= 1e-9 * std::max(1.0, std::max(a, b)); };
+	const std::size_t n = std::min(k, all.size());
+	CHECK(hits.size() == n);
+	for (std::size_t a = 0; a < n && hits.size() == n;) {
+		std::size_t b = a + 1;
+		while (b < n && close(all[b].score, all[a].score)) { ++b; }
+		std::vector<std::uint64_t> want_ids, got_ids;
+		for (std::size_t i = a; i < b; ++i) {
+			CHECK(close(hits[i].score, all[i].score));
+			want_ids.push_back(all[i].docid);
+			got_ids.push_back(hits[i].docid);
+		}
+		std::sort(got_ids.begin(), got_ids.end());
+		// Exactly equal scores must give exactly the scan's docids.
+		bool exact = true;
+		for (std::size_t i = a; i < b; ++i) { exact = exact && all[i].score == all[a].score; }
+		if (exact) { CHECK(got_ids == want_ids); }
+		a = b;
+	}
+}
+
 static std::vector<segment_snapshot> snapshot(const strata::index& ix) {
 	std::vector<segment_snapshot> out;
 	for (const auto& s : ix.segments()) { out.push_back({s.seg, s.deleted}); }
@@ -181,46 +228,15 @@ int main() {
 			}
 			const bool xapian = qn % 2 == 1;
 			auto builder = [&](const segment& seg) { return build(seg, q, st, segs, xapian); };
-			for (std::size_t k : {1u, 10u, 100u}) {
+			const auto all = scan(segs, builder);
+			for (std::size_t k : {1u, 10u, 100u, 1000u}) {
 				std::uint64_t counted = 0;
 				const auto got = search(segs, builder, k, &counted);
 				const auto pruned = search(segs, builder, k);
 				CHECK(search_count(segs, builder) == counted);
-				// Every live match of every segment, scored without pruning, best first.
-				std::vector<doc_hit> all;
-				for (const auto& s : segs) {
-					auto sc = builder(*s.seg);
-					if (!sc) { continue; }
-					for (ordinal_t o = sc->next(); o != no_more_docs; o = sc->next()) {
-						if (s.deleted && ((*s.deleted)[o >> 6] >> (o & 63)) & 1) { continue; }
-						all.push_back({s.seg->docid(o), sc->score()});
-					}
-				}
-				std::sort(all.begin(), all.end(), [](const doc_hit& a, const doc_hit& b) { return a.score != b.score ? a.score > b.score : a.docid < b.docid; });
 				CHECK(counted == all.size());
-				auto close = [](double a, double b) { return std::abs(a - b) <= 1e-9 * std::max(1.0, std::max(a, b)); };
-				const std::size_t n = std::min(k, all.size());
-				for (const auto* hits : {&got, &pruned}) {
-					CHECK(hits->size() == n);
-					// Ranks agree on score; each run of equal scores is drawn from the scan's
-					// documents with that score, the smallest docids first (ties by docid).
-					for (std::size_t a = 0; a < n && hits->size() == n;) {
-						std::size_t b = a + 1;
-						while (b < n && close(all[b].score, all[a].score)) { ++b; }
-						std::vector<std::uint64_t> want_ids, got_ids;
-						for (std::size_t i = a; i < b; ++i) {
-							CHECK(close((*hits)[i].score, all[i].score));
-							want_ids.push_back(all[i].docid);
-							got_ids.push_back((*hits)[i].docid);
-						}
-						std::sort(got_ids.begin(), got_ids.end());
-						// Exactly equal scores must give exactly the scan's docids.
-						bool exact = true;
-						for (std::size_t i = a; i < b; ++i) { exact = exact && all[i].score == all[a].score; }
-						if (exact) { CHECK(got_ids == want_ids); }
-						a = b;
-					}
-				}
+				check_against_scan(got, all, k);
+				check_against_scan(pruned, all, k);
 				if (!deletes) {
 					// One segment with equal statistics answers identically.
 					auto single_builder = [&](const segment& seg) { return build(seg, q, st, single_snap, xapian); };
@@ -229,6 +245,85 @@ int main() {
 					CHECK(single_count == counted);
 				}
 			}
+		}
+	}
+	// Ties straddling the k-th position across segments, and floors that exclude whole
+	// segments (P6-1, review R1): segments of identical documents, short ones scoring high
+	// and long ones (a "pad" term) scoring low, with the smallest docids in a newer segment.
+	{
+		struct group {
+			std::uint64_t first, n;
+			bool low;
+		};
+		const group groups[] = {{1001, 1200, false}, {3001, 600, true}, {4001, 1200, false}, {1, 300, false}, {6001, 100, true}};
+		static const char* shapes[3][3] = {{"a", "b", "c"}, {"a", "c", "d"}, {"a", "b", "d"}};
+		static const std::uint32_t p1[] = {1}, p2[] = {2}, p3[] = {3};
+		std::uint32_t pad[30];
+		for (std::uint32_t i = 0; i < 30; ++i) { pad[i] = 4 + i; }
+		std::vector<std::string> files;
+		files.reserve(std::size(groups));
+		std::vector<std::unique_ptr<segment>> owned;
+		std::vector<segment_snapshot> segs;
+		for (const auto& g : groups) {
+			segment_writer w;
+			for (std::uint64_t d = g.first; d < g.first + g.n; ++d) {
+				const auto& sh = shapes[d % 3];
+				std::vector<posting_input> in = {{sh[0], 1, p1}, {sh[1], 1, p2}, {sh[2], 1, p3}};
+				if (g.low) { in.push_back({"pad", 30, pad}); }
+				w.add(d, in, g.low ? 33u : 3u);
+			}
+			files.push_back(w.flush({}));
+			owned.push_back(std::make_unique<segment>(files.back()));
+			segs.push_back({owned.back().get(), nullptr});
+		}
+		const std::vector<segment_snapshot> reversed(segs.rbegin(), segs.rend());
+		const std::vector<segment_snapshot>* const views[] = {&segs, &reversed};
+		const statistics st = snapshot_statistics(segs);
+		const std::vector<query> queries = {{0, {"a", "b"}}, {0, {"c", "d"}}, {1, {"a"}}, {1, {"a", "c"}}, {1, {"b", "d"}},
+			{2, {"a", "b"}}, {2, {"c", "pad"}}, {3, {"a", "b"}}, {3, {"a", "pad"}}, {4, {"a", "b"}}, {4, {"c", "d"}},
+			{5, {"a", "b", "pad"}}, {5, {"c", "b", "pad"}}};
+		for (const bool xapian : {false, true}) {
+			for (const auto& q : queries) {
+				auto builder = [&](const segment& seg) { return build(seg, q, st, segs, xapian); };
+				for (const auto* view : views) {
+					const std::span<const segment_snapshot> v(*view);
+					const auto all = scan(v, builder);
+					for (std::size_t k : {1u, 10u, 100u, 1000u}) {
+						std::uint64_t counted = 0;
+						const auto got = search(v, builder, k, &counted);
+						CHECK(counted == all.size() && search_count(v, builder) == counted);
+						check_against_scan(got, all, k);
+						check_against_scan(search(v, builder, k), all, k);
+					}
+				}
+				// A segment given a floor returns no hit at or below it; the low segments
+				// hold nothing above the high segment's k-th score for a single term.
+				for (std::size_t k : {1u, 10u, 100u, 1000u}) {
+					auto first = builder(*segs[0].seg);
+					if (!first) { continue; }
+					const auto top = top_k(*first, k);
+					if (top.size() < k) { continue; }
+					const double floor = std::nextafter(top.back().score, -std::numeric_limits<double>::infinity());
+					for (std::size_t g : {1u, 2u, 4u}) {
+						auto sc = builder(*segs[g].seg);
+						if (!sc) { continue; }
+						const auto hits = top_k(*sc, k, nullptr, floor);
+						for (const auto& h : hits) { CHECK(h.score > floor); }
+						if (q.kind == 1 && q.terms.size() == 1 && g != 2) { CHECK(hits.empty()); }
+					}
+				}
+			}
+		}
+		// The single term "a": every short document ties, so the k-th position straddles
+		// three segments and the smallest docids win, wherever their segment sits.
+		auto builder = [&](const segment& seg) { return build(seg, query{1, {"a"}}, st, segs, false); };
+		std::vector<std::uint64_t> want;
+		for (std::uint64_t d = 1; d <= 300; ++d) { want.push_back(d); }
+		for (std::uint64_t d = 1001; d <= 1700; ++d) { want.push_back(d); }
+		for (const auto* view : views) {
+			std::vector<std::uint64_t> got;
+			for (const auto& h : search(std::span<const segment_snapshot>(*view), builder, 1000)) { got.push_back(h.docid); }
+			CHECK(got == want);
 		}
 	}
 	// live_scorer nested where parents use two-phase iteration, its counting copy, and
