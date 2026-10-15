@@ -112,9 +112,14 @@ static std::vector<segment_snapshot> snapshot(const strata::index& ix) {
 int main() {
 	std::mt19937_64 r(5);
 	for (int round = 0; round < 12; ++round) {
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
-		auto ix = strata::index::create(io, {}, uuid);
+		faultfs::filesystem fs, serial_fs;
+		faultfs::io io(fs), serial_io(serial_fs);
+		// Every third round inverts each flush on four threads (D18); a serial twin of the
+		// same transactions must reach the same digest.
+		index::options opts;
+		if (round % 3 == 2) { opts.flush_threads = 4; opts.flush_min_docs = 64; }
+		auto ix = strata::index::create(io, opts, uuid);
+		auto serial = strata::index::create(serial_io, {}, uuid);
 		const std::size_t docs = 2000 + r() % 6000;
 		const bool deletes = round % 2 == 1;
 		segment_writer one;
@@ -126,7 +131,8 @@ int main() {
 			o.doc = all.back();
 			t.ops.push_back(o);
 			ix.apply(t, {});
-			if (d % 500 == 499) { ix.refresh(); }
+			serial.apply(t, {});
+			if (d % 500 == 499) { ix.refresh(); serial.refresh(); }
 		}
 		if (deletes) {
 			// Deletes, and replacements that put small docids into newer segments, so ties
@@ -143,10 +149,14 @@ int main() {
 				}
 				t.ops.push_back(o);
 				ix.apply(t, {});
-				if (r() % 100 == 0) { ix.refresh(); }
+				serial.apply(t, {});
+				if (r() % 100 == 0) { ix.refresh(); serial.refresh(); }
 			}
 		}
 		ix.refresh();
+		serial.refresh();
+		CHECK(ix.digest() == serial.digest());
+		if (round % 3 == 2) { CHECK(ix.segments().size() > serial.segments().size()); }
 		const auto segs = snapshot(ix);
 		const statistics st = snapshot_statistics(segs);
 		CHECK(segs.size() > 3);

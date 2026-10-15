@@ -100,8 +100,9 @@ strata::document tokens_document(std::string_view id, std::string_view text) {
 }
 
 // Phase 3's index: each document upserted by its key ("Q" + id, Xapiand's key prefix),
-// the buffer flushing past STRATA_BUFFER_MB (default 256) and merging by the tiered policy
-// (STRATA_AUTO_MERGE=0 turns merges off), committed once at the end. Segments, versions,
+// the buffer flushing past STRATA_BUFFER_MB (default 256) on STRATA_THREADS inversion
+// threads (default 1, D18) and merging by the tiered policy (STRATA_AUTO_MERGE=0 turns
+// merges off), committed once at the end. Segments, versions,
 // keys, and merges cost what Phase 3's gate measures (T4).
 int index(const std::string& dir) {
 	std::ios::sync_with_stdio(false);
@@ -114,6 +115,7 @@ int index(const std::string& dir) {
 	o.buffer_share = (mb ? std::strtoull(mb, nullptr, 10) : 256) << 20;
 	const char* merge = std::getenv("STRATA_AUTO_MERGE");
 	o.auto_merge = !merge || std::string_view(merge) != "0";
+	if (const char* threads = std::getenv("STRATA_THREADS")) { o.flush_threads = std::max<std::size_t>(1, std::strtoull(threads, nullptr, 10)); }
 	const std::array<char, 16> uuid{'s', 't', 'r', 'a', 't', 'a', '-', 'b', 'e', 'n', 'c', 'h'};
 	auto ix = strata::index::create(io, o, uuid);
 	strata::transaction t;

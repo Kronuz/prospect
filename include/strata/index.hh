@@ -28,6 +28,7 @@
 #include <string>
 #include <system_error>
 #include <unordered_map>
+#include <thread>
 #include <vector>
 
 namespace strata {
@@ -166,6 +167,11 @@ struct index_options {
 	byte_budget* storage = nullptr;
 	// Merges after each flush by `policy` when set; otherwise only merge() and force_merge().
 	bool auto_merge = false;
+	// Writer threads for inversion (D18): a flush splits the buffer's docid-sorted documents
+	// into up to this many contiguous runs and inverts and encodes each on its own thread,
+	// one segment per run. Files, ids, and accounting stay on the owner thread.
+	std::size_t flush_threads = 1;
+	std::size_t flush_min_docs = 4096;  // per run: smaller buffers flush as one segment
 	// Obsolete data files leave in steps: truncated from the end `reclaim_step` bytes at a
 	// time, then removed, so freeing a large file never stalls one call. Each commit
 	// reclaims about `reclaim_slice` bytes, reclaim() the rest, and admission drains them
@@ -1168,27 +1174,46 @@ private:
 		}
 		if (!docs.empty()) {
 			std::sort(docs.begin(), docs.end(), [](const buffered* a, const buffered* b) { return a->docid < b->docid; });
-			segment_writer w;
-			std::vector<posting_input> in;
-			for (const buffered* b : docs) {
-				in.clear();
-				for (const auto& t : b->doc.terms) { in.push_back({t.term, t.wdf, t.positions}); }
-				w.add(b->docid, in, b->doc.length, b->doc.stored, b->version, b->key);
+			// Contiguous docid runs, one segment each, inverted and encoded in parallel (D18).
+			const std::size_t runs = std::max<std::size_t>(1, std::min(opts_.flush_threads, docs.size() / std::max<std::size_t>(1, opts_.flush_min_docs)));
+			std::vector<std::uint64_t> ids(runs);
+			for (auto& id : ids) { id = m_.next_segment++; }  // never reused, even after a failure
+			std::vector<std::string> outputs(runs);
+			std::vector<std::exception_ptr> errors(runs);
+			auto invert = [&](std::size_t k) {
+				try {
+					const std::size_t begin = docs.size() * k / runs, end = docs.size() * (k + 1) / runs;
+					segment_writer w;
+					std::vector<posting_input> in;
+					for (std::size_t i = begin; i < end; ++i) {
+						const buffered* b = docs[i];
+						in.clear();
+						for (const auto& t : b->doc.terms) { in.push_back({t.term, t.wdf, t.positions}); }
+						w.add(b->docid, in, b->doc.length, b->doc.stored, b->version, b->key);
+					}
+					std::array<std::uint8_t, 16> header{};
+					std::memcpy(header.data(), &ids[k], 8);
+					std::memcpy(header.data() + 8, m_.uuid.data(), 8);
+					outputs[k] = w.flush(header);
+				} catch (...) { errors[k] = std::current_exception(); }
+			};
+			std::vector<std::thread> threads;
+			for (std::size_t k = 1; k < runs; ++k) { threads.emplace_back(invert, k); }
+			invert(0);
+			for (auto& t : threads) { t.join(); }
+			for (auto& e : errors) { if (e) { std::rethrow_exception(e); } }
+			for (std::size_t k = 0; k < runs; ++k) {
+				auto& bytes = outputs[k];
+				auto file = write_unsynced(index_detail::segment_name(ids[k]), bytes);
+				files::segment_ref ref;
+				ref.id = ids[k];
+				ref.size = bytes.size();
+				ref.footer_crc = format::decode_footer(bytes).toc_crc;
+				ref.doc_count = docs.size() * (k + 1) / runs - docs.size() * k / runs;
+				auto seg = std::make_unique<open_segment>(ref, std::move(bytes));
+				seg->unsynced = std::move(file);
+				segs_.push_back(std::move(seg));
 			}
-			const std::uint64_t id = m_.next_segment++;  // never reused, even after a failure
-			std::array<std::uint8_t, 16> header{};
-			std::memcpy(header.data(), &id, 8);
-			std::memcpy(header.data() + 8, m_.uuid.data(), 8);
-			std::string bytes = w.flush(header);
-			auto file = write_unsynced(index_detail::segment_name(id), bytes);
-			files::segment_ref ref;
-			ref.id = id;
-			ref.size = bytes.size();
-			ref.footer_crc = format::decode_footer(bytes).toc_crc;
-			ref.doc_count = docs.size();
-			auto seg = std::make_unique<open_segment>(ref, std::move(bytes));
-			seg->unsynced = std::move(file);
-			segs_.push_back(std::move(seg));
 		}
 		buffer_.clear();
 		buffer_docids_.clear();
