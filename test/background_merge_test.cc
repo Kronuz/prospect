@@ -280,6 +280,34 @@ static void id_order(std::size_t threads) {
 	}
 }
 
+namespace strata {
+// Breaks an invariant no public call can: two segments out of id order.
+struct index_test_access {
+	static void swap_segments(strata::index& ix) { std::swap(ix.segs_[0], ix.segs_[1]); }
+};
+}  // namespace strata
+
+// Segments out of id order fence the commit before it writes anything: no new manifest,
+// no new file, and the index stays fenced.
+static void order_check_fences() {
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	background bg(0);
+	auto ix = strata::index::create(io, bg.options(false), uuid);
+	fill(ix, 2, 2, 100, 12);
+	const auto files = fs.list();
+	strata::index_test_access::swap_segments(ix);
+	bool fenced = false;
+	try {
+		ix.commit();
+	} catch (const index_fenced&) {
+		fenced = true;
+	}
+	CHECK(fenced && fs.list() == files);
+	CHECK(throws([&] { ix.commit(); }));
+	CHECK(fs.list() == files);
+}
+
 // One index merging in the background and its twin merging inline, fed the same
 // transactions: their verdicts, digests, and contents must agree at every point.
 struct twins {
@@ -620,6 +648,7 @@ static void build_cancellation() {
 
 int main() {
 	build_cancellation();
+	order_check_fences();
 	for (std::size_t threads : {0, 1, 2}) {
 		const int before = failures;
 		carry_over(threads);

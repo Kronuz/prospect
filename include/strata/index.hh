@@ -732,6 +732,8 @@ public:
 	bool has_docid(std::uint64_t docid) const { return locate_docid(docid).found; }
 
 private:
+	friend struct index_test_access;  // tests reach invariants no public call can break
+
 	// Runs the merges `find` asks for, asking again after each round, until it asks none.
 	// With an executor they run there, on segments not under merge or damaged: one round
 	// without `wait`, otherwise every round, each waited for and published.
@@ -1714,9 +1716,10 @@ private:
 		// A segment whose documents are all deleted leaves without a merge; retention frees
 		// its files.
 		std::erase_if(segs_, [](const auto& s) { return s->dead == s->seg.doc_count(); });
-		// The manifest lists segments by increasing id, and open() refuses any other order.
+		// The manifest lists segments by increasing id, and open() refuses any other order:
+		// a regression fences before anything is written, whichever caller commits.
 		for (std::size_t i = 1; i < segs_.size(); ++i) {
-			if (segs_[i]->ref.id <= segs_[i - 1]->ref.id) { throw std::logic_error("strata: commit: segments out of id order"); }
+			if (segs_[i]->ref.id <= segs_[i - 1]->ref.id) { fence("strata: commit: segments out of id order"); }
 		}
 		// 1. New data files, synced together: flushed segments, live-docs generations,
 		// metadata. Their generations come from the counters directly, so a failed commit
