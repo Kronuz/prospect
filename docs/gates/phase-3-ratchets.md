@@ -28,8 +28,12 @@ Relative to the fastest other engine:
 
 ## Still unmeasured
 
-- The same rows on the M1 (macOS arm64) and on FreeBSD. They are required before Phase
-  3R, and the M1 is unreachable.
+- The same rows on macOS arm64 bare metal and on FreeBSD. They are required before Phase
+  3R. The M1 is retired (2026-10-14: its device management keeps turning ssh off), so
+  another arm64 machine is owed. One unrotated first round ran there before it was
+  retired, after `148eebb` fixed the harness's stdin reading (macOS libc++ reads
+  `std::cin` a character at a time, which had made strata's row 236.7 s): strata 26.8 s,
+  Tantivy 0.26 34.8 s, Lucene 10.4.0 63.4 s; Xapian did not finish. It is not a gate row.
 - Multi-thread and replace-heavy indexing, write amplification, refresh latency.
 - Index size after a full merge, per section.
 - The query rows on multi-segment indexes, before and after merging, including
