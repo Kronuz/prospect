@@ -1177,6 +1177,95 @@ int main() {
 		b.commit();
 		CHECK(budget.used() == 0);  // committed buffers return their bytes
 	}
+	// The flush's memory (D17): a writer charges its buffers to one permit per run, past the
+	// capacity if it must, and writes the same bytes as an uncharged one.
+	{
+		flush_charge none;
+		none.grow(1 << 20);
+		CHECK(!none && none.bytes() == 0);
+		std::vector<std::string> words;
+		for (int j = 0; j < 1000; ++j) { words.push_back("t" + std::to_string(j)); }
+		std::vector<std::uint32_t> pos(20);
+		for (std::uint32_t j = 0; j < 20; ++j) { pos[j] = j + 1; }
+		byte_budget tiny(4096);
+		flush_charge c(&tiny);
+		segment_writer w, plain;
+		w.memory = &c;
+		std::vector<posting_input> in;
+		for (std::uint32_t i = 0; i < 3000; ++i) {
+			in.clear();
+			for (std::uint32_t j = 0; j < 20; ++j) { in.push_back({words[(i + 37 * j) % 1000], 1, std::span<const std::uint32_t>(pos.data() + j, 1)}); }
+			w.add(i + 1, in, 20, "stored");
+			plain.add(i + 1, in, 20, "stored");
+		}
+		CHECK(tiny.used() == c.bytes() && c.bytes() >= c.held() && c.held() >= (2u << 20));  // the term table and an arena chunk
+		const std::uint64_t buffers = c.held();
+		const std::string bytes = w.flush({}), same = plain.flush({});
+		CHECK(bytes == same);
+		CHECK(c.held() >= buffers + bytes.size() && tiny.used() == c.bytes() && tiny.used() > tiny.capacity() && tiny.pressure());
+		c.settle();
+		CHECK(tiny.used() == 0 && !tiny.pressure() && tiny.peak() >= buffers + bytes.size());
+	}
+	// In an index, each run's charge draws above the buffer's own bytes during the flush and
+	// settles when its segment is published, on one thread or four; segments are the bytes
+	// an unbudgeted index writes for the same input.
+	{
+		auto rich = [](int i) {
+			operation o = replace("Q" + std::to_string(i), "body");
+			for (std::uint32_t j = 0; j < 20; ++j) { o.doc.terms.push_back({"t" + std::to_string((i + 37 * j) % 1000), 1, {j + 2}}); }
+			o.doc.length += 20;
+			return o;
+		};
+		auto seg_files = [](const faultfs::filesystem& fs) {
+			std::map<std::string, std::string> out;
+			for (const auto& n : fs.list()) {
+				if (n.starts_with("seg-")) { out[n] = std::string(fs.view(n)); }
+			}
+			return out;
+		};
+		for (std::size_t threads : {std::size_t(1), std::size_t(4)}) {
+			byte_budget budget(1ull << 40);
+			index::options opts = keyed, plain = keyed;
+			opts.budget = &budget;
+			opts.flush_threads = plain.flush_threads = threads;
+			opts.flush_min_docs = plain.flush_min_docs = 500;
+			faultfs::filesystem fa, fb;
+			faultfs::io ia(fa), ib(fb);
+			auto a = strata::index::create(ia, opts, uuid), ref = strata::index::create(ib, plain, uuid);
+			for (int i = 0; i < 6000; ++i) {
+				CHECK(a.apply(tx({rich(i)}), {}).result == verdict::accepted);
+				ref.apply(tx({rich(i)}), {});
+			}
+			const std::uint64_t buffered = budget.used(), before = budget.peak();
+			CHECK(buffered > 0 && a.segments().empty());
+			a.refresh();
+			ref.refresh();
+			CHECK(a.segments().size() == threads);
+			// At least one run's term table and arena chunk drew on top of the buffer.
+			CHECK(budget.peak() > before && budget.peak() >= buffered + (2u << 20));
+			CHECK(budget.used() == 0);  // every run's permit and the buffer's settled
+			CHECK(a.digest() == ref.digest() && contents(a) == contents(ref));
+			const auto files = seg_files(fa);
+			CHECK(files.size() == threads && files == seg_files(fb));
+		}
+		// A budget smaller than any flush: every transaction flushes, each flush draws past
+		// the capacity and completes, and the content is what an unbudgeted index holds.
+		byte_budget tiny(1024);
+		index::options opts = keyed;
+		opts.budget = &tiny;
+		faultfs::filesystem fa, fb;
+		faultfs::io ia(fa), ib(fb);
+		auto a = strata::index::create(ia, opts, uuid), ref = strata::index::create(ib, keyed, uuid);
+		for (int i = 0; i < 200; ++i) {
+			CHECK(a.apply(tx({rich(i)}), {}).result == verdict::accepted);
+			ref.apply(tx({rich(i)}), {});
+		}
+		a.refresh();
+		ref.refresh();
+		CHECK(a.segments().size() > 100 && tiny.peak() >= tiny.capacity() + (2u << 20));
+		CHECK(tiny.used() == 0 && !tiny.pressure());
+		CHECK(a.digest() == ref.digest() && contents(a) == contents(ref));
+	}
 	// The offline check: a healthy index passes and reports what it read; a byte changed
 	// inside a section (which opening the index does not read) fails it.
 	{

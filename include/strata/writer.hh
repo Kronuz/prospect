@@ -43,6 +43,7 @@
 #include "fst.hh"
 #include "fusefilter.hh"
 #include "hashes.hh"
+#include "strata/budget.hh"
 #include "strata/format.hh"
 #include "termdict.hh"
 
@@ -83,27 +84,53 @@ struct spill : output {
 	virtual void copy_to(output& out) = 0;
 };
 
+// Appends to a string, charging its reallocations to `memory` when given.
 class string_output final : public output {
 public:
-	explicit string_output(std::string& s) : s_(s) {}
+	explicit string_output(std::string& s, flush_charge* memory = nullptr) : s_(s), memory_(memory) {}
 	using output::write;
-	void write(const char* data, std::size_t size) override { s_.append(data, size); }
+	void write(const char* data, std::size_t size) override {
+		if (!memory_) {
+			s_.append(data, size);
+			return;
+		}
+		const std::size_t before = s_.capacity();
+		s_.append(data, size);
+		if (s_.capacity() > before) { memory_->grow(s_.capacity() - before); }
+	}
 
 private:
 	std::string& s_;
+	flush_charge* memory_;
 };
 
 class string_spill final : public spill {
 public:
+	string_spill() = default;
+	explicit string_spill(flush_charge* memory) : memory_(memory) {}
 	using output::write;
-	void write(const char* data, std::size_t size) override { s_.append(data, size); }
+	void write(const char* data, std::size_t size) override {
+		if (!memory_) {
+			s_.append(data, size);
+			return;
+		}
+		const std::size_t before = s_.capacity();
+		s_.append(data, size);
+		if (s_.capacity() > before) {
+			memory_->grow(s_.capacity() - before);
+			charged_ += s_.capacity() - before;
+		}
+	}
 	void copy_to(output& out) override {
 		out.write(s_);
 		std::string().swap(s_);
+		if (memory_) { memory_->shrink(std::exchange(charged_, 0)); }
 	}
 
 private:
 	std::string s_;
+	flush_charge* memory_ = nullptr;
+	std::uint64_t charged_ = 0;
 };
 
 // Writes to a file; throws std::runtime_error on failure.
@@ -241,6 +268,9 @@ public:
 	bool wide_skip_offsets = false;
 	// The verification region size of every section, as a power of two.
 	std::uint8_t region_shift = format::default_region_shift;
+	// The run's draw on the indexing budget, if any: the term table, posting buffers,
+	// per-document columns, and the flush's scratch and output report their allocations.
+	flush_charge* memory = nullptr;
 
 	// Adds a document and returns its ordinal. Docids strictly increase, so ordinal order
 	// is docid order. `length` is the document length used by weighting (Xapian: the sum
@@ -294,8 +324,8 @@ public:
 	// Writes the segment file and returns its bytes.
 	std::string flush(const std::array<std::uint8_t, 16>& segment_id) {
 		std::string file;
-		string_output out(file);
-		string_spill positions;
+		string_output out(file, memory);
+		string_spill positions(memory);
 		flush(segment_id, out, positions);
 		return file;
 	}
@@ -305,6 +335,7 @@ public:
 	void flush(const std::array<std::uint8_t, 16>& segment_id, output& sink, spill& positions_spill) {
 		std::vector<std::pair<std::string_view, std::size_t>> keys;
 		keys.reserve(buffers_.size());
+		if (memory) { memory->grow(keys.capacity() * sizeof(keys[0])); }
 		for (const auto& slot : table_) {
 			if (slot.key) { keys.push_back({std::string_view(slot.key, slot.length), slot.buffer}); }
 		}
@@ -370,6 +401,7 @@ public:
 		std::string encoded_postings, term_positions;
 		std::string last_key;
 		bool first_term = true;
+		std::uint64_t scratch = 0;  // the per-term buffers' charged capacity
 		while (const auto got = next(tp)) {
 			const std::string_view key = *got;
 			if (!first_term && key <= std::string_view(last_key)) { throw std::invalid_argument("strata: terms must increase"); }
@@ -416,6 +448,14 @@ public:
 				postings.write(encoded_postings);
 			}
 			dict.add(key, format::encode_term_info(info, run, dict.next_is_restart()));
+			if (memory) {
+				const std::uint64_t now = (tp.ords.capacity() + tp.wdfs.capacity() + tp.counts.capacity() + tp.positions.capacity()) * sizeof(std::uint32_t) +
+					all.capacity() * sizeof(format::impact) + encoded_postings.capacity() + term_positions.capacity();
+				if (now > scratch) {
+					memory->grow(now - scratch);
+					scratch = now;
+				}
+			}
 		}
 		toc.push_back(postings.finish(format::section::postings));
 		out.align(format::section_alignment);
@@ -426,6 +466,7 @@ public:
 			toc.push_back(std::move(entry));
 		}
 		auto tables = dict.finish();
+		if (memory) { memory->grow(tables.blocks.capacity() + tables.index.capacity()); }
 		std::string stats;
 		format::put<std::uint64_t>(stats, lengths_.size());
 		format::put<std::uint64_t>(stats, total_length_);
@@ -438,18 +479,24 @@ public:
 			sec.write(bytes);
 			toc.push_back(sec.finish(kind));
 		};
+		// A section built only to be appended is charged while it lives.
+		auto append_built = [&](format::section kind, const std::string& bytes) {
+			if (memory) { memory->grow(bytes.capacity()); }
+			append(kind, bytes);
+			if (memory) { memory->shrink(bytes.capacity()); }
+		};
 		append(format::section::terms, tables.blocks);
 		append(format::section::term_index, tables.index);
-		append(format::section::lengths, pack_u32(lengths_));
+		append_built(format::section::lengths, pack_u32(lengths_));
 		{
 			std::string norms(lengths_.size(), '\0');
 			for (std::size_t i = 0; i < lengths_.size(); ++i) { norms[i] = char(format::encode_length(lengths_[i])); }
-			append(format::section::norms, norms);
+			append_built(format::section::norms, norms);
 		}
-		append(format::section::docids, encode_docids());
-		append(format::section::versions, encode_versions());
-		if (!key_hashes_.empty()) { append(format::section::pk_filter, encode_pk_filter()); }
-		append(format::section::stored, encode_stored());
+		append_built(format::section::docids, encode_docids());
+		append_built(format::section::versions, encode_versions());
+		if (!key_hashes_.empty()) { append_built(format::section::pk_filter, encode_pk_filter()); }
+		append_built(format::section::stored, encode_stored());
 		append(format::section::stats, stats);
 		out.align(format::section_alignment);
 
@@ -497,25 +544,33 @@ private:
 		lengths_.push_back(length);
 		docids_.push_back(docid);
 		total_length_ += length;
+		if (memory) {
+			const std::uint64_t now = lengths_.capacity() * sizeof(std::uint32_t) +
+				(stored_ends_.capacity() + docids_.capacity() + versions_.capacity() + key_hashes_.capacity()) * sizeof(std::uint64_t) + stored_.capacity();
+			if (now > columns_charged_) {
+				memory->grow(now - columns_charged_);
+				columns_charged_ = now;
+			}
+		}
 		return ord;
 	}
 
 	// A term's posting in document ord: opened, given its positions in order, then closed
 	// with its wdf and position count.
 	void open_posting(term_buffer& t, ordinal_t ord) {
-		format::put_leb(t.ords, t.df ? ord - t.last : ord + 1);
+		put_stream(t.ords, t.df ? ord - t.last : ord + 1);
 		t.last = ord;
 		++t.df;
 		t.open_count = 0;
 		t.open_prev = 0;
 	}
 	void add_position(term_buffer& t, std::uint32_t p) {
-		format::put_leb(t.positions, p - t.open_prev);
+		put_stream(t.positions, p - t.open_prev);
 		t.open_prev = p;
 		++t.open_count;
 	}
 	void close_posting(term_buffer& t, std::uint32_t wdf, std::uint32_t count) {
-		format::put_leb(t.wdfs, wdf);
+		put_stream(t.wdfs, wdf);
 		t.cf += wdf;
 		t.max_wdf = std::max(t.max_wdf, wdf);
 		if (wdf) { t.all_zero_wdf = false; }
@@ -524,10 +579,22 @@ private:
 		// whose LEB128 stream is the same bytes.
 		if (t.counts_are_wdf && count != wdf) {
 			t.counts_are_wdf = false;
+			const std::size_t before = t.counts.capacity();
 			t.counts.assign(t.wdfs, 0, t.wdfs.size() - leb_size(wdf));
+			if (memory && t.counts.capacity() > before) { memory->grow(t.counts.capacity() - before); }
 		}
-		if (!t.counts_are_wdf) { format::put_leb(t.counts, count); }
+		if (!t.counts_are_wdf) { put_stream(t.counts, count); }
 		max_positions_ = std::max(max_positions_, count);
+	}
+	// Appends to a posting stream, charging its reallocations.
+	void put_stream(std::string& stream, std::uint64_t v) {
+		if (!memory) {
+			format::put_leb(stream, v);
+			return;
+		}
+		const std::size_t before = stream.capacity();
+		format::put_leb(stream, v);
+		if (stream.capacity() > before) { memory->grow(stream.capacity() - before); }
 	}
 
 	// Open addressing with linear probing over stored hashes; grows at half load.
@@ -539,7 +606,10 @@ private:
 	};
 
 	term_buffer& buffer_for(std::string_view term) {
-		if (table_.empty()) { table_.resize(1 << 16); }
+		if (table_.empty()) {
+			table_.resize(1 << 16);
+			if (memory) { memory->grow(table_.size() * sizeof(slot)); }
+		}
 		const std::uint64_t h = ::wordwise::hash(term.data(), term.size());
 		std::size_t mask = table_.size() - 1;
 		for (std::size_t i = h & mask;; i = (i + 1) & mask) {
@@ -551,12 +621,14 @@ private:
 		if (arena_.empty() || arena_.back().size() + term.size() > arena_.back().capacity()) {
 			arena_.emplace_back();
 			arena_.back().reserve(std::max<std::size_t>(1 << 20, term.size()));
+			if (memory) { memory->grow(arena_.back().capacity()); }
 		}
 		std::string& chunk = arena_.back();
 		const char* at = chunk.data() + chunk.size();
 		chunk.append(term);
 		if ((buffers_.size() + 1) * 2 > table_.size()) { grow(); }
 		insert({h, at, std::uint32_t(term.size()), std::uint32_t(buffers_.size())});
+		if (memory) { memory->grow(sizeof(term_buffer)); }
 		return buffers_.emplace_back();
 	}
 
@@ -568,6 +640,7 @@ private:
 	}
 
 	void grow() {
+		if (memory) { memory->grow(table_.size() * sizeof(slot)); }  // the table doubles
 		std::vector<slot> old(table_.size() * 2);
 		old.swap(table_);
 		for (const auto& s : old) {
@@ -888,6 +961,7 @@ private:
 	std::vector<std::uint64_t> key_hashes_;
 	std::string keys_min_, keys_max_;
 	std::uint64_t total_length_ = 0;
+	std::uint64_t columns_charged_ = 0;  // the per-document columns' charged capacity
 };
 
 }  // namespace strata

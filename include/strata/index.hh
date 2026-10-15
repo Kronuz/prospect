@@ -1168,12 +1168,16 @@ private:
 
 	// --- flush ------------------------------------------------------------------------------
 
-	// Writes the buffer's live documents, sorted by docid, as a new segment.
+	// Writes the buffer's live documents, sorted by docid, as a new segment. Each run's
+	// memory is charged to the budget on its own permit, settled when its segment is
+	// published (D17); the sort's on another, settled when the flush ends.
 	void flush() {
+		flush_charge sorting(opts_.budget);
 		std::vector<const buffered*> docs;
 		for (const auto& b : buffer_) {
 			if (!b.dead) { docs.push_back(&b); }
 		}
+		sorting.grow(docs.capacity() * sizeof(docs[0]));
 		if (!docs.empty()) {
 			std::sort(docs.begin(), docs.end(), [](const buffered* a, const buffered* b) { return a->docid < b->docid; });
 			// Contiguous docid runs, one segment each, inverted and encoded in parallel (D18).
@@ -1182,21 +1186,29 @@ private:
 			for (auto& id : ids) { id = m_.next_segment++; }  // never reused, even after a failure
 			std::vector<std::string> outputs(runs);
 			std::vector<std::exception_ptr> errors(runs);
+			std::vector<flush_charge> charges(runs);  // each run's, held until its segment is published
 			auto invert = [&](std::size_t k) {
 				try {
 					const std::size_t begin = docs.size() * k / runs, end = docs.size() * (k + 1) / runs;
-					segment_writer w;
-					std::vector<posting_input> in;
-					for (std::size_t i = begin; i < end; ++i) {
-						const buffered* b = docs[i];
-						in.clear();
-						for (const auto& t : b->doc.terms) { in.push_back({t.term, t.wdf, t.positions}); }
-						w.add(b->docid, in, b->doc.length, b->doc.stored, b->version, b->key);
+					flush_charge charge(opts_.budget);  // on the run's own thread
+					{
+						segment_writer w;
+						if (opts_.budget) { w.memory = &charge; }
+						std::vector<posting_input> in;
+						for (std::size_t i = begin; i < end; ++i) {
+							const buffered* b = docs[i];
+							in.clear();
+							for (const auto& t : b->doc.terms) { in.push_back({t.term, t.wdf, t.positions}); }
+							w.add(b->docid, in, b->doc.length, b->doc.stored, b->version, b->key);
+						}
+						std::array<std::uint8_t, 16> header{};
+						std::memcpy(header.data(), &ids[k], 8);
+						std::memcpy(header.data() + 8, m_.uuid.data(), 8);
+						outputs[k] = w.flush(header);
 					}
-					std::array<std::uint8_t, 16> header{};
-					std::memcpy(header.data(), &ids[k], 8);
-					std::memcpy(header.data() + 8, m_.uuid.data(), 8);
-					outputs[k] = w.flush(header);
+					// The writer's buffers are gone; the segment's bytes stay charged until published.
+					charge.shrink(charge.held() - std::min<std::uint64_t>(charge.held(), outputs[k].capacity()));
+					charges[k] = std::move(charge);
 				} catch (...) { errors[k] = std::current_exception(); }
 			};
 			std::vector<std::thread> threads;
@@ -1215,6 +1227,7 @@ private:
 				auto seg = std::make_unique<open_segment>(ref, std::move(bytes));
 				seg->unsynced = std::move(file);
 				segs_.push_back(std::move(seg));
+				charges[k].settle();
 			}
 		}
 		buffer_.clear();
