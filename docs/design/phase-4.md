@@ -171,8 +171,14 @@ Per slot and segment:
   `sum` over `[5, 5]` is 10); `bytes` slots are sorted sets; `binary` slots keep order
   and duplicates. StringList sort keys read `binary`; aggregations and collapse read the
   declared type's form.
-- **Blocks** of 4,096 ordinals record their minimum and maximum. The block size is
-  recorded in the section, a preset a measurement can change without a format change.
+- **Skip groups** (R10) hold 4,096 consecutive documents that have a value, all of
+  their values included, so no document straddles two groups. Each entry records the
+  first and last ordinal, the first value index, the value count, and the minimum and
+  maximum. A range iterator binary-searches the entries by ordinal and skips whole
+  spans; an aggregation decodes only a group's value range. The group size is recorded
+  in the section, a preset a measurement can change without a format change. The
+  128-value packing blocks stay in value-index order: they are the encoding, not the
+  skip index.
 - **Statistics:** count of documents, count of values, minimum, maximum, and an exact
   sum (128-bit for integers; D11's exact accumulator for `f64`, rounded once). They
   include deleted documents: minimum and maximum stay valid as bounds, while counts and

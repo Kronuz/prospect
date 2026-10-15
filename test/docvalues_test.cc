@@ -1,6 +1,7 @@
 // Doc values (Phase 4, D4): columns round-trip for dense, sparse, very sparse, empty,
-// constant, 64-bit, mapped negative, multi-valued, and bytes slots; block and group bounds,
-// GCDs, and statistics (a sum past 2^64) match the input; single-byte corruptions throw
+// constant, 64-bit, mapped negative, multi-valued, and bytes slots; block bounds, GCDs,
+// skip groups (against brute force over ordinals), single-value extraction at every
+// width, and statistics (a sum past 2^64) match the input; single-byte corruptions throw
 // corrupt_segment or decode without crashing, and truncations throw.
 #include "strata/docvalues.hh"
 
@@ -14,6 +15,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 static int failures = 0;
@@ -32,7 +34,7 @@ static std::vector<std::uint64_t> stream_of(const docs_t& docs) {
 	return out;
 }
 
-static void check_bounds(const dv::column_view& c, const std::vector<std::uint64_t>& stream, std::uint64_t group_values) {
+static void check_blocks(const dv::column_view& c, const std::vector<std::uint64_t>& stream) {
 	CHECK(c.block_count() == (stream.size() + 127) / 128);
 	for (std::size_t b = 0; b < c.block_count(); ++b) {
 		const std::size_t first = b * 128, last = std::min(stream.size(), first + 128);
@@ -46,31 +48,81 @@ static void check_bounds(const dv::column_view& c, const std::vector<std::uint64
 		CHECK(e.gcd == gcd);
 		CHECK(e.bits == unsigned(std::bit_width((hi - lo) / gcd)));
 	}
-	CHECK(c.group_values() == group_values);
-	CHECK(c.group_count() == (stream.size() + group_values - 1) / group_values);
+	for (std::size_t i = 0; i < stream.size(); ++i) { CHECK(c.value_at(i) == stream[i]); }
+}
+
+// Skip groups against brute force over ordinals: group_docs documents with a value each,
+// whole, with their ordinal span, first value index, count, and bounds. `docs` holds each
+// ordinal's values sorted, as the column stores them.
+static void check_groups(const dv::column_view& c, const docs_t& docs, std::uint64_t group_docs) {
+	std::vector<ordinal_t> present;
+	for (std::size_t o = 0; o < docs.size(); ++o) { if (!docs[o].empty()) { present.push_back(ordinal_t(o)); } }
+	CHECK(c.group_docs() == group_docs);
+	CHECK(c.group_count() == (present.size() + group_docs - 1) / group_docs);
+	std::uint64_t value = 0;
+	std::vector<std::uint64_t> got;
 	for (std::size_t g = 0; g < c.group_count(); ++g) {
-		const std::size_t first = std::size_t(g * group_values), last = std::min<std::size_t>(stream.size(), std::size_t(first + group_values));
-		const auto b = c.group(g);
-		CHECK(b.min == *std::min_element(stream.begin() + std::ptrdiff_t(first), stream.begin() + std::ptrdiff_t(last)));
-		CHECK(b.max == *std::max_element(stream.begin() + std::ptrdiff_t(first), stream.begin() + std::ptrdiff_t(last)));
+		const auto e = c.group(g);
+		const std::size_t begin = std::size_t(g * group_docs), end = std::min<std::size_t>(present.size(), std::size_t(begin + group_docs));
+		CHECK(e.first == present[begin] && e.last == present[end - 1]);
+		CHECK(e.first_value == value);
+		std::uint64_t count = 0, lo = std::numeric_limits<std::uint64_t>::max(), hi = 0;
+		std::vector<std::uint64_t> expect;
+		for (std::size_t d = begin; d < end; ++d) {
+			for (const auto v : docs[present[d]]) { ++count; lo = std::min(lo, v); hi = std::max(hi, v); expect.push_back(v); }
+		}
+		CHECK(e.count == count && e.min == lo && e.max == hi);
+		// The group's value range is exactly its documents' values: none straddles a group.
+		c.values_at(e.first_value, e.first_value + e.count, got);
+		CHECK(got == expect);
+		CHECK(c.find_group(e.first) == g && c.find_group(e.last) == g);
+		if (g) { CHECK(c.find_group(ordinal_t(c.group(g - 1).last + 1)) == g); }
+		value += count;
+	}
+	if (!present.empty()) { CHECK(c.find_group(ordinal_t(present.back() + 1)) == c.group_count()); }
+	// Range filters that skip groups missing the range find what brute force finds.
+	std::vector<std::uint64_t> sorted;
+	for (const auto& d : docs) { sorted.insert(sorted.end(), d.begin(), d.end()); }
+	CHECK(value == sorted.size());
+	if (sorted.empty()) { return; }
+	std::sort(sorted.begin(), sorted.end());
+	const double quantiles[][2] = {{0.1, 0.2}, {0.5, 0.5}, {0.0, 0.01}, {0.9, 1.0}};
+	for (const auto& q : quantiles) {
+		const auto a = sorted[std::size_t(q[0] * double(sorted.size() - 1))], b = sorted[std::size_t(q[1] * double(sorted.size() - 1))];
+		auto hits = [&](const std::vector<std::uint64_t>& vs) { return std::any_of(vs.begin(), vs.end(), [&](std::uint64_t v) { return v >= a && v <= b; }); };
+		std::vector<ordinal_t> brute, skipped;
+		for (std::size_t o = 0; o < docs.size(); ++o) { if (hits(docs[o])) { brute.push_back(ordinal_t(o)); } }
+		for (std::size_t g = 0; g < c.group_count(); ++g) {
+			const auto e = c.group(g);
+			if (e.max < a || e.min > b) { continue; }
+			for (std::uint64_t o = e.first; o <= e.last; ++o) {
+				if (c.values(ordinal_t(o), got) && hits(got)) { skipped.push_back(ordinal_t(o)); }
+			}
+		}
+		CHECK(skipped == brute);
 	}
 }
 
-static std::string roundtrip(dv::kind k, bool multi, const docs_t& docs, std::uint32_t group_values = 4096) {
-	const auto bytes = dv::encode(k, multi, docs, dv::options{group_values});
+static std::string roundtrip(dv::kind k, bool multi, const docs_t& docs, std::uint32_t group_docs = 4096) {
+	const auto bytes = dv::encode(k, multi, docs, dv::options{group_docs});
 	const auto c = dv::column_view::open(bytes.data(), bytes.size());
 	CHECK(c.type() == k);
 	CHECK(c.multi_valued() == multi);
 	CHECK(c.doc_count() == docs.size());
 	std::uint64_t present = 0;
 	std::vector<std::uint64_t> got;
+	docs_t sorted_docs;
 	for (std::size_t o = 0; o < docs.size(); ++o) {
 		auto want = docs[o];
 		std::sort(want.begin(), want.end());
 		CHECK(c.has(ordinal_t(o)) == !want.empty());
 		CHECK(c.values(ordinal_t(o), got) == want.size());
 		CHECK(got == want);
-		if (!want.empty()) { CHECK(c.value_index(ordinal_t(o)) == present); ++present; }
+		const auto one = c.value(ordinal_t(o));
+		CHECK(one.has_value() == !want.empty());
+		if (one && !want.empty()) { CHECK(*one == want[0]); }
+		if (!want.empty()) { CHECK(c.doc_index(ordinal_t(o)) == present); ++present; }
+		sorted_docs.push_back(std::move(want));
 	}
 	CHECK(!c.has(ordinal_t(docs.size())));
 	const auto stream = stream_of(docs);
@@ -85,7 +137,8 @@ static std::string roundtrip(dv::kind k, bool multi, const docs_t& docs, std::ui
 	CHECK(s.max == (stream.empty() ? 0 : *std::max_element(stream.begin(), stream.end())));
 	CHECK(s.has_sum == (k == dv::kind::u64 || k == dv::kind::i64));
 	CHECK(s.sum == (s.has_sum ? sum : 0));
-	check_bounds(c, stream, group_values);
+	check_blocks(c, stream);
+	check_groups(c, sorted_docs, group_docs);
 	return bytes;
 }
 
@@ -107,10 +160,13 @@ static std::string roundtrip_bytes(bool multi, const strings_t& docs) {
 	CHECK(!c.find("~missing").has_value());
 	std::uint64_t present = 0, values = 0;
 	std::vector<std::uint64_t> got;
+	docs_t ordinals;
 	for (std::size_t o = 0; o < docs.size(); ++o) {
 		auto want = docs[o];
 		std::sort(want.begin(), want.end());
 		want.erase(std::unique(want.begin(), want.end()), want.end());
+		auto& ords = ordinals.emplace_back();
+		for (const auto& t : want) { ords.push_back(std::uint64_t(std::lower_bound(dictionary.begin(), dictionary.end(), t) - dictionary.begin())); }
 		CHECK(c.has(ordinal_t(o)) == !want.empty());
 		CHECK(c.values(ordinal_t(o), got) == want.size());
 		std::vector<std::string> terms;
@@ -123,6 +179,7 @@ static std::string roundtrip_bytes(bool multi, const strings_t& docs) {
 	CHECK(c.stats().values == values);
 	CHECK(!c.stats().has_sum);
 	if (values) { CHECK(c.stats().min == 0 && c.stats().max == dictionary.size() - 1); }
+	check_groups(c, ordinals, 4096);
 	return bytes;
 }
 
@@ -133,12 +190,17 @@ static void exercise(const std::string& bytes) {
 		std::vector<std::uint64_t> got;
 		const auto n = std::min<std::uint64_t>(c.doc_count(), 4096);
 		for (std::uint64_t o = 0; o < n; ++o) {
+			(void)c.value(ordinal_t(o));
+			(void)c.find_group(ordinal_t(o));
 			if (c.values(ordinal_t(o), got) && c.type() == dv::kind::bytes) {
 				for (const auto ord : got) { (void)c.term(ord); }
 			}
 		}
 		for (std::size_t b = 0; b < c.block_count(); ++b) { (void)c.block(b); }
-		for (std::size_t g = 0; g < c.group_count(); ++g) { (void)c.group(g); }
+		for (std::size_t g = 0; g < c.group_count(); ++g) {
+			const auto e = c.group(g);
+			c.values_at(e.first_value, e.first_value + e.count, got);
+		}
 		for (std::uint64_t t = 0; t < std::min<std::uint64_t>(c.terms(), 4096); ++t) { (void)c.term(t); }
 		(void)c.stats();
 	} catch (const strata::corrupt_segment&) {
@@ -173,6 +235,20 @@ int main() {
 	std::mt19937_64 rng(4);
 	constexpr auto u64_max = std::numeric_limits<std::uint64_t>::max();
 
+	// Single-value extraction reads what the full-block decode reads, at every width.
+	for (unsigned bits = 0; bits <= 64; ++bits) {
+		const std::uint64_t mask = bits == 64 ? u64_max : (std::uint64_t(1) << bits) - 1;
+		std::uint64_t in[128], out[128];
+		std::uint8_t packed[bitpack::packed_bytes(64)] = {};
+		for (auto& v : in) { v = rng() & mask; }
+		in[5] = mask;
+		bitpack::pack(in, bits, packed);
+		bitpack::unpack(packed, bits, out);
+		for (std::size_t j = 0; j < 128; ++j) {
+			CHECK(out[j] == in[j]);
+			CHECK(dv::extract(packed, bits, j) == out[j]);
+		}
+	}
 	// Dense, full-width values.
 	{
 		docs_t docs(10000);
@@ -248,6 +324,18 @@ int main() {
 		for (auto& d : wide) { for (std::uint64_t i = rng() % 3; i > 0; --i) { d.push_back(rng()); } }
 		roundtrip(dv::kind::u64, true, wide, 128);
 	}
+	// Sparse multi-valued columns (1% and 0.1%, 1 to 100 values each) with small groups.
+	{
+		docs_t one(100000), tenth(200000);
+		for (auto& d : one) { if (rng() % 100 == 0) { for (auto n = 1 + rng() % 100; n > 0; --n) { d.push_back(rng() % 100000); } } }
+		for (auto& d : tenth) { if (rng() % 1000 == 0) { for (auto n = 1 + rng() % 100; n > 0; --n) { d.push_back(from_i64(std::int64_t(rng() % 2000) - 1000)); } } }
+		roundtrip(dv::kind::u64, true, one, 64);
+		roundtrip(dv::kind::i64, true, tenth, 16);
+		roundtrip(dv::kind::i64, true, tenth, 1);
+		docs_t sparse(50000);
+		for (auto& d : sparse) { if (rng() % 100 == 0) { d.push_back(rng() % 1000); } }
+		roundtrip(dv::kind::u64, false, sparse, 100);
+	}
 	// GCD blocks: multiples of 1000 from an offset.
 	{
 		docs_t docs(1000);
@@ -291,13 +379,13 @@ int main() {
 		roundtrip_bytes(true, strings_t(10));
 		roundtrip_bytes(false, strings_t{});
 	}
-	// Misuse: several values in a single-valued slot, a group size off the block.
+	// Misuse: several values in a single-valued slot, an empty group size.
 	{
 		bool threw = false;
 		try { (void)dv::encode(dv::kind::u64, false, docs_t{{1, 2}}); } catch (const std::invalid_argument&) { threw = true; }
 		CHECK(threw);
 		threw = false;
-		try { (void)dv::encode(dv::kind::u64, false, docs_t{{1}}, dv::options{100}); } catch (const std::invalid_argument&) { threw = true; }
+		try { (void)dv::encode(dv::kind::u64, false, docs_t{{1}}, dv::options{0}); } catch (const std::invalid_argument&) { threw = true; }
 		CHECK(threw);
 	}
 	// Corruptions and truncations: a sparse multi-valued column with presence and offsets,

@@ -23,7 +23,7 @@
 // Doc values (Phase 4, D4): one slot's column in one segment. Presence is a frozen docset,
 // omitted when every ordinal has a value; a present ordinal's value index is its rank.
 // Values pack in blocks of 128 from the block's minimum, divided by the GCD of the
-// deltas, with each block's bounds and a directory of group bounds for range skipping.
+// deltas. Skip groups (R10) hold consecutive documents that have a value, whole.
 //
 // Column, little-endian fixed fields and LEB128 counts:
 //   u8 version, u8 kind, u8 flags (1 multi-valued, 2 presence stored),
@@ -31,10 +31,11 @@
 //   integer kinds: the exact sum as 128-bit two's complement (u64 low, u64 high),
 //   presence: leb size, frozen docset,
 //   bytes: the dictionary (leb terms, terms + 1 u64 offsets, the sorted terms' bytes),
+//   leb documents per group, then per group u32 first ordinal, u32 last ordinal,
+//     u64 first value index, u64 value count, u64 min, u64 max,
 //   multi-valued: the offsets (present documents + 1 cumulative counts) as packed values,
 //   the values as packed values.
-// Packed values: leb count, leb group size (values, a multiple of 128), per block
-// u64 min, u64 max, u64 gcd, u64 offset, u8 bits; per group u64 min, u64 max;
+// Packed values: leb count, per block u64 min, u64 max, u64 gcd, u64 offset, u8 bits;
 // leb packed size, then every block's bitpack form, (value - min) / gcd at `bits`.
 
 #pragma once
@@ -47,6 +48,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <numeric>
 #include <optional>
@@ -63,7 +65,7 @@ enum class kind : std::uint8_t { u64 = 0, i64 = 1, f64 = 2, bytes = 3 };
 inline constexpr std::size_t block_values = ::bitpack::block_size;
 
 struct options {
-	std::uint32_t group_values = 4096;  // values per skip group: a preset, recorded per column
+	std::uint32_t group_docs = 4096;  // documents with a value per skip group: a preset, recorded per column
 };
 
 struct statistics {
@@ -77,26 +79,46 @@ struct statistics {
 };
 
 struct block_info { std::uint64_t min = 0, max = 0, gcd = 1; unsigned bits = 0; };
-struct bounds { std::uint64_t min = 0, max = 0; };
+
+// A skip group: its documents' ordinal span and their values, [first_value, first_value + count).
+struct skip_entry {
+	ordinal_t first = 0, last = 0;
+	std::uint64_t first_value = 0, count = 0, min = 0, max = 0;
+};
+
+// Value j of a bitpack block at width 0 to 64, reading only its own bits. Value j lies in
+// lane j % 4, row j / 4; a 64-bit width packs the low halves at min(bits, 32), then the
+// high halves at bits - 32 after packed_bytes(32).
+inline std::uint64_t extract(const std::uint8_t* block, unsigned bits, std::size_t j) noexcept {
+	auto lane_value = [j](const std::uint8_t* in, unsigned b) -> std::uint64_t {
+		if (b == 0) { return 0; }
+		const unsigned lane = unsigned(j & 3), start = unsigned(j >> 2) * b, s = start % 32;
+		const std::uint8_t* word = in + 4 * (4 * (start / 32) + lane);
+		std::uint32_t low, high;
+		std::memcpy(&low, word, 4);
+		std::uint64_t v = low >> s;
+		if (s + b > 32) { std::memcpy(&high, word + 16, 4); v |= std::uint64_t(high) << (32 - s); }
+		return v & ((std::uint64_t(1) << b) - 1);
+	};
+	if (bits <= 32) { return lane_value(block, bits); }
+	return lane_value(block, 32) | lane_value(block + ::bitpack::packed_bytes(32), bits - 32) << 32;
+}
 
 namespace detail {
 
 inline constexpr std::uint8_t version = 1;
 inline constexpr std::uint8_t flag_multi = 1, flag_presence = 2;
-inline constexpr std::size_t block_entry = 33, group_entry = 16;
-inline constexpr std::uint64_t max_group_values = 1ull << 30;
+inline constexpr std::size_t block_entry = 33, group_entry = 40;
+inline constexpr std::uint64_t max_group_docs = 1ull << 32;
 
 constexpr bool has_sum(kind k) noexcept { return k == kind::u64 || k == kind::i64; }
 
-inline void put_values(std::string& out, const std::vector<std::uint64_t>& v, std::uint32_t group_values) {
+inline void put_values(std::string& out, const std::vector<std::uint64_t>& v) {
 	const std::size_t n = v.size(), blocks = (n + block_values - 1) / block_values;
-	const std::size_t per_group = group_values / block_values;
 	format::put_leb(out, n);
-	format::put_leb(out, group_values);
-	std::string directory, groups, packed;
+	std::string directory, packed;
 	std::uint64_t q[block_values];
 	std::uint8_t buffer[::bitpack::packed_bytes(64)];
-	bounds group{};
 	for (std::size_t b = 0; b < blocks; ++b) {
 		const std::size_t first = b * block_values, last = std::min(n, first + block_values);
 		std::uint64_t lo = v[first], hi = v[first];
@@ -113,33 +135,52 @@ inline void put_values(std::string& out, const std::vector<std::uint64_t>& v, st
 		format::put<std::uint64_t>(directory, packed.size());
 		format::put<std::uint8_t>(directory, std::uint8_t(bits));
 		packed.append(reinterpret_cast<const char*>(buffer), ::bitpack::packed_bytes(bits));
-		if (b % per_group == 0) { group = {lo, hi}; } else { group.min = std::min(group.min, lo); group.max = std::max(group.max, hi); }
-		if (b % per_group == per_group - 1 || b + 1 == blocks) {
-			format::put<std::uint64_t>(groups, group.min);
-			format::put<std::uint64_t>(groups, group.max);
-		}
 	}
 	out += directory;
-	out += groups;
 	format::put_leb(out, packed.size());
 	out += packed;
 }
 
 // `starts` holds ordinals + 1 cumulative counts into `flat`; each ordinal's values sorted.
 inline std::string encode_column(kind k, bool multi, const std::vector<std::uint64_t>& starts, const std::vector<std::uint64_t>& flat, const std::string* dictionary, const options& opts) {
-	if (opts.group_values == 0 || opts.group_values % block_values || opts.group_values > max_group_values) {
-		throw std::invalid_argument("strata: doc values: the group size must be a positive multiple of 128");
-	}
+	if (opts.group_docs == 0) { throw std::invalid_argument("strata: doc values: the group size must be positive"); }
 	const std::size_t doc_count = starts.size() - 1;
 	if (doc_count > std::numeric_limits<ordinal_t>::max()) { throw std::invalid_argument("strata: doc values: too many ordinals"); }
 	std::vector<::docset::doc_t> present;
 	std::vector<std::uint64_t> offsets{0};
+	std::string groups;
+	skip_entry group;
 	for (std::size_t o = 0; o < doc_count; ++o) {
 		const std::uint64_t n = starts[o + 1] - starts[o];
 		if (!n) { continue; }
 		if (!multi && n > 1) { throw std::invalid_argument("strata: doc values: a single-valued slot holds one value per document"); }
+		const auto lo = *std::min_element(flat.begin() + std::ptrdiff_t(starts[o]), flat.begin() + std::ptrdiff_t(starts[o + 1]));
+		const auto hi = *std::max_element(flat.begin() + std::ptrdiff_t(starts[o]), flat.begin() + std::ptrdiff_t(starts[o + 1]));
+		if (present.size() % opts.group_docs == 0) {
+			group = {ordinal_t(o), ordinal_t(o), offsets.back(), 0, lo, hi};
+		}
+		group.last = ordinal_t(o);
+		group.count += n;
+		group.min = std::min(group.min, lo);
+		group.max = std::max(group.max, hi);
 		present.push_back(::docset::doc_t(o));
 		offsets.push_back(offsets.back() + n);
+		if (present.size() % opts.group_docs == 0) {
+			format::put<std::uint32_t>(groups, group.first);
+			format::put<std::uint32_t>(groups, group.last);
+			format::put<std::uint64_t>(groups, group.first_value);
+			format::put<std::uint64_t>(groups, group.count);
+			format::put<std::uint64_t>(groups, group.min);
+			format::put<std::uint64_t>(groups, group.max);
+		}
+	}
+	if (present.size() % opts.group_docs) {
+		format::put<std::uint32_t>(groups, group.first);
+		format::put<std::uint32_t>(groups, group.last);
+		format::put<std::uint64_t>(groups, group.first_value);
+		format::put<std::uint64_t>(groups, group.count);
+		format::put<std::uint64_t>(groups, group.min);
+		format::put<std::uint64_t>(groups, group.max);
 	}
 	statistics s;
 	s.docs = present.size();
@@ -169,8 +210,10 @@ inline std::string encode_column(kind k, bool multi, const std::vector<std::uint
 		out.append(reinterpret_cast<const char*>(frozen.data()), frozen.size());
 	}
 	if (dictionary) { out += *dictionary; }
-	if (multi) { put_values(out, offsets, opts.group_values); }
-	put_values(out, flat, opts.group_values);
+	format::put_leb(out, opts.group_docs);
+	out += groups;
+	if (multi) { put_values(out, offsets); }
+	put_values(out, flat);
 	return out;
 }
 
@@ -258,6 +301,12 @@ public:
 			throw corrupt_segment("doc-value presence");
 		}
 		if (c.kind_ == kind::bytes) { c.parse_dictionary(&p, end); }
+		c.group_docs_ = format::get_leb(&p, end);
+		if (!c.group_docs_ || c.group_docs_ > detail::max_group_docs) { throw corrupt_segment("doc-value group size"); }
+		c.groups_ = std::size_t((c.stats_.docs + c.group_docs_ - 1) / c.group_docs_);
+		need(p, end, std::uint64_t(c.groups_) * detail::group_entry);
+		c.group_directory_ = p;
+		p += c.groups_ * detail::group_entry;
 		if (c.multi_) {
 			c.offsets_.parse(&p, end);
 			if (c.offsets_.count != c.stats_.docs + 1) { throw corrupt_segment("doc-value offsets"); }
@@ -267,14 +316,15 @@ public:
 		c.values_.parse(&p, end);
 		if (c.values_.count != c.stats_.values) { throw corrupt_segment("doc-value count"); }
 		if (p != end) { throw corrupt_segment("doc-value trailing bytes"); }
-		// The statistics' bounds match the groups'.
-		bounds all{c.stats_.values ? std::numeric_limits<std::uint64_t>::max() : 0, 0};
-		for (std::size_t g = 0; g < c.values_.groups; ++g) {
-			const auto b = c.values_.group(g);
-			all.min = std::min(all.min, b.min);
-			all.max = std::max(all.max, b.max);
+		c.check_groups();
+		// The statistics' bounds match the blocks'.
+		std::uint64_t lo = c.stats_.values ? std::numeric_limits<std::uint64_t>::max() : 0, hi = 0;
+		for (std::size_t b = 0; b < c.values_.blocks; ++b) {
+			const auto e = c.values_.block(b);
+			lo = std::min(lo, e.min);
+			hi = std::max(hi, e.max);
 		}
-		if (all.min != c.stats_.min || all.max != c.stats_.max) { throw corrupt_segment("doc-value bounds"); }
+		if (lo != c.stats_.min || hi != c.stats_.max) { throw corrupt_segment("doc-value bounds"); }
 		if (c.kind_ == kind::bytes && c.stats_.values && c.stats_.max >= c.terms_) { throw corrupt_segment("doc-value ordinal"); }
 		return c;
 	}
@@ -289,13 +339,13 @@ public:
 		return !presence_ || presence_->contains(::docset::doc_t(o));
 	}
 	// A present ordinal's index among the present ones.
-	std::uint64_t value_index(ordinal_t o) const noexcept { return presence_ ? presence_->rank(::docset::doc_t(o)) : o; }
+	std::uint64_t doc_index(ordinal_t o) const noexcept { return presence_ ? presence_->rank(::docset::doc_t(o)) : o; }
 
 	// Replaces `out` with the ordinal's values, sorted; returns their count.
 	std::size_t values(ordinal_t o, std::vector<std::uint64_t>& out) const {
 		out.clear();
 		if (!has(o)) { return 0; }
-		const std::uint64_t i = value_index(o);
+		const std::uint64_t i = doc_index(o);
 		if (!multi_) { out.push_back(values_.at(i)); return 1; }
 		const std::uint64_t start = offsets_.at(i), stop = offsets_.at(i + 1);
 		if (start > stop || stop > values_.count) { throw corrupt_segment("doc-value offsets"); }
@@ -303,18 +353,47 @@ public:
 		values_.copy(start, stop, out.data());
 		return out.size();
 	}
+	// A single-valued column's value, reading only its bits.
+	std::optional<std::uint64_t> value(ordinal_t o) const {
+		if (!has(o)) { return std::nullopt; }
+		if (!multi_) { return values_.at(doc_index(o)); }
+		const std::uint64_t start = offsets_.at(doc_index(o));
+		if (start >= values_.count) { throw corrupt_segment("doc-value offsets"); }
+		return values_.at(start);  // a multi-valued document's smallest
+	}
+	// Values by value index: one, or the range [start, stop) into `out`.
+	std::uint64_t value_at(std::uint64_t index) const {
+		if (index >= values_.count) { throw std::out_of_range("strata: doc values: value index"); }
+		return values_.at(index);
+	}
+	void values_at(std::uint64_t start, std::uint64_t stop, std::vector<std::uint64_t>& out) const {
+		if (start > stop || stop > values_.count) { throw std::out_of_range("strata: doc values: value range"); }
+		out.resize(std::size_t(stop - start));
+		values_.copy(start, stop, out.data());
+	}
 
-	// Value blocks of block_values, in value-index order, and groups of group_values().
+	// Packing blocks of block_values, in value-index order.
 	std::size_t block_count() const noexcept { return values_.blocks; }
 	block_info block(std::size_t b) const {
 		if (b >= values_.blocks) { throw std::out_of_range("strata: doc values: block"); }
 		return values_.block(b);
 	}
-	std::uint64_t group_values() const noexcept { return values_.group_values; }
-	std::size_t group_count() const noexcept { return values_.groups; }
-	bounds group(std::size_t g) const {
-		if (g >= values_.groups) { throw std::out_of_range("strata: doc values: group"); }
-		return values_.group(g);
+
+	// Skip groups of group_docs() documents with a value each (the last may hold fewer).
+	std::uint64_t group_docs() const noexcept { return group_docs_; }
+	std::size_t group_count() const noexcept { return groups_; }
+	skip_entry group(std::size_t g) const {
+		if (g >= groups_) { throw std::out_of_range("strata: doc values: group"); }
+		return entry(g);
+	}
+	// The first group whose span ends at or after `o`, or group_count().
+	std::size_t find_group(ordinal_t o) const noexcept {
+		std::size_t lo = 0, hi = groups_;
+		while (lo < hi) {
+			const auto mid = lo + (hi - lo) / 2;
+			if (entry(mid).last < o) { lo = mid + 1; } else { hi = mid; }
+		}
+		return lo;
 	}
 
 	// Bytes slots: the dictionary.
@@ -336,26 +415,18 @@ public:
 
 private:
 	struct packed_values {
-		std::uint64_t count = 0, group_values = 0;
-		std::size_t blocks = 0, groups = 0, packed_size = 0;
+		std::uint64_t count = 0;
+		std::size_t blocks = 0, packed_size = 0;
 		const char* directory = nullptr;
-		const char* group_directory = nullptr;
 		const char* packed = nullptr;
 
 		void parse(const char** p, const char* end) {
 			count = format::get_leb(p, end);
-			group_values = format::get_leb(p, end);
-			if (!group_values || group_values % block_values || group_values > detail::max_group_values) { throw corrupt_segment("doc-value group size"); }
 			const std::uint64_t b = count / block_values + (count % block_values != 0);
 			if (b > std::size_t(end - *p) / detail::block_entry) { throw corrupt_segment("doc-value blocks"); }
 			blocks = std::size_t(b);
 			directory = *p;
 			*p += blocks * detail::block_entry;
-			const std::size_t per_group = std::size_t(group_values / block_values);
-			groups = (blocks + per_group - 1) / per_group;
-			if (groups > std::size_t(end - *p) / detail::group_entry) { throw corrupt_segment("doc-value groups"); }
-			group_directory = *p;
-			*p += groups * detail::group_entry;
 			const auto n = format::get_leb(p, end);
 			need(*p, end, n);
 			packed_size = std::size_t(n);
@@ -364,43 +435,28 @@ private:
 			std::size_t at = 0;
 			for (std::size_t i = 0; i < blocks; ++i) {
 				const auto e = block(i);
-				if (e.bits > 64 || !e.gcd || e.min > e.max || format::get<std::uint64_t>(directory + i * detail::block_entry + 24) != at) {
-					throw corrupt_segment("doc-value block");
-				}
+				if (e.bits > 64 || !e.gcd || e.min > e.max || offset(i) != at) { throw corrupt_segment("doc-value block"); }
 				at += ::bitpack::packed_bytes(e.bits);
 			}
 			if (at != packed_size) { throw corrupt_segment("doc-value packed size"); }
-			for (std::size_t g = 0; g < groups; ++g) {
-				bounds want{std::numeric_limits<std::uint64_t>::max(), 0};
-				for (std::size_t i = g * per_group; i < blocks && i < (g + 1) * per_group; ++i) {
-					const auto e = block(i);
-					want.min = std::min(want.min, e.min);
-					want.max = std::max(want.max, e.max);
-				}
-				const auto got = group(g);
-				if (got.min != want.min || got.max != want.max) { throw corrupt_segment("doc-value group"); }
-			}
 		}
 		block_info block(std::size_t b) const noexcept {
 			const char* e = directory + b * detail::block_entry;
 			return {format::get<std::uint64_t>(e), format::get<std::uint64_t>(e + 8), format::get<std::uint64_t>(e + 16), unsigned(std::uint8_t(e[32]))};
 		}
-		bounds group(std::size_t g) const noexcept {
-			const char* e = group_directory + g * detail::group_entry;
-			return {format::get<std::uint64_t>(e), format::get<std::uint64_t>(e + 8)};
-		}
+		std::uint64_t offset(std::size_t b) const noexcept { return format::get<std::uint64_t>(directory + b * detail::block_entry + 24); }
 		// Every block's offset and width were checked at parse, so its bytes are in range.
+		const std::uint8_t* bytes(std::size_t b) const noexcept { return reinterpret_cast<const std::uint8_t*>(packed + std::size_t(offset(b))); }
 		void decode(std::size_t b, std::uint64_t* out) const noexcept {
 			const auto e = block(b);
-			const auto offset = std::size_t(format::get<std::uint64_t>(directory + b * detail::block_entry + 24));
-			::bitpack::unpack(reinterpret_cast<const std::uint8_t*>(packed + offset), e.bits, out);
+			::bitpack::unpack(bytes(b), e.bits, out);
 			for (std::size_t i = 0; i < block_values; ++i) { out[i] = e.min + out[i] * e.gcd; }
 		}
 		std::uint64_t at(std::uint64_t i) const {
 			if (i >= count) { throw corrupt_segment("doc-value index"); }
-			std::uint64_t buffer[block_values];
-			decode(std::size_t(i / block_values), buffer);
-			return buffer[i % block_values];
+			const auto b = std::size_t(i / block_values);
+			const auto e = block(b);
+			return e.min + extract(bytes(b), e.bits, std::size_t(i % block_values)) * e.gcd;
 		}
 		void copy(std::uint64_t start, std::uint64_t stop, std::uint64_t* out) const noexcept {
 			std::uint64_t buffer[block_values];
@@ -419,6 +475,36 @@ private:
 		if (n > std::uint64_t(end - p)) { throw corrupt_segment("truncated doc-value column"); }
 	}
 	std::uint64_t term_offset(std::uint64_t i) const noexcept { return format::get<std::uint64_t>(term_offsets_ + i * 8); }
+	skip_entry entry(std::size_t g) const noexcept {
+		const char* e = group_directory_ + g * detail::group_entry;
+		return {format::get<std::uint32_t>(e), format::get<std::uint32_t>(e + 4), format::get<std::uint64_t>(e + 8),
+			format::get<std::uint64_t>(e + 16), format::get<std::uint64_t>(e + 24), format::get<std::uint64_t>(e + 32)};
+	}
+
+	// Each group holds the next group_docs present documents, whole, in ordinal order.
+	void check_groups() const {
+		std::uint64_t next_value = 0;
+		for (std::size_t g = 0; g < groups_; ++g) {
+			const auto e = entry(g);
+			const std::uint64_t begin = g * group_docs_, end = std::min<std::uint64_t>(stats_.docs, begin + group_docs_);
+			if (e.first > e.last || e.last >= doc_count_ || e.min > e.max || e.first_value != next_value || e.count < end - begin || e.count > stats_.values - next_value) {
+				throw corrupt_segment("doc-value group");
+			}
+			if (presence_) {
+				if (!presence_->contains(e.first) || !presence_->contains(e.last) || presence_->rank(e.first) != begin || presence_->rank(e.last) != end - 1) {
+					throw corrupt_segment("doc-value group");
+				}
+			} else if (e.first != begin || e.last != end - 1) {
+				throw corrupt_segment("doc-value group");
+			}
+			if (multi_ ? (offsets_.at(begin) != e.first_value || offsets_.at(end) != e.first_value + e.count) : e.count != end - begin) {
+				throw corrupt_segment("doc-value group");
+			}
+			if (e.count && (e.min < stats_.min || e.max > stats_.max)) { throw corrupt_segment("doc-value group"); }
+			next_value += e.count;
+		}
+		if (next_value != stats_.values) { throw corrupt_segment("doc-value group"); }
+	}
 
 	void parse_dictionary(const char** p, const char* end) {
 		const auto n = format::get_leb(p, end);
@@ -444,6 +530,9 @@ private:
 	std::uint64_t doc_count_ = 0;
 	statistics stats_;
 	std::optional<::docset::frozen_view> presence_;
+	std::uint64_t group_docs_ = 0;
+	std::size_t groups_ = 0;
+	const char* group_directory_ = nullptr;
 	packed_values offsets_, values_;
 	std::uint64_t terms_ = 0;
 	const char* term_offsets_ = nullptr;
