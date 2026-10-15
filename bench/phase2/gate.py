@@ -45,13 +45,22 @@ def load(trial):
 
 
 def run_floor(r):
+    # The smallest positive time: a 0 is a timer reporting below its resolution.
     return min(
-        min(q["duration"]) for per in r.values() for e in per.values() for q in e
+        t
+        for per in r.values()
+        for e in per.values()
+        for q in e
+        for t in q["duration"]
+        if t > 0
     )
 
 
 def geo(pairs):
-    return math.exp(sum(math.log(a / b) for a, b in pairs) / len(pairs))
+    # At least 1 us each: a timer can report 0 for a query at its resolution.
+    return math.exp(
+        sum(math.log(max(a, 1.0) / max(b, 1.0)) for a, b in pairs) / len(pairs)
+    )
 
 
 def trial(r, floor):
