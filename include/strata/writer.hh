@@ -45,6 +45,7 @@
 #include "hashes.hh"
 #include "strata/budget.hh"
 #include "strata/format.hh"
+#include "task.hh"
 #include "termdict.hh"
 
 #include <algorithm>
@@ -271,6 +272,8 @@ public:
 	// The run's draw on the indexing budget, if any: the term table, posting buffers,
 	// per-document columns, and the flush's scratch and output report their allocations.
 	flush_charge* memory = nullptr;
+	// When given, the stored section checks it per frame and throws task::cancelled.
+	const task::cancel_token* cancel = nullptr;
 
 	// Adds a document and returns its ordinal. Docids strictly increase, so ordinal order
 	// is docid order. `length` is the document length used by weighting (Xapian: the sum
@@ -855,6 +858,7 @@ private:
 		std::string out, index, raw;
 		std::uint32_t frames = 0;
 		for (std::size_t first = 0; first < stored_ends_.size();) {
+			if (cancel && cancel->requested()) { throw task::cancelled{}; }
 			std::size_t last = first;
 			const std::uint64_t begin = first ? stored_ends_[first - 1] : 0;
 			while (last + 1 < stored_ends_.size() && stored_ends_[last + 1] - begin <= format::stored_block_size) { ++last; }

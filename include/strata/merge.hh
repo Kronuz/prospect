@@ -7,6 +7,7 @@
 
 #include "strata/reader.hh"
 #include "strata/writer.hh"
+#include "task.hh"
 
 #include <algorithm>
 #include <array>
@@ -32,9 +33,19 @@ struct merge_plan {
 
 // Writes the merge of `sources` to sink (positions through spill). `key_prefix` names the
 // documents' key terms (empty: none), which the result's key filter covers. Throws
-// std::logic_error if two live documents share a docid.
+// std::logic_error if two live documents share a docid. With `cancel`, it checks it per
+// document, per term, and per stored frame, and throws task::cancelled; with `memory`,
+// its working memory is charged there.
 inline merge_plan merge_segments(std::span<const merge_source> sources, const std::array<std::uint8_t, 16>& segment_id, output& sink, spill& positions_spill,
-	std::string_view key_prefix = {}, std::uint8_t region_shift = format::default_region_shift) {
+	std::string_view key_prefix = {}, std::uint8_t region_shift = format::default_region_shift, const task::cancel_token* cancel = nullptr,
+	flush_charge* memory = nullptr) {
+	auto check = [&] {
+		if (cancel && cancel->requested()) { throw task::cancelled{}; }
+	};
+	auto charge = [&](std::uint64_t n) {
+		if (memory) { memory->grow(n); }
+	};
+	check();
 	merge_plan plan;
 	plan.ordinals.resize(sources.size());
 	// Each live document's key term, if any.
@@ -46,7 +57,10 @@ inline merge_plan merge_segments(std::span<const merge_source> sources, const st
 				auto info = sources[s].seg->term(term);
 				postings_iterator it(*sources[s].seg, *info);
 				for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
-					if (sources[s].live(o)) { keys[s][o] = std::string(term); }
+					if (sources[s].live(o)) {
+						keys[s][o] = std::string(term);
+						charge(64 + term.size());  // a map node and its key
+					}
 				}
 				return true;
 			});
@@ -65,11 +79,16 @@ inline merge_plan merge_segments(std::span<const merge_source> sources, const st
 		for (ordinal_t o = 0; o < seg.doc_count(); ++o) {
 			if (sources[s].live(o)) { docs.push_back({seg.docid(o), s, o}); }
 		}
+		charge(plan.ordinals[s].capacity() * sizeof(ordinal_t));
 	}
+	charge(docs.capacity() * sizeof(doc));
 	std::sort(docs.begin(), docs.end(), [](const doc& a, const doc& b) { return a.docid < b.docid; });
 	segment_writer w;
 	w.region_shift = region_shift;
+	w.memory = memory;
+	w.cancel = cancel;
 	for (std::size_t i = 0; i < docs.size(); ++i) {
+		check();
 		const auto& d = docs[i];
 		if (i && docs[i - 1].docid == d.docid) { throw std::logic_error("strata: merge: two live copies of a docid"); }
 		const segment& seg = *sources[d.source].seg;
@@ -82,8 +101,10 @@ inline merge_plan merge_segments(std::span<const merge_source> sources, const st
 	for (std::size_t s = 0; s < sources.size(); ++s) {
 		sources[s].seg->scan_terms([&](std::string_view term, const format::term_info& info) {
 			terms[s].emplace_back(std::string(term), info);
+			charge(term.size() > 15 ? term.size() + 1 : 0);  // a string past its inline buffer
 			return true;
 		});
+		charge(terms[s].capacity() * sizeof(terms[s][0]));
 	}
 	// The dictionary's alphabet: every byte the sources' dictionaries use.
 	std::array<bool, 256> used{};
@@ -102,8 +123,10 @@ inline merge_plan merge_segments(std::span<const merge_source> sources, const st
 		std::vector<std::uint32_t> positions;  // absolute
 	};
 	std::vector<posting> postings;
+	std::uint64_t charged = 0;  // the per-term postings' high-water mark
 	w.flush_from(segment_id, sink, positions_spill, alphabet, [&](term_postings& tp) -> std::optional<std::string_view> {
 		for (;;) {
+			check();
 			// The smallest term not yet merged.
 			const std::string* next = nullptr;
 			for (std::size_t s = 0; s < sources.size(); ++s) {
@@ -124,6 +147,14 @@ inline merge_plan merge_segments(std::span<const merge_source> sources, const st
 				}
 			}
 			if (postings.empty()) { continue; }  // only deleted documents held it
+			if (memory) {
+				std::uint64_t now = postings.capacity() * sizeof(posting);
+				for (const auto& p : postings) { now += p.positions.capacity() * sizeof(std::uint32_t); }
+				if (now > charged) {
+					memory->grow(now - charged);
+					charged = now;
+				}
+			}
 			std::sort(postings.begin(), postings.end(), [](const posting& a, const posting& b) { return a.ord < b.ord; });
 			tp.clear();
 			for (const auto& p : postings) {
