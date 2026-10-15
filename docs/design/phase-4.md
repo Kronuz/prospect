@@ -29,9 +29,11 @@ strata is two layers with one boundary, and format 13 draws it:
   terms and postings, doc values, points, and term lists. Plugins never touch the
   lifecycle.
 
-**The plugin interface.** At flush and merge a plugin receives the segment's documents
-in output order (the permutation and the old-to-new docid map at a merge), the live
-docs of each input, and the slot directory; it returns its section's bytes, its
+**The plugin interface.** At flush a plugin receives the segment's documents in output
+order and the slot directory. At a merge it receives its input sections, the
+permutation, the old-to-new docid map, and each input's live docs, so it can copy what
+it need not rewrite (stored frames with no deletes, postings blocks with only their
+base rewritten, P17) instead of decoding every section. Either way it returns its section's bytes, its
 structure flag, and its digest records, which depend only on live documents' content,
 never on segmentation. At open it receives its section's bytes and the segment's
 version, and a plugin that reads format N − 1 does so itself; the core never
@@ -75,8 +77,10 @@ header, so a record can span frames (R19); the width of persisted exact accumula
 - **Free:** `stored`, `values`, `points`, and `term_lists`.
 
 A keyless segment has no `versions`, and `version(ord)` is 0. A conditional operation
-(an expected version) names a key, so it never applies to a keyless document; one
-aimed at a keyless index rejects deterministically in stage 1. A segment without
+(an expected version) whose document has no key rejects in stage 1, in any index; a
+docid operation that also names the key, as Xapiand's numeric ids do, stays
+conditional. (Today a docid operation with an expected version reaches the version check
+with version 0, `index.hh`; the fix lands with Phase 4's operations.) A segment without
 `lengths` (the `log` and `document` profiles) has no scored text fields.
 
 **Structure flags.** The footer records the structures the segment was built with, and
@@ -403,13 +407,16 @@ An operation that deletes every live document matching a query, evaluated at app
 the index state at that position, so replicas agree; the count is in the verdict. The
 test-parity inventory assigns it to Phase 4.
 
-- **Buffered documents** match through the same in-buffer index that real-time get
-  reads (D13), at apply, so the count never depends on when a buffer flushes.
+- **Buffered documents** are not yet inverted, so apply evaluates the boolean query
+  directly against each live buffered document's terms and slot values: linear in the
+  buffer, bounded by its share. The count never depends on when a buffer flushes, and
+  a test checks that the buffer path and the segment path match the same set after a
+  flush, under T2's flush schedules.
 - **Plain boolean matching only:** no top-k, cutoffs, pruning, deadlines, or partial
   results; a query that needs any of them rejects in stage 1.
-- **Memory:** the match set streams into the live-docs deletions per segment; it is
-  charged to the indexing budget and never rejects for memory, as a delete by key never
-  does.
+- **Memory:** the match set streams into the live-docs deletions per segment; it and
+  the undo entries a later rejection in the same transaction needs are charged to the
+  indexing budget, and it never rejects for memory, as a delete by key never does.
 - **Check:** digest and verdict equality under every flush schedule in T2.
 
 ## Determinism and the write path (D17; R15)
