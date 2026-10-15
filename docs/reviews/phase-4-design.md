@@ -1026,3 +1026,97 @@ Closed as specified:
 | Aggregations | Collectors and partials | N8 before the accumulator and histogram code |
 | Geo | D15's offline rows | N6 before candidate 3's engine code |
 | Everything else in the previous table | As that table states, with R1–R7 now closed | — |
+
+## Revision check 2
+
+- Date: 2026-10-15.
+- Reviewed: `docs/design/phase-4.md` and `docs/design/limits.md` at strata `5288ea5`
+  (local), against revision check 1's N1–N9.
+- Checked against: `include/strata/index.hh` at `b3f0e52` (stage 1's conditional
+  checks, `1095-1135`); `phase-3.md`'s buffer and merge rules (`201`, `290-293`).
+- Checked by reading. Nothing was built or run. The reference columns were checked for
+  plausibility against what I know of Lucene's `BKDConfig` (8 index and 16 data
+  dimensions, 16 bytes per dimension, 512 points per leaf), sorted-set doc values
+  (32,766 bytes), Tantivy's nanosecond `DateTime` (±292 years) and its 65,000-bucket
+  default, and Elasticsearch's 65,536. The coordinator reports verifying them against
+  the sources; I did not reread the sources.
+
+### Verdict
+
+**APPROVE WITH CONDITIONS.** N1–N9 are answered and the design is approved: Phase 4
+code starts. Two points are not yet right, and each is a condition on one piece of code:
+
+- Delete by query's matching over buffered documents names a mechanism that does not
+  exist (M1). It holds back that path's code only.
+- The plugin interface makes merges re-encode from documents (M2). It holds back the
+  merge path of the D1 refactor only.
+
+A third is text (M3). The format-13 freeze still waits for Phase 3's per-section disk
+rows and D15's result (`phase-4.md:41-43`).
+
+### Status
+
+Closed:
+
+- **N1** (`95-99`): `slots-<gen>.kv`, referenced by the manifest, rewritten only when
+  it changes; the manifest's version changes with format 13.
+- **N2** (`182-185`, `213`, `limits.md:32`): 8 index and 16 data dimensions, recorded
+  per tree; candidate 4's 9 data dimensions fit.
+- **N3** (`77-80`), with M3's wording.
+- **N4** (`23-48`). The core owns key resolution and the plugins own encodings. The
+  interface is stated. The refactor is measured before and after against Phase 3's
+  recorded rows, and lands before Phase 3R depends on the index API. Open: M2.
+- **N5** (`406-413`): boolean matching only, rejected in stage 1 otherwise; charged to
+  indexing and never rejected for memory; T2's check. Open: M1.
+- **N6** (`221-224`, `247-252`): candidate 3 reduces to the primitive or amends
+  DISTRIBUTION with its measurement. The keep rule names `geonames` and the shape
+  corpus. The single-tree arrangement is measured as a fifth option.
+- **N7** (`300-303`): stored order for `binary`, canonical order otherwise.
+- **N8** (`341-358`): `fma` squares; about 270 bytes per accumulator and about 54 MB at
+  10^5 buckets, charged; the histogram edge formula with `-ffp-contract=off`; iterative
+  decoding and evaluation with a 10^6-deep fuzz input.
+- **N9** (`limits.md:26-42`): reference columns on every Phase 4 row.
+
+### Remaining
+
+1. **M1. Buffered documents have no index to match against** (`406-407`). Real-time get
+   reads the version map and the buffers' key and docid lookups (`384-387`). Those
+   answer "where is this key or docid", not "which documents contain this term or have
+   this value in range". Buffers hold documents before inversion; inversion happens at
+   flush (`phase-3.md:198-201`, D18).
+   - **What is required:** at apply, delete by query evaluates its boolean query
+     against each live buffered document directly: its terms and its slot values. The
+     cost is linear in the buffer's documents, bounded by the buffer share, and stated.
+   - **One evaluator, not two:** the per-document evaluator and the segment path must
+     agree. A test compares, for random boolean queries, the set matched in the buffer
+     with the set matched after the same documents are flushed, under T2's schedules.
+   - **The undo.** A delete by query sits inside a transaction, and a later rejection
+     in that transaction unwinds it (`index.hh`, the undo steps). Its undo entries per
+     deleted document are charged with its match set.
+2. **M2. Merges receive input sections, not only documents** (`36-42`). "Receives the
+   segment's documents in output order" fits flush. At a merge, plugins copy what does
+   not change:
+   - stored frames copy raw when none of their documents is deleted
+     (`phase-3.md:292-293`);
+   - P17 copies postings blocks with only their base rewritten.
+   A document-only interface forces every merge to decode and re-encode every section,
+   which costs merge time and write amplification (T3). At a merge, a plugin receives
+   its input sections with the permutation, the old-to-new docid map, and each input's
+   live docs, and may build its output from them. Documents are the flush-time input.
+3. **M3. Text.** "Never applies to a keyless document" (`77-78`) is read as "rejects in
+   stage 1". Today a docid-addressed operation with an expected version reaches the
+   version check with `current` 0 for a document without a version
+   (`index.hh:1114-1123`), which is the bug N3 named. The sentence reads: a conditional
+   operation whose addressed document has no key, in any index, rejects in stage 1.
+   Docid operations that also name the key, as Xapiand's numeric ids do, stay
+   conditional.
+
+### Which code starts now
+
+| Item | Starts now | Waits for |
+|---|---|---|
+| Format-13 sections, the slot table and its file, points on disk (8 index and 16 data dimensions) | Yes; fixtures stay unfrozen | The freeze: Phase 3's disk rows and D15 |
+| D1 refactor | The flush path and open path through the plugin interface, after Phase 3's rows are recorded | M2 before the merge path |
+| Delete by query | The stage-1 operation, the boolean-only check, and the segment path | M1 before the buffer path |
+| Keyless conditionals | With M3's wording | — |
+| Aggregations, geo's offline rows, scored filters, sort keys, collapse, estimates, query budget, real-time get, benchmark engines | Yes, as designed | Their gate rows |
