@@ -1,6 +1,6 @@
 // Search across an index's segments (Phase 3 design, "Statistics and ranking"): weights
 // read the snapshot's statistics, deleted documents are skipped, each segment prunes
-// against the k-th score found so far, and hits merge by (score descending, docid
+// against the k-th score found so far, and hits rank by (score descending, docid
 // ascending).
 #pragma once
 
@@ -180,40 +180,45 @@ private:
 using scorer_builder = std::function<scorer_ptr(const segment&)>;
 
 // The k best documents across segments, best first, ties by docid; with count, also the
-// number of live matches. Each segment after the first prunes below the k-th score found
-// so far, made strictly lower, so a document tying it with a smaller docid still enters;
-// a segment returns only hits above that floor.
+// number of live matches. One collector spans the segments (P6-2), keyed by docid, so
+// each segment prunes from the first competitive hit against the k best so far.
 inline std::vector<doc_hit> search(std::span<const segment_snapshot> segs, const scorer_builder& build, std::size_t k, std::uint64_t* count = nullptr) {
-	std::vector<doc_hit> best, seg_hits, merged;
-	auto better = [](const doc_hit& a, const doc_hit& b) { return a.score != b.score ? a.score > b.score : a.docid < b.docid; };
 	if (count) { *count = 0; }
+	top_collector c(k, false);
 	for (const auto& s : segs) {
 		scorer_ptr q = build(*s.seg);
 		if (!q) { continue; }
 		if (s.any_deleted()) { q = std::make_unique<live_scorer>(std::move(q), *s.deleted); }
-		const double floor = best.size() == k && k ? std::nextafter(best.back().score, -std::numeric_limits<double>::infinity()) : 0.0;
-		std::uint64_t n = 0;
-		const auto hits = top_k(*q, k, count ? &n : nullptr, floor);
-		if (count) { *count += n; }
-		if (hits.empty()) { continue; }
-		// Hits leave the segment as (score, docid). They arrive sorted by (score, ordinal),
-		// which is docid order unless the segment's ordinals are permuted; then ties re-sort.
-		seg_hits.clear();
-		for (const auto& h : hits) { seg_hits.push_back({s.seg->docid(h.ord), h.score}); }
-		if (!std::is_sorted(seg_hits.begin(), seg_hits.end(), better)) { std::sort(seg_hits.begin(), seg_hits.end(), better); }
-		// Both runs are sorted by (score descending, docid ascending): one linear merge, cut at k.
-		merged.clear();
-		std::size_t i = 0, j = 0;
-		while (merged.size() < k && (i < best.size() || j < seg_hits.size())) {
-			if (j < seg_hits.size() && (i == best.size() || better(seg_hits[j], best[i]))) {
-				merged.push_back(seg_hits[j++]);
+		// A count known from statistics leaves the collection free to prune.
+		c.counting = false;
+		if (count) {
+			if (auto n = q->exact_count()) {
+				*count += *n;
 			} else {
-				merged.push_back(best[i++]);
+				c.counting = true;
 			}
 		}
-		best.swap(merged);
+		if (!k) {
+			if (c.counting) { *count += strata::count(*q); }
+			continue;
+		}
+		c.begin(*s.seg);
+		double min = c.counting ? 0.0 : c.min_competitive();
+		if (min > 0) { q->set_min_competitive_score(min); }
+		if (q->collect_top_k(c)) {
+			if (c.counting) { *count += c.count; }
+			continue;
+		}
+		std::uint64_t n = 0;
+		for (ordinal_t d = q->next(); d != no_more_docs; d = q->next()) {
+			++n;
+			if (c.counting && c.min_competitive() > 0 && q->current_bound() <= c.min_competitive()) { continue; }  // counted, cannot compete
+			c.collect(d, q->score());
+			if (!c.counting && c.min_competitive() != min) { q->set_min_competitive_score(min = c.min_competitive()); }
+		}
+		if (c.counting) { *count += n; }
 	}
-	return best;
+	return c.finish_docs<doc_hit>();
 }
 
 // The number of live matches across segments.

@@ -184,8 +184,55 @@ static void check_against_scan(const std::vector<doc_hit>& hits, const std::vect
 	}
 }
 
+// Review R2: explicit docids that interleave across flushes, duplicated documents so
+// equal scores straddle the k-th position, segments visited in index order and largest
+// first. Single words score bit for bit as the scan does, so they must equal its first k.
+static void check_interleaved(std::mt19937_64& r) {
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	index::options opts;
+	opts.auto_merge = false;
+	auto ix = strata::index::create(io, opts, uuid);
+	std::vector<document> pool;
+	for (int i = 0; i < 40; ++i) { pool.push_back(random_doc(r)); }
+	for (std::size_t d = 0; d < 3000; ++d) {
+		transaction t;
+		operation o;
+		o.type = operation::replace_docid;
+		o.docid = 1 + r() % 6000;
+		o.doc = pool[r() % pool.size()];
+		t.ops.push_back(o);
+		ix.apply(t, {});
+		if (d % 300 == 299) { ix.refresh(); }
+	}
+	ix.refresh();
+	auto segs = snapshot(ix);
+	CHECK(segs.size() > 3);
+	auto largest_first = segs;
+	std::stable_sort(largest_first.begin(), largest_first.end(), [](const segment_snapshot& a, const segment_snapshot& b) { return a.seg->doc_count() > b.seg->doc_count(); });
+	for (const auto* order : {&segs, &largest_first}) {
+		const std::span<const segment_snapshot> view(*order);
+		for (const char* w : vocab) {
+			const engine::parsed q = engine::parse(w);
+			const auto want = scan(view, q, scheme::bm25);
+			for (std::size_t k : {1u, 10u, 100u}) {
+				std::uint64_t n = 0;
+				const auto got = engine::search_snapshot(view, q, k, scheme::bm25, &n);
+				CHECK(n == want.size());
+				CHECK(got == std::vector<doc_hit>(want.begin(), want.begin() + std::ptrdiff_t(std::min(k, want.size()))));
+			}
+		}
+		for (int qn = 0; qn < 60; ++qn) {
+			const engine::parsed q = engine::parse(random_query(r));
+			const auto want = scan(view, q, scheme::bm25);
+			for (std::size_t k : {1u, 10u, 100u}) { check_against_scan(engine::search_snapshot(view, q, k, scheme::bm25), want, k); }
+		}
+	}
+}
+
 int main() {
 	std::mt19937_64 r(17);
+	check_interleaved(r);
 	for (int round = 0; round < 6; ++round) {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
