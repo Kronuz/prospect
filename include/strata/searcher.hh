@@ -8,9 +8,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <deque>
 #include <functional>
 #include <limits>
+#include <optional>
 #include <span>
+#include <stdexcept>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -99,10 +104,70 @@ inline statistics snapshot_statistics(std::span<const segment_snapshot> segs) {
 inline std::uint64_t snapshot_df(std::span<const segment_snapshot> segs, std::string_view term) {
 	std::uint64_t df = 0;
 	for (const auto& s : segs) {
-		if (auto info = s.seg->term(term)) { df += info->df; }
+		if (auto info = s.seg->find_term(term)) { df += info->df; }
 	}
 	return df;
 }
+
+// A query's terms resolved once per segment (P6-3): one dictionary walk per term and
+// segment, shared by the term's snapshot document frequency and every segment's scorer.
+// A term's column fills on first use; the competitive pairs of a short list (below 128
+// postings) are computed only when a scorer asks for the term in that segment.
+class term_table {
+public:
+	explicit term_table(std::span<const segment_snapshot> segs) : segs_(segs), st_(snapshot_statistics(segs)) {}
+
+	// The snapshot's statistics (D13).
+	const statistics& stats() const noexcept { return st_; }
+
+	// The term's document frequency over every segment, deleted documents included.
+	std::uint64_t df(std::string_view term) { return column(term).df; }
+
+	// The term's info in one of the snapshot's segments, ready for a scorer; null when
+	// the segment lacks it.
+	const format::term_info* info(const segment& seg, std::string_view term) {
+		column_t& c = column(term);
+		const std::size_t s = index_of(seg);
+		auto& e = c.infos[s];
+		if (!e) { return nullptr; }
+		if (!c.complete[s]) {
+			seg.complete_impacts(*e);
+			c.complete[s] = 1;
+		}
+		return &*e;
+	}
+
+private:
+	struct column_t {
+		std::string term;
+		std::uint64_t df = 0;
+		std::vector<std::optional<format::term_info>> infos;  // by segment
+		std::vector<std::uint8_t> complete;                   // impacts computed, by segment
+	};
+	column_t& column(std::string_view term) {
+		for (auto& c : columns_) {
+			if (c.term == term) { return c; }
+		}
+		column_t& c = columns_.emplace_back();
+		c.term = term;
+		c.infos.reserve(segs_.size());
+		for (const auto& s : segs_) {
+			c.infos.push_back(s.seg->find_term(term));
+			if (c.infos.back()) { c.df += c.infos.back()->df; }
+		}
+		c.complete.assign(segs_.size(), 0);
+		return c;
+	}
+	std::size_t index_of(const segment& seg) const {
+		for (std::size_t i = 0; i < segs_.size(); ++i) {
+			if (segs_[i].seg == &seg) { return i; }
+		}
+		throw std::invalid_argument("strata: a segment outside the term table's snapshot");
+	}
+	std::span<const segment_snapshot> segs_;
+	statistics st_;
+	std::deque<column_t> columns_;  // stable addresses as columns are added
+};
 
 // Builds a query's scorer for one segment (null when it matches nothing there).
 using scorer_builder = std::function<scorer_ptr(const segment&)>;

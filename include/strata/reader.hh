@@ -288,6 +288,14 @@ public:
 	// A term's info, its offsets resolved from its dictionary run and, for a term without
 	// skip blocks, its competitive pairs computed from its postings (at most 127).
 	std::optional<format::term_info> term(std::string_view key) const {
+		auto info = find_term(key);
+		if (info) { complete_impacts(*info); }
+		return info;
+	}
+
+	// The same from one dictionary walk, leaving a term without skip blocks with no
+	// competitive pairs: its df and offsets, for statistics and counts.
+	std::optional<format::term_info> find_term(std::string_view key) const {
 		// The run's values end with key's: the earlier ones only move the cursor.
 		format::term_run run, before;
 		std::string_view last;
@@ -304,8 +312,12 @@ public:
 		if (!v) { return std::nullopt; }
 		auto info = format::decode_term_info(last, before);
 		if (info.df > doc_count_) { throw corrupt_segment("document frequency"); }
-		if (info.df < format::block) { info.impacts = tail_impacts(info); }
 		return info;
+	}
+
+	// Computes the competitive pairs find_term leaves out (a term below 128 postings).
+	void complete_impacts(format::term_info& info) const {
+		if (info.df < format::block) { info.impacts = tail_impacts(info); }
 	}
 
 	// Competitive pairs of a term without skip blocks, from its postings.

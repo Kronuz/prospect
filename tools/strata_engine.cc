@@ -400,8 +400,8 @@ int verify_index(const std::string& dir) {
 		++queries;
 		const parsed p = parse(q);
 		for (const auto scheme : {strata::scheme::bm25, strata::scheme::bm25_xapian}) {
-			snapshot_stats snap(view);
-			auto builder = [&](const strata::segment& seg) { return build(seg, p, scheme, &snap); };
+			strata::term_table table(view);
+			auto builder = [&](const strata::segment& seg) { return build(seg, p, scheme, &table); };
 			std::vector<strata::doc_hit> scan;
 			for (const auto& sv : segs) {
 				auto all = builder(*sv.seg);

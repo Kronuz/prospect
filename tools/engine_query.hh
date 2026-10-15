@@ -14,7 +14,6 @@
 #include <span>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -54,48 +53,42 @@ inline parsed parse(std::string_view q) {
 	return out;
 }
 
-// A multi-segment search's statistics: the snapshot's totals and each term's document
-// frequency over every segment (D13), cached per query.
-struct snapshot_stats {
-	std::span<const strata::segment_snapshot> segs;
-	strata::statistics st;
-	std::unordered_map<std::string, std::uint64_t> df;
-	explicit snapshot_stats(std::span<const strata::segment_snapshot> s) : segs(s), st(strata::snapshot_statistics(s)) {}
-	std::uint64_t of(const std::string& term) {
-		auto [it, fresh] = df.try_emplace(term, 0);
-		if (fresh) { it->second = strata::snapshot_df(segs, term); }
-		return it->second;
-	}
-};
-
 // A clause's scorer, or null when one of its terms is absent (the clause matches nothing).
-// boost is how many times the clause repeats in its group (Xapian's wqf). With snapshot
-// statistics, weights are the index's, not the segment's.
-inline strata::scorer_ptr clause_scorer(const strata::segment& seg, const std::vector<std::string>& clause, double boost, strata::scheme scheme, snapshot_stats* snap = nullptr) {
+// boost is how many times the clause repeats in its group (Xapian's wqf). With a term
+// table, weights are the snapshot's, not the segment's, and each term's dictionary walk
+// in each segment happens once per query (P6-3).
+inline strata::scorer_ptr clause_scorer(const strata::segment& seg, const std::vector<std::string>& clause, double boost, strata::scheme scheme, strata::term_table* table = nullptr) {
 	std::vector<strata::format::term_info> infos;
 	for (const auto& t : clause) {
-		auto info = seg.term(t);
-		if (!info) { return nullptr; }
-		infos.push_back(*info);
+		if (table) {
+			const auto* info = table->info(seg, t);
+			if (!info) { return nullptr; }
+			infos.push_back(*info);
+		} else {
+			auto info = seg.term(t);
+			if (!info) { return nullptr; }
+			infos.push_back(*info);
+		}
 	}
 	const bool xapian = scheme == strata::scheme::bm25_xapian;
 	if (infos.size() == 1) {
-		if (snap) {
-			const auto df = snap->of(clause[0]);
-			return std::make_unique<strata::term_scorer>(seg, infos[0], xapian ? strata::weight::bm25_xapian(snap->st, df, std::uint32_t(boost)) : strata::weight::bm25(snap->st, df, boost));
+		if (table) {
+			const auto df = table->df(clause[0]);
+			const auto& st = table->stats();
+			return std::make_unique<strata::term_scorer>(seg, infos[0], xapian ? strata::weight::bm25_xapian(st, df, std::uint32_t(boost)) : strata::weight::bm25(st, df, boost));
 		}
 		if (xapian) { return std::make_unique<strata::term_scorer>(seg, infos[0], strata::weight::bm25_xapian(seg, infos[0].df, std::uint32_t(boost))); }
 		return std::make_unique<strata::term_scorer>(seg, infos[0], boost);
 	}
 	if (!xapian) {
-		if (!snap) { return std::make_unique<strata::phrase_scorer>(seg, infos); }
+		if (!table) { return std::make_unique<strata::phrase_scorer>(seg, infos); }
 		std::vector<std::uint64_t> dfs;
-		for (const auto& t : clause) { dfs.push_back(snap->of(t)); }
-		return std::make_unique<strata::phrase_scorer>(seg, infos, std::vector<strata::weight>{}, 0, &snap->st, dfs);
+		for (const auto& t : clause) { dfs.push_back(table->df(t)); }
+		return std::make_unique<strata::phrase_scorer>(seg, infos, std::vector<strata::weight>{}, 0, &table->stats(), dfs);
 	}
 	std::vector<strata::weight> weights;
 	for (std::size_t k = 0; k < infos.size(); ++k) {
-		weights.push_back(snap ? strata::weight::bm25_xapian(snap->st, snap->of(clause[k])) : strata::weight::bm25_xapian(seg, infos[k].df));
+		weights.push_back(table ? strata::weight::bm25_xapian(table->stats(), table->df(clause[k])) : strata::weight::bm25_xapian(seg, infos[k].df));
 	}
 	return std::make_unique<strata::phrase_scorer>(seg, infos, std::move(weights));
 }
@@ -116,18 +109,18 @@ inline std::vector<std::pair<std::vector<std::string>, double>> merge_repeats(co
 	return out;
 }
 
-inline strata::scorer_ptr build(const strata::segment& seg, const parsed& q, strata::scheme scheme = strata::scheme::bm25, snapshot_stats* snap = nullptr) {
+inline strata::scorer_ptr build(const strata::segment& seg, const parsed& q, strata::scheme scheme = strata::scheme::bm25, strata::term_table* table = nullptr) {
 	std::vector<strata::scorer_ptr> must, should, must_not;
 	for (const auto& [c, boost] : merge_repeats(q.must)) {
-		auto s = clause_scorer(seg, c, boost, scheme, snap);
+		auto s = clause_scorer(seg, c, boost, scheme, table);
 		if (!s) { return nullptr; }
 		must.push_back(std::move(s));
 	}
 	for (const auto& [c, boost] : merge_repeats(q.should)) {
-		if (auto s = clause_scorer(seg, c, boost, scheme, snap)) { should.push_back(std::move(s)); }
+		if (auto s = clause_scorer(seg, c, boost, scheme, table)) { should.push_back(std::move(s)); }
 	}
 	for (const auto& c : q.must_not) {
-		if (auto s = clause_scorer(seg, c, 1.0, scheme, snap)) { must_not.push_back(std::move(s)); }
+		if (auto s = clause_scorer(seg, c, 1.0, scheme, table)) { must_not.push_back(std::move(s)); }
 	}
 	auto combine = [](std::vector<strata::scorer_ptr> v, bool all) -> strata::scorer_ptr {
 		if (v.empty()) { return nullptr; }
@@ -170,15 +163,15 @@ inline std::uint64_t run(const strata::segment& seg, std::string_view command, s
 // The k best documents of a query over an index's segments, weighted by the snapshot's
 // statistics (D13); with count, also the number of live matches.
 inline std::vector<strata::doc_hit> search_snapshot(std::span<const strata::segment_snapshot> segs, const parsed& q, std::size_t k, strata::scheme scheme = strata::scheme::bm25, std::uint64_t* count = nullptr) {
-	snapshot_stats snap(segs);
-	auto builder = [&](const strata::segment& seg) { return build(seg, q, scheme, &snap); };
+	strata::term_table table(segs);
+	auto builder = [&](const strata::segment& seg) { return build(seg, q, scheme, &table); };
 	return strata::search(segs, builder, k, count);
 }
 
 // The number of live matches of a query over an index's segments.
 inline std::uint64_t count_snapshot(std::span<const strata::segment_snapshot> segs, const parsed& q, strata::scheme scheme = strata::scheme::bm25) {
-	snapshot_stats snap(segs);
-	auto builder = [&](const strata::segment& seg) { return build(seg, q, scheme, &snap); };
+	strata::term_table table(segs);
+	auto builder = [&](const strata::segment& seg) { return build(seg, q, scheme, &table); };
 	return strata::search_count(segs, builder);
 }
 
