@@ -27,7 +27,7 @@ continuity and the oracle's parity vectors.
  strata core        Index · Snapshot · Search · Segment
  ───────────────────────────────────────────────────────────────────────────────
  building blocks    task · residency · bitpack · fst · termdict · automata · docset ·
-                    bkd · fusefilter · sortable · unicode · snowball · analysis ·
+                    bkd · fusefilter · unicode · snowball · analysis ·
                     queryparser · faultfs · benchkit · compressors · hashes · io · fs
 ```
 
@@ -325,7 +325,6 @@ New standalone libraries:
 | `docset` | Iterator concept, dense and sparse sets, live docs, filter-cache bitsets |
 | `bkd` | Block KD-tree, 1-D and 2-D interval |
 | `fusefilter` | Binary fuse filters (about 9 bits per key, 0.4% false positives) |
-| `sortable` | Order-preserving number encoding, MIT; also replaces Xapiand's GPL `sortable_serialise` |
 | `unicode` | UCD tables, case and accent folding, UAX #29 |
 | `snowball` | Snowball stemmer packaging |
 | `analysis` | Xapian-compatible generator, UAX #29 tokenizer, CJK, stoppers |
