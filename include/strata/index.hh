@@ -920,8 +920,9 @@ private:
 		std::string key_prefix;
 	};
 
-	// A merge's writes to one file, at increasing offsets, each chunk admitted by the rate
-	// limiter first and drawn on the job's storage reservation past what it holds.
+	// A merge's writes to one file, at increasing offsets: before each chunk an executor
+	// checkpoint and the rate limiter's admission, then a draw on the job's storage
+	// reservation past what it holds.
 	class merge_file {
 	public:
 		merge_file(kronuz::journal::File& f, const merge_context& ctx, merge_job& job, const task::cancel_token& stop) : f_(f), ctx_(ctx), job_(job), stop_(stop) {}
@@ -929,7 +930,7 @@ private:
 			const std::size_t chunk = ctx_.rate ? ctx_.rate->chunk() : std::size_t(1) << 20;
 			while (!bytes.empty()) {
 				const std::size_t n = std::min(bytes.size(), chunk);
-				if (ctx_.rate ? !ctx_.rate->admit(*ctx_.exec, n, stop_) : stop_.requested()) { throw task::cancelled{}; }
+				if (!ctx_.exec->checkpoint(stop_) || (ctx_.rate && !ctx_.rate->admit(*ctx_.exec, n, stop_))) { throw task::cancelled{}; }
 				used += n;
 				if (job_.storage && used > job_.reserved) {
 					if (!job_.storage.try_grow(used - job_.reserved)) {
@@ -1064,6 +1065,7 @@ private:
 				}
 			}
 			job.memory = flush_charge(ctx.budget);
+			if (!ctx.exec->checkpoint(stop)) { throw task::cancelled{}; }
 			std::vector<merge_source> sources;
 			for (std::size_t k = 0; k < job.sources.size(); ++k) { sources.push_back({&job.sources[k]->seg, &job.deleted[k]}); }
 			const std::string name = index_detail::segment_name(job.id);
