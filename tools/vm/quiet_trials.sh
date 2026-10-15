@@ -4,7 +4,9 @@
 # the VM, and samples host load every 30 s while it runs; a sample above LIMIT stops the
 # trials, and it waits for quiet again and starts over. The default LIMIT of 6 sits above
 # the host's idle load (2.5-3.5 on 16 threads) and below a compile's (8 and up). TRIALS
-# names another VM command to run the same way (bench/ab.sh, for one).
+# names another VM script to run the same way (bench/ab.sh, for one): a script path and
+# arguments, not an environment assignment, and one that does not exec another script,
+# since stopping it looks the script up by its own path.
 #   [TRIALS='~/bench/ab.sh NAME A B'] tools/vm/quiet_trials.sh [LIMIT] [QUIET_SECONDS]
 set -uo pipefail
 LIMIT=${1:-6}

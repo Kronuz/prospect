@@ -5,15 +5,17 @@
 # quiet VM: anything else writing to the device counts too. Append-only, and with
 # REPLACES=1 a stream where half the documents replace an earlier one by id (keyed
 # engines). Results in ~/bench/results/wamp-NAME.
-#   [ENGINES="strata lucene-10.4.0-st tantivy-0.26-st"] [DOCS=1000000] [REPLACES=1] write_amp.sh NAME
+#   STRATA_BUDGET_MB=N [ENGINES="strata lucene-10.4.0-st tantivy-0.26-st"] [DOCS=1000000] [REPLACES=1] write_amp.sh NAME
 set -u
 name=${1:-run}
 cd ~/bench/search-benchmark-game
 out=~/bench/results/wamp-$name
 mkdir -p "$out"
 export PATH=$HOME/.cargo/bin:$PATH KEYED=1
-# Equal buffers (T3): Lucene's engine uses a 2047 MB RAM buffer, Tantivy's a 2 GB heap.
-export STRATA_BUFFER_MB=${STRATA_BUFFER_MB:-2047}
+# Equal memory (T3): strata runs on the node budget whose peak RSS matches the reference
+# engine's (bench/calibrate_rss.sh); buffer settings are not comparable across engines.
+[ -n "${STRATA_BUDGET_MB:-}" ] || { echo "STRATA_BUDGET_MB is required: run calibrate_rss.sh"; exit 1; }
+export STRATA_BUDGET_MB
 docs=${DOCS:-1000000}
 [ -f corpus-$docs.json ] || head -"$docs" corpus.json > corpus-$docs.json
 corpus=$PWD/corpus-$docs.json
