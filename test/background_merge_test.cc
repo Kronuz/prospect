@@ -3,8 +3,8 @@
 // running merge carry over once, against an inline-merging twin's digest; seeded random
 // schedules with a power loss while merges run; close, destruction, and install while
 // merges run; the rate limit; a merge waiting for indexing-budget room; ENOSPC
-// discarding a merge, EIO fencing, and a damaged source left for heal(); and the merge
-// build's cancellation points.
+// discarding a merge, EIO fencing, and a damaged source left for heal(); merge outputs
+// published in id order; and the merge build's cancellation points.
 #include "strata/faultfs.hh"
 #include "strata/index.hh"
 #include "strata/pool_executor.hh"
@@ -246,6 +246,38 @@ static void carry_over(std::size_t threads) {
 	ix = strata::index::open(io, bg.options());
 	CHECK(ix.digest() == digest && contents(ix) == contents(twin));
 	(void)ix.check();
+}
+
+// A merge takes its output's id when scheduled; a flush that publishes while it runs takes
+// a higher one. The output goes in id order, so the next commit's manifest lists the
+// segments in increasing id order and reopens.
+static void id_order(std::size_t threads) {
+	background bg(threads);
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	auto ix = strata::index::create(io, bg.options(), uuid);
+	fill(ix, 6, 4, 300, 11);
+	ix.maybe_merge();
+	CHECK(ix.merges_pending() >= 1);
+	CHECK(ix.apply(tx({replace("Q500", "flushed while merging")}), {}).result == verdict::accepted);
+	ix.refresh();  // the flush's segment id is above the pending merges' output ids
+	ix.wait_merges();
+	CHECK(ix.merges_pending() == 0 && ix.segments().size() < 7);
+	std::uint64_t last = 0;
+	for (const auto& v : ix.segments()) {
+		CHECK(v.id > last);
+		last = v.id;
+	}
+	ix.commit();
+	const auto digest = ix.digest();
+	ix.close();
+	ix = strata::index::open(io, bg.options());
+	CHECK(ix.digest() == digest && contents(ix).size() == 25);
+	last = 0;
+	for (const auto& s : ix.manifest().segments) {
+		CHECK(s.id > last);
+		last = s.id;
+	}
 }
 
 // One index merging in the background and its twin merging inline, fed the same
@@ -591,6 +623,7 @@ int main() {
 	for (std::size_t threads : {0, 1, 2}) {
 		const int before = failures;
 		carry_over(threads);
+		id_order(threads);
 		for (std::uint64_t seed = 1; seed <= 6; ++seed) { random_schedules(threads, seed); }
 		close_while_merging(threads);
 		rate_limit(threads);

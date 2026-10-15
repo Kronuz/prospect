@@ -1220,8 +1220,11 @@ private:
 			std::sort(at.begin(), at.end());
 			for (std::size_t k = at.size(); k-- > 0;) { segs_.erase(segs_.begin() + std::ptrdiff_t(at[k])); }
 			if (job.output) {
+				// Its id was taken at scheduling, below any flushed since: it goes in id order,
+				// which the manifest requires.
 				track(name, job.output->bytes.size());
-				segs_.emplace_back(std::move(job.output));
+				const auto at_id = std::lower_bound(segs_.begin(), segs_.end(), job.id, [](const auto& s, std::uint64_t id) { return s->ref.id < id; });
+				segs_.emplace(at_id, std::move(job.output));
 			}
 		}
 		settle_storage();
@@ -1711,6 +1714,10 @@ private:
 		// A segment whose documents are all deleted leaves without a merge; retention frees
 		// its files.
 		std::erase_if(segs_, [](const auto& s) { return s->dead == s->seg.doc_count(); });
+		// The manifest lists segments by increasing id, and open() refuses any other order.
+		for (std::size_t i = 1; i < segs_.size(); ++i) {
+			if (segs_[i]->ref.id <= segs_[i - 1]->ref.id) { throw std::logic_error("strata: commit: segments out of id order"); }
+		}
 		// 1. New data files, synced together: flushed segments, live-docs generations,
 		// metadata. Their generations come from the counters directly, so a failed commit
 		// never reuses a name.
@@ -2066,7 +2073,7 @@ private:
 	std::unique_ptr<kronuz::journal::OwnerLock> lock_;
 	options opts_;
 	files::manifest m_;
-	std::vector<std::shared_ptr<open_segment>> segs_;  // oldest first; a background merge shares its sources
+	std::vector<std::shared_ptr<open_segment>> segs_;  // by id, as the manifest lists them; a background merge shares its sources
 	std::vector<std::shared_ptr<merge_job>> pending_;  // handed to the executor, oldest first
 	std::vector<buffered> buffer_;
 	std::unordered_map<std::uint64_t, std::size_t> buffer_docids_;
