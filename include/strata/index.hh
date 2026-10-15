@@ -10,17 +10,20 @@
 #include "strata/files.hh"
 #include "strata/merge.hh"
 #include "strata/merge_policy.hh"
+#include "strata/merge_scheduler.hh"
 #include "strata/reader.hh"
 #include "strata/writer.hh"
 
 #include "completion/io.h"
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cerrno>
 #include <charconv>
 #include <deque>
 #include <cstdint>
+#include <exception>
 #include <map>
 #include <memory>
 #include <optional>
@@ -167,6 +170,10 @@ struct index_options {
 	byte_budget* storage = nullptr;
 	// Merges after each flush by `policy` when set; otherwise only merge() and force_merge().
 	bool auto_merge = false;
+	// The node's merge scheduler, if any (D11, D18): the policy's merges run on its threads
+	// under its rate limit and publish at the next refresh or commit; without one they run
+	// on the caller's thread. It must outlive every index that uses it.
+	merge_scheduler* scheduler = nullptr;
 	// Writer threads for inversion (D18): a flush splits the buffer's docid-sorted documents
 	// into up to this many contiguous runs and inverts and encodes each on its own thread,
 	// one segment per run. Files, ids, and accounting stay on the owner thread.
@@ -201,6 +208,7 @@ public:
 		ix.opts_ = opts;
 		if (opts.budget) { ix.permit_ = opts.budget->open(); }
 		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
+		if (opts.scheduler) { ix.queue_ = opts.scheduler->open(); }
 		ix.commit();
 		return ix;
 	}
@@ -223,16 +231,21 @@ public:
 		ix.opts_ = opts;
 		if (opts.budget) { ix.permit_ = opts.budget->open(); }
 		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
+		if (opts.scheduler) { ix.queue_ = opts.scheduler->open(); }
 		ix.recover(to);
 		return ix;
 	}
 
 	index(index&&) noexcept = default;
 	index& operator=(index&&) noexcept = default;
+	~index() { queue_ = {}; }
 
-	// Releases the owner lock and drops all state; uncommitted work is lost. The index
-	// is fenced afterwards.
+	// Releases the owner lock and drops all state; uncommitted work is lost. Background
+	// merges queued are dropped and running ones stopped first. The index is fenced
+	// afterwards.
 	void close() {
+		queue_ = {};
+		pending_.clear();
 		segs_.clear();
 		buffer_.clear();
 		buffer_docids_.clear();
@@ -294,11 +307,13 @@ public:
 	void refresh() {
 		live();
 		guarded([&] { flush(); });
+		publish_merges(false, false);
 		if (opts_.auto_merge) { maybe_merge(); }
 	}
 
-	// Merges the given segments into one (searchable, not yet durable): their live
-	// documents in docid order, deleted ones dropped. Nothing is written when none is live.
+	// Merges the given segments into one (searchable, not yet durable) on the caller's
+	// thread: their live documents in docid order, deleted ones dropped. Nothing is written
+	// when none is live.
 	void merge(const std::vector<std::uint64_t>& ids) {
 		live();
 		guarded([&] {
@@ -351,31 +366,41 @@ public:
 				merged->unsynced = std::move(file);
 			}
 			for (std::size_t k = picked.size(); k-- > 0;) { segs_.erase(segs_.begin() + std::ptrdiff_t(picked[k])); }
-			if (merged) { segs_.push_back(std::move(merged)); }
+			if (merged) { segs_.emplace_back(std::move(merged)); }
 		});
 	}
 
 	// Merges until at most `max_segments` remain and none holds deletes, by the policy's
-	// forced merges.
+	// forced merges. With a scheduler it waits for every background merge, then for its own.
 	void force_merge(std::size_t max_segments = 1) {
-		run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_forced_merges(std::move(c), max_segments); });
+		run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_forced_merges(std::move(c), max_segments); }, true);
 	}
 
 	// Merges away the segments whose deleted fraction passes the policy's
-	// force_merge_deletes_pct_allowed.
+	// force_merge_deletes_pct_allowed, waiting like force_merge().
 	void force_merge_deletes() {
-		run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_forced_deletes_merges(std::move(c)); });
+		run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_forced_deletes_merges(std::move(c)); }, true);
 	}
 
 	// Runs the policy's merges until it asks for none, or until storage admission has no
-	// room for the next; those wait for space.
+	// room for the next; those wait for space. With a scheduler it hands one round to the
+	// scheduler, leaving out segments already under merge, and returns.
 	void maybe_merge() {
 		try {
-			run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_merges(std::move(c)); });
+			run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_merges(std::move(c)); }, false);
 		} catch (const std::system_error& e) {
 			if (e.code().value() != ENOSPC) { throw; }
 		}
 	}
+
+	// Waits for this index's background merges and publishes them. One that ran out of
+	// space is discarded, its sources left for a later merge; any other failure fences.
+	void wait_merges() {
+		live();
+		publish_merges(true, false);
+	}
+	// Background merges handed to the scheduler and not yet published.
+	std::size_t merges_pending() const noexcept { return pending_.size(); }
 
 	// Makes everything applied durable (design D1), then reclaims what retention allows.
 	// ENOSPC from a write before that file's sync leaves the index as it was (the partial
@@ -384,6 +409,7 @@ public:
 	void commit() {
 		live();
 		guarded([&] { flush(); });
+		publish_merges(false, false);
 		if (opts_.auto_merge) { maybe_merge(); }
 		guarded([&] { commit_files(); });
 		retain();
@@ -635,6 +661,7 @@ public:
 		}
 		hold held{this};
 		if (storage_permit_) { held.add(need); }
+		abandon_merges();  // their sources leave with the old content
 		guarded([&] {
 			for (auto& s : got.segments) {
 				files::segment_ref mine = s->ref;
@@ -688,19 +715,29 @@ public:
 
 private:
 	// Runs the merges `find` asks for, asking again after each round, until it asks none.
+	// With a scheduler they run there, on segments not already under merge: one round
+	// without `wait`, otherwise every round, each waited for and published.
 	template <class Find>
-	void run_merges(Find find) {
+	void run_merges(Find find, bool wait) {
 		live();
+		if (queue_ && wait) { publish_merges(true, false); }
 		for (;;) {
 			std::vector<merge_policy::candidate> c;
 			for (const auto& s : segs_) {
+				if (merging(*s)) { continue; }
 				std::uint64_t deleted = 0;
 				for (auto w : s->deleted) { deleted += std::uint64_t(std::popcount(w)); }
 				c.push_back({s->ref.id, s->bytes.size(), s->seg.doc_count(), deleted});
 			}
 			const auto merges = find(std::move(c));
 			if (merges.empty()) { return; }
-			for (const auto& ids : merges) { merge(ids); }
+			if (!queue_) {
+				for (const auto& ids : merges) { merge(ids); }
+				continue;
+			}
+			for (const auto& ids : merges) { schedule(ids); }
+			if (!wait) { return; }
+			publish_merges(true, true);
 		}
 	}
 
@@ -742,6 +779,21 @@ private:
 		bool deletes_dirty = false;          // deletes since its live-docs generation
 		std::unique_ptr<kronuz::journal::File> unsynced;  // flushed, awaiting the commit's sync
 		open_segment(files::segment_ref r, std::string b) : ref(r), bytes(std::move(b)), seg(bytes), deleted((seg.doc_count() + 63) / 64, 0) {}
+	};
+	// A background merge. The writer sets everything above `plan` before handing it to the
+	// scheduler; the merge thread may grow `storage`, sets the rest, then `done`, and the
+	// writer touches none of it again before `done`.
+	struct merge_job {
+		std::uint64_t id = 0;  // the output segment's
+		std::array<std::uint8_t, 16> header{};
+		std::vector<std::shared_ptr<open_segment>> sources;
+		std::vector<std::vector<std::uint64_t>> deleted;  // the sources' deletes the merge reads
+		std::uint64_t need = 0;                           // the output's estimate, reserved on `storage`
+		byte_budget::permit storage;
+		merge_plan plan;
+		std::unique_ptr<open_segment> output;  // none when no document was live
+		std::exception_ptr error;
+		std::atomic<bool> done{false};
 	};
 	struct buffered {
 		std::uint64_t docid, version;
@@ -796,6 +848,191 @@ private:
 		}
 		track(name, bytes.size());
 		return f;
+	}
+
+	// --- background merges (D11, D18) ------------------------------------------------------
+
+	bool merging(const open_segment& s) const {
+		for (const auto& job : pending_) {
+			for (const auto& src : job->sources) {
+				if (src.get() == &s) { return true; }
+			}
+		}
+		return false;
+	}
+
+	// Hands the merge of `ids` to the scheduler. It shares the sources and reads a copy of
+	// their deletes so far; storage admission reserves the output's estimate as merge()
+	// does, on a permit of the merge's own.
+	void schedule(const std::vector<std::uint64_t>& ids) {
+		auto job = std::make_shared<merge_job>();
+		job->need = segment_overhead;
+		for (const auto& s : segs_) {
+			if (std::find(ids.begin(), ids.end(), s->ref.id) == ids.end() || merging(*s)) { continue; }
+			const std::uint64_t docs = s->seg.doc_count();
+			job->sources.push_back(s);
+			job->deleted.push_back(s->deleted);
+			job->need += s->bytes.size() + 18 * docs + 16 * (docs / format::block + 1);
+		}
+		if (job->sources.empty()) { return; }
+		if (storage_permit_) {
+			job->storage = opts_.storage->open();
+			if (!job->storage.try_grow(job->need) && !(drain() && job->storage.try_grow(job->need))) {
+				throw std::system_error(std::make_error_code(std::errc::no_space_on_device), "strata: no storage reserved for a merge");
+			}
+		}
+		job->id = m_.next_segment++;
+		std::memcpy(job->header.data(), &job->id, 8);
+		std::memcpy(job->header.data() + 8, m_.uuid.data(), 8);
+		pending_.reserve(pending_.size() + 1);
+		queue_.submit([job, io = io_, sched = opts_.scheduler, prefix = m_.key_prefix](const std::atomic<bool>& stop) { run_merge(*job, *io, *sched, prefix, stop); });
+		pending_.push_back(std::move(job));
+	}
+
+	// On a scheduler thread: reads the sources' segments, which never change, and the job
+	// alone; writes the output's file unsynced, as a flush does, under the rate limit. A
+	// failed or stopped write removes the partial file.
+	static void run_merge(merge_job& job, kronuz::journal::IO& io, merge_scheduler& sched, const std::string& key_prefix, const std::atomic<bool>& stop) {
+		try {
+			if (stop.load(std::memory_order_acquire)) { throw std::system_error(std::make_error_code(std::errc::operation_canceled), "strata: merge stopped"); }
+			std::vector<merge_source> sources;
+			for (std::size_t k = 0; k < job.sources.size(); ++k) { sources.push_back({&job.sources[k]->seg, &job.deleted[k]}); }
+			std::string bytes;
+			string_output out(bytes);
+			string_spill spill;
+			job.plan = merge_segments(sources, job.header, out, spill, key_prefix);
+			if (job.plan.doc_count) {
+				if (job.storage && bytes.size() > job.need && !job.storage.try_grow(bytes.size() - job.need)) {
+					throw space_error(std::make_error_code(std::errc::no_space_on_device), "strata: no storage reserved for a merge's output");
+				}
+				const std::string name = index_detail::segment_name(job.id);
+				auto file = io.create_exclusive(name);
+				try {
+					const std::string_view view(bytes);
+					for (std::size_t at = 0; at < view.size();) {
+						const std::size_t end = at + std::min(view.size() - at, sched.chunk());
+						if (!sched.throttle(end - at, stop)) { throw std::system_error(std::make_error_code(std::errc::operation_canceled), "strata: merge stopped"); }
+						while (at < end) {
+							const std::size_t n = file->write_at(at, view.substr(at, end - at));
+							if (n == 0) { throw std::system_error(EIO, std::generic_category(), "write made no progress"); }
+							at += n;
+						}
+					}
+				} catch (const std::system_error& e) {
+					file.reset();
+					io.remove(name);
+					io.sync_directory();  // the partial file's space returns once its removal is durable
+					if (e.code().value() == ENOSPC) { throw space_error(e.code(), e.what()); }
+					throw;
+				}
+				files::segment_ref ref;
+				ref.id = job.id;
+				ref.size = bytes.size();
+				ref.footer_crc = format::decode_footer(bytes).toc_crc;
+				ref.doc_count = job.plan.doc_count;
+				job.output = std::make_unique<open_segment>(ref, std::move(bytes));
+				job.output->unsynced = std::move(file);
+			}
+		} catch (...) {
+			job.error = std::current_exception();
+		}
+		job.done.store(true, std::memory_order_release);
+	}
+
+	// Publishes the background merges that finished, after waiting for all of them with
+	// `wait`. One that ran out of space is dropped, its sources left for a later merge (and
+	// with `space_throws`, ENOSPC is thrown once the rest are published); any other
+	// failure fences.
+	void publish_merges(bool wait, bool space_throws) {
+		if (!queue_ || pending_.empty()) { return; }
+		if (wait) { queue_.wait(); }
+		bool space = false;
+		for (std::size_t i = 0; i < pending_.size();) {
+			if (!pending_[i]->done.load(std::memory_order_acquire)) {
+				++i;
+				continue;
+			}
+			const auto job = std::move(pending_[i]);
+			pending_.erase(pending_.begin() + std::ptrdiff_t(i));
+			if (job->error) {
+				job->storage.settle();
+				try {
+					std::rethrow_exception(job->error);
+				} catch (const space_error&) {
+					space = true;
+					continue;
+				} catch (const std::system_error& e) {
+					fenced_ = true;
+					throw index_fenced(std::string("strata: durability failure: ") + e.what());
+				}
+			}
+			install_merge(*job);
+		}
+		settle_storage();
+		if (space && space_throws) { throw std::system_error(std::make_error_code(std::errc::no_space_on_device), "strata: no space for a merge's output"); }
+	}
+
+	// Publishes a finished merge, on the writer's thread. When its sources are all still
+	// here, the output replaces them, and each delete made since the merge read them carries
+	// over through its ordinal map, once (D11); otherwise the output's file is reclaimed.
+	void install_merge(merge_job& job) {
+		std::vector<std::size_t> at;
+		for (const auto& src : job.sources) {
+			const auto it = std::find(segs_.begin(), segs_.end(), src);
+			if (it == segs_.end()) { break; }
+			at.push_back(std::size_t(it - segs_.begin()));
+		}
+		const std::string name = index_detail::segment_name(job.id);
+		if (job.output) { track(name, job.output->bytes.size()); }
+		if (at.size() != job.sources.size()) {
+			if (job.output) {
+				job.output.reset();
+				reclaim_.push_back(name);
+				queued_.insert(name);
+			}
+		} else {
+			if (job.output) {
+				auto& out = *job.output;
+				for (std::size_t k = 0; k < at.size(); ++k) {
+					const auto& now = segs_[at[k]]->deleted;
+					const auto& then = job.deleted[k];
+					const auto& to = job.plan.ordinals[k];
+					for (std::size_t w = 0; w < now.size(); ++w) {
+						for (std::uint64_t fresh = now[w] & ~then[w]; fresh; fresh &= fresh - 1) {
+							const ordinal_t o = to[w * 64 + std::size_t(std::countr_zero(fresh))];
+							if (o == no_more_docs) { throw std::logic_error("strata: merge: a delete names a document the merge dropped"); }
+							out.deleted[o >> 6] |= std::uint64_t(1) << (o & 63);
+							++out.dead;
+							out.deletes_dirty = true;
+						}
+					}
+				}
+			}
+			std::sort(at.begin(), at.end());
+			for (std::size_t k = at.size(); k-- > 0;) { segs_.erase(segs_.begin() + std::ptrdiff_t(at[k])); }
+			if (job.output) { segs_.emplace_back(std::move(job.output)); }
+		}
+		settle_storage();
+		job.storage.settle();
+	}
+
+	// Ends every background merge unpublished: queued ones are dropped, running ones
+	// stopped, and finished outputs' files reclaimed.
+	void abandon_merges() {
+		if (!queue_) { return; }
+		queue_.cancel();
+		for (const auto& job : pending_) {
+			if (job->done.load(std::memory_order_acquire) && job->output) {
+				const std::string name = index_detail::segment_name(job->id);
+				track(name, job->output->bytes.size());
+				job->output.reset();
+				reclaim_.push_back(name);
+				queued_.insert(name);
+			}
+			job->storage.settle();
+		}
+		pending_.clear();
+		settle_storage();
 	}
 
 	// --- storage accounting (T5) -------------------------------------------------------------
@@ -1239,7 +1476,7 @@ private:
 				ref.doc_count = docs.size() * (k + 1) / runs - docs.size() * k / runs;
 				auto seg = std::make_unique<open_segment>(ref, std::move(bytes));
 				seg->unsynced = std::move(file);
-				segs_.push_back(std::move(seg));
+				segs_.emplace_back(std::move(seg));
 				charges[k].settle();
 			}
 		}
@@ -1548,7 +1785,7 @@ private:
 	// it, so a checkpoint is held to what an open is. Throws corrupt_index (or
 	// corrupt_segment) at the first file that disagrees; changes nothing.
 	struct loaded_files {
-		std::vector<std::unique_ptr<open_segment>> segments;
+		std::vector<std::shared_ptr<open_segment>> segments;
 		std::map<std::string, std::string> meta;
 	};
 	// Runs a read and its checks, and once more if either fails: an unreliable read (a
@@ -1575,7 +1812,7 @@ private:
 	static loaded_files load_files(kronuz::journal::IO& io, const files::manifest& m, bool whole, std::uint64_t* retries = nullptr) {
 		loaded_files out;
 		for (const auto& r : m.segments) {
-			out.segments.push_back(read_checked([&] { return load_segment(io, r, whole); }, retries));
+			out.segments.emplace_back(read_checked([&] { return load_segment(io, r, whole); }, retries));
 		}
 		if (m.meta.generation) {
 			out.meta = read_checked([&] {
@@ -1609,11 +1846,13 @@ private:
 		return s;
 	}
 
+	merge_scheduler::queue queue_;  // first: assigned first and ended first, in ~index()
 	kronuz::journal::IO* io_;
 	std::unique_ptr<kronuz::journal::OwnerLock> lock_;
 	options opts_;
 	files::manifest m_;
-	std::vector<std::unique_ptr<open_segment>> segs_;  // oldest first
+	std::vector<std::shared_ptr<open_segment>> segs_;  // oldest first; a background merge shares its sources
+	std::vector<std::shared_ptr<merge_job>> pending_;  // handed to the scheduler, oldest first
 	std::vector<buffered> buffer_;
 	std::unordered_map<std::uint64_t, std::size_t> buffer_docids_;
 	std::unordered_map<std::string, key_entry> versions_;  // the version map
