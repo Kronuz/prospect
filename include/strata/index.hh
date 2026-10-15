@@ -1216,9 +1216,22 @@ private:
 			invert(0);
 			for (auto& t : threads) { t.join(); }
 			for (auto& e : errors) { if (e) { std::rethrow_exception(e); } }
+			// Every run's file is written before any segment is published: a write that fails
+			// (ENOSPC) publishes none and removes the runs already written, so the retry has
+			// their space and the buffer it keeps holds no published document.
+			std::vector<std::unique_ptr<kronuz::journal::File>> files(runs);
+			for (std::size_t k = 0; k < runs; ++k) {
+				try {
+					files[k] = write_unsynced(index_detail::segment_name(ids[k]), outputs[k]);
+				} catch (const space_error&) {
+					for (std::size_t w = 0; w < k; ++w) { files[w].reset(); remove_file(index_detail::segment_name(ids[w])); }
+					if (k) { sync_dir(); }
+					throw;
+				}
+			}
 			for (std::size_t k = 0; k < runs; ++k) {
 				auto& bytes = outputs[k];
-				auto file = write_unsynced(index_detail::segment_name(ids[k]), bytes);
+				auto file = std::move(files[k]);
 				files::segment_ref ref;
 				ref.id = ids[k];
 				ref.size = bytes.size();

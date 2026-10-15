@@ -368,6 +368,34 @@ int main() {
 		ix.commit();
 		CHECK(contents(ix).size() == 1);
 	}
+	// ENOSPC on a later run of a parallel flush publishes no run, so the retry once space
+	// returns leaves one live copy of each document.
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		auto parallel = keyed; parallel.flush_threads = 2; parallel.flush_min_docs = 1;
+		auto ix = strata::index::create(io, parallel, uuid);
+		std::mt19937_64 r(10);
+		for (const char* key : {"Qa", "Qb"}) {
+			operation big = add(key, key + 1);  // the body term without the key prefix
+			big.doc.stored.resize(20000);
+			for (auto& c : big.doc.stored) { c = char(r()); }  // incompressible
+			CHECK(ix.apply(tx({big}), {}).result == verdict::accepted);
+		}
+		fs.set_capacity(fs.used() + 30000);  // room for one run's segment, not two
+		bool space = false;
+		try {
+			ix.commit();
+		} catch (const std::system_error& e) {
+			space = e.code().value() == ENOSPC;
+		}
+		CHECK(space);
+		fs.set_capacity(~std::uint64_t(0));
+		ix.commit();
+		std::size_t live = 0;
+		for (const auto& s : ix.segments()) { for (ordinal_t o = 0; o < s.seg->doc_count(); ++o) { live += s.live(o); } }
+		CHECK(live == 2 && contents(ix).size() == 2);
+	}
 	// Merges under faults: ENOSPC leaves the index as it was and the merge succeeds once
 	// space returns; any other write failure fences, and reopening recovers the last commit.
 	for (int fault = 0; fault < 2; ++fault) {
