@@ -11,9 +11,12 @@
 
 #include <algorithm>
 #include <array>
+#include <deque>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -96,15 +99,12 @@ inline merge_plan merge_segments(std::span<const merge_source> sources, const st
 		plan.ordinals[d.source][d.ord] = w.add_document(d.docid, seg.length(d.ord), seg.stored(d.ord), seg.version(d.ord), k == keys[d.source].end() ? std::string_view() : std::string_view(k->second));
 	}
 	plan.doc_count = docs.size();
-	// Terms: the union of the sources' dictionaries, in order.
-	std::vector<std::vector<std::pair<std::string, format::term_info>>> terms(sources.size());
+	// Terms: the union of the sources' dictionaries, in order, one cursor per source
+	// (a cursor holds one dictionary block, not the dictionary).
+	std::deque<segment::term_cursor> terms;
+	std::vector<bool> more(sources.size());
 	for (std::size_t s = 0; s < sources.size(); ++s) {
-		sources[s].seg->scan_terms([&](std::string_view term, const format::term_info& info) {
-			terms[s].emplace_back(std::string(term), info);
-			charge(term.size() > 15 ? term.size() + 1 : 0);  // a string past its inline buffer
-			return true;
-		});
-		charge(terms[s].capacity() * sizeof(terms[s][0]));
+		more[s] = terms.emplace_back(*sources[s].seg).next();
 	}
 	// The dictionary's alphabet: every byte the sources' dictionaries use.
 	std::array<bool, 256> used{};
@@ -115,7 +115,6 @@ inline merge_plan merge_segments(std::span<const merge_source> sources, const st
 	for (unsigned c = 0; c < 256; ++c) {
 		if (used[c]) { alphabet.push_back(char(c)); }
 	}
-	std::vector<std::size_t> at(sources.size(), 0);
 	std::string current;
 	struct posting {
 		ordinal_t ord;
@@ -128,16 +127,17 @@ inline merge_plan merge_segments(std::span<const merge_source> sources, const st
 		for (;;) {
 			check();
 			// The smallest term not yet merged.
-			const std::string* next = nullptr;
+			std::optional<std::string_view> next;
 			for (std::size_t s = 0; s < sources.size(); ++s) {
-				if (at[s] < terms[s].size() && (!next || terms[s][at[s]].first < *next)) { next = &terms[s][at[s]].first; }
+				if (more[s] && (!next || terms[s].term() < *next)) { next = terms[s].term(); }
 			}
 			if (!next) { return std::nullopt; }
 			current = *next;
 			postings.clear();
 			for (std::size_t s = 0; s < sources.size(); ++s) {
-				if (at[s] == terms[s].size() || terms[s][at[s]].first != current) { continue; }
-				const auto& info = terms[s][at[s]++].second;
+				if (!more[s] || terms[s].term() != current) { continue; }
+				const format::term_info info = terms[s].info();
+				more[s] = terms[s].next();
 				postings_iterator it(*sources[s].seg, info);
 				positions_reader pr(*sources[s].seg, info);
 				for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {

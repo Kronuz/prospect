@@ -327,6 +327,32 @@ public:
 		}
 	}
 
+	// Every term in order with its info (impacts left empty below 128 postings), pulled one
+	// at a time; scan_terms as a cursor, for k-way merges. Neither copied nor moved.
+	class term_cursor {
+	public:
+		explicit term_cursor(const segment& seg) : seg_(&seg), c_(*seg.dict_) {}
+		// Moves to the next term; false past the last.
+		bool next() {
+			try {
+				if (!c_.next()) { return false; }
+				info_ = format::decode_term_info(c_.value(), run_);
+			} catch (const termdict::corrupt&) {
+				throw corrupt_segment("terms checksum");
+			}
+			if (info_.df > seg_->doc_count_) { throw corrupt_segment("document frequency"); }
+			return true;
+		}
+		std::string_view term() const noexcept { return c_.key(); }
+		const format::term_info& info() const noexcept { return info_; }
+
+	private:
+		const segment* seg_;
+		termdict::reader::cursor c_;
+		format::term_run run_;
+		format::term_info info_;
+	};
+
 	// Calls f(term, value) for every term from `from` in order until f returns false; a
 	// dictionary block that fails its region check throws corrupt_segment.
 	template <class F>
