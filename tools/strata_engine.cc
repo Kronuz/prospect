@@ -7,7 +7,8 @@
 //   strata_engine verify DIR < queries.txt   pruned top-k equals an exhaustive scan, k = 10, 100, 1000,
 //                                            ordinals and scores, Lucene and Xapian BM25
 //   strata_engine bench DIR COMMAND RUNS [bm25_xapian] < queries.txt
-//                                            per query: fastest of RUNS in-process runs, in µs
+//                                            per query: fastest of RUNS in-process runs, in µs,
+//                                            on a segment file or an index's segments
 //   strata_engine churn DIR < ops            the soak's op stream through strata::index (bench/soak):
 //                                            "P\tid\ttext" upserts, "D\tid" deletes, "C" commits and
 //                                            prints "C\tµs\tsegments", "Q\tCOMMAND\tquery" prints
@@ -494,10 +495,10 @@ int verify(const std::string& dir) {
 	return mismatches ? 1 : 0;
 }
 
-// queries.txt is the harness's JSON lines: {"query": "...", "tags": [...]}.
-int bench(const std::string& dir, std::string_view command, int runs, strata::scheme scheme) {
-	residency::file file;
-	strata::segment seg = open(dir, file);
+// Times each query of queries.txt (the harness's JSON lines: {"query": "...", "tags": [...]})
+// with answer(query): the fastest of runs, in µs.
+template <class Answer>
+int bench_queries(int runs, Answer&& answer) {
 	LineReader in; for (std::string line; in.next(line);) {
 		auto at = line.find("\"query\": \"");
 		if (at == std::string::npos) { continue; }
@@ -507,12 +508,32 @@ int bench(const std::string& dir, std::string_view command, int runs, strata::sc
 		std::uint64_t result = 0;
 		for (int r = 0; r < runs; ++r) {
 			auto t0 = std::chrono::steady_clock::now();
-			result = run(seg, command, unescaped, scheme);
+			result = answer(std::string_view(unescaped));
 			best = std::min(best, std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count());
 		}
 		std::cout << std::fixed << std::setprecision(1) << best << '\t' << result << '\t' << unescaped << '\n';
 	}
 	return 0;
+}
+
+// A segment file (segment.sx) is searched alone; an index directory through the
+// snapshot of its segments, as serve answers, so a multi-segment index and its merged
+// form time alike.
+int bench(const std::string& dir, std::string_view command, int runs, strata::scheme scheme) {
+	if (!std::filesystem::exists(dir + "/segment.sx")) {
+		kronuz::journal::PosixIO io(dir);
+		strata::index::options o;
+		o.key_prefix = "Q";
+		auto ix = strata::index::open(io, o);
+		std::vector<strata::segment_snapshot> segs;
+		for (const auto& v : ix.segments()) { segs.push_back({v.seg, v.deleted, v.dead}); }
+		std::cerr << "bench: " << segs.size() << " segments\n";
+		const std::span<const strata::segment_snapshot> view(segs);
+		return bench_queries(runs, [&](std::string_view query) { return run(view, command, query, scheme); });
+	}
+	residency::file file;
+	strata::segment seg = open(dir, file);
+	return bench_queries(runs, [&](std::string_view query) { return run(seg, command, query, scheme); });
 }
 
 }  // namespace
