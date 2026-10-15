@@ -218,6 +218,30 @@ int main() {
 		CHECK(ix.apply(tx({o}), {}).result == verdict::invalid);
 		CHECK(ix.apply(tx({add("Qa", "again")}), {}).result == verdict::version_conflict);
 	}
+	// Terms past Lucene's and Tantivy's limits (64 KiB, 1 MiB), as keys and as body terms,
+	// are found buffered, flushed, reopened, and merged.
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		const std::string key = "Q" + std::string(std::size_t(1) << 20, 'k'), body = std::string(65531, 'b');
+		auto ix = strata::index::create(io, keyed, uuid);
+		ix.apply(tx({add(key, body), add("Qs", body + "x")}), {});
+		CHECK(ix.find_key(key) == kv(1, 1) && ix.find_key("Qs") == kv(2, 1));
+		ix.commit();
+		ix.apply(tx({add("Qt", body)}), {});
+		ix.commit();
+		ix.close();
+		ix = strata::index::open(io, keyed);
+		auto df = [&] {
+			std::uint64_t n = 0;
+			for (const auto& seg : ix.segments()) { if (auto t = seg.seg->term(body)) { n += t->df; } }
+			return n;
+		};
+		CHECK(ix.find_key(key) == kv(1, 1) && ix.segments().size() == 2 && df() == 2);
+		ix.force_merge(1);
+		CHECK(ix.segments().size() == 1 && ix.find_key(key) == kv(1, 1) && df() == 2);
+		CHECK(contents(ix).at(1).second == body);
+	}
 	// Explicit docids, the key/docid agreement, and replayed positions.
 	{
 		faultfs::filesystem fs;

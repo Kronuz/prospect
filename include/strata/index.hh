@@ -1041,7 +1041,7 @@ private:
 		if (d.stored.size() > format::max_stored_record) { return false; }
 		std::set<std::string_view> seen;
 		for (const auto& t : d.terms) {
-			if (t.term.empty() || t.term.size() > 245 || !seen.insert(t.term).second) { return false; }
+			if (t.term.empty() || t.term.size() > format::max_term_bytes || !seen.insert(t.term).second) { return false; }
 			for (std::size_t i = 1; i < t.positions.size(); ++i) {
 				if (t.positions[i] <= t.positions[i - 1]) { return false; }
 			}

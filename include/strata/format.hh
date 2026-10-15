@@ -27,6 +27,7 @@
 #pragma once
 
 #include "crc32c.hh"
+#include "termdict.hh"
 #include "varint.hh"
 
 #include <array>
@@ -67,6 +68,9 @@ inline constexpr std::size_t stored_block_size = 64 * 1024;
 // of records or one record this size, plus its length header, which bounds what reading
 // a frame allocates even when a file's checksums were recomputed (review C9).
 inline constexpr std::uint64_t max_stored_record = 64ull << 20;
+// The longest term: the term dictionary's key limit (fst's 32-bit depth), past Lucene's
+// 32,766 and Tantivy's 65,530 bytes.
+inline constexpr std::size_t max_term_bytes = termdict::max_key_bytes;
 inline constexpr std::uint64_t max_stored_frame = stored_block_size + max_stored_record + 64;
 inline constexpr std::size_t section_alignment = 64;
 inline constexpr std::size_t block = 128;

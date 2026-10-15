@@ -46,7 +46,7 @@ int index(const std::string& dir) {
 		for (std::size_t i = 0; i < text.size();) {
 			auto j = text.find(' ', i);
 			if (j == std::string_view::npos) j = text.size();
-			// Xapian rejects terms over 245 bytes; Lucene and Tantivy drop such tokens too.
+			// Xapian rejects terms over 245 bytes (its key limit), so they are skipped.
 			if (j - i > 245) { ++skipped; } else if (j > i) { doc.add_posting(std::string(text.substr(i, j - i)), ++pos); }
 			i = j + 1;
 		}
