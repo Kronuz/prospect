@@ -5,6 +5,12 @@ unmeasured are listed at the end.
 
 ## Indexing, 1 thread (gate VM, Linux x86_64)
 
+**Superseded (2026-10-15):** these rows ran strata's benchmark engine on Phase 2's
+single-segment writer, without keys, versions, flushes, merges, or commits, so they do
+not measure T4. The engine now indexes through `strata::index` (`ad16376`, `5dfe415`)
+and every engine runs keyed; the rows are being rerun at equal memory
+(BENCHMARKS.md, "Indexing speed").
+
 Run on the gate VM with `bench/index_trials.sh p3` and `tools/vm/quiet_trials.sh`, using
 the VM's synced source tree as built at 06:48 on 2026-10-14 (Phase 3 lifecycle code; the copy
 carries no commit id). The corpus is the 1M-document file from the search-benchmark-game. Each
