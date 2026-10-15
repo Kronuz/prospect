@@ -15,6 +15,7 @@
 // Query syntax: words are optional, +word is required, -word is excluded, "a b" is a phrase.
 #include "completion/posix.h"
 #include "residency.hh"
+#include "strata/budget.hh"
 #include "strata/index.hh"
 #include "strata/check.hh"
 #include "strata/search.hh"
@@ -116,6 +117,14 @@ int index(const std::string& dir) {
 	o.key_prefix = "Q";
 	const char* mb = std::getenv("STRATA_BUFFER_MB");
 	o.buffer_share = (mb ? std::strtoull(mb, nullptr, 10) : 256) << 20;
+	// STRATA_BUDGET_MB: the node's indexing budget (D17), this index's whole share of it,
+	// which the gate calibrates to the reference engine's peak RSS (BENCHMARKS.md).
+	std::unique_ptr<strata::byte_budget> budget;
+	if (const char* node = std::getenv("STRATA_BUDGET_MB")) {
+		budget = std::make_unique<strata::byte_budget>(std::strtoull(node, nullptr, 10) << 20);
+		o.budget = budget.get();
+		o.buffer_share = budget->capacity();
+	}
 	const char* merge = std::getenv("STRATA_AUTO_MERGE");
 	o.auto_merge = !merge || std::string_view(merge) != "0";
 	if (const char* threads = std::getenv("STRATA_THREADS")) { o.flush_threads = std::max<std::size_t>(1, std::strtoull(threads, nullptr, 10)); }
