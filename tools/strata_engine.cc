@@ -33,6 +33,8 @@
 #include <iomanip>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <cerrno>
 #include <filesystem>
 #include <fstream>
 #include <unordered_map>
@@ -56,6 +58,30 @@ std::string_view id_field(std::string_view line) {
 	return line.substr(at, line.find('"', at) - at);
 }
 
+// Lines from stdin in reads of up to 1 MiB: macOS's libc++ reads std::cin a character at a
+// time through getc, locking stdin for each, whatever sync_with_stdio says. read(2) returns
+// what is there, so an interactive client gets its answer.
+class LineReader {
+public:
+	bool next(std::string& line) {
+		line.clear();
+		for (;;) {
+			if (at_ == end_) {
+				ssize_t count;
+				do { count = ::read(0, buffer_.data(), buffer_.size()); } while (count < 0 && errno == EINTR);
+				end_ = count > 0 ? static_cast<std::size_t>(count) : 0; at_ = 0;
+				if (!end_) { return !line.empty(); }
+			}
+			auto* start = buffer_.data() + at_;
+			auto* newline = static_cast<char*>(std::memchr(start, '\n', end_ - at_));
+			if (newline) { line.append(start, newline); at_ = static_cast<std::size_t>(newline - buffer_.data()) + 1; return true; }
+			line.append(start, buffer_.data() + end_); at_ = end_;
+		}
+	}
+private:
+	std::array<char, 1 << 20> buffer_{}; std::size_t at_ = 0, end_ = 0;
+};
+
 int index(const std::string& dir) {
 	std::ios::sync_with_stdio(false);
 	strata::segment_writer w;
@@ -63,7 +89,7 @@ int index(const std::string& dir) {
 	std::string line;
 	std::vector<strata::segment_writer::token> tokens;
 	std::uint64_t n = 0;
-	while (std::getline(std::cin, line)) {
+	for (LineReader in; in.next(line);) {
 		if (line.empty()) { continue; }
 		std::string_view text = text_field(line);
 		tokens.clear();
@@ -220,7 +246,7 @@ int serve(const std::string& dir) {
 	strata::segment seg = open(dir, file);
 	std::string line;
 	std::cout.setf(std::ios::unitbuf);
-	while (std::getline(std::cin, line)) {
+	for (LineReader in; in.next(line);) {
 		const std::size_t tab = line.find('\t');
 		std::cout << run(seg, std::string_view(line.data(), tab), std::string_view(line).substr(tab + 1)) << '\n';
 	}
@@ -396,7 +422,7 @@ int verify(const std::string& dir) {
 	strata::segment seg = open(dir, file);
 	std::size_t queries = 0, mismatches = 0;
 	auto close = [](double a, double b) { return std::abs(a - b) <= 1e-9 * std::max(1.0, std::max(a, b)); };
-	for (std::string line; std::getline(std::cin, line);) {
+	LineReader in; for (std::string line; in.next(line);) {
 		const std::string q = query_of(line);
 		if (q.empty()) { continue; }
 		++queries;
@@ -447,7 +473,7 @@ int verify(const std::string& dir) {
 int bench(const std::string& dir, std::string_view command, int runs, strata::scheme scheme) {
 	residency::file file;
 	strata::segment seg = open(dir, file);
-	for (std::string line; std::getline(std::cin, line);) {
+	LineReader in; for (std::string line; in.next(line);) {
 		auto at = line.find("\"query\": \"");
 		if (at == std::string::npos) { continue; }
 		std::string unescaped;
@@ -539,7 +565,7 @@ int churn(const std::string& dir) {
 		t.ops.clear();
 	};
 	std::string line;
-	while (std::getline(std::cin, line)) {
+	for (LineReader in; in.next(line);) {
 		const std::string_view l = line;
 		if (l.empty()) { continue; }
 		const std::size_t a = l.find('\t'), b = a == std::string_view::npos ? a : l.find('\t', a + 1);
