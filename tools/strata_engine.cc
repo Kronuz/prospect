@@ -126,20 +126,35 @@ int index(const std::string& dir) {
 	};
 	std::string line;
 	std::uint64_t n = 0;
+	std::vector<std::string> keys;
 	for (LineReader in; in.next(line);) {
 		if (line.empty()) { continue; }
 		strata::operation op;
 		op.type = strata::operation::replace_key;
 		const auto id = id_field(line);
 		op.key = "Q" + std::string(id);
+		if (std::getenv("STRATA_DELETE_EVERY")) { keys.push_back(op.key); }
 		op.doc = tokens_document(id, text_field(line));
 		t.ops.push_back(std::move(op));
 		if (t.ops.size() == 1000) { apply(); }
 		if (++n % 100000 == 0) { std::cerr << n << '\n'; }
 	}
 	apply();
+	// STRATA_DELETE_EVERY=N deletes every Nth document by key: T8's index with deletes.
+	std::uint64_t deleted = 0;
+	if (const char* every = std::getenv("STRATA_DELETE_EVERY"); every && std::strtoull(every, nullptr, 10)) {
+		const auto step = std::strtoull(every, nullptr, 10);
+		for (std::uint64_t i = 0; i < keys.size(); i += step, ++deleted) {
+			strata::operation op;
+			op.type = strata::operation::delete_key;
+			op.key = keys[i];
+			t.ops.push_back(std::move(op));
+			if (t.ops.size() == 1000) { apply(); }
+		}
+		apply();
+	}
 	ix.commit();
-	std::cerr << "index: " << n << " documents, " << ix.segments().size() << " segments\n";
+	std::cerr << "index: " << n << " documents, " << deleted << " deleted, " << ix.segments().size() << " segments\n";
 	return 0;
 }
 
@@ -510,7 +525,69 @@ std::string query_of(const std::string& line) {
 // ordinals agree exactly, except that each run of hits whose scores agree within 1e-9
 // must be drawn from the scan's documents with that score (ties compare as sets, since
 // summation order can perturb near-equal scores).
+// verify over an index's segments (T8, C14's form): for each query and both scoring
+// schemes, an exhaustive scan of every live document with the snapshot's statistics,
+// against the pruned multi-segment search at k = 10, 100, and 1000 and its count. Ties at
+// a score may resolve to any of the tied documents.
+int verify_index(const std::string& dir) {
+	kronuz::journal::PosixIO io(dir);
+	strata::index::options o;
+	o.key_prefix = "Q";
+	auto ix = strata::index::open(io, o);
+	std::vector<strata::segment_snapshot> segs;
+	for (const auto& v : ix.segments()) { segs.push_back({v.seg, v.deleted}); }
+	std::span<const strata::segment_snapshot> view(segs);
+	std::size_t queries = 0, mismatches = 0;
+	auto close = [](double a, double b) { return std::abs(a - b) <= 1e-9 * std::max(1.0, std::max(a, b)); };
+	LineReader in; for (std::string line; in.next(line);) {
+		const std::string q = query_of(line);
+		if (q.empty()) { continue; }
+		++queries;
+		const parsed p = parse(q);
+		for (const auto scheme : {strata::scheme::bm25, strata::scheme::bm25_xapian}) {
+			snapshot_stats snap(view);
+			auto builder = [&](const strata::segment& seg) { return build(seg, p, scheme, &snap); };
+			std::vector<strata::doc_hit> scan;
+			for (const auto& sv : segs) {
+				auto all = builder(*sv.seg);
+				if (!all) { continue; }
+				for (auto d = all->next(); d != strata::no_more_docs; d = all->next()) {
+					if (sv.deleted && ((*sv.deleted)[d >> 6] >> (d & 63)) & 1) { continue; }
+					scan.push_back({sv.seg->docid(d), all->score()});
+				}
+			}
+			std::sort(scan.begin(), scan.end(), [](const auto& a, const auto& b) { return a.score != b.score ? a.score > b.score : a.docid < b.docid; });
+			bool ok = strata::search_count(view, builder) == scan.size();
+			for (std::size_t k : {10u, 100u, 1000u}) {
+				std::uint64_t counted = 0;
+				const auto hits = strata::search(view, builder, k, &counted);
+				const std::size_t n = std::min<std::size_t>(k, scan.size());
+				ok = ok && counted == scan.size() && hits.size() == n;
+				for (std::size_t a = 0; ok && a < n;) {
+					std::size_t b = a + 1;
+					while (b < n && close(scan[b].score, scan[a].score)) { ++b; }
+					std::vector<std::uint64_t> tied, got;
+					for (std::size_t i = a; i < scan.size() && close(scan[i].score, scan[a].score); ++i) { tied.push_back(scan[i].docid); }
+					for (std::size_t i = a; i > 0 && close(scan[i - 1].score, scan[a].score); --i) { tied.push_back(scan[i - 1].docid); }
+					for (std::size_t i = a; i < b; ++i) { ok = ok && close(hits[i].score, scan[i].score); got.push_back(hits[i].docid); }
+					std::sort(tied.begin(), tied.end()); std::sort(got.begin(), got.end());
+					ok = ok && std::adjacent_find(got.begin(), got.end()) == got.end() && std::includes(tied.begin(), tied.end(), got.begin(), got.end());
+					a = b;
+				}
+				if (!ok) {
+					++mismatches;
+					std::cout << "MISMATCH " << (scheme == strata::scheme::bm25 ? "bm25" : "bm25_xapian") << " k=" << k << '\t' << q << '\n';
+					break;
+				}
+			}
+		}
+	}
+	std::cout << queries << " queries, " << mismatches << " mismatches over " << segs.size() << " segments\n";
+	return mismatches ? 1 : 0;
+}
+
 int verify(const std::string& dir) {
+	if (!std::filesystem::exists(dir + "/segment.sx")) { return verify_index(dir); }
 	residency::file file;
 	strata::segment seg = open(dir, file);
 	std::size_t queries = 0, mismatches = 0;
