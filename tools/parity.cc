@@ -4,9 +4,12 @@
 // Query(...) description, and compares match counts and top-10 (docid, weight) against
 // the oracle's rank vectors at relative error <= 1e-9, ordering near-ties by docid, both
 // counted and pruned.
-//   parity CORPUS_JSON N RANK_JSONL
+// With SEGMENTS > 1, the same documents are split into that many contiguous segments,
+// weighted with the snapshot's statistics and searched across segments (Phase 3, T8).
+//   parity CORPUS_JSON N RANK_JSONL [SEGMENTS]
 #include "analysis.hh"
 #include "strata/search.hh"
+#include "strata/searcher.hh"
 #include "strata/writer.hh"
 
 #include <cmath>
@@ -15,7 +18,9 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <span>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -91,11 +96,18 @@ void count_terms(const node& n, std::map<std::string, std::uint32_t>& wqf) {
 	for (const auto& c : n.children) { count_terms(c, wqf); }
 }
 
-strata::scorer_ptr build(const strata::segment& seg, const node& n, const std::map<std::string, std::uint32_t>& wqf) {
+// The index's statistics when searching several segments; null for one segment.
+struct snapshot_weights {
+	std::span<const strata::segment_snapshot> segs;
+	strata::statistics st;
+	strata::weight of(const std::string& term, std::uint32_t wqf) const { return strata::weight::bm25_xapian(st, strata::snapshot_df(segs, term), wqf); }
+};
+
+strata::scorer_ptr build(const strata::segment& seg, const node& n, const std::map<std::string, std::uint32_t>& wqf, const snapshot_weights* snap = nullptr) {
 	if (n.op.empty()) {
 		auto info = seg.term(n.term);
 		if (!info) { return nullptr; }
-		return std::make_unique<strata::term_scorer>(seg, *info, strata::weight::bm25_xapian(seg, info->df, wqf.at(n.term)));
+		return std::make_unique<strata::term_scorer>(seg, *info, snap ? snap->of(n.term, wqf.at(n.term)) : strata::weight::bm25_xapian(seg, info->df, wqf.at(n.term)));
 	}
 	if (n.op == "PHRASE" || n.op == "NEAR") {
 		std::vector<strata::format::term_info> infos;
@@ -104,12 +116,12 @@ strata::scorer_ptr build(const strata::segment& seg, const node& n, const std::m
 			auto info = seg.term(c.term);
 			if (!info) { return nullptr; }
 			infos.push_back(*info);
-			weights.push_back(strata::weight::bm25_xapian(seg, info->df, wqf.at(c.term)));
+			weights.push_back(snap ? snap->of(c.term, wqf.at(c.term)) : strata::weight::bm25_xapian(seg, info->df, wqf.at(c.term)));
 		}
 		return std::make_unique<strata::phrase_scorer>(seg, infos, std::move(weights), n.op == "NEAR" ? n.window : 0);
 	}
 	std::vector<strata::scorer_ptr> kids;
-	for (const auto& c : n.children) { kids.push_back(build(seg, c, wqf)); }
+	for (const auto& c : n.children) { kids.push_back(build(seg, c, wqf, snap)); }
 	if (n.op == "OR") {
 		std::erase(kids, nullptr);
 		if (kids.empty()) { return nullptr; }
@@ -164,12 +176,13 @@ std::string field(const std::string& line, const std::string& key) {
 }  // namespace
 
 int main(int argc, char** argv) {
-	if (argc != 4) {
-		std::cerr << "usage: parity CORPUS_JSON N RANK_JSONL\n";
+	if (argc != 4 && argc != 5) {
+		std::cerr << "usage: parity CORPUS_JSON N RANK_JSONL [SEGMENTS]\n";
 		return 2;
 	}
 	const std::size_t n = std::stoul(argv[2]);
-	strata::segment_writer w;
+	const std::size_t parts = argc == 5 ? std::max<std::size_t>(1, std::stoul(argv[4])) : 1;
+	std::vector<strata::segment_writer> writers(parts);
 	{
 		std::ifstream in(argv[1]);
 		std::string line;
@@ -188,11 +201,31 @@ int main(int argc, char** argv) {
 			});
 			postings.clear();
 			for (const auto& [term, t] : terms) { postings.push_back({term, t.first, t.second}); }
-			w.add(d + 1, postings, length);
+			writers[d * parts / n].add(d + 1, postings, length);
 		}
 	}
-	std::string file = w.flush({});
-	strata::segment seg(file);
+	std::vector<std::string> files;
+	for (auto& w : writers) { files.push_back(w.flush({})); }
+	std::vector<strata::segment> segments;
+	for (const auto& f : files) { segments.emplace_back(f); }
+	std::vector<strata::segment_snapshot> snaps;
+	for (const auto& s : segments) { snaps.push_back({&s, nullptr}); }
+	const snapshot_weights weights{snaps, strata::snapshot_statistics(snaps)};
+	const snapshot_weights* snap = parts > 1 ? &weights : nullptr;
+	const strata::segment& seg = segments[0];
+	std::uint64_t total_docs = 0;
+	for (const auto& s : segments) { total_docs += s.doc_count(); }
+	// The k best across segments as hits by ordinal (docid - 1, as one segment would give).
+	auto search = [&](const node& q, const std::map<std::string, std::uint32_t>& wqf, std::uint64_t* count) {
+		std::vector<strata::hit> out;
+		if (parts == 1) {
+			if (auto s = build(seg, q, wqf)) { out = strata::top_k(*s, 10, count); } else if (count) { *count = 0; }
+			return out;
+		}
+		auto hits = strata::search(snaps, [&](const strata::segment& sg) { return build(sg, q, wqf, snap); }, 10, count);
+		for (const auto& h : hits) { out.push_back({strata::ordinal_t(h.docid - 1), h.score}); }
+		return out;
+	};
 
 	std::ifstream rank(argv[3]);
 	std::string line;
@@ -200,10 +233,10 @@ int main(int argc, char** argv) {
 	double worst = 0;
 	while (std::getline(rank, line)) {
 		if (line.find("\"index\"") != std::string::npos) {
-			std::cout << "oracle index: " << line << "  strata docs " << seg.doc_count() << " avlength " << seg.average_length() << '\n';
+			std::cout << "oracle index: " << line << "  strata docs " << total_docs << " in " << parts << " segment(s)\n";
 			continue;
 		}
-		if (field(line, "check_at_least") != std::to_string(seg.doc_count())) { continue; }  // the exact-count rows
+		if (field(line, "check_at_least") != std::to_string(total_docs)) { continue; }  // the exact-count rows
 		++queries;
 		const std::string desc = field(line, "description");
 		node q = description_parser(desc).parse_query();
@@ -211,8 +244,7 @@ int main(int argc, char** argv) {
 		count_terms(q, wqf);
 		const std::uint64_t want_count = std::stoull(field(line, "upper"));
 		std::uint64_t got_count = 0;
-		std::vector<strata::hit> hits;
-		if (auto s = build(seg, q, wqf)) { hits = strata::top_k(*s, 10, &got_count); }
+		std::vector<strata::hit> hits = search(q, wqf, &got_count);
 		count_ok += got_count == want_count;
 
 		// Oracle hits: [[docid, weight, percent], ...]
@@ -236,8 +268,7 @@ int main(int argc, char** argv) {
 			return ok;
 		};
 		// Counted (every match visited) and pruned (no count: thresholds skip blocks).
-		std::vector<strata::hit> pruned;
-		if (auto s = build(seg, q, wqf)) { pruned = strata::top_k(*s, 10); }
+		std::vector<strata::hit> pruned = search(q, wqf, nullptr);
 		const bool ok = matches(hits) && matches(pruned);
 		top_ok += ok;
 		if ((!ok || got_count != want_count) && max_rel_shown++ < 8) {
