@@ -5,7 +5,7 @@
 # without document reordering (-bp); the faster sets the reference (BENCHMARKS.md). Units
 # with a result are skipped, so tools/vm/quiet_trials.sh can stop and restart the run.
 # Results in ~/bench/results/query-NAME.
-#   query_trials.sh NAME [build]
+#   [ENGINES="strata tantivy-0.26"] query_trials.sh NAME [build]
 set -u
 name=${1:-run}
 mode=${2:-trials}
@@ -13,7 +13,8 @@ cd ~/bench/search-benchmark-game
 out=~/bench/results/query-$name
 mkdir -p "$out"
 export COMMANDS="TOP_10 TOP_100 TOP_1000 TOP_100_COUNT COUNT" PATH=$HOME/.cargo/bin:$PATH CORPUS=$PWD/corpus.json
-engines=(strata tantivy-0.26 lucene-10.4.0 lucene-10.4.0-bp xapian-2.1.0 iresearch-26.03.1 pisa-0.8.2)
+# ENGINES overrides the list (an engine without an index cannot run trials).
+read -r -a engines <<< "${ENGINES:-strata tantivy-0.26 lucene-10.4.0 lucene-10.4.0-bp xapian-2.1.0 iresearch-26.03.1 pisa-0.8.2}"
 rotated() {  # rotation k of the engine list
 	local k=$1 n=${#engines[@]}
 	for i in $(seq 0 $((n - 1))); do echo -n "${engines[$(((i + k) % n))]} "; done
