@@ -138,23 +138,29 @@ with deletes (`STRATA_DELETE_EVERY`) must stay at zero mismatches.
 Status. R5, P6-3 (`strata::term_table`, `segment::find_term`), and P6-7 (single-word
 `COUNT` from the table, `tools/engine_query.hh`) are implemented, not yet measured; the
 engine's query layer lives in `tools/engine_query.hh`, tested by `engine_query_test`.
-P6-1 is implemented, not yet measured: `top_collector::collect` and the
-generic loop drop hits at or below a seeded floor, and `search` turns each segment's
-hits into (score, docid), re-sorting them if a segment's ordinals are not in docid
-order, then merges the two sorted runs linearly up to k (review R1). Owed before it
-lands: the `bench/ab.sh` rows and the allocation rows (R6). Owed with P1: a permuted-
-segment tie case in `verify` and the tests, and the in-segment collector comparing
-docids at its truncation boundary.
+P6-1 and P6-2 are implemented, not yet measured. P6-2 replaces P6-1's per-segment
+`top_k` and merge: `search` keeps one `top_collector` for the snapshot, keyed by docid
+after `begin(seg)`, so ties compare docids in and across segments (review R1) whatever
+the ordinal order. Owed before they land: the `bench/ab.sh` rows and the allocation rows
+(R6). Owed with P1: the permuted-segment tie case in `verify`.
 
-Determinism. P6-1 keeps the floor strictly below the k-th score
-(`searcher.hh:116`), so a document tying it with a smaller docid still enters. P6-2
-needs the same rule per segment: a tie at the threshold loses only if the new
-document's docid is larger than the k-th hit's. When segments run in docid order with
-disjoint ranges (flush order), the threshold handed to a scorer can be exact, Lucene's
-`nextUp`; otherwise (P6-5's size order, or merged segments whose ranges interleave) it
-must be `nextafter(threshold, −∞)`, and the collector compares (score, docid). Within a
-segment, ordinal order is docid order (validated at open), so the existing in-segment
-tie rule holds. The output order is (score descending, docid ascending) in every case.
+Determinism. Review R2's rule is in the collector: a hit tying the k-th score enters
+only with a smaller docid, and the bound handed to scorers is the k-th score when the
+segment's `min_docid` exceeds the k-th docid, else the next double below it, re-evaluated
+whenever the k-th changes. `engine_query_test` checks it on explicit docids interleaving
+across flushes, with duplicated documents, in index order and largest segment first.
+
+The rule assumes a document's score does not depend on how it is reached. Two paths
+broke that:
+
+1. **Conjunctions** summed their terms' scores in each segment's cost order, so a
+   document's score changed with the segment holding it (`+b +d +c`: 2.4067498299436387
+   in one segment, 2.4067498299436392 across sixteen) and could change at a merge. They
+   now sum in clause order, as Lucene's `ConjunctionScorer` does.
+2. **Disjunctions' window path** still adds essential clauses in bound order, and the
+   non-essential ones afterwards, both depending on the threshold. Owed: summing each
+   window's per-clause contributions in clause order, measured against today's path,
+   since it adds a per-clause buffer per window.
 
 Not recommended: a term cache shared across queries of one snapshot. The benchmark
 repeats queries, so it would measure cache hits, and neither baseline does it (Lucene's
