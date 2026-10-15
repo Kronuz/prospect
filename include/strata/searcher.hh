@@ -16,12 +16,16 @@
 
 namespace strata {
 
-// A segment as a search sees it: its deleted ordinals (bit per ordinal), or none.
+// A segment as a search sees it: its deleted ordinals (bit per ordinal), or none, and how
+// many are set (index::segments gives it); unknown_dead scans the bitmap instead.
 struct segment_snapshot {
+	static constexpr std::uint64_t unknown_dead = ~std::uint64_t(0);
 	const segment* seg = nullptr;
 	const std::vector<std::uint64_t>* deleted = nullptr;
+	std::uint64_t dead = unknown_dead;
 	bool any_deleted() const {
-		if (!deleted) { return false; }
+		if (!deleted || dead == 0) { return false; }
+		if (dead != unknown_dead) { return true; }
 		for (auto w : *deleted) {
 			if (w) { return true; }
 		}

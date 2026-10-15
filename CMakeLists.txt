@@ -113,6 +113,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   endforeach()
   set_tests_properties(reclaim_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1;STRATA_CRASH_POINTS=150")
   set_tests_properties(lifecycle_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1;STRATA_CRASH_POINTS=1000;STRATA_BG_CRASH_POINTS=200")
+  add_executable(engine_query_test test/engine_query_test.cc)
+  target_include_directories(engine_query_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tools")
+  target_link_libraries(engine_query_test PRIVATE strata)
+  add_test(NAME engine_query COMMAND engine_query_test)
   # Fuzz targets: each target's checked-in corpus replays as a test in every build; with
   # STRATA_FUZZ (Clang) the libFuzzer binaries build too.
   option(STRATA_FUZZ "Build the libFuzzer targets (Clang)" OFF)

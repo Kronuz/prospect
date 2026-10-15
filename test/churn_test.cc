@@ -97,7 +97,7 @@ static void put(strata::index& ix, model& m, const std::string& key, const model
 
 static std::vector<strata::segment_snapshot> snapshot(const strata::index& ix) {
 	std::vector<strata::segment_snapshot> out;
-	for (const auto& s : ix.segments()) { out.push_back({s.seg, s.deleted}); }
+	for (const auto& s : ix.segments()) { out.push_back({s.seg, s.deleted, s.dead}); }
 	return out;
 }
 

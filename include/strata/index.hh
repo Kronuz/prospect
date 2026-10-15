@@ -483,13 +483,14 @@ public:
 		std::uint64_t id;
 		const segment* seg;
 		const std::vector<std::uint64_t>* deleted;  // bit per ordinal; null when none is deleted
+		std::uint64_t dead = 0;                      // bits set in deleted
 		bool live(ordinal_t ord) const { return !deleted || !(((*deleted)[ord >> 6] >> (ord & 63)) & 1); }
 	};
 	// Null bitmaps for segments without deletes, so searches skip the live check without
 	// scanning the bitmap.
 	std::vector<segment_view> segments() const {
 		std::vector<segment_view> out;
-		for (const auto& s : segs_) { out.push_back({s->ref.id, &s->seg, s->dead ? &s->deleted : nullptr}); }
+		for (const auto& s : segs_) { out.push_back({s->ref.id, &s->seg, s->dead ? &s->deleted : nullptr, s->dead}); }
 		return out;
 	}
 	const files::manifest& manifest() const noexcept { return m_; }

@@ -8,6 +8,7 @@
 #include "strata/searcher.hh"
 #include "strata/budget.hh"
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <limits>
 #include <map>
@@ -152,7 +153,7 @@ static void check_against_scan(const std::vector<doc_hit>& hits, const std::vect
 
 static std::vector<segment_snapshot> snapshot(const strata::index& ix) {
 	std::vector<segment_snapshot> out;
-	for (const auto& s : ix.segments()) { out.push_back({s.seg, s.deleted}); }
+	for (const auto& s : ix.segments()) { out.push_back({s.seg, s.deleted, s.dead}); }
 	return out;
 }
 
@@ -205,6 +206,14 @@ int main() {
 		CHECK(ix.digest() == serial.digest());
 		if (round % 3 == 2) { CHECK(ix.segments().size() > serial.segments().size()); }
 		const auto segs = snapshot(ix);
+		// Each segment's dead count is its bitmap's population (review R5).
+		for (const auto& v : ix.segments()) {
+			std::uint64_t bits = 0;
+			if (v.deleted) {
+				for (auto w : *v.deleted) { bits += std::uint64_t(std::popcount(w)); }
+			}
+			CHECK(v.dead == bits);
+		}
 		const statistics st = snapshot_statistics(segs);
 		CHECK(segs.size() > 3);
 		// The same documents in one segment.
@@ -325,6 +334,23 @@ int main() {
 			for (const auto& h : search(std::span<const segment_snapshot>(*view), builder, 1000)) { got.push_back(h.docid); }
 			CHECK(got == want);
 		}
+	}
+	// any_deleted reads the dead count when it has one (review R5) and scans the bitmap
+	// when the count is unknown.
+	{
+		std::vector<std::uint64_t> none(4, 0), some(4, 0);
+		some[3] = 1;
+		segment_snapshot s{nullptr, nullptr};
+		CHECK(s.dead == segment_snapshot::unknown_dead && !s.any_deleted());
+		s.deleted = &none;
+		CHECK(!s.any_deleted());
+		s.deleted = &some;
+		CHECK(s.any_deleted());
+		s.dead = 0;
+		CHECK(!s.any_deleted());
+		s.deleted = &none;
+		s.dead = 1;
+		CHECK(s.any_deleted());
 	}
 	// live_scorer nested where parents use two-phase iteration, its counting copy, and
 	// windows that do not start on a word.
