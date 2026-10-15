@@ -242,6 +242,24 @@ int main() {
 		CHECK(ix.segments().size() == 1 && ix.find_key(key) == kv(1, 1) && df() == 2);
 		CHECK(contents(ix).at(1).second == body);
 	}
+	// A conditional operation without a key is invalid, whatever the expected version: a
+	// keyless document has no version to compare (Phase 4 review, M3).
+	{
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		auto ix = strata::index::create(io, keyed, uuid);
+		auto v = ix.apply(tx({add("", "keyless")}), {});
+		const auto docid = v.docids[0];
+		for (std::uint64_t expected : {0u, 1u, 5u}) {
+			operation o; o.type = operation::delete_docid; o.docid = docid; o.expected_version = expected;
+			CHECK(ix.apply(tx({o}), {}).result == verdict::invalid);
+			o.type = operation::replace_docid; o.doc = doc("", "again");
+			CHECK(ix.apply(tx({o}), {}).result == verdict::invalid);
+		}
+		operation keyed_replace; keyed_replace.type = operation::replace_docid; keyed_replace.docid = 999; keyed_replace.doc = doc("Qn", "named");
+		keyed_replace.expected_version = 0;
+		CHECK(ix.apply(tx({keyed_replace}), {}).result == verdict::accepted);  // names its key: stays conditional
+	}
 	// Explicit docids, the key/docid agreement, and replayed positions.
 	{
 		faultfs::filesystem fs;

@@ -1120,6 +1120,8 @@ private:
 			const bool exists = by_key.has_value() || by_docid.found;
 			if (o.type == operation::add && exists) { return reject(verdict::version_conflict, current); }
 			if (o.expected_version) {
+				// A version belongs to a key: a conditional operation without one is invalid.
+				if (!key) { return reject(verdict::invalid); }
 				if (*o.expected_version == 0 ? exists : (!exists || *o.expected_version != current)) { return reject(verdict::version_conflict, current); }
 			}
 			if (o.type == operation::delete_key || o.type == operation::delete_docid) {
