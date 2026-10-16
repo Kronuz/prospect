@@ -12,6 +12,9 @@
 set -u
 name=${1:?usage: overnight.sh NAME}
 log() { echo "$(date +%T) $*"; }
+for s in query_trials.sh calibrate_rss.sh index_trials.sh write_amp.sh; do  # fail before the first step
+	[ -x ~/bench/$s ] || { log "missing ~/bench/$s: copy bench/ to the VM"; exit 1; }
+done
 res=~/bench/results
 q=$res/query-$name-merged
 mkdir -p "$q"
