@@ -176,52 +176,51 @@ struct hit {
 
 // The best k hits, as Tantivy's TopNComputer keeps them: a buffer of up to 2k hits that,
 // when full, keeps its k best (nth_element) and raises the threshold to the k-th best
-// score; amortized constant time per hit. Hits are keyed by ordinal, or by docid when
-// one collector spans segments (P6-2, begin()); ties keep the smaller key.
+// score; amortized constant time per hit. One collector may span segments (P6-2,
+// begin()): hits keep their segment and ordinal, and ties order by docid, read only when
+// two scores tie (within a segment, ordinal order is docid order).
 struct top_collector {
 	explicit top_collector(std::size_t k, bool counting) : k(k), counting(counting) { hits.reserve(2 * k + 1); }
 	// Scorers may skip whatever scores at or below this (0: nothing yet).
 	double min_competitive() const noexcept { return min_; }
 	// A threshold known before collection starts (another segment's k-th score, made
-	// strictly lower so equal scores still enter); it never decreases. Ordinal keys only.
+	// strictly lower so equal scores still enter); it never decreases. One segment only.
 	void seed(double floor) noexcept { min_ = floor_ = floor; }
-	// Keys the following hits by seg's docids; hits already kept stay (P6-2).
+	// The following hits are seg's; hits already kept stay (P6-2).
 	void begin(const segment& seg) {
-		seg_ = &seg;
+		segs_.push_back(&seg);
+		cur_ = std::uint32_t(segs_.size() - 1);
 		count = 0;
 		update_min();
 	}
 	void collect(ordinal_t d, double score) {
 		if (!k) { return; }
-		std::uint64_t key = d;
-		if (seg_) {
+		if (cur_ != none) {
 			// Review R2: a tie with the k-th enters only with a smaller docid.
-			if (full_ && score < kth_.score) { return; }
-			key = seg_->docid(d);
-			if (full_ && score == kth_.score && key >= kth_.key) { return; }
+			if (full_ && (score < kth_.score || (score == kth_.score && !before_kth(d)))) { return; }
 		} else if ((full_ || floor_ > 0) && score <= min_) {
 			return;
 		}
-		hits.push_back({key, score});
+		hits.push_back({score, d, cur_});
 		if (hits.size() >= 2 * k) { truncate(); }
 	}
-	// The k best, best first.
+	// The k best, best first (one segment, no begin()).
 	std::vector<hit> finish() {
 		if (hits.size() > k) { truncate(); }
-		std::sort(hits.begin(), hits.end(), better);
+		std::sort(hits.begin(), hits.end(), better());
 		std::vector<hit> out;
 		out.reserve(hits.size());
-		for (const auto& e : hits) { out.push_back({ordinal_t(e.key), e.score}); }
+		for (const auto& e : hits) { out.push_back({e.ord, e.score}); }
 		return out;
 	}
 	// The k best by docid, best first, after begin().
 	template <typename DocHit>
 	std::vector<DocHit> finish_docs() {
 		if (hits.size() > k) { truncate(); }
-		std::sort(hits.begin(), hits.end(), better);
+		std::sort(hits.begin(), hits.end(), better());
 		std::vector<DocHit> out;
 		out.reserve(hits.size());
-		for (const auto& e : hits) { out.push_back({e.key, e.score}); }
+		for (const auto& e : hits) { out.push_back({docid(e), e.score}); }
 		return out;
 	}
 	std::size_t k;
@@ -229,31 +228,47 @@ struct top_collector {
 	std::uint64_t count = 0;
 
 private:
+	static constexpr std::uint32_t none = ~std::uint32_t(0);
 	struct entry {
-		std::uint64_t key;
 		double score;
+		ordinal_t ord;
+		std::uint32_t seg;  // index into segs_, or none
 	};
-	static bool better(const entry& a, const entry& b) noexcept { return a.score != b.score ? a.score > b.score : a.key < b.key; }
+	std::uint64_t docid(const entry& e) const { return e.seg == none ? e.ord : segs_[e.seg]->docid(e.ord); }
+	// Best first: by score, then by docid.
+	struct order {
+		const top_collector* c;
+		bool operator()(const entry& a, const entry& b) const {
+			if (a.score != b.score) { return a.score > b.score; }
+			return a.seg == b.seg ? a.ord < b.ord : c->docid(a) < c->docid(b);
+		}
+	};
+	order better() const { return {this}; }
+	// Whether ordinal d of the current segment precedes the k-th hit by docid.
+	bool before_kth(ordinal_t d) const { return kth_.seg == cur_ ? d < kth_.ord : segs_[cur_]->docid(d) < kth_docid_; }
 	void truncate() {
-		std::nth_element(hits.begin(), hits.begin() + std::ptrdiff_t(k - 1), hits.end(), better);
+		std::nth_element(hits.begin(), hits.begin() + std::ptrdiff_t(k - 1), hits.end(), better());
 		hits.resize(k);
 		kth_ = hits[k - 1];
+		if (kth_.seg != none) { kth_docid_ = docid(kth_); }
 		full_ = true;
 		update_min();
 	}
-	// Ordinal keys: later hits have larger keys, so a tie never enters. Docid keys: only
-	// when every docid of the segment exceeds the k-th's (review R2).
+	// One segment: later hits have larger ordinals, so a tie never enters. Across segments:
+	// only when every docid of the current segment exceeds the k-th's (review R2).
 	void update_min() noexcept {
 		if (!full_) { return; }
-		if (!seg_) {
+		if (cur_ == none) {
 			min_ = std::max(floor_, kth_.score);
 		} else {
-			min_ = seg_->min_docid() > kth_.key ? kth_.score : std::nextafter(kth_.score, -std::numeric_limits<double>::infinity());
+			min_ = segs_[cur_]->min_docid() > kth_docid_ ? kth_.score : std::nextafter(kth_.score, -std::numeric_limits<double>::infinity());
 		}
 	}
 	std::vector<entry> hits;
-	entry kth_{0, 0};
-	const segment* seg_ = nullptr;
+	std::vector<const segment*> segs_;
+	entry kth_{0, 0, none};
+	std::uint64_t kth_docid_ = 0;
+	std::uint32_t cur_ = none;
 	double min_ = 0, floor_ = 0;
 	bool full_ = false;
 };
