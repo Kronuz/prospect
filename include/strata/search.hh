@@ -1429,9 +1429,7 @@ inline std::optional<std::uint64_t> disjunction_scorer::exact_count() {
 	both.push_back(std::move(a));
 	both.push_back(std::move(b));
 	conjunction_scorer and_(std::move(both));
-	std::uint64_t common = 0;
-	for (ordinal_t d = and_.next(); d != no_more_docs; d = and_.next()) { ++common; }
-	return counts[0] + counts[1] - common;
+	return counts[0] + counts[1] - count(and_);
 }
 
 }  // namespace strata
