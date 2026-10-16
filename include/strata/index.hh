@@ -217,7 +217,7 @@ public:
 		ix.opts_ = opts;
 		if (opts.budget) { ix.permit_ = opts.budget->open(); }
 		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
-		if (opts.background) { ix.group_ = opts.background->open(); }
+		ix.start_merges();
 		ix.commit();
 		return ix;
 	}
@@ -240,7 +240,7 @@ public:
 		ix.opts_ = opts;
 		if (opts.budget) { ix.permit_ = opts.budget->open(); }
 		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
-		if (opts.background) { ix.group_ = opts.background->open(); }
+		ix.start_merges();
 		ix.recover(to);
 		return ix;
 	}
@@ -320,63 +320,14 @@ public:
 		if (opts_.auto_merge) { maybe_merge(); }
 	}
 
-	// Merges the given segments into one (searchable, not yet durable) on the caller's
-	// thread: their live documents in docid order, deleted ones dropped. Nothing is written
-	// when none is live.
+	// Merges the given segments into one (searchable, not yet durable), waiting for it: their
+	// live documents in docid order, deleted ones dropped. Nothing is written when none is
+	// live; no room for the output throws, after the merge leaves no trace.
 	void merge(const std::vector<std::uint64_t>& ids) {
 		live();
-		guarded([&] {
-			std::vector<merge_source> sources;
-			std::vector<std::size_t> picked;
-			for (std::size_t i = 0; i < segs_.size(); ++i) {
-				if (std::find(ids.begin(), ids.end(), segs_[i]->ref.id) != ids.end()) {
-					sources.push_back({&segs_[i]->seg, &segs_[i]->deleted});
-					picked.push_back(i);
-				}
-			}
-			if (picked.empty()) { return; }
-			// Storage admission: an estimate of the output (the sources' bytes, docids at up to
-			// 10 bytes a document plus 16 a block, versions at up to 8, the fixed bytes once),
-			// grown to the output's real size before it is written, which can exceed it.
-			std::uint64_t need = segment_overhead;
-			for (std::size_t i : picked) {
-				const std::uint64_t docs = segs_[i]->seg.doc_count();
-				need += segs_[i]->bytes.size() + 18 * docs + 16 * (docs / format::block + 1);
-			}
-			if (storage_permit_ && !storage_permit_.try_grow(need) && !(drain() && storage_permit_.try_grow(need))) {
-				throw space_error(std::make_error_code(std::errc::no_space_on_device), "strata: no storage reserved for a merge");
-			}
-			hold held{this};
-			if (storage_permit_) { held.add(need); }
-			const std::uint64_t id = m_.next_segment++;
-			std::array<std::uint8_t, 16> header{};
-			std::memcpy(header.data(), &id, 8);
-			std::memcpy(header.data() + 8, m_.uuid.data(), 8);
-			std::string bytes;
-			string_output out(bytes);
-			string_spill spill;
-			const auto plan = merge_segments(sources, header, out, spill, m_.key_prefix);
-			if (storage_permit_ && bytes.size() > need) {
-				const std::uint64_t more = bytes.size() - need;
-				if (!storage_permit_.try_grow(more) && !(drain() && storage_permit_.try_grow(more))) {
-					throw space_error(std::make_error_code(std::errc::no_space_on_device), "strata: no storage reserved for a merge's output");
-				}
-				held.add(more);
-			}
-			std::unique_ptr<open_segment> merged;
-			if (plan.doc_count) {
-				auto file = write_unsynced(index_detail::segment_name(id), bytes);
-				files::segment_ref ref;
-				ref.id = id;
-				ref.size = bytes.size();
-				ref.footer_crc = format::decode_footer(bytes).toc_crc;
-				ref.doc_count = plan.doc_count;
-				merged = std::make_unique<open_segment>(ref, std::move(bytes));
-				merged->unsynced = std::move(file);
-			}
-			for (std::size_t k = picked.size(); k-- > 0;) { segs_.erase(segs_.begin() + std::ptrdiff_t(picked[k])); }
-			if (merged) { segs_.emplace_back(std::move(merged)); }
-		});
+		publish_merges(true, false);
+		schedule(ids);
+		publish_merges(true, true);
 	}
 
 	// Merges until at most `max_segments` remain and none holds deletes, by the policy's
@@ -673,7 +624,7 @@ public:
 		// The copy, re-encoded live docs (16 bytes for their new names' fields), and the
 		// commit's metadata file and manifest.
 		std::uint64_t need = theirs.meta.size + 96 + files::encode(theirs).size() + 160 * theirs.segments.size();
-		for (const auto& s : got.segments) { need += s->bytes.size() + (s->ref.live.generation ? s->ref.live.size + 16 : 0); }
+		for (const auto& s : got.segments) { need += s->ref.size + (s->ref.live.generation ? s->ref.live.size + 16 : 0); }
 		if (storage_permit_ && !storage_permit_.try_grow(need) && !(drain() && storage_permit_.try_grow(need))) {
 			throw std::system_error(std::make_error_code(std::errc::no_space_on_device), "strata: no storage reserved for an install");
 		}
@@ -685,7 +636,7 @@ public:
 				files::segment_ref mine = s->ref;
 				mine.id = m_.next_segment++;
 				mine.live = {};
-				write_new(index_detail::segment_name(mine.id), s->bytes);
+				write_new(index_detail::segment_name(mine.id), s->bytes());
 				if (s->ref.live.generation) {
 					files::live_docs l;
 					l.segment = mine.id;
@@ -740,28 +691,35 @@ private:
 	template <class Find>
 	void run_merges(Find find, bool wait) {
 		live();
-		if (group_ && wait) { publish_merges(true, false); }
+		if (wait) { publish_merges(true, false); }
 		for (;;) {
 			std::vector<merge_policy::candidate> c;
 			for (const auto& s : segs_) {
 				if (merging(*s) || s->damaged) { continue; }
 				std::uint64_t deleted = 0;
 				for (auto w : s->deleted) { deleted += std::uint64_t(std::popcount(w)); }
-				c.push_back({s->ref.id, s->bytes.size(), s->seg.doc_count(), deleted});
+				c.push_back({s->ref.id, s->ref.size, s->seg.doc_count(), deleted});
 			}
 			const auto merges = find(std::move(c));
 			if (merges.empty()) { return; }
-			if (!group_) {
-				for (const auto& ids : merges) { merge(ids); }
-				continue;
-			}
 			for (const auto& ids : merges) { schedule(ids); }
-			if (!wait) { return; }
+			if (!wait && !own_exec_) { return; }  // the index's own executor runs them now
 			publish_merges(true, true);
 		}
 	}
 
 	explicit index(kronuz::journal::IO& io) : io_(&io) {}
+
+	// Merges run on the host's executor, or on the index's own inline one, synchronously
+	// on the writer's thread, when it passes none: one merge implementation either way.
+	void start_merges() {
+		exec_ = opts_.background;
+		if (!exec_) {
+			own_exec_ = std::make_unique<inline_executor>();
+			exec_ = own_exec_.get();
+		}
+		group_ = exec_->open();
+	}
 
 	// --- memory -----------------------------------------------------------------------------
 
@@ -792,14 +750,18 @@ private:
 
 	struct open_segment {
 		files::segment_ref ref;
-		std::string bytes;
+		std::shared_ptr<const kronuz::journal::Mapping> mapping;  // the file, mapped (ARCHITECTURE, I/O)
+		std::string owned;                                         // or its bytes, when the backend cannot map
 		segment seg;
 		std::vector<std::uint64_t> deleted;  // bit per ordinal
 		std::uint64_t dead = 0;              // bits set in deleted
 		bool deletes_dirty = false;          // deletes since its live-docs generation
 		bool damaged = false;                // a background merge found it corrupt; heal() clears it
 		std::unique_ptr<kronuz::journal::File> unsynced;  // flushed, awaiting the commit's sync
-		open_segment(files::segment_ref r, std::string b) : ref(r), bytes(std::move(b)), seg(bytes), deleted((seg.doc_count() + 63) / 64, 0) {}
+		open_segment(files::segment_ref r, std::string b) : ref(r), owned(std::move(b)), seg(owned), deleted((seg.doc_count() + 63) / 64, 0) {}
+		open_segment(files::segment_ref r, std::shared_ptr<const kronuz::journal::Mapping> m)
+			: ref(r), mapping(std::move(m)), seg(mapping->bytes()), deleted((seg.doc_count() + 63) / 64, 0) {}
+		std::string_view bytes() const noexcept { return mapping ? mapping->bytes() : std::string_view(owned); }
 	};
 	// A background merge. The writer sets everything above `plan` before handing it to the
 	// executor; the merge grows `storage` and `reserved`, sets the rest, then `done`, and the
@@ -855,6 +817,15 @@ private:
 		}
 	}
 
+	// A segment just written to f: mapped when the backend maps and the mapping holds what
+	// was written (size and footer), so its bytes leave memory; else kept.
+	static std::unique_ptr<open_segment> written_segment(kronuz::journal::File& f, const files::segment_ref& r, std::string bytes) {
+		if (auto m = f.map(); m && m->bytes().size() == r.size && format::decode_footer(m->bytes()).toc_crc == r.footer_crc) {
+			return std::make_unique<open_segment>(r, std::move(m));
+		}
+		return std::make_unique<open_segment>(r, std::move(bytes));
+	}
+
 	// Creates a file and writes it whole. ENOSPC removes the partial file and throws
 	// space_error; the caller has changed nothing yet.
 	std::unique_ptr<kronuz::journal::File> write_unsynced(const std::string& name, std::string_view bytes) {
@@ -894,7 +865,7 @@ private:
 			const std::uint64_t docs = s->seg.doc_count();
 			job->sources.push_back(s);
 			job->deleted.push_back(s->deleted);
-			job->reserved += s->bytes.size() + 18 * docs + 16 * (docs / format::block + 1);
+			job->reserved += s->ref.size + 18 * docs + 16 * (docs / format::block + 1);
 		}
 		if (job->sources.empty()) { return; }
 		if (storage_permit_) {
@@ -907,7 +878,7 @@ private:
 		std::memcpy(job->header.data(), &job->id, 8);
 		std::memcpy(job->header.data() + 8, m_.uuid.data(), 8);
 		pending_.reserve(pending_.size() + 1);
-		const merge_context ctx{io_, opts_.background, opts_.rate, opts_.budget, opts_.merge_memory_wait, m_.key_prefix};
+		const merge_context ctx{io_, exec_, opts_.rate, opts_.budget, opts_.merge_memory_wait, m_.key_prefix};
 		group_->post([job, ctx](const task::cancel_token& stop) { run_merge(*job, ctx, stop); });
 		pending_.push_back(std::move(job));
 	}
@@ -1054,7 +1025,7 @@ private:
 				std::uint64_t dead = 0;
 				for (auto w : job.deleted[k]) { dead += std::uint64_t(std::popcount(w)); }
 				live += job.sources[k]->seg.doc_count() - dead;
-				estimate += job.sources[k]->bytes.size();
+				estimate += job.sources[k]->ref.size;
 			}
 			if (live == 0) {  // nothing to write: publication drops the sources
 				job.done.store(true, std::memory_order_release);
@@ -1073,6 +1044,7 @@ private:
 			const std::string name = index_detail::segment_name(job.id);
 			auto file = ctx.io->create_exclusive(name);
 			std::string bytes;
+			std::shared_ptr<const kronuz::journal::Mapping> mapped;  // the output, mapped; else read into bytes
 			try {
 				const std::size_t chunk = ctx.rate ? ctx.rate->chunk() : std::size_t(1) << 20;
 				std::uint64_t used = 0;
@@ -1084,21 +1056,26 @@ private:
 				}
 				sink.finish();
 				job.memory.shrink(job.memory.held());  // the build's buffers are gone
-				bytes = index_detail::read_all(*ctx.io->open_existing(name));
-				if (bytes.size() != out.size()) { throw std::system_error(EIO, std::generic_category(), "strata: a merge's output reads back short"); }
-				job.memory.grow(bytes.capacity());
+				if (!(mapped = file->map())) {
+					bytes = index_detail::read_all(*ctx.io->open_existing(name));
+					job.memory.grow(bytes.capacity());
+				}
+				if ((mapped ? mapped->bytes().size() : bytes.size()) != out.size()) {
+					throw std::system_error(EIO, std::generic_category(), "strata: a merge's output reads back short");
+				}
 			} catch (...) {
 				file.reset();
 				ctx.io->remove(name);
 				ctx.io->sync_directory();  // the partial file's space returns once its removal is durable
 				throw;
 			}
+			const std::string_view view = mapped ? mapped->bytes() : std::string_view(bytes);
 			files::segment_ref ref;
 			ref.id = job.id;
-			ref.size = bytes.size();
-			ref.footer_crc = format::decode_footer(bytes).toc_crc;
+			ref.size = view.size();
+			ref.footer_crc = format::decode_footer(view).toc_crc;
 			ref.doc_count = job.plan.doc_count;
-			job.output = std::make_unique<open_segment>(ref, std::move(bytes));
+			job.output = mapped ? std::make_unique<open_segment>(ref, std::move(mapped)) : std::make_unique<open_segment>(ref, std::move(bytes));
 			job.output->unsynced = std::move(file);
 		} catch (const std::system_error& e) {
 			job.error = e.code().value() == ENOSPC ? std::make_exception_ptr(space_error(e.code(), e.what())) : std::current_exception();
@@ -1116,7 +1093,7 @@ private:
 	void publish_merges(bool wait, bool space_throws) {
 		if (!group_ || pending_.empty()) { return; }
 		if (wait) { group_->wait(); }
-		bool space = false;
+		std::optional<std::string> space;  // the first refusal's own message: admission's or the disk's
 		for (std::size_t i = 0; i < pending_.size();) {
 			if (!pending_[i]->done.load(std::memory_order_acquire)) {
 				++i;
@@ -1129,8 +1106,8 @@ private:
 				job->memory.settle();
 				try {
 					std::rethrow_exception(job->error);
-				} catch (const space_error&) {
-					space = true;
+				} catch (const space_error& e) {
+					if (!space) { space = e.what(); }
 					continue;
 				} catch (const task::cancelled&) {
 					continue;
@@ -1146,7 +1123,7 @@ private:
 			install_merge(*job);
 		}
 		settle_storage();
-		if (space && space_throws) { throw std::system_error(std::make_error_code(std::errc::no_space_on_device), "strata: no space for a merge's output"); }
+		if (space && space_throws) { throw space_error(std::make_error_code(std::errc::no_space_on_device), *space); }
 	}
 
 	[[noreturn]] void fence(const std::string& why) {
@@ -1184,7 +1161,7 @@ private:
 		const std::string name = index_detail::segment_name(job.id);
 		auto reclaim_output = [&] {
 			if (!job.output) { return; }
-			track(name, job.output->bytes.size());
+			track(name, job.output->ref.size);
 			job.output.reset();
 			reclaim_.push_back(name);
 			queued_.insert(name);
@@ -1224,7 +1201,7 @@ private:
 			if (job.output) {
 				// Its id was taken at scheduling, below any flushed since: it goes in id order,
 				// which the manifest requires.
-				track(name, job.output->bytes.size());
+				track(name, job.output->ref.size);
 				const auto at_id = std::lower_bound(segs_.begin(), segs_.end(), job.id, [](const auto& s, std::uint64_t id) { return s->ref.id < id; });
 				segs_.emplace(at_id, std::move(job.output));
 			}
@@ -1242,7 +1219,7 @@ private:
 		for (const auto& job : pending_) {
 			if (job->done.load(std::memory_order_acquire) && job->output) {
 				const std::string name = index_detail::segment_name(job->id);
-				track(name, job->output->bytes.size());
+				track(name, job->output->ref.size);
 				job->output.reset();
 				reclaim_.push_back(name);
 				queued_.insert(name);
@@ -1693,7 +1670,7 @@ private:
 				ref.size = bytes.size();
 				ref.footer_crc = format::decode_footer(bytes).toc_crc;
 				ref.doc_count = docs.size() * (k + 1) / runs - docs.size() * k / runs;
-				auto seg = std::make_unique<open_segment>(ref, std::move(bytes));
+				auto seg = written_segment(*file, ref, std::move(bytes));
 				seg->unsynced = std::move(file);
 				segs_.emplace_back(std::move(seg));
 				charges[k].settle();
@@ -2051,9 +2028,21 @@ private:
 		return out;
 	}
 	static std::unique_ptr<open_segment> load_segment(kronuz::journal::IO& io, const files::segment_ref& r, bool whole) {
-		std::string bytes = read_named(io, index_detail::segment_name(r.id), r.size);
-		if (format::decode_footer(bytes).toc_crc != r.footer_crc) { throw corrupt_index("segment differs from its manifest entry"); }
-		auto s = std::make_unique<open_segment>(r, std::move(bytes));
+		const std::string name = index_detail::segment_name(r.id);
+		std::unique_ptr<kronuz::journal::File> f;
+		try {
+			f = io.open_existing(name);
+		} catch (const std::system_error& e) {
+			if (e.code().value() != ENOENT) { throw; }
+			throw corrupt_index("missing file: " + name);
+		}
+		auto mapped = f->map();
+		std::string bytes;
+		if (!mapped) { bytes = index_detail::read_all(*f); }
+		const std::string_view view = mapped ? mapped->bytes() : std::string_view(bytes);
+		if (view.size() != r.size) { throw corrupt_index("file size differs from the manifest: " + name); }
+		if (format::decode_footer(view).toc_crc != r.footer_crc) { throw corrupt_index("segment differs from its manifest entry"); }
+		auto s = mapped ? std::make_unique<open_segment>(r, std::move(mapped)) : std::make_unique<open_segment>(r, std::move(bytes));
 		if (s->seg.doc_count() != r.doc_count) { throw corrupt_index("segment document count"); }
 		if (whole) { s->seg.verify_all(); }
 		if (r.live.generation) {
@@ -2072,6 +2061,8 @@ private:
 	}
 
 	std::unique_ptr<executor::group> group_;  // first: assigned first and ended first, in ~index()
+	std::unique_ptr<inline_executor> own_exec_;  // merges' executor when the host passes none
+	executor* exec_ = nullptr;
 	kronuz::journal::IO* io_;
 	std::unique_ptr<kronuz::journal::OwnerLock> lock_;
 	options opts_;

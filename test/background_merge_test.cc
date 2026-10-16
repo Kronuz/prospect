@@ -529,6 +529,7 @@ static void space_and_faults(std::size_t threads) {
 static void damaged_source(std::size_t threads) {
 	background bg(threads);
 	faultfs::filesystem fs;
+	fs.map_files(false);  // media faults act on reads
 	faultfs::io io(fs);
 	const auto o = bg.options();
 	auto ix = strata::index::create(io, o, uuid);

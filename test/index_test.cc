@@ -84,26 +84,6 @@ static std::string live_deltas(const files::live_docs& l) {
 	return out;
 }
 
-// faultfs::io that runs `on_segment` when a segment file is created, before its bytes.
-class watch_io final : public kronuz::journal::IO {
-public:
-	watch_io(faultfs::io& inner, std::function<void()> on_segment) : inner_(&inner), on_segment_(std::move(on_segment)) {}
-	std::unique_ptr<kronuz::journal::OwnerLock> acquire_owner(bool create) override { return inner_->acquire_owner(create); }
-	std::unique_ptr<kronuz::journal::File> open_existing(std::string_view name) override { return inner_->open_existing(name); }
-	std::unique_ptr<kronuz::journal::File> create_exclusive(std::string_view name) override {
-		if (name.starts_with("seg-") && name.ends_with(".sx")) { on_segment_(); }
-		return inner_->create_exclusive(name);
-	}
-	void replace(std::string_view a, std::string_view b) override { inner_->replace(a, b); }
-	void remove(std::string_view name) override { inner_->remove(name); }
-	std::unique_ptr<kronuz::journal::DirectoryCursor> scan_directory() override { return inner_->scan_directory(); }
-	void sync_directory() override { inner_->sync_directory(); }
-
-private:
-	faultfs::io* inner_;
-	std::function<void()> on_segment_;
-};
-
 // faultfs::io, but the n-th later open_existing of one name fails once with `error`.
 class flaky_io final : public kronuz::journal::IO {
 public:
@@ -648,24 +628,14 @@ int main() {
 			byte_budget tight(storage.used() + room);  // the same index, reopened on a budget this tight
 			ix.close();
 			o.storage = &tight;
-			// When the merged segment is created, what the budget holds beyond the files on
-			// disk must cover the whole output (review L5).
-			std::uint64_t spare = 0;
-			watch_io watched(io, [&] {
-				std::uint64_t bytes = 0;
-				for (const auto& n : fs.list()) { bytes += fs.view(n).size(); }
-				spare = tight.used() > bytes ? tight.used() - bytes : 0;
-			});
-			ix = strata::index::open(watched, o);
+			// A merge streams its output, drawing on the budget before each chunk (review L5,
+			// as background merges do): with the disk holding just what the budget has, a write
+			// past the reservation would meet the disk's ENOSPC, not admission's refusal.
+			ix = strata::index::open(io, o);
 			fs.set_capacity(fs.used() + (tight.capacity() - tight.used()));  // the disk has what the budget has
 			try {
 				ix.merge(ids);
 				CHECK(ix.segments().size() == 1);
-				std::uint64_t output = 0;
-				for (const auto& n : fs.list()) {
-					if (n == index_detail::segment_name(ix.segments()[0].id)) { output = fs.view(n).size(); }
-				}
-				CHECK(spare >= output);
 				++merged;
 			} catch (const std::system_error& e) {
 				CHECK(std::string(e.what()).find("no storage reserved") != std::string::npos);  // admission, not the disk

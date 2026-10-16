@@ -24,7 +24,7 @@ set(COMPRESSORS_LZ4 OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG 7a6cc22f8a4eaceefd098374c05cdc2935c0fd19)
 FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG b4f4ce1932c8e204fb6bebd34f83f5b10de7b51c)
 # Index I/O goes through kronuz::journal::IO, from the completion library.
-FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG 64d958b0f416fdd576c1dc7916176eec131b25cd)
+FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG e6c28aaef09c5beff099f7f9cc47ecd517ba02d7)
 # Background merges' default threaded executor: one pool per node, a task group per index.
 FetchContent_Declare(threadpool GIT_REPOSITORY https://github.com/Kronuz/threadpool.git GIT_TAG fdc0a1ef216aaf5357c92a6d09d6b60af65e66db)
 FetchContent_MakeAvailable(docset bitpack fst task hashes residency varint termdict unicode snowball analysis compressors fusefilter completion threadpool)
@@ -104,6 +104,13 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(search_test test/search_test.cc)
   target_link_libraries(search_test PRIVATE strata)
   add_test(NAME search COMMAND search_test)
+  # The same lifecycles over mapped segments: faultfs maps files, and aborts when a file
+  # is truncated below a live mapping. Lifecycle at a quarter of its crash points.
+  foreach(t index reclaim lifecycle background_merge multisegment)
+    add_test(NAME ${t}_mapped COMMAND ${t}_test)
+    set_tests_properties(${t}_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+  endforeach()
+  set_tests_properties(lifecycle_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1;STRATA_CRASH_POINTS=2500;STRATA_BG_CRASH_POINTS=500")
   # Fuzz targets: each target's checked-in corpus replays as a test in every build; with
   # STRATA_FUZZ (Clang) the libFuzzer binaries build too.
   option(STRATA_FUZZ "Build the libFuzzer targets (Clang)" OFF)
