@@ -185,6 +185,7 @@ using scorer_builder = std::function<scorer_ptr(const segment&)>;
 inline std::vector<doc_hit> search(std::span<const segment_snapshot> segs, const scorer_builder& build, std::size_t k, std::uint64_t* count = nullptr) {
 	if (count) { *count = 0; }
 	top_collector c(k, false);
+	c.expect_segments(segs.size());
 	for (const auto& s : segs) {
 		scorer_ptr q = build(*s.seg);
 		if (!q) { continue; }

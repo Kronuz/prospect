@@ -186,6 +186,8 @@ struct top_collector {
 	// A threshold known before collection starts (another segment's k-th score, made
 	// strictly lower so equal scores still enter); it never decreases. One segment only.
 	void seed(double floor) noexcept { min_ = floor_ = floor; }
+	// Room for the segments begin() will name, so collection allocates once.
+	void expect_segments(std::size_t n) { segs_.reserve(n); }
 	// The following hits are seg's; hits already kept stay (P6-2).
 	void begin(const segment& seg) {
 		segs_.push_back(&seg);
@@ -201,7 +203,7 @@ struct top_collector {
 		} else if ((full_ || floor_ > 0) && score <= min_) {
 			return;
 		}
-		hits.push_back({score, d, cur_});
+		hits.push_back({score, d, cur_, 0});
 		if (hits.size() >= 2 * k) { truncate(); }
 	}
 	// The k best, best first (one segment, no begin()).
@@ -232,9 +234,14 @@ private:
 	struct entry {
 		double score;
 		ordinal_t ord;
-		std::uint32_t seg;  // index into segs_, or none
+		std::uint32_t seg;                // index into segs_, or none
+		mutable std::uint64_t docid = 0;  // read once, when a tie first needs it (0: not yet)
 	};
-	std::uint64_t docid(const entry& e) const { return e.seg == none ? e.ord : segs_[e.seg]->docid(e.ord); }
+	std::uint64_t docid(const entry& e) const {
+		if (e.seg == none) { return e.ord; }
+		if (!e.docid) { e.docid = segs_[e.seg]->docid(e.ord); }
+		return e.docid;
+	}
 	// Best first: by score, then by docid.
 	struct order {
 		const top_collector* c;
@@ -276,7 +283,7 @@ private:
 	}
 	std::vector<entry> hits;
 	std::vector<const segment*> segs_;
-	entry kth_{0, 0, none};
+	entry kth_{0, 0, none, 0};
 	std::uint64_t kth_docid_ = 0;
 	std::uint32_t cur_ = none;
 	double min_ = 0, floor_ = 0;
