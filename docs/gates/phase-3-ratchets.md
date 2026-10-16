@@ -95,6 +95,25 @@ changed the single-segment path is settled by a same-session A/B (P6 review R3).
 | `COUNT` | two-phase-critic | 1 | 5 | 38,848 | 46,443 | 28,860 | 137,079 | 1.34× [1.30–1.44] | 1.34× [1.30–1.44]  | 0.283× [0.278–0.293] |
 | `COUNT` | union | 301 | 5 | 1,583 | 1,083 | 2,302 | 67,110 | 1.60× [1.55–1.77] | 1.69× [1.63–1.90]  | 0.023× [0.023–0.023] |
 
+## Gate status (2026-10-15)
+
+PLAN's Phase 3 gate, row by row. The query rows are carried (PLAN, "Carried rows"): the
+gate records their ratios and gaps, and Phase 4's gate does not pass while they miss.
+
+| Row | State | Where |
+|---|---|---|
+| Power loss at ≥ 10,000 crash points; crashes during recovery | Pass | `phase-3-lifecycle.md` (T1), background merges at 10,000 points at `e8accae` |
+| Digest equal across two replays | Pass | `phase-3-lifecycle.md` (T2) |
+| Disk full: fail closed, no corruption, recovery | Pass | `phase-3-lifecycle.md` (T5) |
+| Queries after merging (strata force-merged, baselines force-merged), five trials | Running overnight (`bench/overnight.sh n1`) | below, when recorded |
+| Queries before merging (baselines unmerged at equal memory) | Owed: calibration on the full corpus, then a scheduled night | — |
+| Indexing, 1 and 8 threads, keyed (T4), five trials at equal memory | Running overnight | below, when recorded |
+| Write amplification against Lucene (T3), append-only and replace-heavy | Running overnight | below, when recorded |
+| Memory (serving and indexing peaks), disk after a full merge, per section | Owed: untimed runs on the VM | — |
+| `verify` and `parity` on multi-segment indexes | Owed: untimed runs on the VM | — |
+| Coverage targets and the test-parity inventory's Phase 3 rows | Owed | — |
+| The rows on FreeBSD and arm64 (before Phase 3R) | Owed: FreeBSD VM; an arm64 host | — |
+
 ## Still unmeasured
 
 - The same rows on macOS arm64 bare metal and on FreeBSD. They are required before Phase
