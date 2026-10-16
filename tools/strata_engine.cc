@@ -3,6 +3,7 @@
 //   strata_engine serve DIR                  "COMMAND\tquery" lines -> one count per line
 //   strata_engine terms DIR                  every term and its document frequency
 //   strata_engine dictstats DIR              the term dictionary's bytes by part
+//   strata_engine sections DIR               each section's kind and length, then the file size
 //   strata_engine check DIR                  every byte verified and every structure decoded
 //   strata_engine verify DIR < queries.txt   pruned top-k equals an exhaustive scan, k = 10, 100, 1000,
 //                                            ordinals and scores, Lucene and Xapian BM25
@@ -225,6 +226,20 @@ int terms(const std::string& dir) {
 		std::cout << key << '\t' << info.df << '\n';
 		return true;
 	});
+	return 0;
+}
+
+// Every section's kind and length in bytes, in file order, then the file's size.
+int sections(const std::string& dir) {
+	residency::file file;
+	strata::segment seg = open(dir, file);
+	static constexpr const char* names[] = {"header", "terms", "term_index", "postings", "positions", "lengths",
+		"stored", "docids", "stats", "norms", "versions", "pk_filter"};
+	for (const auto& e : seg.sections()) {
+		const auto k = std::size_t(e.kind);
+		std::cout << (k < std::size(names) ? names[k] : "unknown") << '\t' << e.length << '\n';
+	}
+	std::cout << "file\t" << file.size() << '\n';
 	return 0;
 }
 
@@ -648,6 +663,7 @@ int main(int argc, char** argv) {
 	if (mode == "merge" && argc == 3) { return merge(argv[2]); }
 	if (mode == "serve" && argc == 3) { return serve(argv[2]); }
 	if (mode == "terms" && argc == 3) { return terms(argv[2]); }
+	if (mode == "sections" && argc == 3) { return sections(argv[2]); }
 	if (mode == "dictstats" && argc == 3) { return dictstats(argv[2]); }
 	if (mode == "dictdump" && argc == 4) { return dictdump(argv[2], argv[3]); }
 	if (mode == "check" && argc == 3) {
