@@ -157,10 +157,10 @@ broke that:
    document's score changed with the segment holding it (`+b +d +c`: 2.4067498299436387
    in one segment, 2.4067498299436392 across sixteen) and could change at a merge. They
    now sum in clause order, as Lucene's `ConjunctionScorer` does.
-2. **Disjunctions' window path** still adds essential clauses in bound order, and the
-   non-essential ones afterwards, both depending on the threshold. Owed: summing each
-   window's per-clause contributions in clause order, measured against today's path,
-   since it adds a per-clause buffer per window.
+2. **Disjunctions** added clauses in bound order, in `score()` and in the window path,
+   and the bound order depends on the segment. They now sum in clause order (`2fc2a0b`);
+   the window path keeps one score buffer per clause instead of one shared buffer. Its
+   cost and a cheaper exact alternative are below ("The cost of determinism").
 
 Not recommended: a term cache shared across queries of one snapshot. The benchmark
 repeats queries, so it would measure cache hits, and neither baseline does it (Lucene's
@@ -230,3 +230,66 @@ buffer is 2,047 MB, eight times strata's 256 MB. The comparison needs:
 
 P6's target follows from that table: strata's 16-segment overhead at or below Lucene's
 at its natural count.
+
+## Merged-index results (R6), for review
+
+Quick A/Bs (`bench/quick/ab.sh`) on the gate VM, 5M documents force-merged to one segment,
+each step against the one before it; B/A of the geometric mean of per-query bests, with
+the 95% bootstrap interval. The A/A noise floor is about ±2%. R6's bar on the merged
+index is an upper bound at or below 1.03.
+
+| Step | Command | Queries (962) | Single terms (200) | Verdict |
+|---|---|---|---|---|
+| P6-1, P6-2, P6-3, P6-7, R5, conjunction clause order (`p6base` → `p6c`) | `TOP_10` | 0.984 [0.977–0.992] | 0.982 [0.972–0.991] | Passes |
+| | `TOP_1000` | 0.981 [0.973–0.988] | 0.993 [0.976–1.010] | Passes |
+| Disjunction clause order (`p6c` → `p6d`) | `TOP_10` | 1.038 [1.030–1.046] | 0.990 [0.983–0.998] | Fails on queries |
+| | `TOP_1000` | 1.054 [1.046–1.062] | 0.999 [0.987–1.014] | Fails on queries |
+| P6-2's docid work (`p6d` → `p6`) | `TOP_10` | 1.019 [1.011–1.026] | 1.083 [1.070–1.096] | Superseded by `c963cfa` |
+| | `TOP_1000` | 1.002 [0.995–1.010] | 1.047 [1.030–1.062] | Superseded by `c963cfa` |
+
+Three rounds each; zero result mismatches in every run.
+
+1. **The disjunction's clause-order sum is the one real cost on one segment:** 4–5% on
+   the query set, nothing on single terms, which have no disjunction. On the 16-segment
+   index the same change reads 1.01–1.05× on queries (`p6d2`, six rounds).
+2. **P6-2's cross-segment bookkeeping** cost 5–8% on single terms over one segment;
+   `c963cfa` sends a one-segment snapshot down the single-segment path, so that cost is
+   gone by construction. Its own A/B (`p6m2`, base against the whole of P6 with it) is
+   not usable: single-term rounds swing from 0.85× to 1.27× on code paths P6 does not
+   change. It is rerun on a quiet night.
+
+## The cost of determinism, and a proposal
+
+Floating-point addition is not associative, so a document's score depends on the order
+its clause scores are summed. Fixing that order to the query's clause order makes scores
+independent of the segment (R2's rule depends on it), but the window path then needs a
+buffer per clause, where it had one shared accumulator: more stores and loads per
+document per clause, which is the 4–5% above.
+
+**Proposal: sum clause scores in fixed point.** Integer addition is associative, so any
+order gives the same sum, and the window path goes back to one shared accumulator.
+
+1. Each clause score rounds once to a 64-bit fixed-point value with 40 fractional bits
+   (a grid of 2^-40, about 9.1 × 10^-13). A clause's score depends only on the document
+   and the snapshot's statistics, so its rounded value is the same in every segment.
+2. An unboosted BM25 clause score is at most `idf · (k1 + 1)`, under 2^7 for any index
+   below 2^40 documents, so 23 integer bits hold any sum of up to 2^16 clauses without overflow.
+3. Bounds round up to the grid and thresholds compare in the integer domain, so MaxScore
+   and block-max pruning keep exact upper bounds.
+4. The final score is the integer times 2^-40, one conversion per collected hit.
+
+What changes for users: scores move by at most half a grid step per clause against a
+double sum in clause order, and two documents whose scores differ by less than that may
+tie, which R2's docid order resolves. Lucene's scores are `float`s, so neither form
+reproduces Lucene's bits; parity is by result order and tolerance either way.
+
+**For the architect:**
+
+1. Whether fixed-point clause sums are acceptable as the scoring contract, given the
+   tolerance above and the parity and oracle tests' reliance on double scores.
+2. Whether the disjunction's 4–5% on the merged index waits for that prototype, or the
+   clause-order sum lands now and R6 is waived for this one item.
+3. The prototype is measured the same way: A/B on the merged and 16-segment indexes,
+   `verify` at zero mismatches, and the segment-independence test (`engine_query_test`)
+   unchanged.
+
