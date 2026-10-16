@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Phase 2 query gate over harness trials (BENCHMARKS rule 3, Phase 2 review G5).
 
-  gate.py [--md] [--target X] TRIAL [TRIAL...]      TRIAL: RESULTS_JSON[+RESULTS_JSON...]
+  gate.py [--md] [--target X] [--strata NAME] TRIAL [TRIAL...]
+                                                    TRIAL: RESULTS_JSON[+RESULTS_JSON...]
+
+--strata names the engine scored as strata (e.g. strata-merged); the default is strata.
 
 Without --target, Phase 2's verdicts (1.5x, 2x blocks); with it, a class fails when its
 interval's upper bound exceeds X (Phase 3: --target 1.0).
@@ -33,14 +36,14 @@ XAPIAN = "xapian-2.1.0"
 COUNTED = {"COUNT", "TOP_100_COUNT"}
 
 
-def load(trial):
+def load(trial, strata="strata"):
     merged = defaultdict(lambda: defaultdict(list))
     for path in trial.split("+"):
         with open(path) as f:
             results = json.load(f)["results"]
         for cmd, per in results.items():
             for e, qs in per.items():
-                merged[cmd][e] += qs
+                merged[cmd]["strata" if e == strata else e] += qs
     return merged
 
 
@@ -124,9 +127,13 @@ def interval(values, reps=10000, seed=2026):
 def main(argv):
     md = "--md" in argv
     target = float(argv[argv.index("--target") + 1]) if "--target" in argv else None
-    skip = {argv.index("--target"), argv.index("--target") + 1} if target else set()
+    strata = argv[argv.index("--strata") + 1] if "--strata" in argv else "strata"
+    skip = set()
+    for flag in ("--target", "--strata"):
+        if flag in argv:
+            skip |= {argv.index(flag), argv.index(flag) + 1}
     paths = [a for i, a in enumerate(argv) if a != "--md" and i not in skip]
-    results = [load(p) for p in paths]
+    results = [load(p, strata) for p in paths]
     floors = [run_floor(r) for r in results]
     floor = min(floors)
     trials = [trial(r, floor) for r in results]
