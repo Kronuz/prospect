@@ -70,7 +70,7 @@ feature, with the reason).
 | `query::boolean_query`, `union`, `intersection`, `exclude`, `reqopt_scorer` (including property tests) | Boolean evaluation against expected sets | `search_test` brute force over random segments | covered |
 | `query::boolean_query::block_wand` | Block-max WAND | strata uses MaxScore | n/a; nested WAND pending Phase 3 |
 | `query::phrase_query` | Phrases, positions, scoring | `search_test` kinds 4–6, `parity` | partial: as Lucene's row |
-| `query::size_hint`, `query::bitset` | Cost estimates; bitset doc sets | `prefer_windows` exercised through `search_test` counts | pending: cost() checked directly (Phase 3) |
+| `query::size_hint`, `query::bitset` | Cost estimates; bitset doc sets | `cost_test` (each scorer's cost formula, and every cost an upper bound on its matches); `prefer_windows` exercised through `search_test` counts | covered |
 | `collector::top_score_collector`, `count_collector` | Top-k order and ties, offsets, counts | `search_test`, `multisegment_test` | partial: offsets (paging) Phase 7 |
 | `store` | Stored documents, blocks, the store index | `segment_test` stored records | covered |
 | `query::query_parser` | The query language | Phase 5 (`queryparser`, against Xapian's vectors) | pending, Phase 5 |
@@ -89,6 +89,5 @@ feature, with the reason).
 
 - Scores against Lucene's own on the gate queries (the `bm25` preset's claim of Lucene
   compatibility).
-- `cost()` estimates checked directly.
 - Nested WAND or the amended cost model (review C7).
 - From the Phase 3 rows: document limits, and reads while a writer commits.

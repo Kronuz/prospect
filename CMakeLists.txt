@@ -104,6 +104,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(search_test test/search_test.cc)
   target_link_libraries(search_test PRIVATE strata)
   add_test(NAME search COMMAND search_test)
+  add_executable(cost_test test/cost_test.cc)
+  target_link_libraries(cost_test PRIVATE strata)
+  add_test(NAME cost COMMAND cost_test)
   # The same lifecycles over mapped segments: faultfs maps files, and aborts when a file
   # is truncated below a live mapping. Fewer crash points than the read-path runs, to fit
   # the sanitizer jobs' hour.
