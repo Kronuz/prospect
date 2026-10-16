@@ -59,6 +59,13 @@ using docset::no_more_docs;
 
 // --- layouts (layers.md, L2) -----------------------------------------------------------
 
+// One term of a document as the host builds it; terms are unique within a document.
+struct term_entry {
+	std::string term;
+	std::uint32_t wdf = 1;
+	std::vector<std::uint32_t> positions;
+};
+
 template <class... Entries>
 struct layout {};
 // Format 12 only: where the core's docids section sits between plugins in file order.
@@ -189,6 +196,37 @@ struct open_context {
 // Terms, postings, positions, lengths, and norms.
 struct inverted_plugin {
 	static constexpr std::string_view id = "inverted";
+
+	// What a document carries for it (L10).
+	struct part {
+		std::vector<term_entry> terms;
+		std::uint32_t length = 0;
+	};
+	// Stage-1 checks (D10): terms non-empty, within the term limit, unique, positions increasing.
+	static bool validate(const part& p) {
+		std::vector<std::string_view> seen;
+		seen.reserve(p.terms.size());
+		for (const auto& t : p.terms) {
+			if (t.term.empty() || t.term.size() > format::max_term_bytes) { return false; }
+			seen.push_back(t.term);
+			for (std::size_t i = 1; i < t.positions.size(); ++i) {
+				if (t.positions[i] <= t.positions[i - 1]) { return false; }
+			}
+		}
+		std::sort(seen.begin(), seen.end());
+		return std::adjacent_find(seen.begin(), seen.end()) == seen.end();
+	}
+	// Buffer memory and an overestimate of disk bytes.
+	static std::uint64_t bytes(const part& p) {
+		std::uint64_t n = 0;
+		for (const auto& t : p.terms) { n += sizeof(term_entry) + t.term.size() + 4 * t.positions.size(); }
+		return n;
+	}
+	static std::uint64_t disk_estimate(const part& p) {
+		std::uint64_t n = 0;
+		for (const auto& t : p.terms) { n += t.term.size() + 12 + 4 * t.positions.size(); }
+		return n;
+	}
 	static constexpr section_rule rules[] = {
 		{format::section::terms, section_rule::regions, section_rule::with_plugin},
 		{format::section::term_index, section_rule::pinned, section_rule::with_plugin},
@@ -338,6 +376,21 @@ struct inverted_plugin {
 // Versions and the key filter.
 struct keys_plugin {
 	static constexpr std::string_view id = "keys";
+
+	// Format 12: a document's key is its one term with the index's key prefix (none
+	// without a prefix); `valid` turns false when it has two.
+	static std::optional<std::string> key_of(std::string_view prefix, const inverted_plugin::part& d, bool& valid) {
+		valid = true;
+		if (prefix.empty()) { return std::nullopt; }
+		std::optional<std::string> key;
+		for (const auto& t : d.terms) {
+			if (t.term.starts_with(prefix)) {
+				if (key) { valid = false; }
+				key = t.term;
+			}
+		}
+		return key;
+	}
 	static constexpr section_rule rules[] = {
 		{format::section::versions, section_rule::pinned, section_rule::with_plugin},
 		{format::section::pk_filter, section_rule::pinned, section_rule::optional},
@@ -406,6 +459,13 @@ struct keys_plugin {
 // Stored records in zstd frames.
 struct stored_plugin {
 	static constexpr std::string_view id = "stored";
+
+	struct part {
+		std::string stored;
+	};
+	static bool validate(const part& p) { return p.stored.size() <= format::max_stored_record; }
+	static std::uint64_t bytes(const part& p) { return p.stored.size(); }
+	static std::uint64_t disk_estimate(const part& p) { return p.stored.size() + p.stored.size() / 16; }
 	static constexpr section_rule rules[] = {
 		{format::section::stored, section_rule::regions, section_rule::with_plugin},
 	};
@@ -511,6 +571,72 @@ struct stored_plugin {
 		std::uint64_t doc_count_;
 	};
 };
+
+// --- documents (L10) --------------------------------------------------------------------
+
+template <class E>
+struct empty_part {};  // one distinct type per layout entry, so empty bases never repeat
+namespace detail {
+template <class E>
+struct plugin_part {
+	using type = empty_part<E>;
+};
+template <class E>
+	requires requires { typename E::part; }
+struct plugin_part<E> {
+	using type = typename E::part;
+};
+template <class E>
+using plugin_part_t = typename plugin_part<E>::type;
+}  // namespace detail
+
+struct core_part {};
+template <class Layout>
+struct basic_document;
+// The document is its parts: `d.terms`, `d.length`, and `d.stored` name the plugins'.
+template <class... Entries>
+struct basic_document<layout<Entries...>> : core_part, detail::plugin_part_t<Entries>... {
+	// Stage-1 checks in layout order; false on the first that fails.
+	bool valid() const { return (valid_part<Entries>() && ...); }
+	// Buffer memory beyond the document object, and the parts' disk estimate.
+	std::uint64_t part_bytes() const { return (part_bytes_of<Entries>() + ... + 0); }
+	std::uint64_t disk_estimate() const { return (disk_estimate_of<Entries>() + ... + 0); }
+
+private:
+	template <class E>
+	bool valid_part() const {
+		if constexpr (requires { typename E::part; }) {
+			return E::validate(static_cast<const typename E::part&>(*this));
+		} else {
+			return true;
+		}
+	}
+	template <class E>
+	std::uint64_t part_bytes_of() const {
+		if constexpr (requires { typename E::part; }) {
+			return E::bytes(static_cast<const typename E::part&>(*this));
+		} else {
+			return 0;
+		}
+	}
+	template <class E>
+	std::uint64_t disk_estimate_of() const {
+		if constexpr (requires { typename E::part; }) {
+			return E::disk_estimate(static_cast<const typename E::part&>(*this));
+		} else {
+			return 0;
+		}
+	}
+};
+using document = basic_document<search_layout_12>;
+namespace detail {
+struct document_12 {  // format 12's document, before the parts
+	std::vector<term_entry> terms;
+	std::uint32_t length = 0;
+	std::string stored;
+};
+}  // namespace detail
+static_assert(sizeof(document) == sizeof(detail::document_12), "doc_bytes and every flush trigger depend on it");
 
 namespace detail {
 template <class E>

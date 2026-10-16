@@ -38,33 +38,25 @@
 
 namespace strata {
 
-// One document as the host builds it; terms are unique within it.
-struct term_entry {
-	std::string term;
-	std::uint32_t wdf = 1;
-	std::vector<std::uint32_t> positions;
-};
-struct document {
-	std::vector<term_entry> terms;
-	std::uint32_t length = 0;
-	std::string stored;
-};
-
-struct operation {
+template <class Layout>
+struct basic_operation {
 	enum kind : std::uint8_t { add, replace_key, delete_key, replace_docid, delete_docid, set_meta, delete_meta };
 	kind type = add;
 	std::uint64_t docid = 0;                       // replace_docid, delete_docid
 	std::string key;                               // replace_key, delete_key: the key term
 	std::optional<std::uint64_t> expected_version;  // 0: must be absent
-	document doc;                                  // add, replace_*
+	basic_document<Layout> doc;                    // add, replace_*
 	std::string meta_key, meta_value;              // set_meta, delete_meta
 };
+using operation = basic_operation<search_layout_12>;
 
-struct transaction {
-	std::vector<operation> ops;
+template <class Layout>
+struct basic_transaction {
+	std::vector<basic_operation<Layout>> ops;
 	std::optional<std::uint64_t> expected_schema;  // the schema version it was built against
 	std::optional<std::uint64_t> set_schema;       // the schema version it sets
 };
+using transaction = basic_transaction<search_layout_12>;
 
 // Apply's answer. A rejected transaction left no trace.
 struct verdict {
@@ -739,11 +731,7 @@ private:
 
 	// --- memory -----------------------------------------------------------------------------
 
-	static std::uint64_t doc_bytes(const document& d) {
-		std::uint64_t n = sizeof(document) + 96 + d.stored.size();
-		for (const auto& t : d.terms) { n += sizeof(term_entry) + t.term.size() + 4 * t.positions.size(); }
-		return n;
-	}
+	static std::uint64_t doc_bytes(const document& d) { return sizeof(document) + 96 + d.part_bytes(); }
 	std::uint64_t map_bytes() const { return versions_.size() * 96 + version_key_bytes_; }
 
 	// Brings the permit to what the buffer and version map hold now.
@@ -1396,8 +1384,7 @@ private:
 		std::uint64_t n = 64;
 		for (const auto& o : t.ops) {
 			n += 16 + o.key.size() + o.meta_key.size() + o.meta_value.size();
-			n += o.doc.stored.size() + o.doc.stored.size() / 16 + 64;
-			for (const auto& term : o.doc.terms) { n += term.term.size() + 12 + 4 * term.positions.size(); }
+			n += 64 + o.doc.disk_estimate();  // a per-document overhead, and the parts
 		}
 		return n;
 	}
@@ -1527,31 +1514,10 @@ private:
 	}
 
 	// The key term of a document: its one term with the index's key prefix.
-	std::optional<std::string> key_of(const document& d, bool& valid) const {
-		valid = true;
-		if (m_.key_prefix.empty()) { return std::nullopt; }
-		std::optional<std::string> key;
-		for (const auto& t : d.terms) {
-			if (t.term.starts_with(m_.key_prefix)) {
-				if (key) { valid = false; }
-				key = t.term;
-			}
-		}
-		return key;
-	}
+	std::optional<std::string> key_of(const document& d, bool& valid) const { return keys_plugin::key_of(m_.key_prefix, d, valid); }
 
 	// Validation that can reject runs here, before anything changes (design D10).
-	static bool valid(const document& d) {
-		if (d.stored.size() > format::max_stored_record) { return false; }
-		std::set<std::string_view> seen;
-		for (const auto& t : d.terms) {
-			if (t.term.empty() || t.term.size() > format::max_term_bytes || !seen.insert(t.term).second) { return false; }
-			for (std::size_t i = 1; i < t.positions.size(); ++i) {
-				if (t.positions[i] <= t.positions[i - 1]) { return false; }
-			}
-		}
-		return true;
-	}
+	static bool valid(const document& d) { return d.valid(); }
 
 	verdict evaluate(const transaction& t) {
 		verdict v;
