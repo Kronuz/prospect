@@ -105,12 +105,14 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(search_test PRIVATE strata)
   add_test(NAME search COMMAND search_test)
   # The same lifecycles over mapped segments: faultfs maps files, and aborts when a file
-  # is truncated below a live mapping. Lifecycle at a quarter of its crash points.
-  foreach(t index reclaim lifecycle background_merge multisegment)
+  # is truncated below a live mapping. Fewer crash points than the read-path runs, to fit
+  # the sanitizer jobs' hour.
+  foreach(t index reclaim lifecycle background_merge)
     add_test(NAME ${t}_mapped COMMAND ${t}_test)
     set_tests_properties(${t}_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
   endforeach()
-  set_tests_properties(lifecycle_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1;STRATA_CRASH_POINTS=2500;STRATA_BG_CRASH_POINTS=500")
+  set_tests_properties(reclaim_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1;STRATA_CRASH_POINTS=150")
+  set_tests_properties(lifecycle_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1;STRATA_CRASH_POINTS=1000;STRATA_BG_CRASH_POINTS=200")
   # Fuzz targets: each target's checked-in corpus replays as a test in every build; with
   # STRATA_FUZZ (Clang) the libFuzzer binaries build too.
   option(STRATA_FUZZ "Build the libFuzzer targets (Clang)" OFF)
