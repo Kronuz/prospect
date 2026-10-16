@@ -652,9 +652,16 @@ private:
 // Documents any child matches; score = sum of the matching children's scores.
 class disjunction_scorer final : public scorer {
 public:
-	explicit disjunction_scorer(std::vector<scorer_ptr> children) : children_(std::move(children)) {
-		// Clauses ordered by bound, lowest first, for the MaxScore partition.
-		std::sort(children_.begin(), children_.end(), [](const scorer_ptr& a, const scorer_ptr& b) { return a->max_score_total() < b->max_score_total(); });
+	// Clauses ordered by bound, lowest first, for the MaxScore partition; their scores sum
+	// in the given order, so a document scores the same in every segment.
+	explicit disjunction_scorer(std::vector<scorer_ptr> children) : rank_(children.size()), parts_(children.size()) {
+		std::vector<std::size_t> by_bound(children.size());
+		for (std::size_t i = 0; i < by_bound.size(); ++i) { by_bound[i] = i; }
+		std::stable_sort(by_bound.begin(), by_bound.end(), [&](std::size_t a, std::size_t b) { return children[a]->max_score_total() < children[b]->max_score_total(); });
+		for (std::size_t i = 0; i < by_bound.size(); ++i) {
+			children_.push_back(std::move(children[by_bound[i]]));
+			rank_[i] = by_bound[i];
+		}
 		for (const auto& c : children_) {
 			cost_ += c->cost();
 			bound_ += c->max_score_total();
@@ -713,13 +720,12 @@ public:
 	}
 	std::uint64_t cost() const noexcept override { return cost_; }
 	double score() override {
-		double s = 0;
 		for (std::size_t i = 0; i < children_.size(); ++i) {
 			auto& c = children_[i];
 			if (i < essential_from_ && c->doc() < doc_) { c->advance(doc_); }  // non-essential: positioned on demand
-			if (c->doc() == doc_) { s += c->score(); }
+			parts_[rank_[i]] = c->doc() == doc_ ? c->score() : 0.0;
 		}
-		return s;
+		return sum_parts();
 	}
 	double max_score(ordinal_t from, ordinal_t upto) override {
 		double s = 0;
@@ -741,9 +747,9 @@ public:
 	bool collect_top_k(top_collector& c) override;
 
 	std::unique_ptr<scorer> fresh() const override {
-		std::vector<scorer_ptr> kids;
-		for (const auto& c : children_) {
-			if (auto f = c->fresh()) { kids.push_back(std::move(f)); } else { return nullptr; }
+		std::vector<scorer_ptr> kids(children_.size());
+		for (std::size_t i = 0; i < children_.size(); ++i) {
+			if (auto f = children_[i]->fresh()) { kids[rank_[i]] = std::move(f); } else { return nullptr; }
 		}
 		return std::make_unique<disjunction_scorer>(std::move(kids));
 	}
@@ -790,7 +796,15 @@ private:
 		}
 	}
 
+	double sum_parts() const noexcept {
+		double s = 0;
+		for (double p : parts_) { s += p; }
+		return s;
+	}
+
 	std::vector<scorer_ptr> children_;
+	std::vector<std::size_t> rank_;  // each child's position in the given order
+	std::vector<double> parts_;      // the current document's scores, in the given order
 	std::vector<entry> heap_;
 	ordinal_t doc_ = 0;
 	std::uint64_t cost_ = 0;
@@ -1272,7 +1286,7 @@ inline bool disjunction_scorer::collect_top_k(top_collector& c) {
 	started_ = true;
 	constexpr ordinal_t window = 4096;
 	const std::size_t n = children_.size();
-	std::vector<double> acc(window, 0.0), bound(n), below;
+	std::vector<double> acc(n * window, 0.0), bound(n), below;  // acc: one window per clause
 	std::vector<std::size_t> order(n);
 	std::uint64_t bits[window / 64];
 	for (auto& ch : children_) { ch->next(); }
@@ -1313,7 +1327,7 @@ inline bool disjunction_scorer::collect_top_k(top_collector& c) {
 		for (std::size_t e = essential; e < n; ++e) {
 			auto& ch = children_[order[e]];
 			if (ch->doc() < window_min) { ch->advance(window_min); }
-			if (ch->doc() <= window_max) { ch->score_window(window_min, window_max + 1, acc.data(), bits); }
+			if (ch->doc() <= window_max) { ch->score_window(window_min, window_max + 1, acc.data() + order[e] * window, bits); }
 		}
 		// Bounds of the non-essential clauses below each one, summed rather than subtracted
 		// so rounding never understates what remains.
@@ -1323,17 +1337,28 @@ inline bool disjunction_scorer::collect_top_k(top_collector& c) {
 			for (std::uint64_t word = bits[w]; word; word &= word - 1) {
 				const ordinal_t i = ordinal_t(w * 64 + std::size_t(std::countr_zero(word)));
 				const ordinal_t d = window_min + i;
-				double score = acc[i];
-				acc[i] = 0;
+				// Each clause's score lands in parts_ by its given position; the running
+				// sum only bounds what remains.
+				double score = 0;
+				for (std::size_t e = essential; e < n; ++e) {
+					double& a = acc[order[e] * window + i];
+					score += parts_[rank_[order[e]]] = a;
+					a = 0;
+				}
 				++c.count;
+				bool competes = true;
 				for (std::size_t e = essential; e-- > 0;) {
 					const double m = c.counting ? 0.0 : c.min_competitive();
-					if (!c.counting && sum_upper(score + below[e + 1], n) <= m) { break; }
+					if (!c.counting && sum_upper(score + below[e + 1], n) <= m) {
+						competes = false;
+						break;
+					}
 					auto& ch = children_[order[e]];
 					if (ch->doc() < d) { ch->advance(d); }
-					if (ch->doc() == d) { score += ch->score(); }
+					const double v = ch->doc() == d ? ch->score() : 0.0;
+					score += parts_[rank_[order[e]]] = v;
 				}
-				c.collect(d, score);
+				if (competes) { c.collect(d, sum_parts()); }
 			}
 		}
 		if (window_max == no_more_docs - 1) { break; }

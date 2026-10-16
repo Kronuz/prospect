@@ -184,6 +184,60 @@ static void check_against_scan(const std::vector<doc_hit>& hits, const std::vect
 	}
 }
 
+// A document scores the same in every segment: each probe goes into two segments whose
+// fillers reverse which terms bound highest, and a disjunction of every word must score
+// both copies bit for bit (scores sum in clause order, not in each segment's bound order).
+static void check_segment_independent(std::mt19937_64& r) {
+	const char* words[] = {"a", "b", "c", "d", "e", "f"};
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	index::options opts;
+	opts.auto_merge = false;
+	auto ix = strata::index::create(io, opts, uuid);
+	std::vector<document> probes;
+	for (int i = 0; i < 200; ++i) {
+		document d;
+		std::uint32_t pos = 0;
+		for (const char* w : words) {
+			term_entry t{w, 1 + std::uint32_t(r() % 9), {}};
+			for (std::uint32_t k = 0; k < t.wdf; ++k) { t.positions.push_back(++pos); }
+			d.length += t.wdf;
+			d.terms.push_back(std::move(t));
+		}
+		probes.push_back(std::move(d));
+	}
+	auto add = [&](const document& d) {
+		transaction t;
+		operation o;
+		o.doc = d;
+		t.ops.push_back(o);
+		ix.apply(t, {});
+	};
+	for (int side = 0; side < 2; ++side) {
+		for (const auto& d : probes) { add(d); }
+		for (int i = 0; i < 300; ++i) {  // short fillers dense in one end of the vocabulary
+			document f;
+			const char* w = words[side ? 5 - i % 3 : i % 3];
+			f.terms.push_back({w, 20, {}});
+			for (std::uint32_t k = 0; k < 20; ++k) { f.terms.back().positions.push_back(k + 1); }
+			f.length = 20;
+			add(f);
+		}
+		ix.refresh();
+	}
+	const auto segs = snapshot(ix);
+	CHECK(segs.size() == 2);
+	const engine::parsed q = engine::parse("a b c d e f");
+	const auto all = scan(segs, q, scheme::bm25);
+	std::map<std::uint64_t, double> score;
+	for (const auto& h : all) { score[h.docid] = h.score; }
+	const std::uint64_t second = probes.size() + 300;  // docids: probes, fillers, probes, fillers
+	std::size_t differ = 0;
+	for (std::uint64_t i = 1; i <= probes.size(); ++i) { differ += score.at(i) != score.at(second + i); }
+	CHECK(differ == 0);
+	for (const auto& h : engine::search_snapshot(segs, q, 1000, scheme::bm25)) { CHECK(h.score == score.at(h.docid)); }
+}
+
 // Review R2: explicit docids that interleave across flushes, duplicated documents so
 // equal scores straddle the k-th position, segments visited in index order and largest
 // first. Single words score bit for bit as the scan does, so they must equal its first k.
@@ -233,6 +287,7 @@ static void check_interleaved(std::mt19937_64& r) {
 int main() {
 	std::mt19937_64 r(17);
 	check_interleaved(r);
+	check_segment_independent(r);
 	for (int round = 0; round < 6; ++round) {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
