@@ -1,0 +1,7 @@
+[
+  "Written in C++20.",
+  "Postings in 128-ordinal blocks: bitpack FOR ordinal deltas and PFOR term frequencies, LEB128 tails.",
+  "Skip data in groups of 32 blocks with competitive (wdf, length) pairs.",
+  "Lucene-compatible BM25 (k1 = 1.2, b = 0.75).",
+  "Force-merged to one segment after indexing, as the baselines' builders do."
+]

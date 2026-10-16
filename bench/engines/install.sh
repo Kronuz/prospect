@@ -4,7 +4,7 @@
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 harness="${1:?usage: install.sh HARNESS}"
-for e in tantivy-0.26-st lucene-10.4.0-st xapian-2.1.0; do
+for e in tantivy-0.26-st lucene-10.4.0-st xapian-2.1.0 strata-merged; do
 	mkdir -p "$harness/engines/$e"
 	(cd "$here/$e" && tar cf - .) | tar xf - -C "$harness/engines/$e"
 done
