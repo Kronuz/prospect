@@ -95,7 +95,83 @@ changed the single-segment path is settled by a same-session A/B (P6 review R3).
 | `COUNT` | two-phase-critic | 1 | 5 | 38,848 | 46,443 | 28,860 | 137,079 | 1.34× [1.30–1.44] | 1.34× [1.30–1.44]  | 0.283× [0.278–0.293] |
 | `COUNT` | union | 301 | 5 | 1,583 | 1,083 | 2,302 | 67,110 | 1.60× [1.55–1.77] | 1.69× [1.63–1.90]  | 0.023× [0.023–0.023] |
 
-## Gate status (2026-10-15)
+## Queries after merging (gate VM, Linux x86_64)
+
+The gate's "after merging" rows: strata's 5M-document index force-merged to one segment
+(`engines/strata-merged`, `strata_engine merge`) against baselines whose builders also
+force-merge. Carried (PLAN, "Carried rows"): recorded here, and Phase 4's gate does not
+pass while a row misses.
+
+Run with `bench/overnight.sh n1` under `tools/vm/quiet_trials.sh` on the night of
+2026-10-15 (one clean attempt), five trials with the engine order rotated, the queries
+and the stratified term set; strata at `2e774db`, a Release build with `-march=native`;
+Lucene 10.4.0 with and without document reordering, Tantivy 0.26, Xapian 2.1.0. Scored by
+`bench/phase2/gate.py --target 1.0 --strata strata-merged`; pipe floor 67 µs. Counts
+equal every engine's on every query in every trial.
+
+Trial 4's query set overlapped about five minutes of small host builds (03:33–03:38;
+host load peaked at 4.07 against the guard's limit of 6, so the guard did not stop the
+run), and trial 5's query set overlapped a ten-minute file scan (04:42–04:52). Each row's
+interval is over five trials. Scoring trials 1–3 alone moves no global ratio by more than
+0.02 (`TOP_10` 1.35×, `TOP_1000` 1.33×, `COUNT` 1.34×), so neither overlap changes a
+verdict.
+
+Every global class misses the 1.0× target: strata is 1.33× to 1.34× the faster of
+Lucene and Tantivy, with every interval clear of 1.0. Four class rows are under 1.0×:
+`TOP_10` negated (0.86×), `TOP_10` two-phase-critic (0.63×), `TOP_100_COUNT` term
+(0.90×), and `COUNT` intersection_union (0.93×); `COUNT` term is at 0.99× with an
+interval up to 1.27×. The widest gaps are intersection_union at `TOP_10` and `TOP_100`
+(1.88× and 1.85×) and union at `TOP_10` (1.54×). Against Xapian 2.1.0, strata takes
+0.13× of its time at `TOP_10` global.
+
+Against the 16-segment diagnostic above (same baselines, two days apart), merging and
+P6 bring strata's global excess from 1.58× to 1.33× at `TOP_10`, from 2.09× to
+1.33× at `TOP_1000`, and from 1.65× to 1.33× at `COUNT`.
+
+| Command | Class | n | Trials | strata µs | Lucene µs | Tantivy µs | Xapian µs | Raw | Floor-subtracted | Against Xapian |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `TOP_10` | global | 657 | 5 | 1,350 | 1,177 | 1,288 | 10,505 | 1.33× [1.32–1.36] | 1.36× [1.34–1.39]  | 0.133× [0.131–0.147] |
+| `TOP_10` | intersection | 300 | 5 | 1,046 | 1,067 | 1,020 | 8,395 | 1.14× [1.12–1.16] | 1.16× [1.13–1.17]  | 0.159× [0.157–0.175] |
+| `TOP_10` | intersection_union | 40 | 5 | 4,053 | 3,028 | 3,310 | 12,636 | 1.88× [1.87–1.89] | 1.93× [1.92–1.94]  | 0.253× [0.252–0.276] |
+| `TOP_10` | negated | 19 | 5 | 509 | 884 | 719 | 13,539 | 0.86× [0.85–0.87] | 0.84× [0.83–0.85]  | 0.036× [0.036–0.042] |
+| `TOP_10` | phrase | 300 | 5 | 2,355 | 2,080 | 1,803 | 8,422 | 1.43× [1.39–1.46] | 1.46× [1.42–1.49]  | 0.261× [0.260–0.282] |
+| `TOP_10` | term | 201 | 5 | 292 | 286 | 255 | 16,783 | 1.14× [1.12–1.27] | 1.19× [1.16–1.35]  | 0.051× [0.050–0.068] |
+| `TOP_10` | two-phase-critic | 1 | 5 | 16,816 | 49,227 | 26,549 | 58,264 | 0.63× [0.61–0.69] | 0.63× [0.61–0.69]  | 0.288× [0.282–0.305] |
+| `TOP_10` | union | 301 | 5 | 1,547 | 1,236 | 1,728 | 13,816 | 1.54× [1.52–1.58] | 1.60× [1.57–1.65]  | 0.110× [0.109–0.123] |
+| `TOP_100` | global | 657 | 5 | 1,888 | 1,597 | 1,639 | 15,151 | 1.34× [1.32–1.41] | 1.36× [1.34–1.43]  | 0.127× [0.126–0.138] |
+| `TOP_100` | intersection | 300 | 5 | 1,329 | 1,275 | 1,033 | 8,461 | 1.31× [1.29–1.35] | 1.35× [1.33–1.38]  | 0.188× [0.187–0.208] |
+| `TOP_100` | intersection_union | 40 | 5 | 4,422 | 3,099 | 3,330 | 18,651 | 1.85× [1.84–1.90] | 1.89× [1.88–1.94]  | 0.187× [0.182–0.192] |
+| `TOP_100` | negated | 19 | 5 | 862 | 1,325 | 726 | 13,632 | 1.17× [1.16–1.22] | 1.20× [1.17–1.24]  | 0.059× [0.058–0.067] |
+| `TOP_100` | phrase | 300 | 5 | 2,521 | 2,640 | 1,806 | 7,930 | 1.38× [1.34–1.38] | 1.41× [1.37–1.41]  | 0.325× [0.322–0.334] |
+| `TOP_100` | term | 201 | 5 | 487 | 448 | 407 | 16,979 | 1.22× [1.18–1.28] | 1.26× [1.20–1.33]  | 0.079× [0.075–0.084] |
+| `TOP_100` | two-phase-critic | 1 | 5 | 32,382 | 48,535 | 27,195 | 91,264 | 1.19× [1.18–1.21] | 1.19× [1.18–1.21]  | 0.353× [0.319–0.362] |
+| `TOP_100` | union | 301 | 5 | 2,460 | 1,970 | 2,593 | 23,229 | 1.49× [1.46–1.56] | 1.52× [1.49–1.60]  | 0.086× [0.086–0.092] |
+| `TOP_1000` | global | 657 | 5 | 2,743 | 2,540 | 2,543 | 21,388 | 1.33× [1.32–1.39] | 1.35× [1.33–1.41]  | 0.134× [0.130–0.150] |
+| `TOP_1000` | intersection | 300 | 5 | 1,542 | 1,471 | 1,084 | 8,692 | 1.35× [1.35–1.38] | 1.39× [1.38–1.42]  | 0.203× [0.194–0.229] |
+| `TOP_1000` | intersection_union | 40 | 5 | 4,790 | 3,621 | 3,533 | 28,066 | 1.59× [1.51–1.60] | 1.61× [1.53–1.62]  | 0.136× [0.131–0.150] |
+| `TOP_1000` | negated | 19 | 5 | 1,144 | 1,514 | 875 | 14,045 | 1.32× [1.28–1.36] | 1.36× [1.31–1.39]  | 0.076× [0.075–0.092] |
+| `TOP_1000` | phrase | 300 | 5 | 2,576 | 2,871 | 1,809 | 7,704 | 1.38× [1.35–1.40] | 1.42× [1.38–1.44]  | 0.346× [0.324–0.369] |
+| `TOP_1000` | term | 201 | 5 | 891 | 798 | 670 | 17,230 | 1.15× [1.14–1.19] | 1.15× [1.15–1.21]  | 0.114× [0.113–0.121] |
+| `TOP_1000` | two-phase-critic | 1 | 5 | 38,496 | 47,559 | 26,717 | 138,017 | 1.42× [1.29–1.46] | 1.42× [1.29–1.46]  | 0.274× [0.263–0.282] |
+| `TOP_1000` | union | 301 | 5 | 4,188 | 3,880 | 4,604 | 35,630 | 1.37× [1.34–1.43] | 1.38× [1.35–1.44]  | 0.092× [0.090–0.101] |
+| `TOP_100_COUNT` | global | 657 | 5 | 5,485 | 5,654 | 3,406 | 35,497 | 1.34× [1.24–1.37] | 1.37× [1.25–1.40]  | 0.121× [0.118–0.126] |
+| `TOP_100_COUNT` | intersection | 300 | 5 | 1,652 | 1,324 | 1,032 | 8,618 | 1.45× [1.43–1.56] | 1.49× [1.46–1.62]  | 0.203× [0.198–0.212] |
+| `TOP_100_COUNT` | intersection_union | 40 | 5 | 4,576 | 3,738 | 3,403 | 34,382 | 1.48× [1.45–1.58] | 1.50× [1.46–1.60]  | 0.105× [0.100–0.109] |
+| `TOP_100_COUNT` | negated | 19 | 5 | 1,036 | 1,288 | 718 | 13,863 | 1.44× [1.23–1.46] | 1.50× [1.25–1.52]  | 0.069× [0.069–0.077] |
+| `TOP_100_COUNT` | phrase | 300 | 5 | 2,565 | 3,019 | 1,800 | 8,291 | 1.39× [1.32–1.43] | 1.43× [1.34–1.47]  | 0.344× [0.339–0.364] |
+| `TOP_100_COUNT` | term | 201 | 5 | 494 | 992 | 710 | 18,155 | 0.90× [0.83–0.92] | 0.89× [0.81–0.92]  | 0.078× [0.071–0.087] |
+| `TOP_100_COUNT` | two-phase-critic | 1 | 5 | 38,119 | 43,074 | 26,683 | 136,051 | 1.43× [1.29–1.47] | 1.43× [1.29–1.47]  | 0.277× [0.259–0.297] |
+| `TOP_100_COUNT` | union | 301 | 5 | 12,474 | 11,291 | 6,408 | 67,733 | 1.29× [1.20–1.32] | 1.30× [1.21–1.33]  | 0.076× [0.075–0.080] |
+| `COUNT` | global | 657 | 5 | 1,083 | 904 | 1,346 | 35,255 | 1.33× [1.28–1.38] | 1.36× [1.30–1.42]  | 0.046× [0.045–0.048] |
+| `COUNT` | intersection | 300 | 5 | 981 | 850 | 847 | 8,536 | 1.43× [1.37–1.48] | 1.48× [1.40–1.54]  | 0.154× [0.150–0.160] |
+| `COUNT` | intersection_union | 40 | 5 | 261 | 282 | 354 | 34,116 | 0.93× [0.89–0.99] | 0.93× [0.86–0.98]  | 0.006× [0.006–0.006] |
+| `COUNT` | negated | 19 | 5 | 665 | 796 | 514 | 13,675 | 1.32× [1.09–1.42] | 1.37× [1.11–1.50]  | 0.046× [0.044–0.049] |
+| `COUNT` | phrase | 300 | 5 | 2,547 | 3,261 | 1,767 | 8,258 | 1.39× [1.19–1.44] | 1.43× [1.21–1.49]  | 0.333× [0.322–0.347] |
+| `COUNT` | term | 201 | 5 | 199 | 209 | 200 | 18,077 | 0.99× [0.99–1.27] | 1.00× [0.99–1.41]  | 0.031× [0.031–0.041] |
+| `COUNT` | two-phase-critic | 1 | 5 | 37,926 | 47,891 | 27,336 | 136,066 | 1.38× [1.28–1.53] | 1.38× [1.28–1.53]  | 0.279× [0.273–0.283] |
+| `COUNT` | union | 301 | 5 | 1,403 | 1,098 | 2,280 | 67,312 | 1.32× [1.28–1.37] | 1.34× [1.30–1.40]  | 0.018× [0.018–0.019] |
+
+## Gate status (2026-10-16)
 
 PLAN's Phase 3 gate, row by row. The query rows are carried (PLAN, "Carried rows"): the
 gate records their ratios and gaps, and Phase 4's gate does not pass while they miss.
@@ -105,10 +181,10 @@ gate records their ratios and gaps, and Phase 4's gate does not pass while they 
 | Power loss at ≥ 10,000 crash points; crashes during recovery | Pass | `phase-3-lifecycle.md` (T1), background merges at 10,000 points at `e8accae` |
 | Digest equal across two replays | Pass | `phase-3-lifecycle.md` (T2) |
 | Disk full: fail closed, no corruption, recovery | Pass | `phase-3-lifecycle.md` (T5) |
-| Queries after merging (strata force-merged, baselines force-merged), five trials | Running overnight (`bench/overnight.sh n1`) | below, when recorded |
+| Queries after merging (strata force-merged, baselines force-merged), five trials | Miss, carried: global 1.33–1.34× | above |
 | Queries before merging (baselines unmerged at equal memory) | Owed: calibration on the full corpus, then a scheduled night | — |
-| Indexing, 1 and 8 threads, keyed (T4), five trials at equal memory | Running overnight | below, when recorded |
-| Write amplification against Lucene (T3), append-only and replace-heavy | Running overnight | below, when recorded |
+| Indexing, 1 and 8 threads, keyed (T4), five trials at equal memory | Owed: the night's calibration step failed at once (`calibrate_rss.sh` was not deployed to the VM); rescheduled | — |
+| Write amplification against Lucene (T3), append-only and replace-heavy | Owed: rescheduled with T4 | — |
 | Memory (serving and indexing peaks), disk after a full merge, per section | Owed: untimed runs on the VM | — |
 | `verify` and `parity` on multi-segment indexes | Owed: untimed runs on the VM | — |
 | Coverage targets and the test-parity inventory's Phase 3 rows | Owed | — |
