@@ -240,12 +240,22 @@ private:
 		const top_collector* c;
 		bool operator()(const entry& a, const entry& b) const {
 			if (a.score != b.score) { return a.score > b.score; }
-			return a.seg == b.seg ? a.ord < b.ord : c->docid(a) < c->docid(b);
+			if (a.seg == b.seg) { return a.ord < b.ord; }
+			const auto *sa = c->segs_[a.seg], *sb = c->segs_[b.seg];
+			if (sa->max_docid() < sb->min_docid()) { return true; }  // disjoint ranges: no docid read
+			if (sb->max_docid() < sa->min_docid()) { return false; }
+			return c->docid(a) < c->docid(b);
 		}
 	};
 	order better() const { return {this}; }
 	// Whether ordinal d of the current segment precedes the k-th hit by docid.
-	bool before_kth(ordinal_t d) const { return kth_.seg == cur_ ? d < kth_.ord : segs_[cur_]->docid(d) < kth_docid_; }
+	bool before_kth(ordinal_t d) const {
+		if (kth_.seg == cur_) { return d < kth_.ord; }
+		const segment* s = segs_[cur_];
+		if (s->max_docid() < kth_docid_) { return true; }
+		if (s->min_docid() > kth_docid_) { return false; }
+		return s->docid(d) < kth_docid_;
+	}
 	void truncate() {
 		std::nth_element(hits.begin(), hits.begin() + std::ptrdiff_t(k - 1), hits.end(), better());
 		hits.resize(k);

@@ -143,8 +143,9 @@ public:
 		dict_.emplace(terms_, integrity_->pinned_index, &verify_terms, integrity_.get());  // validates the FST index
 	}
 
-	// The segment's smallest docid (its footer's).
+	// The segment's smallest and largest docids (its footer's).
 	std::uint64_t min_docid() const noexcept { return footer_.min_docid; }
+	std::uint64_t max_docid() const noexcept { return footer_.max_docid; }
 
 	// The host docid of an ordinal.
 	std::uint64_t docid(ordinal_t ord) const {
