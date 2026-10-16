@@ -27,11 +27,11 @@ ENGINES="$engines" ~/bench/query_trials.sh "$name-merged" build > "$q/build.log"
 log "query trials"
 ENGINES="$engines" ~/bench/query_trials.sh "$name-merged" > "$q/trials.log" 2>&1 || exit 1
 cal=$res/calibrate-$name.out
-if ! grep -q "^[0-9]*$" <(tail -1 "$cal" 2>/dev/null); then
+if ! grep -q "^BUDGET [0-9][0-9]*$" "$cal" 2>/dev/null; then  # calibrate_rss.sh's result line
 	log "calibration"
 	KEYED=1 ~/bench/calibrate_rss.sh "$name" lucene-10.4.0-st > "$cal.tmp" 2>&1 && mv "$cal.tmp" "$cal" || exit 1
 fi
-budget=$(tail -1 "$cal")
+budget=$(awk '/^BUDGET [0-9]+$/ {print $2}' "$cal")
 log "T4 indexing at ${budget} MB"
 KEYED=1 STRATA_BUDGET_MB=$budget ~/bench/index_trials.sh "$name-t4-1" > "$res/overnight-$name-t4-1.log" 2>&1 || exit 1
 KEYED=1 STRATA_BUDGET_MB=$budget STRATA_THREADS=8 ~/bench/index_trials.sh "$name-t4-8" > "$res/overnight-$name-t4-8.log" 2>&1 || exit 1
