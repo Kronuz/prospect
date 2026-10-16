@@ -34,6 +34,7 @@
 #include "residency.hh"
 #include "strata/docids.hh"
 #include "strata/format.hh"
+#include "strata/section_io.hh"
 #include "termdict.hh"
 
 #include <algorithm>
@@ -48,20 +49,35 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
+#include <type_traits>
 #include <vector>
 
 namespace strata {
 
 using docset::no_more_docs;
 
-class segment {
+// --- layouts (layers.md, L2) -----------------------------------------------------------
+
+template <class... Entries>
+struct layout {};
+// Format 12 only: where the core's docids section sits between plugins in file order.
+struct docids_section {};
+struct inverted_plugin;
+struct keys_plugin;
+struct stored_plugin;
+using search_layout_12 = layout<inverted_plugin, docids_section, keys_plugin, stored_plugin>;
+
+template <class Layout>
+class basic_segment;
+using segment = basic_segment<search_layout_12>;
+
+// The core of an open segment (L7): the footer, table of contents, and header; every
+// pinned section's checksum; stats' document count; docids; and the one verified-region
+// state that every regions-checked section shares.
+class core_segment {
 public:
-	// Verifies the footer, the table of contents, the header, and the pinned sections
-	// (term index, lengths, docids, stats) in full; other sections are verified per region
-	// as they are read.
-	// The file's bytes must outlive the segment; a temporary string cannot be one.
-	explicit segment(std::string&&) = delete;
-	explicit segment(std::string_view file) : file_(file) {
+	core_segment(std::string_view file, std::span<const section_rule> rules) : file_(file) {
 		footer_ = format::decode_footer(file);
 		sections_ = format::decode_toc(file, footer_);
 		if (sections_.empty() || sections_[0].kind != format::section::header || sections_[0].offset != 0 ||
@@ -71,245 +87,516 @@ public:
 		if (std::memcmp(file.data(), format::header_magic, 8) != 0 || format::get<std::uint32_t>(file.data() + 8) != format::version) {
 			corrupt("header magic or version");
 		}
-		for (const auto& e : sections_) {
-			auto bytes = file.substr(e.offset, e.length);
-			switch (e.kind) {
-			case format::section::header:
-			case format::section::term_index:
-			case format::section::norms:
-			case format::section::docids:
-			case format::section::stats:
-			case format::section::versions:
-			case format::section::pk_filter:
-				if (hashes::crc32c(bytes.data(), bytes.size()) != e.crc) { corrupt("section checksum"); }
-				break;
-			default:
-				break;
+		// Kinds no rule claims are left alone in format 12, as before the split; a kind listed
+		// twice is corrupt.
+		std::vector<residency::verified_regions::span> spans;
+		std::vector<format::section> seen;
+		// Each regions-checked section's CRCs move to its span; others are dropped.
+		for (auto& e : sections_) {
+			if (std::find(seen.begin(), seen.end(), e.kind) != seen.end()) { corrupt("section listed twice"); }
+			seen.push_back(e.kind);
+			const section_rule* r = rule_of(rules, e.kind);
+			if (r && r->check == section_rule::regions) {
+				spans.push_back({e.offset, e.length, e.region_shift, std::move(e.region_crcs)});
+			} else {
+				std::vector<std::uint32_t>().swap(e.region_crcs);
 			}
-			switch (e.kind) {
-			case format::section::terms: terms_ = bytes; break;
-			case format::section::term_index: term_index_ = bytes; break;
-			case format::section::postings: postings_ = bytes; break;
-			case format::section::positions: positions_ = bytes; break;
-			case format::section::lengths:
-				lengths_ = bytes;
-				lengths_crc_ = e.crc;
-				break;
-			case format::section::docids: docids_ = bytes; break;
-			case format::section::stats: stats_ = bytes; break;
-			case format::section::stored: stored_ = bytes; break;
-			case format::section::norms: norms_ = bytes; break;
-			case format::section::versions: versions_ = bytes; break;
-			case format::section::pk_filter: pk_filter_ = bytes; break;
-			default: break;
+			if (!r) { continue; }
+			if (r->check == section_rule::pinned) {
+				if (hashes::crc32c(file.data() + e.offset, e.length) != e.crc) { corrupt("section checksum"); }
 			}
+			if (e.kind == format::section::docids) { docids_ = file.substr(e.offset, e.length); }
+			if (e.kind == format::section::stats) { stats_ = file.substr(e.offset, e.length); }
 		}
 		if (stats_.size() != 28) { corrupt("stats"); }
-		max_positions_ = format::get<std::uint32_t>(stats_.data() + 24);
 		doc_count_ = format::get<std::uint64_t>(stats_.data());
-		total_length_ = format::get<std::uint64_t>(stats_.data() + 8);
 		if (doc_count_ != footer_.doc_count) { corrupt("document count"); }
-		if (lengths_.empty()) { corrupt("lengths"); }
-		length_width_ = std::uint8_t(lengths_[0]);
-		if (length_width_ > 32 || lengths_.size() != 1 + (doc_count_ + 127) / 128 * bitpack::packed_bytes(length_width_)) {
-			corrupt("lengths size");
-		}
-		// Terms, postings, positions, and stored records are verified per region on first
-		// read, each section in its own region size.
-		// Each section's region CRCs move to the span that checks them; others are dropped.
-		std::vector<residency::verified_regions::span> spans;
-		for (auto& e : sections_) {
-			if (e.kind != format::section::terms && e.kind != format::section::postings && e.kind != format::section::positions &&
-				e.kind != format::section::stored) {
-				std::vector<std::uint32_t>().swap(e.region_crcs);
-				continue;
-			}
-			spans.push_back({e.offset, e.length, e.region_shift, std::move(e.region_crcs)});
-			if (e.kind == format::section::terms) { integrity_->terms_offset = e.offset; }
-			if (e.kind == format::section::postings) {
-				integrity_->postings_offset = e.offset;
-				integrity_->postings_shift = e.region_shift;
-			}
-			if (e.kind == format::section::positions) { integrity_->positions_offset = e.offset; }
-			if (e.kind == format::section::stored) { integrity_->stored_offset = e.offset; }
-		}
 		std::sort(spans.begin(), spans.end(), [](const auto& a, const auto& b) { return a.offset < b.offset; });
-		integrity_->regions = residency::verified_regions(
-			std::span<const std::byte>(reinterpret_cast<const std::byte*>(file.data()), file.size()), std::move(spans));
-		if (norms_.size() != doc_count_) { corrupt("norms size"); }
+		try {
+			regions_->regions = residency::verified_regions(
+				std::span<const std::byte>(reinterpret_cast<const std::byte*>(file.data()), file.size()), std::move(spans));
+		} catch (const std::invalid_argument&) {
+			corrupt("section regions");  // spans out of bounds, overlapping, or miscounted
+		}
 		validate_docids();
-		validate_versions();
-		if (!pk_filter_.empty()) { open_pk_filter(); }
-		// The term index is copied out of the mapping (verified above), so later lookups never
-		// read bytes that could change or fault under the FST's unchecked traversal.
-		integrity_->pinned_index.assign(term_index_);
-		dict_.emplace(terms_, integrity_->pinned_index, &verify_terms, integrity_.get());  // validates the FST index
 	}
 
-	// The segment's smallest and largest docids (its footer's).
+	// The core's own sections, all verified whole at open.
+	static constexpr section_rule rules[] = {
+		{format::section::header, section_rule::pinned, section_rule::with_plugin},
+		{format::section::docids, section_rule::pinned, section_rule::with_plugin},
+		{format::section::stats, section_rule::pinned, section_rule::with_plugin},
+	};
+
+	// The handle for a section, or an empty one when the segment lacks it.
+	section_handle section(format::section kind) const {
+		for (const auto& e : sections_) {
+			if (e.kind == kind) { return {file_.substr(e.offset, e.length), e.offset, &regions_->regions}; }
+		}
+		return {{}, 0, &regions_->regions};
+	}
+	const format::section_entry* entry(format::section kind) const {
+		for (const auto& e : sections_) {
+			if (e.kind == kind) { return &e; }
+		}
+		return nullptr;
+	}
+
+	std::uint64_t doc_count() const noexcept { return doc_count_; }
+	std::string_view stats() const noexcept { return stats_; }
+	const std::vector<format::section_entry>& sections() const noexcept { return sections_; }
 	std::uint64_t min_docid() const noexcept { return footer_.min_docid; }
 	std::uint64_t max_docid() const noexcept { return footer_.max_docid; }
+	std::size_t verified_regions() const noexcept { return regions_->regions.verified(); }
+	bool verify(std::uint64_t offset, std::uint64_t length) const { return regions_->regions.verify({offset, length}); }
 
 	// The host docid of an ordinal.
 	std::uint64_t docid(ordinal_t ord) const { return ids_.docid(ord); }
-
 	// The ordinal holding docid, if any.
 	std::optional<ordinal_t> ordinal_of(std::uint64_t docid) const { return ids_.ordinal_of(docid); }
 	// Whether ordinal order is docid order: false only for a reordering merge's output.
 	bool docid_ordered() const noexcept { return ids_.docid_ordered(); }
 
-	// The document's version (0 when the segment's writer recorded none).
-	std::uint64_t version(ordinal_t ord) const {
-		if (ord >= doc_count_) { throw std::out_of_range("strata: ordinal out of range"); }
-		const unsigned width = std::uint8_t(versions_[8]);
-		std::uint64_t v = 0;
-		for (unsigned b = 0; b < width; ++b) {
-			const std::uint64_t at = std::uint64_t(ord) * width + b;
-			v |= std::uint64_t(std::uint8_t(versions_[9 + (at >> 3)]) >> (at & 7) & 1) << b;
+private:
+	static const section_rule* rule_of(std::span<const section_rule> rules, format::section kind) {
+		for (const auto& r : rules) {
+			if (r.kind == kind) { return &r; }
 		}
-		return format::get<std::uint64_t>(versions_.data()) + v;
+		return nullptr;
 	}
+	// docids: see docids.hh; validated whole at open.
+	void validate_docids() { ids_ = docids::reader(docids_, doc_count_, footer_.min_docid, footer_.max_docid); }
 
-	// Whether the segment may hold a document with this key term: inside its key range
-	// and in its filter (false positives possible, false negatives not).
-	bool may_hold_key(std::string_view key) const {
-		if (!pk_.filter) { return false; }
-		if (key < pk_.min || key > pk_.max) { return false; }
-		return pk_.filter->contains(xxh64::hash(key));
-	}
-
-	// The document's length quantized by format::encode_length (one byte, verified at open).
-	std::uint8_t norm(ordinal_t ord) const noexcept { return std::uint8_t(norms_[ord]); }
-
-	// Verifies a range of the postings or positions section before it is read; throws
-	// corrupt_segment on a checksum mismatch.
-	void verify_postings(std::uint64_t offset, std::uint64_t length) const {
-		if (!integrity_->regions.verify({integrity_->postings_offset + offset, length})) { corrupt("postings checksum"); }
-	}
-	// The postings section's verification region size, as a shift.
-	std::uint8_t postings_region_shift() const noexcept { return integrity_->postings_shift; }
-	void verify_positions(std::uint64_t offset, std::uint64_t length) const {
-		if (!integrity_->regions.verify({integrity_->positions_offset + offset, length})) { corrupt("positions checksum"); }
-	}
-	const std::vector<format::section_entry>& sections() const noexcept { return sections_; }
-
-	// One decoded stored frame: its first ordinal and each record's place in `raw`.
-	struct stored_frame {
-		std::uint32_t index = ~std::uint32_t(0);
-		ordinal_t first = 0;
-		std::string raw;
-		std::vector<std::uint64_t> starts;  // records + 1 offsets into raw
-		std::string_view record(ordinal_t ord) const { return std::string_view(raw).substr(starts[ord - first], starts[ord - first + 1] - starts[ord - first]); }
-		bool holds(ordinal_t ord) const noexcept { return index != ~std::uint32_t(0) && ord >= first && ord - first + 1 < starts.size(); }
+	struct shared {
+		residency::verified_regions regions;
 	};
-	// The number of stored frames (0 when no document has a record).
-	std::uint32_t stored_frames() const {
-		if (stored_.size() < 4) { return 0; }
-		const std::uint32_t frames = format::get<std::uint32_t>(stored_.data() + stored_.size() - 4);
-		if (std::uint64_t(frames) * 16 > stored_.size() - 4) { corrupt("stored index"); }
-		return frames;
-	}
-	// Decodes frame f into out. Its range is verified before it is decompressed, into
-	// exactly its recorded size.
-	void decode_stored_frame(std::uint32_t f, stored_frame& out) const {
-		const std::uint32_t frames = stored_frames();
-		const std::uint64_t index_at = stored_.size() - 4 - std::uint64_t(frames) * 16;
-		if (!integrity_->regions.verify({integrity_->stored_offset + index_at, stored_.size() - index_at})) { corrupt("stored checksum"); }
-		if (f >= frames) { corrupt("stored index"); }
-		const char* e = stored_.data() + index_at + 16 * std::uint64_t(f);
-		const std::uint32_t first = format::get<std::uint32_t>(e);
-		const std::uint32_t raw_size = format::get<std::uint32_t>(e + 4);
-		if (raw_size > format::max_stored_frame) { corrupt("stored frame size"); }
-		const std::uint64_t begin = format::get<std::uint64_t>(e + 8);
-		const std::uint64_t end = f + 1 < frames ? format::get<std::uint64_t>(e + 24) : index_at;
-		if (begin > end || end > index_at) { corrupt("stored frame bounds"); }
-		if (f + 1 < frames && format::get<std::uint32_t>(e + 16) <= first) { corrupt("stored index"); }
-		if (!integrity_->regions.verify({integrity_->stored_offset + begin, end - begin})) { corrupt("stored checksum"); }
-		try {
-			out.raw = decompress_zstd(stored_.substr(begin, end - begin), raw_size);
-		} catch (const std::exception&) {
-			corrupt("stored frame");
-		}
-		const char* p = out.raw.data();
-		const char* rend = p + out.raw.size();
-		const std::uint64_t n = format::get_leb(&p, rend);
-		if (n > doc_count_ || first > doc_count_ - n) { corrupt("stored frame count"); }
-		out.starts.assign(1, 0);
-		for (std::uint64_t i = 0; i < n; ++i) {
-			const std::uint64_t len = format::get_leb(&p, rend);
-			if (len > out.raw.size()) { corrupt("stored record length"); }
-			out.starts.push_back(out.starts.back() + len);
-		}
-		const std::uint64_t header = std::uint64_t(p - out.raw.data());
-		if (out.starts.back() > std::uint64_t(rend - p)) { corrupt("stored record bounds"); }
-		for (auto& v : out.starts) { v += header; }
-		out.index = f;
-		out.first = first;
-	}
-	// The stored frame whose ordinals start at or before ord, or none without a stored section.
-	std::optional<std::uint32_t> stored_frame_of(ordinal_t ord) const {
-		if (stored_.size() < 4) { return std::nullopt; }
-		const std::uint32_t frames = stored_frames();
-		const std::uint64_t index_at = stored_.size() - 4 - std::uint64_t(frames) * 16;
-		if (!integrity_->regions.verify({integrity_->stored_offset + index_at, stored_.size() - index_at})) { corrupt("stored checksum"); }
-		if (frames == 0) { corrupt("stored index"); }
-		auto first_of = [&](std::uint32_t f) { return format::get<std::uint32_t>(stored_.data() + index_at + 16 * std::uint64_t(f)); };
-		std::uint32_t lo = 0, hi = frames;  // the last frame whose first ordinal <= ord
-		while (hi - lo > 1) {
-			const std::uint32_t mid = lo + (hi - lo) / 2;
-			if (first_of(mid) <= ord) { lo = mid; } else { hi = mid; }
-		}
-		if (first_of(lo) > ord) { corrupt("stored index"); }
-		return lo;
-	}
-	// The document's stored record (empty when it has none), through `cache`: a reader in
-	// ordinal order decodes each frame once.
-	std::string_view stored(ordinal_t ord, stored_frame& cache) const {
-		if (ord >= doc_count_) { throw std::out_of_range("strata: ordinal out of range"); }
-		if (cache.holds(ord)) { return cache.record(ord); }
-		const auto f = stored_frame_of(ord);
-		if (!f) { return {}; }
-		decode_stored_frame(*f, cache);
-		if (!cache.holds(ord)) { corrupt("stored frame count"); }
-		return cache.record(ord);
-	}
-	// The document's stored record (empty when it has none); decodes its frame.
-	std::string stored(ordinal_t ord) const {
-		stored_frame f;
-		return std::string(stored(ord, f));
-	}
-	// How many regions have been verified.
-	std::size_t verified_regions() const noexcept { return integrity_->regions.verified(); }
-	// Verifies every byte of the sections checked on first read (terms, postings,
-	// positions, stored, lengths); throws corrupt_segment at the first one that differs.
-	void verify_all() const {
-		for (const auto& e : sections_) {
-			if (e.kind == format::section::terms || e.kind == format::section::postings || e.kind == format::section::positions || e.kind == format::section::stored) {
-				if (!integrity_->regions.verify({e.offset, e.length})) { corrupt("section checksum"); }
+	std::string_view file_, docids_, stats_;
+	docids::reader ids_;
+	format::footer footer_;
+	std::vector<format::section_entry> sections_;
+	std::unique_ptr<shared> regions_ = std::make_unique<shared>();  // stable address for handles
+	std::uint64_t doc_count_ = 0;
+};
+
+// What a plugin reader's constructor sees (L7).
+struct open_context {
+	std::uint32_t version;
+	std::uint64_t doc_count;
+	const core_segment& core;
+	section_handle section(format::section kind) const { return core.section(kind); }
+};
+
+// Terms, postings, positions, lengths, and norms.
+struct inverted_plugin {
+	static constexpr std::string_view id = "inverted";
+	static constexpr section_rule rules[] = {
+		{format::section::terms, section_rule::regions, section_rule::with_plugin},
+		{format::section::term_index, section_rule::pinned, section_rule::with_plugin},
+		{format::section::postings, section_rule::regions, section_rule::with_plugin},
+		{format::section::positions, section_rule::regions, section_rule::with_plugin},
+		{format::section::lengths, section_rule::first_use, section_rule::with_plugin},
+		{format::section::norms, section_rule::pinned, section_rule::with_plugin},
+	};
+
+	class reader {
+	public:
+		explicit reader(const open_context& c) : state_(std::make_unique<state>()), doc_count_(c.doc_count) {
+			const std::string_view stats = c.core.stats();
+			max_positions_ = format::get<std::uint32_t>(stats.data() + 24);
+			total_length_ = format::get<std::uint64_t>(stats.data() + 8);
+			state_->terms = c.section(format::section::terms);
+			postings_ = c.section(format::section::postings);
+			positions_ = c.section(format::section::positions);
+			lengths_ = c.section(format::section::lengths).bytes;
+			if (const auto* e = c.core.entry(format::section::lengths)) { lengths_crc_ = e->crc; }
+			if (const auto* e = c.core.entry(format::section::postings)) { postings_shift_ = e->region_shift; }
+			norms_ = c.section(format::section::norms).bytes;
+			if (lengths_.empty()) { corrupt("lengths"); }
+			length_width_ = std::uint8_t(lengths_[0]);
+			if (length_width_ > 32 || lengths_.size() != 1 + (doc_count_ + 127) / 128 * bitpack::packed_bytes(length_width_)) {
+				corrupt("lengths size");
+			}
+			if (norms_.size() != doc_count_) { corrupt("norms size"); }
+			// The term index is copied out of the mapping (verified at open), so later lookups
+			// never read bytes that could change or fault under the FST's unchecked traversal.
+			state_->pinned_index.assign(c.section(format::section::term_index).bytes);
+			try {
+				dict_.emplace(state_->terms.bytes, state_->pinned_index, &verify_terms, state_.get());  // validates the FST index
+			} catch (const termdict::corrupt&) {
+				corrupt("term index");
+			} catch (const std::invalid_argument&) {
+				corrupt("term index");  // the FST's own check
 			}
 		}
-		verify_lengths();
+
+		std::uint8_t norm(ordinal_t ord) const noexcept { return std::uint8_t(norms_[ord]); }
+		void verify_postings(std::uint64_t offset, std::uint64_t length) const {
+			if (!postings_.verify(offset, length)) { corrupt("postings checksum"); }
+		}
+		std::uint8_t postings_region_shift() const noexcept { return postings_shift_; }
+		void verify_positions(std::uint64_t offset, std::uint64_t length) const {
+			if (!positions_.verify(offset, length)) { corrupt("positions checksum"); }
+		}
+		std::uint32_t max_positions() const noexcept { return max_positions_; }
+		std::uint64_t total_length() const noexcept { return total_length_; }
+		double average_length() const noexcept { return doc_count_ ? double(total_length_) / double(doc_count_) : 0.0; }
+
+		// Document length by ordinal: one lane extraction from the bit-packed block. The
+		// section is verified whole on the first call (the default scheme reads norms only).
+		std::uint32_t length(ordinal_t ord) const {
+			if (state_->lengths_state.load(std::memory_order_acquire) != 1) [[unlikely]] { verify_lengths(); }
+			const unsigned w = length_width_;
+			if (w == 0) { return 0; }
+			const char* block = lengths_.data() + 1 + std::size_t(ord / 128) * bitpack::packed_bytes(w);
+			const unsigned j = ord % 128, lane = j & 3, row = j >> 2;
+			const unsigned start = row * w, word = start / 32, shift = start % 32;
+			std::uint64_t v = format::get<std::uint32_t>(block + 4 * (4 * word + lane)) >> shift;
+			if (shift + w > 32) { v |= std::uint64_t(format::get<std::uint32_t>(block + 4 * (4 * (word + 1) + lane))) << (32 - shift); }
+			return std::uint32_t(v & (w == 32 ? 0xffffffffu : ((1u << w) - 1)));
+		}
+
+		std::optional<format::term_info> find_term(std::string_view key) const {
+			// The run's values end with key's: the earlier ones only move the cursor.
+			format::term_run run, before;
+			std::string_view last;
+			std::optional<std::string_view> v;
+			try {
+				v = dict_->find_run(key, [&](std::string_view value) {
+					before = run;
+					(void)format::decode_term_info(value, run, false);
+					last = value;
+				});
+			} catch (const termdict::corrupt&) {
+				corrupt("terms checksum");  // a dictionary block failed its region check
+			}
+			if (!v) { return std::nullopt; }
+			auto info = format::decode_term_info(last, before);
+			if (info.df > doc_count_) { corrupt("document frequency"); }
+			return info;
+		}
+
+		template <class F>
+		void scan_terms(F&& f) const {
+			format::term_run run;
+			try {
+				dict_->scan("", [&](std::string_view key, std::string_view value) {
+					const auto info = format::decode_term_info(value, run);
+					if (info.df > doc_count_) { corrupt("document frequency"); }
+					return f(key, info);
+				});
+			} catch (const termdict::corrupt&) {
+				corrupt("terms checksum");
+			}
+		}
+		template <class F>
+		void scan_dictionary(std::string_view from, F&& f) const {
+			try {
+				dict_->scan(from, std::forward<F>(f));
+			} catch (const termdict::corrupt&) {
+				corrupt("terms checksum");
+			}
+		}
+
+		std::string_view postings_bytes() const noexcept { return postings_.bytes; }
+		std::string_view positions_bytes() const noexcept { return positions_.bytes; }
+		const termdict::reader& dictionary() const noexcept { return *dict_; }
+		std::uint64_t doc_count() const noexcept { return doc_count_; }
+
+		// Every byte of the sections checked on first read.
+		void verify_all() const {
+			for (const section_handle* h : {static_cast<const section_handle*>(&state_->terms), &postings_, &positions_}) {
+				if (!h->verify(0, h->bytes.size())) { corrupt("section checksum"); }
+			}
+			verify_lengths();
+		}
+
+	private:
+		void verify_lengths() const {
+			auto& st = state_->lengths_state;
+			if (st.load(std::memory_order_acquire) == 0) { st.store(hashes::crc32c(lengths_.data(), lengths_.size()) == lengths_crc_ ? 1 : 2, std::memory_order_release); }
+			if (st.load(std::memory_order_acquire) != 1) { corrupt("lengths checksum"); }
+		}
+		static bool verify_terms(void* context, std::uint64_t offset, std::uint64_t length) {
+			return static_cast<state*>(context)->terms.verify(offset, length);
+		}
+		// Heap-held, so the dictionary's verifier context survives moving the segment.
+		struct state {
+			section_handle terms;
+			std::string pinned_index;  // the term index, copied out of the mapping
+			std::atomic<std::uint8_t> lengths_state{0};  // 0 unverified, 1 good, 2 bad
+		};
+		std::unique_ptr<state> state_;
+		section_handle postings_, positions_;
+		std::string_view lengths_, norms_;
+		std::optional<termdict::reader> dict_;
+		std::uint64_t doc_count_ = 0, total_length_ = 0;
+		std::uint32_t max_positions_ = 0, lengths_crc_ = 0;
+		std::uint8_t length_width_ = 0, postings_shift_ = 0;
+	};
+};
+
+// Versions and the key filter.
+struct keys_plugin {
+	static constexpr std::string_view id = "keys";
+	static constexpr section_rule rules[] = {
+		{format::section::versions, section_rule::pinned, section_rule::with_plugin},
+		{format::section::pk_filter, section_rule::pinned, section_rule::optional},
+	};
+
+	class reader {
+	public:
+		explicit reader(const open_context& c) : versions_(c.section(format::section::versions).bytes), doc_count_(c.doc_count) {
+			validate_versions();
+			if (auto pk = c.section(format::section::pk_filter).bytes; !pk.empty()) { open_pk_filter(pk); }
+		}
+		// The document's version (0 when the segment's writer recorded none).
+		std::uint64_t version(ordinal_t ord) const {
+			if (ord >= doc_count_) { throw std::out_of_range("strata: ordinal out of range"); }
+			const unsigned width = std::uint8_t(versions_[8]);
+			std::uint64_t v = 0;
+			for (unsigned b = 0; b < width; ++b) {
+				const std::uint64_t at = std::uint64_t(ord) * width + b;
+				v |= std::uint64_t(std::uint8_t(versions_[9 + (at >> 3)]) >> (at & 7) & 1) << b;
+			}
+			return format::get<std::uint64_t>(versions_.data()) + v;
+		}
+		void verify_all() const {}  // both sections are verified whole at open
+		// Whether the segment may hold a document with this key term: inside its key range
+		// and in its filter (false positives possible, false negatives not).
+		bool may_hold_key(std::string_view key) const {
+			if (!filter_) { return false; }
+			if (key < min_ || key > max_) { return false; }
+			return filter_->contains(xxh64::hash(key));
+		}
+
+	private:
+		// versions: [min u64][width u8][packed bits]; exactly the bits doc_count needs, and no
+		// version past 2^64 - 1.
+		void validate_versions() const {
+			if (versions_.size() < 9) { corrupt("versions"); }
+			const unsigned width = std::uint8_t(versions_[8]);
+			const std::uint64_t lo = format::get<std::uint64_t>(versions_.data());
+			const std::uint64_t mask = width >= 64 ? ~std::uint64_t(0) : (std::uint64_t(1) << width) - 1;
+			if (width > 64 || versions_.size() != 9 + (doc_count_ * width + 7) / 8 || lo > ~std::uint64_t(0) - mask) {
+				corrupt("versions");
+			}
+		}
+		// pk_filter: the smallest and largest key, then the fuse filter.
+		void open_pk_filter(std::string_view pk) {
+			const char* p = pk.data();
+			const char* end = p + pk.size();
+			auto bytes = [&] {
+				const std::uint64_t n = format::get_leb(&p, end);
+				if (n > std::uint64_t(end - p)) { corrupt("pk_filter"); }
+				std::string_view out(p, n);
+				p += n;
+				return out;
+			};
+			min_ = bytes();
+			max_ = bytes();
+			filter_ = fusefilter::filter8_view::parse(std::string_view(p, std::size_t(end - p)));  // reads the mapping in place
+			if (!filter_ || min_ > max_ || min_.empty()) { corrupt("pk_filter"); }
+		}
+		std::string_view versions_, min_, max_;
+		std::optional<fusefilter::filter8_view> filter_;
+		std::uint64_t doc_count_;
+	};
+};
+
+// Stored records in zstd frames.
+struct stored_plugin {
+	static constexpr std::string_view id = "stored";
+	static constexpr section_rule rules[] = {
+		{format::section::stored, section_rule::regions, section_rule::with_plugin},
+	};
+
+	class reader {
+	public:
+		explicit reader(const open_context& c) : stored_(c.section(format::section::stored)), doc_count_(c.doc_count) {}
+
+		// One decoded stored frame: its first ordinal and each record's place in `raw`.
+		struct stored_frame {
+			std::uint32_t index = ~std::uint32_t(0);
+			ordinal_t first = 0;
+			std::string raw;
+			std::vector<std::uint64_t> starts;  // records + 1 offsets into raw
+			std::string_view record(ordinal_t ord) const { return std::string_view(raw).substr(starts[ord - first], starts[ord - first + 1] - starts[ord - first]); }
+			bool holds(ordinal_t ord) const noexcept { return index != ~std::uint32_t(0) && ord >= first && ord - first + 1 < starts.size(); }
+		};
+		// The number of stored frames (0 when no document has a record).
+		std::uint32_t stored_frames() const {
+			const std::string_view s = stored_.bytes;
+			if (s.size() < 4) { return 0; }
+			const std::uint32_t frames = format::get<std::uint32_t>(s.data() + s.size() - 4);
+			if (std::uint64_t(frames) * 16 > s.size() - 4) { corrupt("stored index"); }
+			return frames;
+		}
+		// Decodes frame f into out. Its range is verified before it is decompressed, into
+		// exactly its recorded size.
+		void decode_stored_frame(std::uint32_t f, stored_frame& out) const {
+			const std::string_view s = stored_.bytes;
+			const std::uint32_t frames = stored_frames();
+			const std::uint64_t index_at = s.size() - 4 - std::uint64_t(frames) * 16;
+			if (!stored_.verify(index_at, s.size() - index_at)) { corrupt("stored checksum"); }
+			if (f >= frames) { corrupt("stored index"); }
+			const char* e = s.data() + index_at + 16 * std::uint64_t(f);
+			const std::uint32_t first = format::get<std::uint32_t>(e);
+			const std::uint32_t raw_size = format::get<std::uint32_t>(e + 4);
+			if (raw_size > format::max_stored_frame) { corrupt("stored frame size"); }
+			const std::uint64_t begin = format::get<std::uint64_t>(e + 8);
+			const std::uint64_t end = f + 1 < frames ? format::get<std::uint64_t>(e + 24) : index_at;
+			if (begin > end || end > index_at) { corrupt("stored frame bounds"); }
+			if (f + 1 < frames && format::get<std::uint32_t>(e + 16) <= first) { corrupt("stored index"); }
+			if (!stored_.verify(begin, end - begin)) { corrupt("stored checksum"); }
+			try {
+				out.raw = decompress_zstd(s.substr(begin, end - begin), raw_size);
+			} catch (const std::exception&) {
+				corrupt("stored frame");
+			}
+			const char* p = out.raw.data();
+			const char* rend = p + out.raw.size();
+			const std::uint64_t n = format::get_leb(&p, rend);
+			if (n > doc_count_ || first > doc_count_ - n) { corrupt("stored frame count"); }
+			out.starts.assign(1, 0);
+			for (std::uint64_t i = 0; i < n; ++i) {
+				const std::uint64_t len = format::get_leb(&p, rend);
+				if (len > out.raw.size()) { corrupt("stored record length"); }
+				out.starts.push_back(out.starts.back() + len);
+			}
+			const std::uint64_t header = std::uint64_t(p - out.raw.data());
+			if (out.starts.back() > std::uint64_t(rend - p)) { corrupt("stored record bounds"); }
+			for (auto& v : out.starts) { v += header; }
+			out.index = f;
+			out.first = first;
+		}
+		// The stored frame whose ordinals start at or before ord, or none without a stored section.
+		std::optional<std::uint32_t> stored_frame_of(ordinal_t ord) const {
+			const std::string_view s = stored_.bytes;
+			if (s.size() < 4) { return std::nullopt; }
+			const std::uint32_t frames = stored_frames();
+			const std::uint64_t index_at = s.size() - 4 - std::uint64_t(frames) * 16;
+			if (!stored_.verify(index_at, s.size() - index_at)) { corrupt("stored checksum"); }
+			if (frames == 0) { corrupt("stored index"); }
+			auto first_of = [&](std::uint32_t f) { return format::get<std::uint32_t>(s.data() + index_at + 16 * std::uint64_t(f)); };
+			std::uint32_t lo = 0, hi = frames;  // the last frame whose first ordinal <= ord
+			while (hi - lo > 1) {
+				const std::uint32_t mid = lo + (hi - lo) / 2;
+				if (first_of(mid) <= ord) { lo = mid; } else { hi = mid; }
+			}
+			if (first_of(lo) > ord) { corrupt("stored index"); }
+			return lo;
+		}
+		// The document's stored record (empty when it has none), through `cache`: a reader in
+		// ordinal order decodes each frame once.
+		std::string_view stored(ordinal_t ord, stored_frame& cache) const {
+			if (ord >= doc_count_) { throw std::out_of_range("strata: ordinal out of range"); }
+			if (cache.holds(ord)) { return cache.record(ord); }
+			const auto f = stored_frame_of(ord);
+			if (!f) { return {}; }
+			decode_stored_frame(*f, cache);
+			if (!cache.holds(ord)) { corrupt("stored frame count"); }
+			return cache.record(ord);
+		}
+		// The document's stored record (empty when it has none); decodes its frame.
+		std::string stored(ordinal_t ord) const {
+			stored_frame f;
+			return std::string(stored(ord, f));
+		}
+		void verify_all() const {
+			if (!stored_.verify(0, stored_.bytes.size())) { corrupt("section checksum"); }
+		}
+
+	private:
+		section_handle stored_;
+		std::uint64_t doc_count_;
+	};
+};
+
+namespace detail {
+template <class E>
+struct reader_of {
+	using type = typename E::reader;
+};
+template <>
+struct reader_of<docids_section> {  // the core's section: no reader of its own
+	struct type {
+		explicit type(const open_context&) {}
+	};
+};
+}  // namespace detail
+
+// An open segment of a layout: the core, then each plugin's reader in layout order. Its
+// members forward to the reader that owns each concern, so callers name the segment.
+template <class... Entries>
+class basic_segment<layout<Entries...>> {
+	template <class E>
+	static constexpr auto rules_of() {
+		if constexpr (std::is_same_v<E, docids_section>) {
+			return std::span<const section_rule>{};
+		} else {
+			return std::span<const section_rule>(E::rules);
+		}
+	}
+	static std::vector<section_rule> all_rules() {
+		std::vector<section_rule> out(std::begin(core_segment::rules), std::end(core_segment::rules));
+		(..., [&] {
+			for (const auto& r : rules_of<Entries>()) { out.push_back(r); }
+		}());
+		return out;
 	}
 
-	std::uint64_t doc_count() const noexcept { return doc_count_; }
-	// The most positions any document has for one term.
-	std::uint32_t max_positions() const noexcept { return max_positions_; }
-	std::uint64_t total_length() const noexcept { return total_length_; }
-	double average_length() const noexcept { return doc_count_ ? double(total_length_) / double(doc_count_) : 0.0; }
+public:
+	// Verifies the footer, the table of contents, the header, and the pinned sections in
+	// full; other sections are verified per region as they are read. The file's bytes
+	// must outlive the segment; a temporary string cannot be one.
+	explicit basic_segment(std::string&&) = delete;
+	explicit basic_segment(std::string_view file) : core_(file, all_rules()), readers_(open(core_)) {}
 
-	// Document length by ordinal: one lane extraction from the bit-packed block. The
-	// section is verified whole on the first call (the default scheme reads norms only).
-	std::uint32_t length(ordinal_t ord) const {
-		if (integrity_->lengths_state.load(std::memory_order_acquire) != 1) [[unlikely]] { verify_lengths(); }
-		const unsigned w = length_width_;
-		if (w == 0) { return 0; }
-		const char* block = lengths_.data() + 1 + std::size_t(ord / 128) * bitpack::packed_bytes(w);
-		const unsigned j = ord % 128, lane = j & 3, row = j >> 2;
-		const unsigned start = row * w, word = start / 32, shift = start % 32;
-		std::uint64_t v = format::get<std::uint32_t>(block + 4 * (4 * word + lane)) >> shift;
-		if (shift + w > 32) { v |= std::uint64_t(format::get<std::uint32_t>(block + 4 * (4 * (word + 1) + lane))) << (32 - shift); }
-		return std::uint32_t(v & (w == 32 ? 0xffffffffu : ((1u << w) - 1)));
+	template <class P>
+	auto& reader() noexcept { return std::get<typename detail::reader_of<P>::type>(readers_); }
+	template <class P>
+	const auto& reader() const noexcept { return std::get<typename detail::reader_of<P>::type>(readers_); }
+	const core_segment& core() const noexcept { return core_; }
+
+	// Core.
+	std::uint64_t min_docid() const noexcept { return core_.min_docid(); }
+	std::uint64_t max_docid() const noexcept { return core_.max_docid(); }
+	std::uint64_t docid(ordinal_t ord) const { return core_.docid(ord); }
+	std::optional<ordinal_t> ordinal_of(std::uint64_t docid) const { return core_.ordinal_of(docid); }
+	bool docid_ordered() const noexcept { return core_.docid_ordered(); }
+	std::uint64_t doc_count() const noexcept { return core_.doc_count(); }
+	const std::vector<format::section_entry>& sections() const noexcept { return core_.sections(); }
+	std::size_t verified_regions() const noexcept { return core_.verified_regions(); }
+	// Verifies every byte of the sections checked on first read; throws corrupt_segment at
+	// the first one that differs.
+	void verify_all() const {
+		(..., verify_all_of<Entries>());
 	}
+
+	// keys.
+	std::uint64_t version(ordinal_t ord) const { return reader<keys_plugin>().version(ord); }
+	bool may_hold_key(std::string_view key) const { return reader<keys_plugin>().may_hold_key(key); }
+
+	// stored.
+	using stored_frame = stored_plugin::reader::stored_frame;
+	std::uint32_t stored_frames() const { return reader<stored_plugin>().stored_frames(); }
+	void decode_stored_frame(std::uint32_t f, stored_frame& out) const { reader<stored_plugin>().decode_stored_frame(f, out); }
+	std::optional<std::uint32_t> stored_frame_of(ordinal_t ord) const { return reader<stored_plugin>().stored_frame_of(ord); }
+	std::string_view stored(ordinal_t ord, stored_frame& cache) const { return reader<stored_plugin>().stored(ord, cache); }
+	std::string stored(ordinal_t ord) const { return reader<stored_plugin>().stored(ord); }
+
+	// inverted.
+	std::uint8_t norm(ordinal_t ord) const noexcept { return reader<inverted_plugin>().norm(ord); }
+	void verify_postings(std::uint64_t offset, std::uint64_t length) const { reader<inverted_plugin>().verify_postings(offset, length); }
+	std::uint8_t postings_region_shift() const noexcept { return reader<inverted_plugin>().postings_region_shift(); }
+	void verify_positions(std::uint64_t offset, std::uint64_t length) const { reader<inverted_plugin>().verify_positions(offset, length); }
+	std::uint32_t max_positions() const noexcept { return reader<inverted_plugin>().max_positions(); }
+	std::uint64_t total_length() const noexcept { return reader<inverted_plugin>().total_length(); }
+	double average_length() const noexcept { return reader<inverted_plugin>().average_length(); }
+	std::uint32_t length(ordinal_t ord) const { return reader<inverted_plugin>().length(ord); }
+	std::string_view postings_bytes() const noexcept { return reader<inverted_plugin>().postings_bytes(); }
+	std::string_view positions_bytes() const noexcept { return reader<inverted_plugin>().positions_bytes(); }
+	const termdict::reader& dictionary() const noexcept { return reader<inverted_plugin>().dictionary(); }
 
 	// A term's info, its offsets resolved from its dictionary run and, for a term without
 	// skip blocks, its competitive pairs computed from its postings (at most 127).
@@ -318,58 +605,29 @@ public:
 		if (info) { complete_impacts(*info); }
 		return info;
 	}
-
 	// The same from one dictionary walk, leaving a term without skip blocks with no
 	// competitive pairs: its df and offsets, for statistics and counts.
-	std::optional<format::term_info> find_term(std::string_view key) const {
-		// The run's values end with key's: the earlier ones only move the cursor.
-		format::term_run run, before;
-		std::string_view last;
-		std::optional<std::string_view> v;
-		try {
-			v = dict_->find_run(key, [&](std::string_view value) {
-				before = run;
-				(void)format::decode_term_info(value, run, false);
-				last = value;
-			});
-		} catch (const termdict::corrupt&) {
-			corrupt("terms checksum");  // a dictionary block failed its region check
-		}
-		if (!v) { return std::nullopt; }
-		auto info = format::decode_term_info(last, before);
-		if (info.df > doc_count_) { corrupt("document frequency"); }
-		return info;
-	}
-
+	std::optional<format::term_info> find_term(std::string_view key) const { return reader<inverted_plugin>().find_term(key); }
 	// Computes the competitive pairs find_term leaves out (a term below 128 postings).
 	void complete_impacts(format::term_info& info) const {
 		if (info.df < format::block) { info.impacts = tail_impacts(info); }
 	}
-
 	// Competitive pairs of a term without skip blocks, from its postings.
 	std::vector<format::impact> tail_impacts(const format::term_info& info) const;
-
 	// Calls f(term, info) for every term in order (impacts left empty below 128 postings)
 	// until f returns false.
 	template <class F>
-	void scan_terms(F&& f) const {
-		format::term_run run;
-		try {
-			dict_->scan("", [&](std::string_view key, std::string_view value) {
-				const auto info = format::decode_term_info(value, run);
-				if (info.df > doc_count_) { corrupt("document frequency"); }
-				return f(key, info);
-			});
-		} catch (const termdict::corrupt&) {
-			corrupt("terms checksum");
-		}
-	}
+	void scan_terms(F&& f) const { reader<inverted_plugin>().scan_terms(std::forward<F>(f)); }
+	// Calls f(term, value) for every term from `from` in order until f returns false; a
+	// dictionary block that fails its region check throws corrupt_segment.
+	template <class F>
+	void scan_dictionary(std::string_view from, F&& f) const { reader<inverted_plugin>().scan_dictionary(from, std::forward<F>(f)); }
 
 	// Every term in order with its info (impacts left empty below 128 postings), pulled one
 	// at a time; scan_terms as a cursor, for k-way merges. Neither copied nor moved.
 	class term_cursor {
 	public:
-		explicit term_cursor(const segment& seg) : seg_(&seg), c_(*seg.dict_) {}
+		explicit term_cursor(const basic_segment& seg) : seg_(&seg), c_(seg.dictionary()) {}
 		// Moves to the next term; false past the last.
 		bool next() {
 			try {
@@ -378,98 +636,37 @@ public:
 			} catch (const termdict::corrupt&) {
 				corrupt("terms checksum");
 			}
-			if (info_.df > seg_->doc_count_) { corrupt("document frequency"); }
+			if (info_.df > seg_->doc_count()) { corrupt("document frequency"); }
 			return true;
 		}
 		std::string_view term() const noexcept { return c_.key(); }
 		const format::term_info& info() const noexcept { return info_; }
 
 	private:
-		const segment* seg_;
+		const basic_segment* seg_;
 		termdict::reader::cursor c_;
 		format::term_run run_;
 		format::term_info info_;
 	};
 
-	// Calls f(term, value) for every term from `from` in order until f returns false; a
-	// dictionary block that fails its region check throws corrupt_segment.
-	template <class F>
-	void scan_dictionary(std::string_view from, F&& f) const {
-		try {
-			dict_->scan(from, std::forward<F>(f));
-		} catch (const termdict::corrupt&) {
-			corrupt("terms checksum");
-		}
-	}
-
-	std::string_view postings_bytes() const noexcept { return postings_; }
-	std::string_view positions_bytes() const noexcept { return positions_; }
-	const termdict::reader& dictionary() const noexcept { return *dict_; }
-
 private:
-	// docids: see docids.hh; validated whole at open.
-	void validate_docids() { ids_ = docids::reader(docids_, doc_count_, footer_.min_docid, footer_.max_docid); }
-
-	// versions: [min u64][width u8][packed bits]; exactly the bits doc_count needs, and no
-	// version past 2^64 - 1.
-	void validate_versions() const {
-		if (versions_.size() < 9) { corrupt("versions"); }
-		const unsigned width = std::uint8_t(versions_[8]);
-		const std::uint64_t lo = format::get<std::uint64_t>(versions_.data());
-		const std::uint64_t mask = width >= 64 ? ~std::uint64_t(0) : (std::uint64_t(1) << width) - 1;
-		if (width > 64 || versions_.size() != 9 + (doc_count_ * width + 7) / 8 || lo > ~std::uint64_t(0) - mask) {
-			corrupt("versions");
-		}
+	using readers = std::tuple<typename detail::reader_of<Entries>::type...>;
+	static readers open(const core_segment& core) {
+		const open_context c{format::version, core.doc_count(), core};
+		return readers{typename detail::reader_of<Entries>::type(c)...};
+	}
+	template <class E>
+	void verify_all_of() const {
+		if constexpr (!std::is_same_v<E, docids_section>) { reader<E>().verify_all(); }
 	}
 
-	// pk_filter: the smallest and largest key, then the fuse filter.
-	void open_pk_filter() {
-		const char* p = pk_filter_.data();
-		const char* end = p + pk_filter_.size();
-		auto bytes = [&] {
-			const std::uint64_t n = format::get_leb(&p, end);
-			if (n > std::uint64_t(end - p)) { corrupt("pk_filter"); }
-			std::string_view out(p, n);
-			p += n;
-			return out;
-		};
-		pk_.min = bytes();
-		pk_.max = bytes();
-		pk_.filter = fusefilter::filter8_view::parse(std::string_view(p, std::size_t(end - p)));  // reads the mapping in place
-		if (!pk_.filter || pk_.min > pk_.max || pk_.min.empty()) { corrupt("pk_filter"); }
-	}
-
-	std::string_view file_, terms_, term_index_, postings_, positions_, lengths_, docids_, stats_, stored_, norms_, versions_, pk_filter_;
-	docids::reader ids_;
-	struct {
-		std::string_view min, max;
-		std::optional<fusefilter::filter8_view> filter;
-	} pk_;
-	format::footer footer_;
-	std::vector<format::section_entry> sections_;
-	struct integrity {
-		residency::verified_regions regions;
-		std::atomic<std::uint8_t> lengths_state{0};  // 0 unverified, 1 good, 2 bad
-		std::uint64_t terms_offset = 0, postings_offset = 0, positions_offset = 0, stored_offset = 0;
-		std::uint8_t postings_shift = 0;
-		std::string pinned_index;  // the term index, copied out of the mapping
-	};
-	void verify_lengths() const {
-		auto& state = integrity_->lengths_state;
-		if (state.load(std::memory_order_acquire) == 0) { state.store(hashes::crc32c(lengths_.data(), lengths_.size()) == lengths_crc_ ? 1 : 2, std::memory_order_release); }
-		if (state.load(std::memory_order_acquire) != 1) { corrupt("lengths checksum"); }
-	}
-	static bool verify_terms(void* context, std::uint64_t offset, std::uint64_t length) {
-		auto* i = static_cast<integrity*>(context);
-		return i->regions.verify({i->terms_offset + offset, length});
-	}
-	std::unique_ptr<integrity> integrity_ = std::make_unique<integrity>();  // stable address for dict_
-	std::optional<termdict::reader> dict_;
-	std::uint64_t doc_count_ = 0, total_length_ = 0;
-	std::uint32_t max_positions_ = 0;
-	std::uint32_t lengths_crc_ = 0;
-	std::uint8_t length_width_ = 0;
+	core_segment core_;
+	readers readers_;
 };
+
+// Readers hold views of the file and pointers into heap-held state, so a segment moves
+// without leaving one dangling (layers.md L3).
+static_assert(std::is_nothrow_move_constructible_v<segment>);
 
 // Iterates one term's postings: ordinals in increasing order with their wdf. Satisfies
 // docset::doc_iterator; scorers build on it. Skip groups are decoded on demand.
@@ -1072,6 +1269,7 @@ private:
 // Reads one term's position data: per-document counts (when they differ from wdf) and the
 // position stream, decoding one 128-position block at a time. Opening reads a fixed header;
 // blocks are found from the postings skip data and stepped over by their headers.
+template <>
 inline std::vector<format::impact> segment::tail_impacts(const format::term_info& info) const {
 	std::vector<format::impact> pairs;
 	postings_iterator it(*this, info);

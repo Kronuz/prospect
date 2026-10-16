@@ -183,12 +183,19 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 	} else if (data[1] % 8 != 0) {
 		refresh_checksums(file);  // one input in eight checks detection instead
 	}
+	// STRATA_FUZZ_VERDICTS prints each input's verdict, to compare two builds' outcomes.
+	static const bool verdicts = std::getenv("STRATA_FUZZ_VERDICTS") != nullptr;
+	const char* verdict = "accepted";
 	try {
 		strata::segment seg(file);
 		exercise(seg);
 	} catch (const strata::corrupt_segment&) {
+		verdict = "corrupt_segment";
 	} catch (const termdict::corrupt&) {
+		verdict = "termdict::corrupt";
 	} catch (const std::invalid_argument&) {
+		verdict = "invalid_argument";
 	}
+	if (verdicts) { std::printf("%s\n", verdict); }
 	return 0;
 }

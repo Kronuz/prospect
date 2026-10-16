@@ -108,6 +108,22 @@ int main() {
 	for (std::uint32_t o = 0; o < 400; o += 3) { da[o >> 6] |= std::uint64_t(1) << (o & 63); }
 	for (std::uint32_t o = 1; o < 300; o += 5) { db[o >> 6] |= std::uint64_t(1) << (o & 63); }
 	pin("merge-deletes.sx", merged({a, b}, {da, db}));
+	// A segment moved after open still answers: terms, postings, keys, and stored records
+	// (under ASan in CI, any reader left pointing into the moved-from object faults).
+	{
+		const std::string file = build(300, 1000, true);
+		segment first(file);
+		segment moved(std::move(first));
+		const auto info = moved.term("gamma");
+		CHECK(info && info->df > 0);
+		postings_iterator it(moved, *info);
+		std::uint64_t n = 0;
+		for (auto d = it.next(); d != no_more_docs; d = it.next()) { ++n; }
+		CHECK(n == info->df);
+		CHECK(moved.may_hold_key("Q7") && moved.version(6) == 1 + 6 % 3);
+		CHECK(moved.stored(5).size() == 1000);
+		moved.verify_all();
+	}
 	// An empty flush, when the writer allows one.
 	try {
 		segment_writer w;
