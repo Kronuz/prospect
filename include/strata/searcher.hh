@@ -184,6 +184,15 @@ using scorer_builder = std::function<scorer_ptr(const segment&)>;
 // each segment prunes from the first competitive hit against the k best so far.
 inline std::vector<doc_hit> search(std::span<const segment_snapshot> segs, const scorer_builder& build, std::size_t k, std::uint64_t* count = nullptr) {
 	if (count) { *count = 0; }
+	if (segs.size() == 1) {  // one segment: ordinal order is docid order, nothing spans segments
+		const auto& s = segs[0];
+		scorer_ptr q = build(*s.seg);
+		if (!q) { return {}; }
+		if (s.any_deleted()) { q = std::make_unique<live_scorer>(std::move(q), *s.deleted); }
+		std::vector<doc_hit> out;
+		for (const auto& h : top_k(*q, k, count)) { out.push_back({s.seg->docid(h.ord), h.score}); }
+		return out;
+	}
 	top_collector c(k, false);
 	c.expect_segments(segs.size());
 	for (const auto& s : segs) {
