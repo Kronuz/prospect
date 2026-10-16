@@ -59,6 +59,11 @@ using docset::no_more_docs;
 
 // --- layouts (layers.md, L2) -----------------------------------------------------------
 
+// What stage-1 checks may consult (L4); Phase 4 adds the slot table.
+struct validate_context {
+	std::string_view key_prefix;  // the manifest's, until format 13
+};
+
 // One term of a document as the host builds it; terms are unique within a document.
 struct term_entry {
 	std::string term;
@@ -203,7 +208,7 @@ struct inverted_plugin {
 		std::uint32_t length = 0;
 	};
 	// Stage-1 checks (D10): terms non-empty, within the term limit, unique, positions increasing.
-	static bool validate(const part& p) {
+	static bool validate(const validate_context&, const part& p) {
 		std::vector<std::string_view> seen;
 		seen.reserve(p.terms.size());
 		for (const auto& t : p.terms) {
@@ -379,8 +384,9 @@ struct keys_plugin {
 
 	// Format 12: a document's key is its one term with the index's key prefix (none
 	// without a prefix); `valid` turns false when it has two.
-	static std::optional<std::string> key_of(std::string_view prefix, const inverted_plugin::part& d, bool& valid) {
+	static std::optional<std::string> key_of(const validate_context& vc, const inverted_plugin::part& d, bool& valid) {
 		valid = true;
+		const std::string_view prefix = vc.key_prefix;
 		if (prefix.empty()) { return std::nullopt; }
 		std::optional<std::string> key;
 		for (const auto& t : d.terms) {
@@ -463,7 +469,7 @@ struct stored_plugin {
 	struct part {
 		std::string stored;
 	};
-	static bool validate(const part& p) { return p.stored.size() <= format::max_stored_record; }
+	static bool validate(const validate_context&, const part& p) { return p.stored.size() <= format::max_stored_record; }
 	static std::uint64_t bytes(const part& p) { return p.stored.size(); }
 	static std::uint64_t disk_estimate(const part& p) { return p.stored.size() + p.stored.size() / 16; }
 	static constexpr section_rule rules[] = {
@@ -597,16 +603,16 @@ struct basic_document;
 template <class... Entries>
 struct basic_document<layout<Entries...>> : core_part, detail::plugin_part_t<Entries>... {
 	// Stage-1 checks in layout order; false on the first that fails.
-	bool valid() const { return (valid_part<Entries>() && ...); }
+	bool valid(const validate_context& vc) const { return (valid_part<Entries>(vc) && ...); }
 	// Buffer memory beyond the document object, and the parts' disk estimate.
 	std::uint64_t part_bytes() const { return (part_bytes_of<Entries>() + ... + 0); }
 	std::uint64_t disk_estimate() const { return (disk_estimate_of<Entries>() + ... + 0); }
 
 private:
 	template <class E>
-	bool valid_part() const {
+	bool valid_part(const validate_context& vc) const {
 		if constexpr (requires { typename E::part; }) {
-			return E::validate(static_cast<const typename E::part&>(*this));
+			return E::validate(vc, static_cast<const typename E::part&>(*this));
 		} else {
 			return true;
 		}

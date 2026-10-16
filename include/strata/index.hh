@@ -204,14 +204,20 @@ struct index_options {
 	strata::reorder::settings reorder_settings;
 };
 
-class index {
+// An index of a layout's segments (layers.md L2); `index` is format 12's search layout.
+template <class Layout>
+class basic_index {
 public:
 	using options = index_options;
+	using document = basic_document<Layout>;
+	using operation = basic_operation<Layout>;
+	using transaction = basic_transaction<Layout>;
+	using segment = basic_segment<Layout>;
 
 	// Creates an empty index and commits its first manifest, in an empty directory or over
 	// what an interrupted create left (removed first); any other strata file is refused.
-	static index create(kronuz::journal::IO& io, const options& opts, const std::array<char, 16>& uuid) {
-		index ix(io);
+	static basic_index create(kronuz::journal::IO& io, const options& opts, const std::array<char, 16>& uuid) {
+		basic_index ix(io);
 		try {
 			ix.lock_ = io.acquire_owner(true);
 		} catch (const std::system_error& e) {
@@ -231,8 +237,8 @@ public:
 
 	// Opens the highest durable manifest (or `to`, committed again as the newest), fails
 	// closed when a file it names is missing or differs, then deletes orphans.
-	static index open(kronuz::journal::IO& io, const options& opts = {}, std::optional<std::uint64_t> to = std::nullopt) {
-		index ix(io);
+	static basic_index open(kronuz::journal::IO& io, const options& opts = {}, std::optional<std::uint64_t> to = std::nullopt) {
+		basic_index ix(io);
 		try {
 			ix.lock_ = io.acquire_owner(false);
 		} catch (const std::system_error& e) {
@@ -252,9 +258,9 @@ public:
 		return ix;
 	}
 
-	index(index&&) noexcept = default;
-	index& operator=(index&&) noexcept = default;
-	~index() { group_.reset(); }
+	basic_index(basic_index&&) noexcept = default;
+	basic_index& operator=(basic_index&&) noexcept = default;
+	~basic_index() { group_.reset(); }
 
 	// Releases the owner lock and drops all state; uncommitted work is lost. Background
 	// merges queued are dropped and running ones stopped first. The index is fenced
@@ -716,7 +722,7 @@ private:
 		}
 	}
 
-	explicit index(kronuz::journal::IO& io) : io_(&io) {}
+	explicit basic_index(kronuz::journal::IO& io) : io_(&io) {}
 
 	// Merges run on the host's executor, or on the index's own inline one, synchronously
 	// on the writer's thread, when it passes none: one merge implementation either way.
@@ -1295,7 +1301,7 @@ private:
 	// Bytes a merge or install reserved for what it writes: settle_storage() counts them, so
 	// a drain while it runs keeps them; they go when it ends.
 	struct hold {
-		index* ix;
+		basic_index* ix;
 		std::uint64_t n = 0;
 		void add(std::uint64_t bytes) {
 			n += bytes;
@@ -1514,10 +1520,11 @@ private:
 	}
 
 	// The key term of a document: its one term with the index's key prefix.
-	std::optional<std::string> key_of(const document& d, bool& valid) const { return keys_plugin::key_of(m_.key_prefix, d, valid); }
+	validate_context context() const { return {m_.key_prefix}; }
+	std::optional<std::string> key_of(const document& d, bool& valid) const { return keys_plugin::key_of(context(), d, valid); }
 
 	// Validation that can reject runs here, before anything changes (design D10).
-	static bool valid(const document& d) { return d.valid(); }
+	bool valid(const document& d) const { return d.valid(context()); }
 
 	verdict evaluate(const transaction& t) {
 		verdict v;
@@ -2098,7 +2105,7 @@ private:
 		return s;
 	}
 
-	std::unique_ptr<executor::group> group_;  // first: assigned first and ended first, in ~index()
+	std::unique_ptr<executor::group> group_;  // first: assigned first and ended first, in ~basic_index()
 	std::unique_ptr<inline_executor> own_exec_;  // merges' executor when the host passes none
 	executor* exec_ = nullptr;
 	kronuz::journal::IO* io_;
@@ -2134,5 +2141,6 @@ private:
 	bool meta_dirty_ = false;
 	bool fenced_ = false;
 };
+using index = basic_index<search_layout_12>;
 
 }  // namespace strata
