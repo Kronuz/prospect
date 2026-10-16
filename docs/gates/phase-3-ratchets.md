@@ -171,6 +171,24 @@ P6 bring strata's global excess from 1.58× to 1.33× at `TOP_10`, from 2.09× t
 | `COUNT` | two-phase-critic | 1 | 5 | 37,926 | 47,891 | 27,336 | 136,066 | 1.38× [1.28–1.53] | 1.38× [1.28–1.53]  | 0.279× [0.273–0.283] |
 | `COUNT` | union | 301 | 5 | 1,403 | 1,098 | 2,280 | 67,312 | 1.32× [1.28–1.37] | 1.34× [1.30–1.40]  | 0.018× [0.018–0.019] |
 
+## Verify and parity
+
+`strata_engine verify` (C14's form: pruned top-k equal to an exhaustive scan at k = 10, 100,
+and 1,000, ordinals and scores, Lucene and Xapian BM25) on the gate VM at `98faf05`:
+
+| Index | Queries | Mismatches | Wall | Peak RSS |
+|---|---:|---:|---:|---:|
+| 5M, 16 segments (before merging) | 962 gate queries | 0 | 3:15 | 1,137 MB |
+| 5M, 16 segments | 200 stratified terms | 0 | 0:10 | 241 MB |
+| 5M, force-merged to one segment | 962 gate queries | 0 | 2:38 | 709 MB |
+| 5M, force-merged | 200 stratified terms | 0 | 0:07 | 130 MB |
+
+`tools/parity.cc` against the oracle's 1,257-line rank vectors (419 queries over the first
+10,000 documents), counted and pruned: 419 of 419 equal in counts and top-10 at 1, 4, and
+16 segments weighted with the snapshot's statistics, worst relative error 3.87e-16. The
+variant with deletes (drift against Xapian vectors from the same update stream, exact
+again after a merge drops every deleted document) is not in the tool yet.
+
 ## Gate status (2026-10-16)
 
 PLAN's Phase 3 gate, row by row. The query rows are carried (PLAN, "Carried rows"): the
@@ -183,11 +201,11 @@ gate records their ratios and gaps, and Phase 4's gate does not pass while they 
 | Disk full: fail closed, no corruption, recovery | Pass | `phase-3-lifecycle.md` (T5) |
 | Queries after merging (strata force-merged, baselines force-merged), five trials | Miss, carried: global 1.33–1.34× | above |
 | Queries before merging (baselines unmerged at equal memory) | Owed: calibration on the full corpus, then a scheduled night | — |
-| Indexing, 1 and 8 threads, keyed (T4), five trials at equal memory | Owed: the night's calibration step failed at once (`calibrate_rss.sh` was not deployed to the VM); rescheduled | — |
+| Indexing, 1 and 8 threads, keyed (T4), five trials at equal memory | Owed: calibration done (a 1,039 MB budget peaks at 2,352 MB against Lucene's 2,398 MB, 1.9% under); the trials run the night of 2026-10-16 | — |
 | Write amplification against Lucene (T3), append-only and replace-heavy | Owed: rescheduled with T4 | — |
 | Memory (serving and indexing peaks), disk after a full merge, per section | Owed: untimed runs on the VM | — |
-| `verify` and `parity` on multi-segment indexes | Owed: untimed runs on the VM | — |
-| Coverage targets and the test-parity inventory's Phase 3 rows | Owed | — |
+| `verify` and `parity` on multi-segment indexes | Pass before and after merging; `parity` with deletes owed | "Verify and parity" below |
+| Coverage targets and the test-parity inventory's Phase 3 rows | Owed: `cost()` checked directly (`cost_test`); scores against Lucene's own, document limits, and nested WAND or C7's cost model remain; reads while a writer commits need a shared-ownership reader (Phase 3R) | `docs/testing/parity.md` |
 | The rows on FreeBSD and arm64 (before Phase 3R) | Owed: FreeBSD VM; an arm64 host | — |
 
 ## Still unmeasured
