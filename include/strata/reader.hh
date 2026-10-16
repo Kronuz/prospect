@@ -123,7 +123,10 @@ public:
 			}
 			spans.push_back({e.offset, e.length, e.region_shift, e.region_crcs});
 			if (e.kind == format::section::terms) { integrity_->terms_offset = e.offset; }
-			if (e.kind == format::section::postings) { integrity_->postings_offset = e.offset; }
+			if (e.kind == format::section::postings) {
+				integrity_->postings_offset = e.offset;
+				integrity_->postings_shift = e.region_shift;
+			}
 			if (e.kind == format::section::positions) { integrity_->positions_offset = e.offset; }
 			if (e.kind == format::section::stored) { integrity_->stored_offset = e.offset; }
 		}
@@ -199,6 +202,8 @@ public:
 	void verify_postings(std::uint64_t offset, std::uint64_t length) const {
 		if (!integrity_->regions.verify({integrity_->postings_offset + offset, length})) { throw corrupt_segment("postings checksum"); }
 	}
+	// The postings section's verification region size, as a shift.
+	std::uint8_t postings_region_shift() const noexcept { return integrity_->postings_shift; }
 	void verify_positions(std::uint64_t offset, std::uint64_t length) const {
 		if (!integrity_->regions.verify({integrity_->positions_offset + offset, length})) { throw corrupt_segment("positions checksum"); }
 	}
@@ -413,6 +418,7 @@ private:
 		residency::verified_regions regions;
 		std::atomic<std::uint8_t> lengths_state{0};  // 0 unverified, 1 good, 2 bad
 		std::uint64_t terms_offset = 0, postings_offset = 0, positions_offset = 0, stored_offset = 0;
+		std::uint8_t postings_shift = 0;
 		std::string pinned_index;  // the term index, copied out of the mapping
 	};
 	void verify_lengths() const {
@@ -985,11 +991,21 @@ private:
 	}
 
 	// Verifies [p, p + n) of the postings section before it is read.
-	void need(const char* p, std::uint64_t n) const { seg_->verify_postings(std::uint64_t(p - seg_->postings_bytes().data()), n); }
+	// Reads stay inside the regions the last call verified, so most calls end at the compare.
+	void need(const char* p, std::uint64_t n) const {
+		const char* base = seg_->postings_bytes().data();
+		const auto from = std::uint64_t(p - base), to = from + n;
+		if (from >= verified_from_ && to <= verified_to_) { return; }
+		seg_->verify_postings(from, n);
+		const std::uint8_t shift = seg_->postings_region_shift();
+		verified_from_ = from >> shift << shift;
+		verified_to_ = std::min<std::uint64_t>(((to + (std::uint64_t(1) << shift) - 1) >> shift) << shift, seg_->postings_bytes().size());
+	}
 
 	const segment* seg_;
 	format::term_info info_;
 	std::uint32_t df_;
+	mutable std::uint64_t verified_from_ = 0, verified_to_ = 0;  // postings offsets known good
 	const char* p_ = nullptr;
 	const char* end_ = nullptr;
 	const char* level0_ = nullptr;

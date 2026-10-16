@@ -777,6 +777,39 @@ int main() {
 		std::printf("  resealed sweep: %llu changes, %llu fenced\n", (unsigned long long)changes, (unsigned long long)fenced);
 		CHECK(changes > 1000 && fenced > changes / 10);
 	}
+	// P15: one iterator walking a long list verifies each region it enters, not only the
+	// first; a flip in the list's last region fences the walk that reaches it.
+	{
+		strata::segment_writer w;
+		std::mt19937_64 r(15);
+		for (std::uint32_t d = 0; d < 60000; ++d) {
+			std::vector<strata::posting_input> in{{"long", 1 + std::uint32_t(r() % 7), {}}};
+			w.add(d + 1, in, 8);
+		}
+		const std::string good = w.flush({});
+		const auto walk = [](const std::string& file) {
+			strata::segment s(file);
+			const auto info = *s.term("long");
+			strata::postings_iterator it(s, info);
+			std::uint64_t n = 0;
+			for (auto d = it.next(); d != strata::no_more_docs; d = it.next()) { n += it.wdf(); }
+			return n;
+		};
+		CHECK(walk(good) > 0);
+		strata::segment s(good);
+		const auto info = *s.term("long");
+		const std::uint64_t region = std::uint64_t(1) << strata::format::default_region_shift;
+		CHECK(info.postings_length > 3 * region);
+		const auto toc = strata::format::decode_toc(good, strata::format::decode_footer(good));
+		std::uint64_t at = 0;
+		for (const auto& e : toc) {
+			if (e.kind == strata::format::section::postings) { at = e.offset + info.postings + info.postings_length - 1; }
+		}
+		CHECK(at > region * 3);
+		std::string bad = good;
+		bad[at] ^= 0x20;
+		CHECK(throws_corrupt([&] { (void)walk(bad); }));
+	}
 	// C13 (Phase 2 review): a resealed skip group whose first position index is near 2^64.
 	// Reading a document whose index wraps fences; no read returns other positions.
 	{
