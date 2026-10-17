@@ -321,6 +321,27 @@ The harness checks counts only, and PISA's top-k commands answer a count of 1, s
 saw (2) or (3). Its `TOP_10` rows are the fair reference; P21 seeds at k = 10, 100, and
 1,000 so that every k stays exact.
 
+## Reordering's effect on queries (P1 T2, 2026-10-17)
+
+The quick tier with strata at `c80996b` over the 5M index force-merged in docid order and
+the same index reordered (8 bisection threads), interleaved in the same three trials with
+Tantivy as the anchor (`results/query-t2-quick`). Reordered against docid order, the
+geometric mean over queries and trials:
+
+| Command | Global | Intersection | Union | Mixed AND/OR | Phrase | Term |
+|---|---:|---:|---:|---:|---:|---:|
+| `TOP_10` | 0.81× | 0.76× | 0.80× | 0.81× | 0.82× | 0.99× |
+| `TOP_100` | 0.79× | 0.73× | 0.81× | 0.82× | 0.81× | 0.97× |
+| `TOP_1000` | 0.80× | 0.73× | 0.83× | 0.81× | 0.80× | 1.00× |
+| `TOP_100_COUNT` | 0.79× | 0.73× | 0.83× | 0.80× | 0.80× | 0.92× |
+| `COUNT` | 0.84× | 0.70× | 0.88× | 1.01× | 0.81× | 1.00× |
+
+Against the cached baseline (`gate.py --baseline`) every class reads DRIFT: the anchor ran
+1.21× to 1.31× slower than in the 2026-10-16 baseline, so the host was not the same, and no
+ratio against the baseline engines is recorded from this run. Scaled by the anchor's drift,
+the reordered index sits near 1.0× the fastest baseline (about 1.06× for global `TOP_10`);
+the gate's five-trial run with every engine measures it.
+
 ## Gate status (2026-10-16)
 
 PLAN's Phase 3 gate, row by row. The query rows are carried (PLAN, "Carried rows"): the
