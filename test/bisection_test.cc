@@ -140,6 +140,11 @@ int main() {
 	std::sort(sorted.begin(), sorted.end());
 	for (std::uint32_t i = 0; i < sorted.size(); ++i) { CHECK(sorted[i] == i); }  // a permutation
 	CHECK(bs::order(g) == perm);                                                   // deterministic
+	for (std::uint32_t threads : {2u, 4u, 8u}) {                                    // at any thread count
+		bs::presets tp;
+		tp.threads = threads;
+		CHECK(bs::order(g, tp) == perm);
+	}
 	// Each quarter of the order is mostly one cluster.
 	for (int q = 0; q < 4; ++q) {
 		int count[4] = {};
@@ -168,6 +173,17 @@ int main() {
 		threw = true;
 	}
 	CHECK(threw);
+	{
+		bs::presets tp;
+		tp.threads = 4;
+		bool threw4 = false;
+		try {
+			(void)bs::order(g, tp, &token);
+		} catch (const task::cancelled&) {
+			threw4 = true;
+		}
+		CHECK(threw4);
+	}
 
 	if (failures) {
 		std::fprintf(stderr, "%d failures\n", failures);

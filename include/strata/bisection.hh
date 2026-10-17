@@ -31,13 +31,17 @@
 
 #include <algorithm>
 #include <bit>
-#include <cstring>
+#include <condition_variable>
 #include <cstdint>
+#include <cstring>
+#include <exception>
+#include <mutex>
 #include <numeric>
 #include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -335,6 +339,7 @@ inline std::int64_t move_gain(std::uint64_t d1, std::uint64_t n1, std::uint64_t 
 struct presets {
 	std::uint32_t min_partition = 32;  // parts this small are left as they are
 	std::uint32_t iterations = 20;     // passes per part, stopping early when none swaps
+	std::uint32_t threads = 1;         // reorder_threads: parts bisected concurrently
 };
 
 // Documents 0..docs-1 and their rows, as the forward index lays them out (D4): per document
@@ -409,61 +414,135 @@ struct graph_buffer {
 	graph view(std::uint32_t terms) const { return {terms, std::uint32_t(offsets.size() / 8 - 1), rows, offsets}; }
 };
 
+namespace detail {
+
+// One worker's counters and gain lists, reused across the parts it bisects.
+struct scratch {
+	std::vector<std::uint32_t> left_deg, right_deg;
+	std::vector<std::pair<std::int64_t, std::uint32_t>> left_gain, right_gain;  // (gain, position)
+	explicit scratch(std::uint32_t terms) : left_deg(terms, 0), right_deg(terms, 0) {}
+};
+
+// Bisects positions [a, b) of perm in place: at most p.iterations rounds of swaps between
+// its halves. Touches no position outside [a, b), so disjoint parts may run concurrently.
+inline void bisect_part(const graph& g, const presets& p, std::vector<std::uint32_t>& perm, std::uint32_t a, std::uint32_t b, scratch& sc,
+	const task::cancel_token* cancel) {
+	auto& left_deg = sc.left_deg;
+	auto& right_deg = sc.right_deg;
+	auto& left_gain = sc.left_gain;
+	auto& right_gain = sc.right_gain;
+	const std::uint32_t mid = a + (b - a) / 2;
+	const std::uint64_t nl = mid - a, nr = b - mid;
+	// Degrees are counted once per part and then follow each swap, so an iteration reads
+	// every row once (the gains) and the swapped rows again.
+	for (std::uint32_t i = a; i < b; ++i) {
+		auto& deg = i < mid ? left_deg : right_deg;
+		g.for_row(perm[i], [&](std::uint32_t t) { ++deg[t]; });
+	}
+	struct reset {  // the counters return to zero however the part ends
+		const graph& g;
+		const std::vector<std::uint32_t>& perm;
+		std::uint32_t a, b;
+		scratch& sc;
+		~reset() {
+			for (std::uint32_t i = a; i < b; ++i) {
+				g.for_row(perm[i], [&](std::uint32_t t) { sc.left_deg[t] = sc.right_deg[t] = 0; });
+			}
+		}
+	} reset_on_exit{g, perm, a, b, sc};
+	for (std::uint32_t it = 0; it < p.iterations; ++it) {
+		if (cancel && cancel->requested()) { throw task::cancelled{}; }
+		left_gain.clear();
+		right_gain.clear();
+		for (std::uint32_t i = a; i < b; ++i) {
+			std::int64_t gain = 0;
+			if (i < mid) {
+				g.for_row(perm[i], [&](std::uint32_t t) { gain += move_gain(left_deg[t], nl, right_deg[t], nr); });
+			} else {
+				g.for_row(perm[i], [&](std::uint32_t t) { gain += move_gain(right_deg[t], nr, left_deg[t], nl); });
+			}
+			(i < mid ? left_gain : right_gain).push_back({gain, i});
+		}
+		auto by_gain = [](const auto& x, const auto& y) { return x.first != y.first ? x.first > y.first : x.second < y.second; };
+		std::sort(left_gain.begin(), left_gain.end(), by_gain);
+		std::sort(right_gain.begin(), right_gain.end(), by_gain);
+		bool swapped = false;
+		for (std::size_t i = 0; i < left_gain.size() && i < right_gain.size(); ++i) {
+			if (left_gain[i].first + right_gain[i].first <= 0) { break; }
+			const std::uint32_t l = perm[left_gain[i].second], r = perm[right_gain[i].second];
+			g.for_row(l, [&](std::uint32_t t) { --left_deg[t], ++right_deg[t]; });
+			g.for_row(r, [&](std::uint32_t t) { --right_deg[t], ++left_deg[t]; });
+			std::swap(perm[left_gain[i].second], perm[right_gain[i].second]);
+			swapped = true;
+		}
+		if (!swapped) { break; }
+	}
+}
+
+}  // namespace detail
+
 // The order: [position] = document. Starts from 0..docs-1; checks `cancel` once per iteration
-// of each part. Calls g.check() first.
+// of each part. Calls g.check() first. With p.threads above 1, independent parts run on
+// that many threads; each part's result depends only on its own documents, so every thread
+// count gives the same order.
 inline std::vector<std::uint32_t> order(const graph& g, const presets& p = {}, const task::cancel_token* cancel = nullptr) {
 	g.check();
 	const std::uint32_t n = g.docs;
 	std::vector<std::uint32_t> perm(n);
 	std::iota(perm.begin(), perm.end(), 0u);
-	std::vector<std::uint32_t> left_deg(g.terms, 0), right_deg(g.terms, 0);
-	std::vector<std::pair<std::int64_t, std::uint32_t>> left_gain, right_gain;  // (gain, position)
-	std::vector<std::pair<std::uint32_t, std::uint32_t>> parts{{0, n}};         // [a, b)
-	while (!parts.empty()) {
-		const auto [a, b] = parts.back();
-		parts.pop_back();
-		if (b - a <= p.min_partition) { continue; }
-		const std::uint32_t mid = a + (b - a) / 2;
-		const std::uint64_t nl = mid - a, nr = b - mid;
-		// Degrees are counted once per part and then follow each swap, so an iteration reads
-		// every row once (the gains) and the swapped rows again.
-		for (std::uint32_t i = a; i < b; ++i) {
-			auto& deg = i < mid ? left_deg : right_deg;
-			g.for_row(perm[i], [&](std::uint32_t t) { ++deg[t]; });
+	std::vector<std::pair<std::uint32_t, std::uint32_t>> parts{{0, n}};  // [a, b)
+	if (p.threads <= 1) {
+		detail::scratch sc(g.terms);
+		while (!parts.empty()) {
+			const auto [a, b] = parts.back();
+			parts.pop_back();
+			if (b - a <= p.min_partition) { continue; }
+			detail::bisect_part(g, p, perm, a, b, sc, cancel);
+			const std::uint32_t mid = a + (b - a) / 2;
+			parts.push_back({mid, b});
+			parts.push_back({a, mid});
 		}
-		for (std::uint32_t it = 0; it < p.iterations; ++it) {
-			if (cancel && cancel->requested()) { throw task::cancelled{}; }
-			left_gain.clear();
-			right_gain.clear();
-			for (std::uint32_t i = a; i < b; ++i) {
-				std::int64_t gain = 0;
-				if (i < mid) {
-					g.for_row(perm[i], [&](std::uint32_t t) { gain += move_gain(left_deg[t], nl, right_deg[t], nr); });
-				} else {
-					g.for_row(perm[i], [&](std::uint32_t t) { gain += move_gain(right_deg[t], nr, left_deg[t], nl); });
-				}
-				(i < mid ? left_gain : right_gain).push_back({gain, i});
-			}
-			auto by_gain = [](const auto& x, const auto& y) { return x.first != y.first ? x.first > y.first : x.second < y.second; };
-			std::sort(left_gain.begin(), left_gain.end(), by_gain);
-			std::sort(right_gain.begin(), right_gain.end(), by_gain);
-			bool swapped = false;
-			for (std::size_t i = 0; i < left_gain.size() && i < right_gain.size(); ++i) {
-				if (left_gain[i].first + right_gain[i].first <= 0) { break; }
-				const std::uint32_t l = perm[left_gain[i].second], r = perm[right_gain[i].second];
-				g.for_row(l, [&](std::uint32_t t) { --left_deg[t], ++right_deg[t]; });
-				g.for_row(r, [&](std::uint32_t t) { --right_deg[t], ++left_deg[t]; });
-				std::swap(perm[left_gain[i].second], perm[right_gain[i].second]);
-				swapped = true;
-			}
-			if (!swapped) { break; }
-		}
-		for (std::uint32_t i = a; i < b; ++i) {  // reset only what this part touched
-			g.for_row(perm[i], [&](std::uint32_t t) { left_deg[t] = right_deg[t] = 0; });
-		}
-		parts.push_back({mid, b});
-		parts.push_back({a, mid});
+		return perm;
 	}
+	std::mutex m;
+	std::condition_variable ready;
+	std::size_t busy = 0;
+	std::exception_ptr error;
+	auto work = [&] {
+		detail::scratch sc(g.terms);
+		std::unique_lock lock(m);
+		for (;;) {
+			ready.wait(lock, [&] { return !parts.empty() || busy == 0 || error; });
+			if (error || (parts.empty() && busy == 0)) { break; }
+			const auto [a, b] = parts.back();
+			parts.pop_back();
+			if (b - a <= p.min_partition) { continue; }
+			++busy;
+			lock.unlock();
+			std::exception_ptr failed;
+			try {
+				detail::bisect_part(g, p, perm, a, b, sc, cancel);
+			} catch (...) {
+				failed = std::current_exception();
+			}
+			lock.lock();
+			--busy;
+			if (failed && !error) { error = failed; }
+			if (!failed) {
+				const std::uint32_t mid = a + (b - a) / 2;
+				parts.push_back({mid, b});
+				parts.push_back({a, mid});
+			}
+			ready.notify_all();
+		}
+		ready.notify_all();
+	};
+	{
+		std::vector<std::jthread> workers;
+		for (std::uint32_t t = 1; t < p.threads; ++t) { workers.emplace_back(work); }
+		work();
+	}
+	if (error) { std::rethrow_exception(error); }
 	return perm;
 }
 
