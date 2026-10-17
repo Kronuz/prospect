@@ -123,6 +123,10 @@ int main() {
 		CHECK(moved.get<strata::keys_plugin>().may_hold("Q7") && moved.get<strata::keys_plugin>().version(6) == 1 + 6 % 3);
 		CHECK(moved.get<strata::stored_plugin>().stored(5).size() == 1000);
 		moved.verify_all();
+		// Presence is per segment (L11): a format-12 segment holds every plugin of its layout.
+		struct outside_plugin {};
+		CHECK(moved.holds<strata::inverted_plugin>() && moved.holds<strata::keys_plugin>() && moved.holds<strata::stored_plugin>());
+		CHECK(!moved.holds<outside_plugin>());
 	}
 	// An empty flush, when the writer allows one.
 	try {

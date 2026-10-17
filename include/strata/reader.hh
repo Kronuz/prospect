@@ -753,7 +753,7 @@ public:
 	// full; other sections are verified per region as they are read. The file's bytes
 	// must outlive the segment; a temporary string cannot be one.
 	explicit basic_segment(std::string&&) = delete;
-	explicit basic_segment(std::string_view file) : core_(file, all_rules()), readers_(open(core_)) {}
+	explicit basic_segment(std::string_view file) : core_(file, all_rules()), readers_(open(core_)), present_(presence(core_)) {}
 
 	// The core's view: docids, ordinals, the document count, the table of contents.
 	const core_segment& core() const noexcept { return core_; }
@@ -766,9 +766,16 @@ public:
 	// What P's reader needs from the readers it depends on, built at each call (L3).
 	template <class P>
 	typename P::deps deps() const noexcept { return deps_of<P>(typename P::depends_on{}); }
-	// Whether the segment holds P's structure: every plugin of the layout in format 12.
+	// Whether this segment holds P's structure (L11): a bit per layout entry, set at open;
+	// false, with no load, for a plugin outside the layout.
 	template <class P>
-	static constexpr bool holds() noexcept { return index_of<P>() < sizeof...(Entries); }
+	bool holds() const noexcept {
+		if constexpr (index_of<P>() == sizeof...(Entries)) {
+			return false;
+		} else {
+			return (present_ >> index_of<P>()) & 1;
+		}
+	}
 	// Verifies every byte of the sections checked on first read; throws corrupt_segment at
 	// the first one that differs.
 	void verify_all() const {
@@ -777,6 +784,11 @@ public:
 
 private:
 	using readers = std::tuple<typename detail::reader_of<Entries>::type...>;
+	static_assert(sizeof...(Entries) <= 32, "a layout's presence mask holds 32 entries");
+	// Format 12 requires every plugin of the layout; format 13 reads the footer's flags (L7).
+	static std::uint32_t presence(const core_segment&) noexcept {
+		return std::uint32_t((std::uint64_t(1) << sizeof...(Entries)) - 1);
+	}
 	static readers open(const core_segment& core) {
 		const open_context c{format::version, core.doc_count(), core};
 		return readers{typename detail::reader_of<Entries>::type(c)...};
@@ -801,6 +813,7 @@ private:
 
 	core_segment core_;
 	readers readers_;
+	std::uint32_t present_;  // bit i: layout entry i is present
 };
 
 // Readers hold views of the file and pointers into heap-held state, so a segment moves
