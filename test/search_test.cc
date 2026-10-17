@@ -481,8 +481,9 @@ int main() {
 		w.permuted = true;
 		for (std::uint32_t d = 0; d < 5000; ++d) {
 			const std::uint64_t docid = 1 + (std::uint64_t(d) * 7919) % 5000;
-			std::vector<std::uint32_t> p1{1, 3}, p2{2};
-			std::vector<strata::posting_input> in{{"a", docid % 97 ? 1u : 2u, docid % 97 ? std::vector<std::uint32_t>{1} : p1}, {"b", 1, p2}};
+			const bool high = docid % 97 == 0;
+			const std::vector<std::uint32_t> pa = high ? std::vector<std::uint32_t>{1, 3} : std::vector<std::uint32_t>{1}, pb{2};
+			std::vector<strata::posting_input> in{{"a", high ? 2u : 1u, pa}, {"b", 1, pb}};
 			w.add(docid, in, 3);
 		}
 		const std::string file = w.flush({});
