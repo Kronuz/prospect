@@ -127,23 +127,41 @@ from the papers. Its presets start from Lucene 10.4's documented `BPIndexReorder
   term whose live document frequency lies in [`min_df`, `max_df` × documents]. Term ids are
   dense, in the merged dictionary's order. df is counted over live postings in the pass that
   builds the forward index, so deleted documents never shape the order.
-- **The forward index** (P1-R5) is never held whole in memory. It is a merge temporary file
-  written through `IO` (a name in strata's orphan patterns, reserved by storage admission,
-  its bytes counted in T3's write amplification): per document, its graph terms' ids in
-  increasing order, delta-coded LEB128, and a row-offset array beside them. It is built by
-  transposition in passes: for each range of documents whose rows fit in half of
-  `reorder_memory`, every graph term's live postings in that range are read once (each
-  iterator advanced to the range's start) and appended to the rows, which are then written
-  out. At 5M documents the graph has about 308M edges (the review's `graph_size`
-  extrapolation), roughly 0.5 GB on disk, so 4 passes at a 256 MB preset. Bisection reads
-  rows through a mapping of that file: page cache, not anonymous memory.
-- **The cost** (P1-R6). For a term of degree d in a part of n documents,
-  c(d, n) = d · (L(n) − L(d + 1)), the papers' log-gap estimate, where
-  L(x) = round(2^16 · log2 x) in integers: L(x) = 2^16 · ⌊log2 x⌋ + T[m], with m the 10 bits
-  after x's leading one and T a checked-in table of 1,024 constants whose hash a test pins.
-  No libm at run time. A document's move gain is the sum over its graph terms of the cost
-  before the move minus the cost after it, in `int64`: one term's c is under 2^53 for
-  n ≤ 2^32, and the gains of a swap pair stay in range.
+- **The forward index** (P1-R5, P1-R19) is never held whole in memory. It is a merge
+  temporary file written through `IO` (a name in strata's orphan patterns, reserved by
+  storage admission, its bytes counted in T3's write amplification): per document, its graph
+  terms' ids in increasing order, delta-coded LEB128, and a row-offset array beside them.
+  It takes 1 + P passes over the candidate terms (summed source df ≥ `min_df`):
+  - **The first pass** counts each candidate's live df, which decides graph membership, and
+    each document's degree in the graph.
+  - **The ranges** are then cut on those degrees, at most `reorder_memory` / 2 / 5 documents'
+    worth of edges each (5 bytes is an edge's worst LEB128 width), so every range's rows fit.
+  - **Each of the P passes** reads every graph term's live postings in its range and appends
+    them to the rows, which are then written out. A docid-ordered source maps the range to
+    an ordinal range, and its iterator is advanced to the range's start. A permuted source
+    (a forced merge of a reordered segment with newer ones) maps no range, so each pass reads
+    its lists whole, through a (source, ordinal) → output-rank map of 4 bytes a document,
+    charged with the working set.
+  - **The transposition checks the cancel token** per term, as the merge does.
+  At max_df 1.0 the graph has about 336M edges at 5M documents (the review's `forward_size`
+  probe), roughly 0.5 GB on disk, so 4 or 5 passes at a 256 MB preset. Bisection reads rows
+  through a mapping of that file (page cache, which T3's RSS counts; see T3).
+- **The cost** (P1-R6, P1-R18). The papers' log-gap estimate for a term of degree d in a
+  part of n documents is d · log2(n / (d + 1)). Its difference when a document moves from
+  part 1 (degree d₁, size n₁) to part 2 (d₂, n₂) is computed directly, never as a difference
+  of d · L products, whose table error the degree multiplies:
+  g = L(n₁) − L(n₂) − D(d₁) + D(d₂ + 1), with D(d) = d · log2(d + 1) − (d − 1) · log2 d
+  = log2 d + d · log2(1 + 1/d). All in integers, 2^-16 bits: L(x) = 2^16 · ⌊log2 x⌋ + T[m],
+  where m is the 10 bits after x's leading one, left-aligned and zero-padded below 2^10, so L
+  is exact below 2^11 and truncates above it (by up to 92 units); D(d) = L(d) + E(d), with E a
+  table below 2^11 and the constant round(2^16 / ln 2) above it, which errs by under 24 units.
+  T and E are checked-in constants whose hashes a test pins, with no libm at run time, and a
+  second test pins the gains of fixed (d₁, d₂, n₁, n₂) against values computed offline. Each
+  per-term gain is under 2^23 in magnitude, and a document's sum over at most 2^32 terms fits
+  `int64`. A document's move gain sums g over its graph terms; the other direction is
+  symmetric. (The review's probe `gain_corpus`: this form's swap decisions agree with the
+  papers' real-valued formula in 99.1% of pairs on the corpus sample, against 52.6% for the
+  product form.)
 - **The step.** For a part [a, b): the left half is its first ⌊(b − a) / 2⌋ documents of the
   current order. Per iteration: count each graph term's degree in both halves (one pass over
   the part's rows), compute every document's gain (a second pass), sort each half by gain
@@ -158,14 +176,16 @@ from the papers. Its presets start from Lucene 10.4's documented `BPIndexReorder
   threads give the same bytes by construction.
 - **Cancellation.** Bisection checks the merge's token and the executor's checkpoint once
   per iteration of each part, so `abandon_merges` is never held behind it.
-- **Memory and the fallback** (P1-R5). Bisection's anonymous working set is the order and
-  each document's gain and part (16 bytes a document) plus two degree counters per graph
-  term per thread: about 80 MB at 5M. The fallback is a deterministic function of the
-  inputs and presets, never the budget's state: if that working set exceeds
-  `reorder_memory` (256 MB, the reference `-bp` builder's budget), the merge writes docid
-  order and counts it in a metric. At 256 MB a segment of about 16M documents still
-  reorders. The working set is charged to the merge's `flush_charge` while bisection runs,
-  and a merge without room waits as merges already do (`merge_memory_wait`).
+- **Memory and the fallback** (P1-R5, P1-R20). Bisection's anonymous working set is the
+  order and each document's gain and part (16 bytes a document), the 4-byte rank map when a
+  source is permuted, and two degree counters per graph term for each of the largest
+  `reorder_threads` that the preset allows (8), whatever the run uses. The fallback compares
+  that figure, a function of the document count and the graph's term count alone, with
+  `reorder_memory` (256 MB, the reference `-bp` builder's budget): above it the merge writes
+  docid order and counts it in a metric. So 1 and 8 threads always make the same choice and
+  the same bytes. It is about 80 MB at 5M; a segment of about 16M documents still reorders.
+  The working set is charged to the merge's `flush_charge` while bisection runs, and a merge
+  without room waits as merges already do (`merge_memory_wait`).
 - **Cost, projected** (P1-R6). About 18 levels × at most 20 iterations × 2 passes over
   308M edges, about 2 × 10^11 edge reads, plus 18 × 20 sorts of 5M gains: on the order of
   20–30 minutes on one thread at 5M, before the merge itself. T3 compares the forced merge
