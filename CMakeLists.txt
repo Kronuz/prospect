@@ -11,13 +11,13 @@ FetchContent_Declare(docset GIT_REPOSITORY https://github.com/Kronuz/docset.git 
 FetchContent_Declare(bitpack GIT_REPOSITORY https://github.com/Kronuz/bitpack.git GIT_TAG abf8972a6317a752ea63840a9c93d7b3f2a688e0)
 FetchContent_Declare(fst GIT_REPOSITORY https://github.com/Kronuz/fst.git GIT_TAG 24da59a9e3d7225865335dcdc71ddeb2e1cb66ec)
 FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG bbb2e14aecb0fe49bcfac2685d64408ef6177c23)
-FetchContent_Declare(hashes GIT_REPOSITORY https://github.com/Kronuz/hashes.git GIT_TAG 32c49913e5287884518152d28c712f83dafef413)
-FetchContent_Declare(termdict GIT_REPOSITORY https://github.com/Kronuz/termdict.git GIT_TAG c9c4c285f353908d5d3dc58ac0bc2019b58f8cde)
+FetchContent_Declare(hashes GIT_REPOSITORY https://github.com/Kronuz/hashes.git GIT_TAG 7ab0c23325debfbaf4104044987ba6583d14808f)
+FetchContent_Declare(termdict GIT_REPOSITORY https://github.com/Kronuz/termdict.git GIT_TAG eaf83b33621b54ea388b30b189e0cd5fd806e861)
 FetchContent_Declare(varint GIT_REPOSITORY https://github.com/Kronuz/varint.git GIT_TAG 21af82a64fd5860d14d5ec9591bec2ffd5d662d1)
-FetchContent_Declare(residency GIT_REPOSITORY https://github.com/Kronuz/residency.git GIT_TAG 7dbc254f79e468f9d583ea51d5cbdc84e5cf2c18)
+FetchContent_Declare(residency GIT_REPOSITORY https://github.com/Kronuz/residency.git GIT_TAG 4a7b816ed504133e5c2d35e35267e50173865905)
 FetchContent_Declare(unicode GIT_REPOSITORY https://github.com/Kronuz/unicode.git GIT_TAG c93026cedf9124421886d449528dd6edb16e5ed3)
 FetchContent_Declare(snowball GIT_REPOSITORY https://github.com/Kronuz/snowball.git GIT_TAG 570a0b78fc2967f9ec6a0ec005547d20fcf32b61)
-FetchContent_Declare(analysis GIT_REPOSITORY https://github.com/Kronuz/analysis.git GIT_TAG 4df23c08fd3c09b0f2fbb6d491bd77434c97fc12)
+FetchContent_Declare(analysis GIT_REPOSITORY https://github.com/Kronuz/analysis.git GIT_TAG a0825b1a376754d4718ac6dd89b7b31c6dd96738)
 # Stored records use zstd alone.
 set(COMPRESSORS_DEFLATE OFF CACHE BOOL "" FORCE)
 set(COMPRESSORS_LZ4 OFF CACHE BOOL "" FORCE)
@@ -27,7 +27,7 @@ FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compre
 set(COMPRESSORS_ZSTD_PINNED ON CACHE BOOL "" FORCE)
 FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG 28f4241f22b27aa68ff92cdddc66b124e71f3298)
 # Index I/O goes through kronuz::journal::IO, from the completion library.
-FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG da14d1d47a20334535aa096436eda326b6148737)
+FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG 5251cf9f24350c65548318b54a4be93389df73d0)
 # Background merges' default threaded executor: one pool per node, a task group per index.
 FetchContent_Declare(threadpool GIT_REPOSITORY https://github.com/Kronuz/threadpool.git GIT_TAG 628679a2e27b563cf2709a6f35f98f1657baf7b3)
 FetchContent_MakeAvailable(docset bitpack fst task hashes residency varint termdict unicode snowball analysis compressors fusefilter completion threadpool)
