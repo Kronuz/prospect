@@ -230,6 +230,7 @@ inline std::vector<section_entry> decode_toc(std::string_view file, const footer
 		if (e.offset > f.toc_offset || e.length > f.toc_offset - e.offset) { throw corrupt_segment("section bounds"); }
 		const std::size_t regions = std::size_t((e.length + e.region_size() - 1) >> e.region_shift);
 		need(regions * 4);
+		e.region_crcs.reserve(regions);
 		for (std::size_t r = 0; r < regions; ++r) { e.region_crcs.push_back(get<std::uint32_t>(p + 4 * r)); }
 		p += regions * 4;
 		entries.push_back(std::move(e));

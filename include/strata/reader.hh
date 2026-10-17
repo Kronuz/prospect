@@ -115,13 +115,15 @@ public:
 		}
 		// Terms, postings, positions, and stored records are verified per region on first
 		// read, each section in its own region size.
+		// Each section's region CRCs move to the span that checks them; others are dropped.
 		std::vector<residency::verified_regions::span> spans;
-		for (const auto& e : sections_) {
+		for (auto& e : sections_) {
 			if (e.kind != format::section::terms && e.kind != format::section::postings && e.kind != format::section::positions &&
 				e.kind != format::section::stored) {
+				std::vector<std::uint32_t>().swap(e.region_crcs);
 				continue;
 			}
-			spans.push_back({e.offset, e.length, e.region_shift, e.region_crcs});
+			spans.push_back({e.offset, e.length, e.region_shift, std::move(e.region_crcs)});
 			if (e.kind == format::section::terms) { integrity_->terms_offset = e.offset; }
 			if (e.kind == format::section::postings) {
 				integrity_->postings_offset = e.offset;
@@ -444,7 +446,7 @@ private:
 		};
 		pk_.min = bytes();
 		pk_.max = bytes();
-		pk_.filter = fusefilter::filter8::deserialize(std::string_view(p, std::size_t(end - p)));
+		pk_.filter = fusefilter::filter8_view::parse(std::string_view(p, std::size_t(end - p)));  // reads the mapping in place
 		if (!pk_.filter || pk_.min > pk_.max || pk_.min.empty()) { throw corrupt_segment("pk_filter"); }
 	}
 
@@ -452,7 +454,7 @@ private:
 	const char* docid_deltas_ = nullptr;
 	struct {
 		std::string_view min, max;
-		std::optional<fusefilter::filter8> filter;
+		std::optional<fusefilter::filter8_view> filter;
 	} pk_;
 	format::footer footer_;
 	std::vector<format::section_entry> sections_;

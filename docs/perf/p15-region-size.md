@@ -55,3 +55,22 @@ Tried and not kept: verifying a positions block's exact size from its header ins
 the largest possible encoding (1,155 bytes) moved positions 470.5 → 469.9 MB and the peak
 not at all, so read-ahead verification is not what keeps positions resident. The gap
 goes to P13: fewer position bytes per phrase query.
+
+## Anonymous memory at open (2026-10-16)
+
+Serving the merged, keyed 5M index (`bench/serve_mem.py`'s queries, gate VM), strata's
+anonymous memory was 15.7 MB against Phase 2's 3 MB: 4 KiB regions made the per-region
+CRC tables 16 times larger, and they were held twice (the table of contents and
+residency's spans), and the 5.7 MB key filter was copied out of the mapping by
+`fusefilter::filter8::deserialize`. Now the CRCs move into the spans (and sections not
+verified per region drop theirs), and the key filter is read in place through
+`fusefilter::filter8_view` (fusefilter `28f4241`).
+
+| | At open | After 2,886 queries | Mapped index pages |
+|---|---:|---:|---:|
+| Before | 14.8 MB | 15.7 MB | 572 MB |
+| After | 6.9 MB | 7.5 MB | 572 MB |
+
+The remaining 7.5 MB is residency's CRC table (2.7 MB), its per-region state (0.7 MB),
+the pinned term index (1.4 MB), and the query structures. Segments are byte-identical
+(`fixtures_test`).

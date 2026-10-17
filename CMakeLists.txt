@@ -22,7 +22,7 @@ FetchContent_Declare(analysis GIT_REPOSITORY https://github.com/Kronuz/analysis.
 set(COMPRESSORS_DEFLATE OFF CACHE BOOL "" FORCE)
 set(COMPRESSORS_LZ4 OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG 7a6cc22f8a4eaceefd098374c05cdc2935c0fd19)
-FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG b4f4ce1932c8e204fb6bebd34f83f5b10de7b51c)
+FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG 28f4241f22b27aa68ff92cdddc66b124e71f3298)
 # Index I/O goes through kronuz::journal::IO, from the completion library.
 FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG e6c28aaef09c5beff099f7f9cc47ecd517ba02d7)
 # Background merges' default threaded executor: one pool per node, a task group per index.
