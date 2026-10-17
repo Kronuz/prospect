@@ -217,7 +217,7 @@ int main(int argc, char** argv) {
 		for (const auto& sg : segments) { sources.push_back({&sg, nullptr}); }
 		strata::reorder::settings set;
 		set.min_df = std::uint32_t(std::stoul(r));
-		strata::reorder::string_scratch forward;
+		strata::string_scratch forward;
 		const auto order = strata::reorder::order(sources, forward, set);
 		std::string merged;
 		strata::string_output out(merged);

@@ -66,10 +66,10 @@ public:
 		sections_ = format::decode_toc(file, footer_);
 		if (sections_.empty() || sections_[0].kind != format::section::header || sections_[0].offset != 0 ||
 			sections_[0].length != format::header_size) {
-			throw corrupt_segment("header entry");
+			corrupt("header entry");
 		}
 		if (std::memcmp(file.data(), format::header_magic, 8) != 0 || format::get<std::uint32_t>(file.data() + 8) != format::version) {
-			throw corrupt_segment("header magic or version");
+			corrupt("header magic or version");
 		}
 		for (const auto& e : sections_) {
 			auto bytes = file.substr(e.offset, e.length);
@@ -81,7 +81,7 @@ public:
 			case format::section::stats:
 			case format::section::versions:
 			case format::section::pk_filter:
-				if (hashes::crc32c(bytes.data(), bytes.size()) != e.crc) { throw corrupt_segment("section checksum"); }
+				if (hashes::crc32c(bytes.data(), bytes.size()) != e.crc) { corrupt("section checksum"); }
 				break;
 			default:
 				break;
@@ -104,15 +104,15 @@ public:
 			default: break;
 			}
 		}
-		if (stats_.size() != 28) { throw corrupt_segment("stats"); }
+		if (stats_.size() != 28) { corrupt("stats"); }
 		max_positions_ = format::get<std::uint32_t>(stats_.data() + 24);
 		doc_count_ = format::get<std::uint64_t>(stats_.data());
 		total_length_ = format::get<std::uint64_t>(stats_.data() + 8);
-		if (doc_count_ != footer_.doc_count) { throw corrupt_segment("document count"); }
-		if (lengths_.empty()) { throw corrupt_segment("lengths"); }
+		if (doc_count_ != footer_.doc_count) { corrupt("document count"); }
+		if (lengths_.empty()) { corrupt("lengths"); }
 		length_width_ = std::uint8_t(lengths_[0]);
 		if (length_width_ > 32 || lengths_.size() != 1 + (doc_count_ + 127) / 128 * bitpack::packed_bytes(length_width_)) {
-			throw corrupt_segment("lengths size");
+			corrupt("lengths size");
 		}
 		// Terms, postings, positions, and stored records are verified per region on first
 		// read, each section in its own region size.
@@ -136,7 +136,7 @@ public:
 		std::sort(spans.begin(), spans.end(), [](const auto& a, const auto& b) { return a.offset < b.offset; });
 		integrity_->regions = residency::verified_regions(
 			std::span<const std::byte>(reinterpret_cast<const std::byte*>(file.data()), file.size()), std::move(spans));
-		if (norms_.size() != doc_count_) { throw corrupt_segment("norms size"); }
+		if (norms_.size() != doc_count_) { corrupt("norms size"); }
 		validate_docids();
 		validate_versions();
 		if (!pk_filter_.empty()) { open_pk_filter(); }
@@ -184,57 +184,99 @@ public:
 	// Verifies a range of the postings or positions section before it is read; throws
 	// corrupt_segment on a checksum mismatch.
 	void verify_postings(std::uint64_t offset, std::uint64_t length) const {
-		if (!integrity_->regions.verify({integrity_->postings_offset + offset, length})) { throw corrupt_segment("postings checksum"); }
+		if (!integrity_->regions.verify({integrity_->postings_offset + offset, length})) { corrupt("postings checksum"); }
 	}
 	// The postings section's verification region size, as a shift.
 	std::uint8_t postings_region_shift() const noexcept { return integrity_->postings_shift; }
 	void verify_positions(std::uint64_t offset, std::uint64_t length) const {
-		if (!integrity_->regions.verify({integrity_->positions_offset + offset, length})) { throw corrupt_segment("positions checksum"); }
+		if (!integrity_->regions.verify({integrity_->positions_offset + offset, length})) { corrupt("positions checksum"); }
 	}
 	const std::vector<format::section_entry>& sections() const noexcept { return sections_; }
 
-	// The document's stored record (empty when it has none). Each zstd frame's range is
-	// verified before it is decompressed, into exactly its recorded size.
-	std::string stored(ordinal_t ord) const {
-		if (ord >= doc_count_) { throw std::out_of_range("strata: ordinal out of range"); }
-		if (stored_.size() < 4) { return {}; }
+	// One decoded stored frame: its first ordinal and each record's place in `raw`.
+	struct stored_frame {
+		std::uint32_t index = ~std::uint32_t(0);
+		ordinal_t first = 0;
+		std::string raw;
+		std::vector<std::uint64_t> starts;  // records + 1 offsets into raw
+		std::string_view record(ordinal_t ord) const { return std::string_view(raw).substr(starts[ord - first], starts[ord - first + 1] - starts[ord - first]); }
+		bool holds(ordinal_t ord) const noexcept { return index != ~std::uint32_t(0) && ord >= first && ord - first + 1 < starts.size(); }
+	};
+	// The number of stored frames (0 when no document has a record).
+	std::uint32_t stored_frames() const {
+		if (stored_.size() < 4) { return 0; }
 		const std::uint32_t frames = format::get<std::uint32_t>(stored_.data() + stored_.size() - 4);
-		if (std::uint64_t(frames) * 16 > stored_.size() - 4) { throw corrupt_segment("stored index"); }
+		if (std::uint64_t(frames) * 16 > stored_.size() - 4) { corrupt("stored index"); }
+		return frames;
+	}
+	// Decodes frame f into out. Its range is verified before it is decompressed, into
+	// exactly its recorded size.
+	void decode_stored_frame(std::uint32_t f, stored_frame& out) const {
+		const std::uint32_t frames = stored_frames();
 		const std::uint64_t index_at = stored_.size() - 4 - std::uint64_t(frames) * 16;
-		if (!integrity_->regions.verify({integrity_->stored_offset + index_at, stored_.size() - index_at})) { throw corrupt_segment("stored checksum"); }
+		if (!integrity_->regions.verify({integrity_->stored_offset + index_at, stored_.size() - index_at})) { corrupt("stored checksum"); }
+		if (f >= frames) { corrupt("stored index"); }
+		const char* e = stored_.data() + index_at + 16 * std::uint64_t(f);
+		const std::uint32_t first = format::get<std::uint32_t>(e);
+		const std::uint32_t raw_size = format::get<std::uint32_t>(e + 4);
+		if (raw_size > format::max_stored_frame) { corrupt("stored frame size"); }
+		const std::uint64_t begin = format::get<std::uint64_t>(e + 8);
+		const std::uint64_t end = f + 1 < frames ? format::get<std::uint64_t>(e + 24) : index_at;
+		if (begin > end || end > index_at) { corrupt("stored frame bounds"); }
+		if (f + 1 < frames && format::get<std::uint32_t>(e + 16) <= first) { corrupt("stored index"); }
+		if (!integrity_->regions.verify({integrity_->stored_offset + begin, end - begin})) { corrupt("stored checksum"); }
+		try {
+			out.raw = decompress_zstd(stored_.substr(begin, end - begin), raw_size);
+		} catch (const std::exception&) {
+			corrupt("stored frame");
+		}
+		const char* p = out.raw.data();
+		const char* rend = p + out.raw.size();
+		const std::uint64_t n = format::get_leb(&p, rend);
+		if (n > doc_count_ || first > doc_count_ - n) { corrupt("stored frame count"); }
+		out.starts.assign(1, 0);
+		for (std::uint64_t i = 0; i < n; ++i) {
+			const std::uint64_t len = format::get_leb(&p, rend);
+			if (len > out.raw.size()) { corrupt("stored record length"); }
+			out.starts.push_back(out.starts.back() + len);
+		}
+		const std::uint64_t header = std::uint64_t(p - out.raw.data());
+		if (out.starts.back() > std::uint64_t(rend - p)) { corrupt("stored record bounds"); }
+		for (auto& v : out.starts) { v += header; }
+		out.index = f;
+		out.first = first;
+	}
+	// The stored frame whose ordinals start at or before ord, or none without a stored section.
+	std::optional<std::uint32_t> stored_frame_of(ordinal_t ord) const {
+		if (stored_.size() < 4) { return std::nullopt; }
+		const std::uint32_t frames = stored_frames();
+		const std::uint64_t index_at = stored_.size() - 4 - std::uint64_t(frames) * 16;
+		if (!integrity_->regions.verify({integrity_->stored_offset + index_at, stored_.size() - index_at})) { corrupt("stored checksum"); }
+		if (frames == 0) { corrupt("stored index"); }
 		auto first_of = [&](std::uint32_t f) { return format::get<std::uint32_t>(stored_.data() + index_at + 16 * std::uint64_t(f)); };
 		std::uint32_t lo = 0, hi = frames;  // the last frame whose first ordinal <= ord
 		while (hi - lo > 1) {
 			const std::uint32_t mid = lo + (hi - lo) / 2;
 			if (first_of(mid) <= ord) { lo = mid; } else { hi = mid; }
 		}
-		if (frames == 0 || first_of(lo) > ord) { throw corrupt_segment("stored index"); }
-		const char* e = stored_.data() + index_at + 16 * std::uint64_t(lo);
-		const std::uint32_t raw_size = format::get<std::uint32_t>(e + 4);
-		if (raw_size > format::max_stored_frame) { throw corrupt_segment("stored frame size"); }
-		const std::uint64_t begin = format::get<std::uint64_t>(e + 8);
-		const std::uint64_t end = lo + 1 < frames ? format::get<std::uint64_t>(e + 24) : index_at;
-		if (begin > end || end > index_at) { throw corrupt_segment("stored frame bounds"); }
-		if (!integrity_->regions.verify({integrity_->stored_offset + begin, end - begin})) { throw corrupt_segment("stored checksum"); }
-		std::string raw;
-		try {
-			raw = decompress_zstd(stored_.substr(begin, end - begin), raw_size);
-		} catch (const std::exception&) {
-			throw corrupt_segment("stored frame");
-		}
-		const char* p = raw.data();
-		const char* rend = p + raw.size();
-		const std::uint64_t n = format::get_leb(&p, rend);
-		if (ord - first_of(lo) >= n) { throw corrupt_segment("stored frame count"); }
-		std::uint64_t skip = 0, length = 0;
-		for (std::uint64_t i = 0; i < n; ++i) {
-			const std::uint64_t len = format::get_leb(&p, rend);
-			if (len > raw.size()) { throw corrupt_segment("stored record length"); }
-			if (i < ord - first_of(lo)) { skip += len; }
-			if (i == ord - first_of(lo)) { length = len; }
-		}
-		if (skip > std::uint64_t(rend - p) || length > std::uint64_t(rend - p) - skip) { throw corrupt_segment("stored record bounds"); }
-		return std::string(p + skip, length);
+		if (first_of(lo) > ord) { corrupt("stored index"); }
+		return lo;
+	}
+	// The document's stored record (empty when it has none), through `cache`: a reader in
+	// ordinal order decodes each frame once.
+	std::string_view stored(ordinal_t ord, stored_frame& cache) const {
+		if (ord >= doc_count_) { throw std::out_of_range("strata: ordinal out of range"); }
+		if (cache.holds(ord)) { return cache.record(ord); }
+		const auto f = stored_frame_of(ord);
+		if (!f) { return {}; }
+		decode_stored_frame(*f, cache);
+		if (!cache.holds(ord)) { corrupt("stored frame count"); }
+		return cache.record(ord);
+	}
+	// The document's stored record (empty when it has none); decodes its frame.
+	std::string stored(ordinal_t ord) const {
+		stored_frame f;
+		return std::string(stored(ord, f));
 	}
 	// How many regions have been verified.
 	std::size_t verified_regions() const noexcept { return integrity_->regions.verified(); }
@@ -243,7 +285,7 @@ public:
 	void verify_all() const {
 		for (const auto& e : sections_) {
 			if (e.kind == format::section::terms || e.kind == format::section::postings || e.kind == format::section::positions || e.kind == format::section::stored) {
-				if (!integrity_->regions.verify({e.offset, e.length})) { throw corrupt_segment("section checksum"); }
+				if (!integrity_->regions.verify({e.offset, e.length})) { corrupt("section checksum"); }
 			}
 		}
 		verify_lengths();
@@ -291,11 +333,11 @@ public:
 				last = value;
 			});
 		} catch (const termdict::corrupt&) {
-			throw corrupt_segment("terms checksum");  // a dictionary block failed its region check
+			corrupt("terms checksum");  // a dictionary block failed its region check
 		}
 		if (!v) { return std::nullopt; }
 		auto info = format::decode_term_info(last, before);
-		if (info.df > doc_count_) { throw corrupt_segment("document frequency"); }
+		if (info.df > doc_count_) { corrupt("document frequency"); }
 		return info;
 	}
 
@@ -315,11 +357,11 @@ public:
 		try {
 			dict_->scan("", [&](std::string_view key, std::string_view value) {
 				const auto info = format::decode_term_info(value, run);
-				if (info.df > doc_count_) { throw corrupt_segment("document frequency"); }
+				if (info.df > doc_count_) { corrupt("document frequency"); }
 				return f(key, info);
 			});
 		} catch (const termdict::corrupt&) {
-			throw corrupt_segment("terms checksum");
+			corrupt("terms checksum");
 		}
 	}
 
@@ -334,9 +376,9 @@ public:
 				if (!c_.next()) { return false; }
 				info_ = format::decode_term_info(c_.value(), run_);
 			} catch (const termdict::corrupt&) {
-				throw corrupt_segment("terms checksum");
+				corrupt("terms checksum");
 			}
-			if (info_.df > seg_->doc_count_) { throw corrupt_segment("document frequency"); }
+			if (info_.df > seg_->doc_count_) { corrupt("document frequency"); }
 			return true;
 		}
 		std::string_view term() const noexcept { return c_.key(); }
@@ -356,7 +398,7 @@ public:
 		try {
 			dict_->scan(from, std::forward<F>(f));
 		} catch (const termdict::corrupt&) {
-			throw corrupt_segment("terms checksum");
+			corrupt("terms checksum");
 		}
 	}
 
@@ -371,12 +413,12 @@ private:
 	// versions: [min u64][width u8][packed bits]; exactly the bits doc_count needs, and no
 	// version past 2^64 - 1.
 	void validate_versions() const {
-		if (versions_.size() < 9) { throw corrupt_segment("versions"); }
+		if (versions_.size() < 9) { corrupt("versions"); }
 		const unsigned width = std::uint8_t(versions_[8]);
 		const std::uint64_t lo = format::get<std::uint64_t>(versions_.data());
 		const std::uint64_t mask = width >= 64 ? ~std::uint64_t(0) : (std::uint64_t(1) << width) - 1;
 		if (width > 64 || versions_.size() != 9 + (doc_count_ * width + 7) / 8 || lo > ~std::uint64_t(0) - mask) {
-			throw corrupt_segment("versions");
+			corrupt("versions");
 		}
 	}
 
@@ -386,7 +428,7 @@ private:
 		const char* end = p + pk_filter_.size();
 		auto bytes = [&] {
 			const std::uint64_t n = format::get_leb(&p, end);
-			if (n > std::uint64_t(end - p)) { throw corrupt_segment("pk_filter"); }
+			if (n > std::uint64_t(end - p)) { corrupt("pk_filter"); }
 			std::string_view out(p, n);
 			p += n;
 			return out;
@@ -394,7 +436,7 @@ private:
 		pk_.min = bytes();
 		pk_.max = bytes();
 		pk_.filter = fusefilter::filter8_view::parse(std::string_view(p, std::size_t(end - p)));  // reads the mapping in place
-		if (!pk_.filter || pk_.min > pk_.max || pk_.min.empty()) { throw corrupt_segment("pk_filter"); }
+		if (!pk_.filter || pk_.min > pk_.max || pk_.min.empty()) { corrupt("pk_filter"); }
 	}
 
 	std::string_view file_, terms_, term_index_, postings_, positions_, lengths_, docids_, stats_, stored_, norms_, versions_, pk_filter_;
@@ -415,7 +457,7 @@ private:
 	void verify_lengths() const {
 		auto& state = integrity_->lengths_state;
 		if (state.load(std::memory_order_acquire) == 0) { state.store(hashes::crc32c(lengths_.data(), lengths_.size()) == lengths_crc_ ? 1 : 2, std::memory_order_release); }
-		if (state.load(std::memory_order_acquire) != 1) { throw corrupt_segment("lengths checksum"); }
+		if (state.load(std::memory_order_acquire) != 1) { corrupt("lengths checksum"); }
 	}
 	static bool verify_terms(void* context, std::uint64_t offset, std::uint64_t length) {
 		auto* i = static_cast<integrity*>(context);
@@ -435,7 +477,7 @@ class postings_iterator {
 public:
 	postings_iterator(const segment& seg, const format::term_info& info) : seg_(&seg), info_(info), df_(info.df) {
 		if (info.flags & format::single_posting) {
-			if (info.postings >= seg.doc_count()) { throw corrupt_segment("single posting ordinal"); }
+			if (info.postings >= seg.doc_count()) { corrupt("single posting ordinal"); }
 			buf_ords_[0] = ordinal_t(info.postings);
 			buf_wdfs_[0] = info.single_wdf;
 			buf_len_ = 1;
@@ -443,7 +485,7 @@ public:
 			return;
 		}
 		auto bytes = seg.postings_bytes();
-		if (info.postings > bytes.size() || info.postings_length > bytes.size() - info.postings) { throw corrupt_segment("postings offset"); }
+		if (info.postings > bytes.size() || info.postings_length > bytes.size() - info.postings) { corrupt("postings offset"); }
 		p_ = bytes.data() + info.postings;
 		end_ = p_ + info.postings_length;  // every read stays inside the term's range
 		// Bytes are verified as they are first read (P15): the header here; level 1 and the
@@ -454,8 +496,8 @@ public:
 		with_counts_ = with_positions_ && !(info.flags & format::counts_are_wdf);
 		if (blocks_) {
 			const std::uint64_t groups = format::get_leb(&p_, end_);
-			if (groups != (blocks_ + 31) / 32) { throw corrupt_segment("skip group count"); }
-			if (p_ == end_ || std::uint8_t(*p_) > 1) { throw corrupt_segment("skip width"); }
+			if (groups != (blocks_ + 31) / 32) { corrupt("skip group count"); }
+			if (p_ == end_ || std::uint8_t(*p_) > 1) { corrupt("skip width"); }
 			offset_width_ = *p_++ ? 8 : 4;
 			if (with_positions_) {
 				tail_first_position_ = format::get_leb(&p_, end_);
@@ -468,12 +510,12 @@ public:
 			entry_size_ = 8 + offset_width_ * (with_positions_ ? 5 : 2);
 			groups_n_ = groups;
 			std::uint64_t range = std::uint64_t(end_ - p_);
-			if (groups > range / entry_size_) { throw corrupt_segment("skip groups bounds"); }
+			if (groups > range / entry_size_) { corrupt("skip groups bounds"); }
 			level1_ = p_;
 			p_ += groups * entry_size_;
 			range = std::uint64_t(end_ - p_);
 			if (pairs_bytes > range || level0_bytes > range - pairs_bytes || blocks_bytes > range - pairs_bytes - level0_bytes) {
-				throw corrupt_segment("skip data bounds");
+				corrupt("skip data bounds");
 			}
 			need(level1_, std::uint64_t(p_ - level1_) + pairs_bytes);
 			pairs_ = std::string_view(p_, pairs_bytes);
@@ -583,7 +625,7 @@ public:
 	std::span<const format::impact> group_impacts(std::size_t g) {
 		const std::uint64_t at = format::get<std::uint32_t>(level1_ + g * entry_size_ + 4);
 		const std::uint64_t end = g + 1 < groups_n_ ? format::get<std::uint32_t>(level1_ + (g + 1) * entry_size_ + 4) : pairs_.size();
-		if (at >= end || end > pairs_.size()) { throw corrupt_segment("group pairs bounds"); }
+		if (at >= end || end > pairs_.size()) { corrupt("group pairs bounds"); }
 		return decode(pairs_.substr(at, end - at));
 	}
 
@@ -628,7 +670,7 @@ public:
 			sum_ = positions_start().first_index;
 		}
 		for (; sum_pos_ < pos_; ++sum_pos_) {
-			if (sum_ + counts[sum_pos_] < sum_) { throw corrupt_segment("position index"); }  // wraps past 2^64
+			if (sum_ + counts[sum_pos_] < sum_) { corrupt("position index"); }  // wraps past 2^64
 			sum_ += counts[sum_pos_];
 		}
 		return sum_;
@@ -637,7 +679,7 @@ public:
 	// The decoded block's wdfs, decoded on first use (counting never needs them).
 	const std::uint32_t* wdfs() const {
 		if (wdf_pending_) {
-			if (!bitpack::decode(reinterpret_cast<const std::uint8_t*>(wdf_pending_), wdf_size_, buf_wdfs_)) { throw corrupt_segment("wdf block"); }
+			if (!bitpack::decode(reinterpret_cast<const std::uint8_t*>(wdf_pending_), wdf_size_, buf_wdfs_)) { corrupt("wdf block"); }
 			wdf_pending_ = nullptr;
 		}
 		return buf_wdfs_;
@@ -696,10 +738,10 @@ public:
 	void or_bitset(std::size_t b, ordinal_t base, std::uint64_t* bits) {
 		const entry& e = level0_entry(b);
 		const ordinal_t first = b ? e.base + 1 : 0;  // <= e.last: level-0 lasts increase
-		if (first < base) { throw corrupt_segment("bitset block span"); }
+		if (first < base) { corrupt("bitset block span"); }
 		const std::uint64_t span = std::uint64_t(e.last) - first + 1, bytes = (span + 7) / 8;
 		const char* p = blocks_begin_ + e.offset;
-		if (bytes > e.bytes) { throw corrupt_segment("bitset block bounds"); }
+		if (bytes > e.bytes) { corrupt("bitset block bounds"); }
 		need(p, e.bytes);
 		const std::uint64_t at = first - base;
 		const unsigned shift = unsigned(at % 64);
@@ -713,7 +755,7 @@ public:
 			bits[k] |= word << shift;
 			if (shift && (word >> (64 - shift))) { bits[k + 1] |= word >> (64 - shift); }
 		}
-		if (n != format::block) { throw corrupt_segment("bitset block count"); }
+		if (n != format::block) { corrupt("bitset block count"); }
 	}
 
 private:
@@ -721,7 +763,7 @@ private:
 		impacts_.clear();
 		const char* p = list.data();
 		format::decode_impacts(&p, list.data() + list.size(), impacts_);
-		if (p != list.data() + list.size()) { throw corrupt_segment("impacts length"); }
+		if (p != list.data() + list.size()) { corrupt("impacts length"); }
 		return impacts_;
 	}
 
@@ -780,7 +822,7 @@ private:
 		}
 		if ((g && f.last <= f.prev_last) || f.last >= seg_->doc_count() || f.level0_begin > f.level0_end || f.level0_end > level0_bytes_ ||
 			f.blocks_begin > f.blocks_end || f.blocks_end > std::uint64_t(tail_ - blocks_begin_)) {
-			throw corrupt_segment("skip group");
+			corrupt("skip group");
 		}
 		return f;
 	}
@@ -803,7 +845,7 @@ private:
 			entry& e = entries_[entries_n_++];
 			// Lasts increase within the group and end at its last; block bytes stay inside it.
 			const std::uint64_t delta = format::get_leb(&p, end);
-			if (((g || i) && delta == 0) || delta > std::uint64_t(gf.last) - last) { throw corrupt_segment("block last ordinal"); }
+			if (((g || i) && delta == 0) || delta > std::uint64_t(gf.last) - last) { corrupt("block last ordinal"); }
 			e.last = last + ordinal_t(delta);
 			const std::uint64_t bytes = format::get_leb(&p, end);
 			e.bytes = bytes >> 1;
@@ -811,7 +853,7 @@ private:
 			e.base = last;  // the previous block's last ordinal (none before the first)
 			if (with_positions_) {
 				const std::uint64_t delta = format::get_leb(&p, end);
-				if (first_position + delta < first_position) { throw corrupt_segment("position index"); }
+				if (first_position + delta < first_position) { corrupt("position index"); }
 				first_position += delta;
 				pos_offset += format::get_leb(&p, end);
 				if (with_counts_) { count_offset += format::get_leb(&p, end); }
@@ -821,13 +863,13 @@ private:
 			e.count_offset = count_offset;
 			e.impacts = format::skip_sized_impacts(&p, end);
 			e.offset = offset;
-			if (e.bytes == 0 || e.bytes > group_end - offset) { throw corrupt_segment("block bytes"); }
+			if (e.bytes == 0 || e.bytes > group_end - offset) { corrupt("block bytes"); }
 			offset += e.bytes;
 			last = e.last;
 		}
-		if (offset != group_end) { throw corrupt_segment("group bytes"); }
-		if (p != end) { throw corrupt_segment("level-0 bytes"); }
-		if (entries_[entries_n_ - 1].last != gf.last) { throw corrupt_segment("skip group last ordinal"); }
+		if (offset != group_end) { corrupt("group bytes"); }
+		if (p != end) { corrupt("level-0 bytes"); }
+		if (entries_[entries_n_ - 1].last != gf.last) { corrupt("skip group last ordinal"); }
 		decoded_group_ = g;
 	}
 
@@ -861,20 +903,20 @@ private:
 				used = load_bitset(p, cur);
 			} else {
 				used = bitpack::decode_delta(reinterpret_cast<const std::uint8_t*>(p), cur.bytes, base, buf_ords_);
-				if (!used) { throw corrupt_segment("ordinal block"); }
+				if (!used) { corrupt("ordinal block"); }
 			}
 			if (info_.flags & format::no_wdf) {
 				std::fill(buf_wdfs_, buf_wdfs_ + format::block, 0u);
 				wdf_pending_ = nullptr;
 			} else {
-				if (used >= cur.bytes) { throw corrupt_segment("wdf block"); }
+				if (used >= cur.bytes) { corrupt("wdf block"); }
 				wdf_pending_ = p + used;
 				wdf_size_ = cur.bytes - used;
 			}
 			buf_len_ = format::block;
 			++next_block_;
 			if (cur.bitset) { return doc_ = bits_doc0_; }
-			if (buf_ords_[format::block - 1] != cur.last || buf_ords_[0] == no_more_docs) { throw corrupt_segment("block last ordinal"); }
+			if (buf_ords_[format::block - 1] != cur.last || buf_ords_[0] == no_more_docs) { corrupt("block last ordinal"); }
 			check_increasing(base);
 			return doc_ = buf_ords_[0];
 		}
@@ -906,7 +948,7 @@ private:
 	std::size_t load_bitset(const char* p, const entry& e) {
 		const ordinal_t first = next_block_ ? e.base + 1 : 0;  // <= e.last: level-0 lasts increase
 		const std::uint64_t span = std::uint64_t(e.last) - first + 1, bytes = (span + 7) / 8;
-		if (bytes > e.bytes || bytes > sizeof bits_) { throw corrupt_segment("bitset block bounds"); }
+		if (bytes > e.bytes || bytes > sizeof bits_) { corrupt("bitset block bounds"); }
 		const std::size_t words = std::size_t((bytes + 7) / 8);
 		std::size_t n = 0;
 		for (std::size_t w = 0; w < words; ++w) {
@@ -916,7 +958,7 @@ private:
 			bits_[w] = word;
 			n += std::size_t(std::popcount(word));
 		}
-		if (n != format::block || !(bits_[words - 1] >> ((span - 1) % 64) & 1)) { throw corrupt_segment("bitset block count"); }
+		if (n != format::block || !(bits_[words - 1] >> ((span - 1) % 64) & 1)) { corrupt("bitset block count"); }
 		std::size_t w = 0;
 		while (!bits_[w]) { ++w; }
 		bits_first_ = first;
@@ -977,8 +1019,8 @@ private:
 		if (n == 0) { return; }
 		std::uint32_t bad = base != std::numeric_limits<ordinal_t>::max() && buf_ords_[0] <= base;
 		for (std::size_t i = 1; i < n; ++i) { bad |= buf_ords_[i] <= buf_ords_[i - 1]; }
-		if (bad) { throw corrupt_segment("ordinals not increasing"); }
-		if (buf_ords_[n - 1] >= seg_->doc_count()) { throw corrupt_segment("ordinal out of range"); }
+		if (bad) { corrupt("ordinals not increasing"); }
+		if (buf_ords_[n - 1] >= seg_->doc_count()) { corrupt("ordinal out of range"); }
 	}
 
 	// Verifies [p, p + n) of the postings section before it is read.
@@ -1045,7 +1087,7 @@ public:
 			return;
 		}
 		auto bytes = seg.positions_bytes();
-		if (info.positions > bytes.size() || info.positions_length > bytes.size() - info.positions) { throw corrupt_segment("positions offset"); }
+		if (info.positions > bytes.size() || info.positions_length > bytes.size() - info.positions) { corrupt("positions offset"); }
 		seg_ = &seg;
 		const char* p = bytes.data() + info.positions;
 		end_ = p + info.positions_length;  // every read stays inside the term's range
@@ -1055,7 +1097,7 @@ public:
 		if (!(info.flags & format::counts_are_wdf)) {
 			need(p, std::min<std::uint64_t>(10, std::uint64_t(end_ - p)));
 			const std::uint64_t n = format::get_leb(&p, end_);
-			if (n > std::uint64_t(end_ - p)) { throw corrupt_segment("count blocks bounds"); }
+			if (n > std::uint64_t(end_ - p)) { corrupt("count blocks bounds"); }
 			count_blocks_ = p;
 			count_blocks_bytes_ = n;
 			p += n;
@@ -1066,7 +1108,7 @@ public:
 		}
 		full_blocks_ = format::get_leb(&p, end_);
 		blocks_bytes_ = format::get_leb(&p, end_);
-		if (blocks_bytes_ > std::uint64_t(end_ - p) || full_blocks_ > blocks_bytes_) { throw corrupt_segment("position blocks bounds"); }
+		if (blocks_bytes_ > std::uint64_t(end_ - p) || full_blocks_ > blocks_bytes_) { corrupt("position blocks bounds"); }
 		blocks_ = p;
 		tail_ = p + blocks_bytes_;
 	}
@@ -1094,7 +1136,7 @@ public:
 		// No document has more positions than the segment's maximum; full blocks hold 128
 		// positions each and a tail position takes at least a byte.
 		const std::uint64_t limit = full_blocks_ * format::block + std::uint64_t(end_ - tail_);
-		if (count > max_count_ || first > limit || count > limit - first) { throw corrupt_segment("position count"); }
+		if (count > max_count_ || first > limit || count > limit - first) { corrupt("position count"); }
 		if (count > out_size_) {
 			out_size_ = std::max<std::size_t>(count, 2 * out_size_);
 			out_ = std::make_unique_for_overwrite<std::uint32_t[]>(out_size_);
@@ -1120,7 +1162,7 @@ private:
 			if (offset < count_blocks_bytes_) { need_block(count_blocks_ + offset, count_blocks_bytes_ - offset); }
 			if (offset >= count_blocks_bytes_ ||
 				!bitpack::decode(reinterpret_cast<const std::uint8_t*>(count_blocks_ + offset), count_blocks_bytes_ - offset, counts_buf_)) {
-				throw corrupt_segment("count block");
+				corrupt("count block");
 			}
 			decoded_counts_ = offset;
 		}
@@ -1149,16 +1191,16 @@ private:
 			offset = decoded_offset_;
 		}
 		for (; at < j; ++at) {  // j >= at: position indexes never wrap (position_index, decode_group)
-			if (offset >= blocks_bytes_) { throw corrupt_segment("position block bounds"); }
+			if (offset >= blocks_bytes_) { corrupt("position block bounds"); }
 			need_block(blocks_ + offset, blocks_bytes_ - offset);
 			const std::size_t n = bitpack::encoded_size(reinterpret_cast<const std::uint8_t*>(blocks_ + offset), blocks_bytes_ - offset);
-			if (!n) { throw corrupt_segment("position block"); }
+			if (!n) { corrupt("position block"); }
 			offset += n;
 		}
 		if (offset < blocks_bytes_) { need_block(blocks_ + offset, blocks_bytes_ - offset); }
 		if (offset >= blocks_bytes_ ||
 			!bitpack::decode(reinterpret_cast<const std::uint8_t*>(blocks_ + offset), blocks_bytes_ - offset, block_buf_)) {
-			throw corrupt_segment("position block");
+			corrupt("position block");
 		}
 		decoded_block_ = j;
 		decoded_offset_ = offset;

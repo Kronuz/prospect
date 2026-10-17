@@ -45,13 +45,16 @@ struct merge_plan {
 // documents' key terms (empty: none), which the result's key filter covers. Throws
 // std::logic_error if two live documents share a docid. With `cancel`, it checks it per
 // document, per term, and per stored frame, and throws task::cancelled; with `memory`,
-// its working memory is charged there.
+// its working memory is charged there. Stored records are read a frame at a time per
+// source; out of docid order, `records` (when given) takes each source's live records,
+// every frame decoded once, and the output reads them from there (reordering review,
+// P1-R4 (b)).
 // The output is in docid order, unless `order` gives it: [new ordinal] = the source
 // document, every live document exactly once (std::invalid_argument otherwise). Without
 // `order`, a single source whose ordinals are not in docid order keeps its order.
 inline merge_plan merge_segments(std::span<const merge_source> sources, const std::array<std::uint8_t, 16>& segment_id, output& sink, spill& positions_spill,
 	std::string_view key_prefix = {}, std::uint8_t region_shift = format::default_region_shift, const task::cancel_token* cancel = nullptr,
-	flush_charge* memory = nullptr, std::span<const merge_ref> order = {}) {
+	flush_charge* memory = nullptr, std::span<const merge_ref> order = {}, scratch* records = nullptr) {
 	auto check = [&] {
 		if (cancel && cancel->requested()) { throw task::cancelled{}; }
 	};
@@ -116,6 +119,44 @@ inline merge_plan merge_segments(std::span<const merge_source> sources, const st
 			docs.push_back({sources[r.source].seg->docid(r.ord), r.source, r.ord});
 		}
 	}
+	// Stored records: out of docid order, spilled once per source frame into `records`,
+	// [source][ordinal] .. [ordinal + 1] their bytes there; otherwise a frame cache per source.
+	std::vector<std::vector<std::uint64_t>> spilled;
+	std::string_view spilled_bytes;
+	if (records && (!order.empty() || keep_source_order)) {
+		spilled.resize(sources.size());
+		std::uint64_t at = 0;
+		segment::stored_frame frame;
+		for (std::size_t s = 0; s < sources.size(); ++s) {
+			const segment& seg = *sources[s].seg;
+			spilled[s].assign(seg.doc_count() + 1, at);  // this source's records start at `at`
+			charge(spilled[s].capacity() * 8);
+			const std::uint32_t frames = seg.stored_frames();
+			ordinal_t next = 0;
+			for (std::uint32_t f = 0; f < frames; ++f) {
+				check();
+				seg.decode_stored_frame(f, frame);
+				for (ordinal_t o = frame.first; o < frame.first + frame.starts.size() - 1; ++o) {
+					for (; next < o; ++next) { spilled[s][next + 1] = at; }
+					if (sources[s].live(o)) {
+						const auto rec = frame.record(o);
+						records->out().write(rec.data(), rec.size());
+						at += rec.size();
+					}
+					spilled[s][o + 1] = at;
+					next = o + 1;
+				}
+			}
+			for (; next < seg.doc_count(); ++next) { spilled[s][next + 1] = at; }
+		}
+		spilled_bytes = records->bytes();
+		if (spilled_bytes.size() != at) { throw std::runtime_error("strata: merge: the stored records read back short"); }
+	}
+	std::vector<segment::stored_frame> frames(spilled.empty() ? sources.size() : 0);
+	auto stored_of = [&](std::size_t s, ordinal_t o) -> std::string_view {
+		if (spilled.empty()) { return sources[s].seg->stored(o, frames[s]); }
+		return spilled_bytes.substr(spilled[s][o], spilled[s][o + 1] - spilled[s][o]);
+	};
 	segment_writer w;
 	w.region_shift = region_shift;
 	w.memory = memory;
@@ -126,7 +167,7 @@ inline merge_plan merge_segments(std::span<const merge_source> sources, const st
 		const auto& d = docs[i];
 		const segment& seg = *sources[d.source].seg;
 		auto k = keys[d.source].find(d.ord);
-		plan.ordinals[d.source][d.ord] = w.add_document(d.docid, seg.length(d.ord), seg.stored(d.ord), seg.version(d.ord), k == keys[d.source].end() ? std::string_view() : std::string_view(k->second));
+		plan.ordinals[d.source][d.ord] = w.add_document(d.docid, seg.length(d.ord), stored_of(d.source, d.ord), seg.version(d.ord), k == keys[d.source].end() ? std::string_view() : std::string_view(k->second));
 	}
 	plan.doc_count = docs.size();
 	// Terms: the union of the sources' dictionaries, in order, one cursor per source

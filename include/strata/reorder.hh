@@ -29,24 +29,6 @@ struct settings {
 // for each of the 8 threads the preset allows.
 inline std::uint64_t working_set(std::uint64_t docs, std::uint64_t terms) noexcept { return 20 * docs + 64 * terms; }
 
-// The forward index's file: written through `out`, then read back whole (a mapping).
-struct scratch {
-	virtual ~scratch() = default;
-	virtual output& out() = 0;
-	virtual std::string_view bytes() = 0;
-};
-
-class string_scratch final : public scratch {
-public:
-	explicit string_scratch(flush_charge* memory = nullptr) : out_(s_, memory) {}
-	output& out() override { return out_; }
-	std::string_view bytes() override { return s_; }
-
-private:
-	std::string s_;
-	string_output out_;
-};
-
 // The sources' live documents in docid order: [rank] = the document.
 inline std::vector<merge_ref> docid_order(std::span<const merge_source> sources) {
 	struct doc {

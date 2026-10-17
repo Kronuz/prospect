@@ -97,6 +97,7 @@ int main() {
 			}
 			std::sort(d.terms.begin(), d.terms.end(), [](const auto& a, const auto& b) { return a.term < b.term; });
 			d.terms.erase(std::unique(d.terms.begin(), d.terms.end(), [](const auto& a, const auto& b) { return a.term == b.term; }), d.terms.end());
+			if (r() % 3) { d.stored = std::to_string(i) + std::string(r() % 300, char('a' + topic)); }
 			if (kind < 6) {
 				o.type = operation::replace_key;
 				o.key = key;
@@ -128,7 +129,7 @@ int main() {
 		std::string first_bytes;
 		for (std::uint64_t mem : {std::uint64_t(64), std::uint64_t(4096), std::uint64_t(256) << 20}) {
 			set.memory = mem;
-			reorder::string_scratch file;
+			string_scratch file;
 			const auto st = reorder::write_forward(sources, file.out(), set);
 			CHECK(st.terms == terms);
 			CHECK(st.docs == expect.size());
@@ -145,12 +146,12 @@ int main() {
 
 		// The order: a permutation of the live documents that merge accepts, and deterministic.
 		set.memory = 256ull << 20;
-		reorder::string_scratch f1, f2;
+		string_scratch f1, f2;
 		const auto order = reorder::order(sources, f1, set);
 		CHECK(!order.empty());
 		CHECK(reorder::order(sources, f2, set).size() == order.size());
 		{
-			reorder::string_scratch f3;
+			string_scratch f3;
 			const auto again = reorder::order(sources, f3, set);
 			bool same = again.size() == order.size();
 			for (std::size_t i = 0; same && i < order.size(); ++i) { same = again[i].source == order[i].source && again[i].ord == order[i].ord; }
@@ -167,6 +168,18 @@ int main() {
 		const segment seg(merged);
 		seg.verify_all();
 		CHECK(!seg.docid_ordered());
+		// Stored records through a record spill (each source frame decoded once) write the
+		// same bytes as through the frame caches.
+		{
+			std::string again;
+			string_output out(again);
+			string_spill spill;
+			string_scratch records;
+			const std::array<std::uint8_t, 16> id{9};
+			(void)merge_segments(sources, id, out, spill, "Q", format::default_region_shift, nullptr, nullptr, order, &records);
+			CHECK(again == merged);
+			CHECK(!records.bytes().empty());
+		}
 
 		// A permuted source among docid-ordered ones (a forced merge of a reordered segment with
 		// newer ones): its lists are read whole, through the rank map.
@@ -191,7 +204,7 @@ int main() {
 		const auto expect_mixed = direct(mixed, set, terms);
 		for (std::uint64_t mem : {std::uint64_t(64), std::uint64_t(256) << 20}) {
 			set.memory = mem;
-			reorder::string_scratch file;
+			string_scratch file;
 			const auto st = reorder::write_forward(mixed, file.out(), set);
 			CHECK(rows_of(reorder::forward_graph(file.bytes(), st)) == expect_mixed);
 		}
@@ -201,7 +214,7 @@ int main() {
 		{
 			reorder::settings tight = set;
 			tight.memory = reorder::working_set(expect.size(), 1) - 1;
-			reorder::string_scratch file;
+			string_scratch file;
 			reorder::forward_stats st;
 			CHECK(reorder::order(sources, file, tight, nullptr, nullptr, &st).empty());
 			CHECK(reorder::working_set(st.docs, st.terms) > tight.memory);
@@ -211,7 +224,7 @@ int main() {
 			task::cancel_source stop;
 			stop.request();
 			const task::cancel_token token = stop.token();
-			reorder::string_scratch file;
+			string_scratch file;
 			bool threw = false;
 			try {
 				(void)reorder::order(sources, file, set, &token);
@@ -241,7 +254,7 @@ int main() {
 				CHECK(e.has_value() == (it != keys.end()));
 				if (e && it != keys.end()) { CHECK(*e == it->second && ix.has_docid(e->first)); }
 			}
-			CHECK(!has_file(io, ".fwd"));
+			CHECK(!has_file(io, ".fwd") && !has_file(io, ".rec"));
 		}
 		// A forward index left by a crash is an orphan open removes.
 		{

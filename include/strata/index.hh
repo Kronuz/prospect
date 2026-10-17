@@ -93,6 +93,7 @@ inline std::string segment_name(std::uint64_t id) { return "seg-" + std::to_stri
 inline std::string live_name(std::uint64_t id, std::uint64_t gen) { return "seg-" + std::to_string(id) + "." + std::to_string(gen) + ".live"; }
 inline std::string spill_name(std::uint64_t id) { return "seg-" + std::to_string(id) + ".spill"; }
 inline std::string forward_name(std::uint64_t id) { return "seg-" + std::to_string(id) + ".fwd"; }
+inline std::string records_name(std::uint64_t id) { return "seg-" + std::to_string(id) + ".rec"; }
 inline std::string meta_name(std::uint64_t gen) { return "meta-" + std::to_string(gen) + ".kv"; }
 inline std::string manifest_name(std::uint64_t n) { return "manifest-" + std::to_string(n); }
 
@@ -107,7 +108,7 @@ inline std::optional<std::uint64_t> number(std::string_view s) {
 
 // The kind and numbers of one of strata's file names, or nothing for other names.
 struct parsed_name {
-	enum kind { segment, live, meta, manifest, manifest_tmp, spill, forward } type;
+	enum kind { segment, live, meta, manifest, manifest_tmp, spill, scratch } type;
 	std::uint64_t a = 0, b = 0;
 };
 inline std::optional<parsed_name> parse_name(std::string_view n) {
@@ -130,8 +131,10 @@ inline std::optional<parsed_name> parse_name(std::string_view n) {
 	if (auto m = strip("seg-", ".spill")) {
 		if (auto v = number(*m)) { return parsed_name{parsed_name::spill, *v}; }
 	}
-	if (auto m = strip("seg-", ".fwd")) {
-		if (auto v = number(*m)) { return parsed_name{parsed_name::forward, *v}; }
+	for (const char* suffix : {".fwd", ".rec"}) {
+		if (auto m = strip("seg-", suffix)) {
+			if (auto v = number(*m)) { return parsed_name{parsed_name::scratch, *v}; }
+		}
 	}
 	if (auto m = strip("seg-", ".live")) {
 		const auto dot = m->find('.');
@@ -1032,16 +1035,17 @@ private:
 		std::unique_ptr<merge_file> file_;
 	};
 
-	// A reordering merge's forward index, `seg-<id>.fwd`: written through the merge's file
-	// writes (checkpoints, rate limit, storage), mapped back for bisection, and removed when
-	// the order is made. One left by a crash is an orphan open removes.
-	class merge_forward final : public strata::reorder::scratch {
+	// A reordering merge's temporary file: its forward index (`seg-<id>.fwd`), mapped back
+	// for bisection, or its stored records (`seg-<id>.rec`), mapped back as the output is
+	// written. Written through the merge's file writes (checkpoints, rate limit, storage)
+	// and removed after use; one left by a crash is an orphan open removes.
+	class merge_scratch final : public strata::scratch {
 	public:
-		merge_forward(const merge_context& ctx, merge_job& job, std::uint64_t& used, const task::cancel_token& stop, std::size_t chunk)
-			: ctx_(ctx), used_(used), name_(index_detail::forward_name(job.id)), f_(ctx.io->create_exclusive(name_)), file_(*f_, ctx, job, stop), out_(file_, used, chunk) {}
-		merge_forward(const merge_forward&) = delete;
-		merge_forward& operator=(const merge_forward&) = delete;
-		~merge_forward() override {
+		merge_scratch(const merge_context& ctx, merge_job& job, std::uint64_t& used, const task::cancel_token& stop, std::size_t chunk, std::string name)
+			: ctx_(ctx), used_(used), name_(std::move(name)), f_(ctx.io->create_exclusive(name_)), file_(*f_, ctx, job, stop), out_(file_, used, chunk) {}
+		merge_scratch(const merge_scratch&) = delete;
+		merge_scratch& operator=(const merge_scratch&) = delete;
+		~merge_scratch() override {
 			mapped_.reset();
 			f_.reset();
 			used_ -= std::min(used_, file_.size());
@@ -1109,12 +1113,17 @@ private:
 				merge_output sink(out, used, chunk);
 				std::vector<merge_ref> order;
 				if (job.reorder) {
-					merge_forward forward(ctx, job, used, stop, chunk);
+					merge_scratch forward(ctx, job, used, stop, chunk, index_detail::forward_name(job.id));
 					order = strata::reorder::order(sources, forward, ctx.reorder, &stop, &job.memory);
 				}
 				{
+					std::optional<merge_scratch> records;
+					if (!order.empty() || (sources.size() == 1 && !sources[0].seg->docid_ordered())) {
+						records.emplace(ctx, job, used, stop, chunk, index_detail::records_name(job.id));
+					}
 					merge_spill positions(ctx, job, used, stop, chunk);
-					job.plan = merge_segments(sources, job.header, sink, positions, ctx.key_prefix, format::default_region_shift, &stop, &job.memory, order);
+					job.plan = merge_segments(sources, job.header, sink, positions, ctx.key_prefix, format::default_region_shift, &stop, &job.memory, order,
+						records ? &*records : nullptr);
 				}
 				sink.finish();
 				job.memory.shrink(job.memory.held());  // the build's buffers are gone
@@ -1984,7 +1993,7 @@ private:
 			case index_detail::parsed_name::manifest_tmp: top = std::max(top, p->a); break;
 			case index_detail::parsed_name::segment:
 			case index_detail::parsed_name::spill:
-			case index_detail::parsed_name::forward: max_segment = std::max(max_segment, p->a); break;
+			case index_detail::parsed_name::scratch: max_segment = std::max(max_segment, p->a); break;
 			case index_detail::parsed_name::live:
 				max_segment = std::max(max_segment, p->a);
 				max_live = std::max(max_live, p->b);

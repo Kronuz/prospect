@@ -409,7 +409,7 @@ private:
 				while (g < it_.groups() && group_bound(g) <= min_) { ++g; }
 				if (g == it_.groups() && total_bound_ <= min_) { return no_more_docs; }
 				const ordinal_t to = g < it_.groups() ? it_.group_first(g) : it_.group_last(g - 1) + 1;
-				if (to <= d) { throw corrupt_segment("skip group order"); }  // else the loop never ends
+				if (to <= d) { corrupt("skip group order"); }  // else the loop never ends
 				d = it_.advance(to);
 				continue;
 			}

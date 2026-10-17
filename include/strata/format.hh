@@ -50,6 +50,10 @@ struct corrupt_segment : std::runtime_error {
 	explicit corrupt_segment(const char* what) : std::runtime_error(std::string("strata: corrupt segment: ") + what) {}
 };
 
+// Throws corrupt_segment, out of line and cold, so the decoders that check keep no throw
+// path inline.
+[[noreturn, gnu::cold, gnu::noinline]] inline void corrupt(const char* what) { throw corrupt_segment(what); }
+
 namespace format {
 
 inline constexpr char header_magic[8] = {'S', 'T', 'R', 'S', 'E', 'G', '0', '1'};
@@ -115,7 +119,7 @@ inline void put_leb(std::string& out, std::uint64_t v) {
 // Reads a LEB128 value from [*p, end) or throws corrupt_segment.
 inline std::uint64_t get_leb(const char** p, const char* end) {
 	std::uint64_t v = 0;
-	if (!varint::leb128::decode(p, end, v)) { throw corrupt_segment("truncated integer"); }
+	if (!varint::leb128::decode(p, end, v)) { corrupt("truncated integer"); }
 	return v;
 }
 
@@ -186,14 +190,14 @@ inline std::string encode_footer(const footer& f) {
 }
 
 inline footer decode_footer(std::string_view file) {
-	if (file.size() < header_size + footer_size) { throw corrupt_segment("file too small"); }
+	if (file.size() < header_size + footer_size) { corrupt("file too small"); }
 	const char* p = file.data() + file.size() - footer_size;
-	if (std::memcmp(p + 44, footer_magic, 4) != 0) { throw corrupt_segment("footer magic"); }
-	if (hashes::crc32c(p, 40) != get<std::uint32_t>(p + 40)) { throw corrupt_segment("footer checksum"); }
+	if (std::memcmp(p + 44, footer_magic, 4) != 0) { corrupt("footer magic"); }
+	if (hashes::crc32c(p, 40) != get<std::uint32_t>(p + 40)) { corrupt("footer checksum"); }
 	footer f{get<std::uint64_t>(p), get<std::uint64_t>(p + 8), get<std::uint32_t>(p + 16), get<std::uint32_t>(p + 20),
 		get<std::uint64_t>(p + 24), get<std::uint64_t>(p + 32)};
 	const std::uint64_t body = file.size() - footer_size;
-	if (f.toc_offset > body || f.toc_length > body - f.toc_offset || f.toc_offset + f.toc_length != body) { throw corrupt_segment("table of contents bounds"); }
+	if (f.toc_offset > body || f.toc_length > body - f.toc_offset || f.toc_offset + f.toc_length != body) { corrupt("table of contents bounds"); }
 	return f;
 }
 
@@ -201,29 +205,29 @@ inline footer decode_footer(std::string_view file) {
 // placement inside the file before the table of contents.
 inline std::vector<section_entry> decode_toc(std::string_view file, const footer& f) {
 	std::string_view t = file.substr(f.toc_offset, f.toc_length);
-	if (hashes::crc32c(t.data(), t.size()) != f.toc_crc) { throw corrupt_segment("table of contents checksum"); }
+	if (hashes::crc32c(t.data(), t.size()) != f.toc_crc) { corrupt("table of contents checksum"); }
 	const char* p = t.data();
 	const char* end = p + t.size();
 	auto need = [&](std::size_t n) {
-		if (std::size_t(end - p) < n) { throw corrupt_segment("table of contents truncated"); }
+		if (std::size_t(end - p) < n) { corrupt("table of contents truncated"); }
 	};
 	need(4);
 	std::uint32_t n = get<std::uint32_t>(p);
 	p += 4;
-	if (n > 64) { throw corrupt_segment("section count"); }
+	if (n > 64) { corrupt("section count"); }
 	std::vector<section_entry> entries;
 	for (std::uint32_t i = 0; i < n; ++i) {
 		need(24);
 		section_entry e;
 		e.kind = section(get<std::uint16_t>(p));
 		const std::uint16_t shift = get<std::uint16_t>(p + 2);
-		if (shift < min_region_shift || shift > max_region_shift) { throw corrupt_segment("region size"); }
+		if (shift < min_region_shift || shift > max_region_shift) { corrupt("region size"); }
 		e.region_shift = std::uint8_t(shift);
 		e.offset = get<std::uint64_t>(p + 4);
 		e.length = get<std::uint64_t>(p + 12);
 		e.crc = get<std::uint32_t>(p + 20);
 		p += 24;
-		if (e.offset > f.toc_offset || e.length > f.toc_offset - e.offset) { throw corrupt_segment("section bounds"); }
+		if (e.offset > f.toc_offset || e.length > f.toc_offset - e.offset) { corrupt("section bounds"); }
 		const std::size_t regions = std::size_t((e.length + e.region_size() - 1) >> e.region_shift);
 		need(regions * 4);
 		e.region_crcs.reserve(regions);
@@ -231,18 +235,18 @@ inline std::vector<section_entry> decode_toc(std::string_view file, const footer
 		p += regions * 4;
 		entries.push_back(std::move(e));
 	}
-	if (p != end) { throw corrupt_segment("table of contents trailing bytes"); }
+	if (p != end) { corrupt("table of contents trailing bytes"); }
 	// Each kind at most once; sections never overlap.
 	std::vector<const section_entry*> sorted;
 	for (const auto& e : entries) {
 		for (const auto* o : sorted) {
-			if (o->kind == e.kind) { throw corrupt_segment("duplicate section"); }
+			if (o->kind == e.kind) { corrupt("duplicate section"); }
 		}
 		sorted.push_back(&e);
 	}
 	std::sort(sorted.begin(), sorted.end(), [](const auto* a, const auto* b) { return a->offset < b->offset; });
 	for (std::size_t i = 1; i < sorted.size(); ++i) {
-		if (sorted[i - 1]->offset + sorted[i - 1]->length > sorted[i]->offset) { throw corrupt_segment("overlapping sections"); }
+		if (sorted[i - 1]->offset + sorted[i - 1]->length > sorted[i]->offset) { corrupt("overlapping sections"); }
 	}
 	return entries;
 }
@@ -306,11 +310,11 @@ inline void encode_impacts(std::string& out, const std::vector<impact>& impacts)
 // Appends one encoded list of competitive pairs to out; returns how many.
 inline std::size_t decode_impacts(const char** p, const char* end, std::vector<impact>& out) {
 	const std::uint64_t n = get_leb(p, end);
-	if (n == 0 || n > 256) { throw corrupt_segment("impact count"); }  // lengths are 1 byte
+	if (n == 0 || n > 256) { corrupt("impact count"); }  // lengths are 1 byte
 	for (std::size_t k = 0; k < n; ++k) {
 		impact i;
 		i.wdf = std::uint32_t(get_leb(p, end));
-		if (*p == end) { throw corrupt_segment("impacts truncated"); }
+		if (*p == end) { corrupt("impacts truncated"); }
 		i.length = std::uint8_t(*(*p)++);
 		out.push_back(i);
 	}
@@ -342,9 +346,9 @@ inline void encode_sized_impacts(std::string& out, const std::vector<impact>& im
 inline std::string_view skip_sized_impacts(const char** p, const char* end) {
 	const char* start = *p;
 	const std::uint64_t h = get_leb(p, end), n = h >> 1;
-	if (n == 0 || n > 256) { throw corrupt_segment("impact count"); }
+	if (n == 0 || n > 256) { corrupt("impact count"); }
 	const std::uint64_t size = (h & 1) ? 2 * n : get_leb(p, end);
-	if (size > std::uint64_t(end - *p)) { throw corrupt_segment("impacts bounds"); }
+	if (size > std::uint64_t(end - *p)) { corrupt("impacts bounds"); }
 	*p += size;
 	return std::string_view(start, std::size_t(*p - start));
 }
@@ -358,23 +362,23 @@ inline bool any_sized_impact(std::string_view list, F&& f) {
 	const std::uint64_t h = get_leb(&p, end), n = h >> 1;
 	if (!(h & 1)) {
 		const std::uint64_t size = get_leb(&p, end);
-		if (size != std::uint64_t(end - p)) { throw corrupt_segment("impacts length"); }
+		if (size != std::uint64_t(end - p)) { corrupt("impacts length"); }
 		const std::uint64_t m = get_leb(&p, end);
-		if (m != n) { throw corrupt_segment("impact count"); }
+		if (m != n) { corrupt("impact count"); }
 	}
 	for (std::uint64_t k = 0; k < n; ++k) {
 		impact i;
 		if (h & 1) {
-			if (end - p < 2) { throw corrupt_segment("impacts truncated"); }
+			if (end - p < 2) { corrupt("impacts truncated"); }
 			i.wdf = std::uint8_t(*p++);
 		} else {
 			i.wdf = std::uint32_t(get_leb(&p, end));
-			if (p == end) { throw corrupt_segment("impacts truncated"); }
+			if (p == end) { corrupt("impacts truncated"); }
 		}
 		i.length = std::uint8_t(*p++);
 		if (f(i)) { return true; }
 	}
-	if (p != end) { throw corrupt_segment("impacts length"); }
+	if (p != end) { corrupt("impacts length"); }
 	return false;
 }
 
@@ -444,13 +448,13 @@ inline term_info decode_term_info(std::string_view bytes, term_run& run, bool wi
 	const char* end = p + bytes.size();
 	term_info t;
 	const std::uint64_t head = get_leb(&p, end);
-	if (head >> 5 == 0 || head >> 5 > 0xffffffffu) { throw corrupt_segment("term info"); }
+	if (head >> 5 == 0 || head >> 5 > 0xffffffffu) { corrupt("term info"); }
 	t.df = std::uint32_t(head >> 5);
 	for (unsigned b = 0; b < 5; ++b) {
 		if (head >> b & 1) { t.flags |= detail::packed_flags[b]; }
 	}
 	if (t.df == 1) { t.flags |= single_posting; }
-	if (!(t.flags & absolute) && !run.started) { throw corrupt_segment("term offsets without a run"); }
+	if (!(t.flags & absolute) && !run.started) { corrupt("term offsets without a run"); }
 	if (t.flags & absolute) {
 		run.postings = get_leb(&p, end);
 		run.positions = get_leb(&p, end);
@@ -463,13 +467,13 @@ inline term_info decode_term_info(std::string_view bytes, term_run& run, bool wi
 		t.cf = t.flags & cf_is_df ? t.df : get_leb(&p, end);
 		t.postings_length = get_leb(&p, end);
 		t.postings = run.postings;
-		if (run.postings + t.postings_length < run.postings) { throw corrupt_segment("postings range"); }
+		if (run.postings + t.postings_length < run.postings) { corrupt("postings range"); }
 		run.postings += t.postings_length;
 	}
 	if (!(t.flags & no_positions)) {
 		t.positions_length = get_leb(&p, end);
 		t.positions = run.positions;
-		if (run.positions + t.positions_length < run.positions) { throw corrupt_segment("positions range"); }
+		if (run.positions + t.positions_length < run.positions) { corrupt("positions range"); }
 		run.positions += t.positions_length;
 	}
 	if (t.df >= block) {
@@ -479,7 +483,7 @@ inline term_info decode_term_info(std::string_view bytes, term_run& run, bool wi
 			p = end;
 		}
 	}
-	if (p != end) { throw corrupt_segment("term info"); }
+	if (p != end) { corrupt("term info"); }
 	run.started = true;
 	return t;
 }

@@ -95,10 +95,12 @@ permuted mode, and the docids section's kind follows the order actually written 
   against the order; Phase 3's T2 schedule with permuted merges is T4's.
 - **(b) Stored records.** A permuted order never keeps a source frame's documents
   contiguous, so I7's raw frame copy never applies and the stored section is re-encoded.
-  Today each document's `stored()` decompresses its whole frame; the reordering merge
-  decodes each source frame once instead, into a record spill indexed by ordinal (charged
-  and reserved like the merge's other temporaries), then writes in `order`. Not built yet;
-  T3 states its cost at 5M.
+  `stored()` alone decompresses a record's whole frame. A merge reads each source through
+  a one-frame cache (`segment::stored_frame`), so docid order decodes each frame once. Out
+  of docid order the merge first copies every source's live records, frame by frame, into
+  a record spill (`seg-<id>.rec`, written through the merge's file writes and mapped back,
+  8 bytes an ordinal charged for its offsets), then writes them in `order`. Each source
+  frame is decoded exactly once either way. T3 states the cost at 5M.
 - **(c) A single permuted source keeps its order.** Without `order`, a merge of one source
   whose ordinals are not in docid order writes its live documents in that source's order:
   the policy's rewrites past the deleted-fraction bound and `force_merge_deletes` do not

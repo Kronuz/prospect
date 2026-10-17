@@ -106,6 +106,25 @@ private:
 	flush_charge* memory_;
 };
 
+// A temporary file written once through out(), then read back whole (a mapping): a
+// reordering merge's forward index and its stored records.
+struct scratch {
+	virtual ~scratch() = default;
+	virtual output& out() = 0;
+	virtual std::string_view bytes() = 0;
+};
+
+class string_scratch final : public scratch {
+public:
+	explicit string_scratch(flush_charge* memory = nullptr) : out_(s_, memory) {}
+	output& out() override { return out_; }
+	std::string_view bytes() override { return s_; }
+
+private:
+	std::string s_;
+	string_output out_;
+};
+
 class string_spill final : public spill {
 public:
 	string_spill() = default;

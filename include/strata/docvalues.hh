@@ -265,15 +265,15 @@ public:
 		const char* p = data;
 		const char* const end = data + size;
 		column_view c;
-		if (size < 3) { throw corrupt_segment("truncated doc-value column"); }
-		if (std::uint8_t(p[0]) != detail::version) { throw corrupt_segment("doc-value column version"); }
+		if (size < 3) { corrupt("truncated doc-value column"); }
+		if (std::uint8_t(p[0]) != detail::version) { corrupt("doc-value column version"); }
 		const auto k = std::uint8_t(p[1]), flags = std::uint8_t(p[2]);
 		p += 3;
-		if (k > std::uint8_t(kind::bytes) || (flags & ~(detail::flag_multi | detail::flag_presence))) { throw corrupt_segment("doc-value column kind"); }
+		if (k > std::uint8_t(kind::bytes) || (flags & ~(detail::flag_multi | detail::flag_presence))) { corrupt("doc-value column kind"); }
 		c.kind_ = kind(k);
 		c.multi_ = flags & detail::flag_multi;
 		c.doc_count_ = format::get_leb(&p, end);
-		if (c.doc_count_ > std::numeric_limits<ordinal_t>::max()) { throw corrupt_segment("doc-value ordinals"); }
+		if (c.doc_count_ > std::numeric_limits<ordinal_t>::max()) { corrupt("doc-value ordinals"); }
 		c.stats_.docs = format::get_leb(&p, end);
 		c.stats_.values = format::get_leb(&p, end);
 		need(p, end, 16);
@@ -287,35 +287,35 @@ public:
 			c.stats_.has_sum = true;
 			c.stats_.sum = static_cast<__int128>((static_cast<unsigned __int128>(high) << 64) | low);
 		}
-		if (c.stats_.docs > c.doc_count_) { throw corrupt_segment("doc-value documents"); }
+		if (c.stats_.docs > c.doc_count_) { corrupt("doc-value documents"); }
 		if (flags & detail::flag_presence) {
 			const auto n = format::get_leb(&p, end);
 			need(p, end, n);
 			c.presence_ = ::docset::frozen_view::open(reinterpret_cast<const std::uint8_t*>(p), std::size_t(n));
 			// Every present ordinal lies below the column's ordinals.
 			if (!c.presence_ || c.presence_->cardinality() != c.stats_.docs || c.presence_->rank(::docset::doc_t(c.doc_count_)) != c.stats_.docs) {
-				throw corrupt_segment("doc-value presence");
+				corrupt("doc-value presence");
 			}
 			p += n;
 		} else if (c.stats_.docs != c.doc_count_) {
-			throw corrupt_segment("doc-value presence");
+			corrupt("doc-value presence");
 		}
 		if (c.kind_ == kind::bytes) { c.parse_dictionary(&p, end); }
 		c.group_docs_ = format::get_leb(&p, end);
-		if (!c.group_docs_ || c.group_docs_ > detail::max_group_docs) { throw corrupt_segment("doc-value group size"); }
+		if (!c.group_docs_ || c.group_docs_ > detail::max_group_docs) { corrupt("doc-value group size"); }
 		c.groups_ = std::size_t((c.stats_.docs + c.group_docs_ - 1) / c.group_docs_);
 		need(p, end, std::uint64_t(c.groups_) * detail::group_entry);
 		c.group_directory_ = p;
 		p += c.groups_ * detail::group_entry;
 		if (c.multi_) {
 			c.offsets_.parse(&p, end);
-			if (c.offsets_.count != c.stats_.docs + 1) { throw corrupt_segment("doc-value offsets"); }
+			if (c.offsets_.count != c.stats_.docs + 1) { corrupt("doc-value offsets"); }
 		} else if (c.stats_.values != c.stats_.docs) {
-			throw corrupt_segment("doc-value count");
+			corrupt("doc-value count");
 		}
 		c.values_.parse(&p, end);
-		if (c.values_.count != c.stats_.values) { throw corrupt_segment("doc-value count"); }
-		if (p != end) { throw corrupt_segment("doc-value trailing bytes"); }
+		if (c.values_.count != c.stats_.values) { corrupt("doc-value count"); }
+		if (p != end) { corrupt("doc-value trailing bytes"); }
 		c.check_groups();
 		// The statistics' bounds match the blocks'.
 		std::uint64_t lo = c.stats_.values ? std::numeric_limits<std::uint64_t>::max() : 0, hi = 0;
@@ -324,8 +324,8 @@ public:
 			lo = std::min(lo, e.min);
 			hi = std::max(hi, e.max);
 		}
-		if (lo != c.stats_.min || hi != c.stats_.max) { throw corrupt_segment("doc-value bounds"); }
-		if (c.kind_ == kind::bytes && c.stats_.values && c.stats_.max >= c.terms_) { throw corrupt_segment("doc-value ordinal"); }
+		if (lo != c.stats_.min || hi != c.stats_.max) { corrupt("doc-value bounds"); }
+		if (c.kind_ == kind::bytes && c.stats_.values && c.stats_.max >= c.terms_) { corrupt("doc-value ordinal"); }
 		return c;
 	}
 
@@ -348,7 +348,7 @@ public:
 		const std::uint64_t i = doc_index(o);
 		if (!multi_) { out.push_back(values_.at(i)); return 1; }
 		const std::uint64_t start = offsets_.at(i), stop = offsets_.at(i + 1);
-		if (start > stop || stop > values_.count) { throw corrupt_segment("doc-value offsets"); }
+		if (start > stop || stop > values_.count) { corrupt("doc-value offsets"); }
 		out.resize(std::size_t(stop - start));
 		values_.copy(start, stop, out.data());
 		return out.size();
@@ -358,7 +358,7 @@ public:
 		if (!has(o)) { return std::nullopt; }
 		if (!multi_) { return values_.at(doc_index(o)); }
 		const std::uint64_t start = offsets_.at(doc_index(o));
-		if (start >= values_.count) { throw corrupt_segment("doc-value offsets"); }
+		if (start >= values_.count) { corrupt("doc-value offsets"); }
 		return values_.at(start);  // a multi-valued document's smallest
 	}
 	// Values by value index: one, or the range [start, stop) into `out`.
@@ -399,7 +399,7 @@ public:
 	// Bytes slots: the dictionary.
 	std::uint64_t terms() const noexcept { return terms_; }
 	std::string_view term(std::uint64_t ord) const {
-		if (ord >= terms_) { throw corrupt_segment("doc-value ordinal"); }
+		if (ord >= terms_) { corrupt("doc-value ordinal"); }
 		const auto from = term_offset(ord), to = term_offset(ord + 1);
 		return {term_data_ + from, std::size_t(to - from)};
 	}
@@ -423,7 +423,7 @@ private:
 		void parse(const char** p, const char* end) {
 			count = format::get_leb(p, end);
 			const std::uint64_t b = count / block_values + (count % block_values != 0);
-			if (b > std::size_t(end - *p) / detail::block_entry) { throw corrupt_segment("doc-value blocks"); }
+			if (b > std::size_t(end - *p) / detail::block_entry) { corrupt("doc-value blocks"); }
 			blocks = std::size_t(b);
 			directory = *p;
 			*p += blocks * detail::block_entry;
@@ -435,10 +435,10 @@ private:
 			std::size_t at = 0;
 			for (std::size_t i = 0; i < blocks; ++i) {
 				const auto e = block(i);
-				if (e.bits > 64 || !e.gcd || e.min > e.max || offset(i) != at) { throw corrupt_segment("doc-value block"); }
+				if (e.bits > 64 || !e.gcd || e.min > e.max || offset(i) != at) { corrupt("doc-value block"); }
 				at += ::bitpack::packed_bytes(e.bits);
 			}
-			if (at != packed_size) { throw corrupt_segment("doc-value packed size"); }
+			if (at != packed_size) { corrupt("doc-value packed size"); }
 		}
 		block_info block(std::size_t b) const noexcept {
 			const char* e = directory + b * detail::block_entry;
@@ -453,7 +453,7 @@ private:
 			for (std::size_t i = 0; i < block_values; ++i) { out[i] = e.min + out[i] * e.gcd; }
 		}
 		std::uint64_t at(std::uint64_t i) const {
-			if (i >= count) { throw corrupt_segment("doc-value index"); }
+			if (i >= count) { corrupt("doc-value index"); }
 			const auto b = std::size_t(i / block_values);
 			const auto e = block(b);
 			return e.min + extract(bytes(b), e.bits, std::size_t(i % block_values)) * e.gcd;
@@ -472,7 +472,7 @@ private:
 	column_view() = default;
 
 	static void need(const char* p, const char* end, std::uint64_t n) {
-		if (n > std::uint64_t(end - p)) { throw corrupt_segment("truncated doc-value column"); }
+		if (n > std::uint64_t(end - p)) { corrupt("truncated doc-value column"); }
 	}
 	std::uint64_t term_offset(std::uint64_t i) const noexcept { return format::get<std::uint64_t>(term_offsets_ + i * 8); }
 	skip_entry entry(std::size_t g) const noexcept {
@@ -488,27 +488,27 @@ private:
 			const auto e = entry(g);
 			const std::uint64_t begin = g * group_docs_, end = std::min<std::uint64_t>(stats_.docs, begin + group_docs_);
 			if (e.first > e.last || e.last >= doc_count_ || e.min > e.max || e.first_value != next_value || e.count < end - begin || e.count > stats_.values - next_value) {
-				throw corrupt_segment("doc-value group");
+				corrupt("doc-value group");
 			}
 			if (presence_) {
 				if (!presence_->contains(e.first) || !presence_->contains(e.last) || presence_->rank(e.first) != begin || presence_->rank(e.last) != end - 1) {
-					throw corrupt_segment("doc-value group");
+					corrupt("doc-value group");
 				}
 			} else if (e.first != begin || e.last != end - 1) {
-				throw corrupt_segment("doc-value group");
+				corrupt("doc-value group");
 			}
 			if (multi_ ? (offsets_.at(begin) != e.first_value || offsets_.at(end) != e.first_value + e.count) : e.count != end - begin) {
-				throw corrupt_segment("doc-value group");
+				corrupt("doc-value group");
 			}
-			if (e.count && (e.min < stats_.min || e.max > stats_.max)) { throw corrupt_segment("doc-value group"); }
+			if (e.count && (e.min < stats_.min || e.max > stats_.max)) { corrupt("doc-value group"); }
 			next_value += e.count;
 		}
-		if (next_value != stats_.values) { throw corrupt_segment("doc-value group"); }
+		if (next_value != stats_.values) { corrupt("doc-value group"); }
 	}
 
 	void parse_dictionary(const char** p, const char* end) {
 		const auto n = format::get_leb(p, end);
-		if (n >= std::uint64_t(end - *p) / 8) { throw corrupt_segment("doc-value dictionary"); }  // n + 1 offsets
+		if (n >= std::uint64_t(end - *p) / 8) { corrupt("doc-value dictionary"); }  // n + 1 offsets
 		terms_ = n;
 		term_offsets_ = *p;
 		*p += std::size_t(n + 1) * 8;
@@ -516,12 +516,12 @@ private:
 		need(*p, end, bytes);
 		term_data_ = *p;
 		*p += bytes;
-		if (term_offset(0) != 0) { throw corrupt_segment("doc-value dictionary"); }
+		if (term_offset(0) != 0) { corrupt("doc-value dictionary"); }
 		for (std::uint64_t i = 1; i <= n; ++i) {
-			if (term_offset(i) < term_offset(i - 1)) { throw corrupt_segment("doc-value dictionary"); }
+			if (term_offset(i) < term_offset(i - 1)) { corrupt("doc-value dictionary"); }
 		}
 		for (std::uint64_t i = 1; i < n; ++i) {
-			if (!(term(i - 1) < term(i))) { throw corrupt_segment("doc-value dictionary order"); }
+			if (!(term(i - 1) < term(i))) { corrupt("doc-value dictionary order"); }
 		}
 	}
 
