@@ -604,7 +604,7 @@ static void build_cancellation() {
 	{
 		string_output out(full);
 		string_spill spill;
-		(void)merge_segments(sources, header, out, spill, "Q");
+		(void)merge_segments(sources, header, out, spill, {.key_prefix = "Q"});
 	}
 	{
 		task::cancel_source source;
@@ -615,7 +615,7 @@ static void build_cancellation() {
 		string_spill spill;
 		bool cancelled = false;
 		try {
-			(void)merge_segments(sources, header, out, spill, "Q", format::default_region_shift, &token);
+			(void)merge_segments(sources, header, out, spill, {.cancel = &token, .key_prefix = "Q"});
 		} catch (const task::cancelled&) {
 			cancelled = true;
 		}
@@ -639,7 +639,7 @@ static void build_cancellation() {
 		string_spill spill;
 		bool cancelled = false;
 		try {
-			(void)merge_segments(sources, header, out, spill, "Q", format::default_region_shift, &token);
+			(void)merge_segments(sources, header, out, spill, {.cancel = &token, .key_prefix = "Q"});
 		} catch (const task::cancelled&) {
 			cancelled = true;
 		}

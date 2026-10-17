@@ -162,7 +162,7 @@ int main() {
 			string_output out(merged);
 			string_spill spill;
 			const std::array<std::uint8_t, 16> id{9};
-			const auto plan = merge_segments(sources, id, out, spill, "Q", format::default_region_shift, nullptr, nullptr, order);
+			const auto plan = merge_segments(sources, id, out, spill, {.order = order, .key_prefix = "Q"});
 			CHECK(plan.doc_count == order.size());
 		}
 		const segment seg(merged);
@@ -176,7 +176,7 @@ int main() {
 			string_spill spill;
 			string_scratch records;
 			const std::array<std::uint8_t, 16> id{9};
-			(void)merge_segments(sources, id, out, spill, "Q", format::default_region_shift, nullptr, nullptr, order, &records);
+			(void)merge_segments(sources, id, out, spill, {.order = order, .records = &records, .key_prefix = "Q"});
 			CHECK(again == merged);
 			CHECK(!records.bytes().empty());
 		}
@@ -304,7 +304,7 @@ int main() {
 			string_output out(out_bytes[t]);
 			string_spill spill;
 			const std::array<std::uint8_t, 16> id{7};
-			(void)merge_segments(src, id, out, spill, "", format::default_region_shift, nullptr, nullptr, order, &records);
+			(void)merge_segments(src, id, out, spill, {.order = order, .records = &records});
 		}
 		CHECK(out_bytes[0] == out_bytes[1]);
 		const std::uint64_t h = xxh64::hash(out_bytes[0]);

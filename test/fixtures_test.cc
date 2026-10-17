@@ -90,7 +90,7 @@ static std::string merged(const std::vector<std::string>& files, const std::vect
 	std::string out;
 	string_output sink(out);
 	string_spill spill;
-	(void)merge_segments(sources, id, sink, spill, "Q");
+	(void)merge_segments(sources, id, sink, spill, {.key_prefix = "Q"});
 	return out;
 }
 

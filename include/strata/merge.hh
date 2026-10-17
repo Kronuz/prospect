@@ -221,14 +221,29 @@ struct order_source {
 	static constexpr bool exists = false;
 };
 
+// How a merge runs (L6, F13-R11): named, so a call that leaves a field out cannot rebind
+// the next one. Callers use designated initializers, in declaration order.
+struct merge_options {
+	std::uint8_t region_shift = format::default_region_shift;
+	const task::cancel_token* cancel = nullptr;  // checked per document, per term, and per stored frame
+	flush_charge* memory = nullptr;              // charged with the merge's working memory
+	std::span<const merge_ref> order;            // [new ordinal] = the source document; empty: docid order
+	scratch* records = nullptr;                  // out of docid order: where each source's live records spill
+	std::string_view key_prefix;                 // format 12: the key terms' prefix (empty: none)
+};
+
 namespace detail {
 
 // The core of a merge (L6) over a layout: the plan, then each layout entry in order.
 template <class... Entries>
 merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> sources, const std::array<std::uint8_t, 16>& segment_id, output& out,
-	spill& positions_spill, std::string_view key_prefix, std::uint8_t region_shift, const task::cancel_token* cancel, flush_charge* memory,
-	std::span<const merge_ref> order, scratch* records) {
+	spill& positions_spill, const merge_options& options) {
 	using segment_type = basic_segment<layout<Entries...>>;
+	const std::string_view key_prefix = options.key_prefix;
+	const std::uint8_t region_shift = options.region_shift;
+	const task::cancel_token* const cancel = options.cancel;
+	flush_charge* const memory = options.memory;
+	const std::span<const merge_ref> order = options.order;
 	constexpr bool keyed = (std::is_same_v<Entries, keys_plugin> || ...);
 	auto check = [&] {
 		if (cancel && cancel->requested()) { throw task::cancelled{}; }
@@ -330,7 +345,7 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 	m.docid_order = docid_order;
 	m.cancel = cancel;
 	m.memory = memory;
-	m.records = records;
+	m.records = options.records;
 
 	section_sink sink(out, region_shift, &positions_spill);
 	begin_segment(sink, segment_id);
@@ -354,20 +369,17 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 }  // namespace detail
 
 // Writes the merge of `sources` to sink (positions through spill). `key_prefix` names the
-// documents' key terms (empty: none), which the result's key filter covers. Throws
-// std::logic_error if two live documents share a docid. With `cancel`, it checks it per
-// document, per term, and per stored frame, and throws task::cancelled; with `memory`,
-// its working memory is charged there. Stored records are read a frame at a time per
-// source; out of docid order, `records` (when given) takes each source's live records,
-// every frame decoded once, and the output reads them from there (reordering review,
-// P1-R4 (b)).
+// documents' key terms, which the result's key filter covers. Throws std::logic_error if
+// two live documents share a docid. With `cancel`, it throws task::cancelled when asked.
+// Stored records are read a frame at a time per source; out of docid order, `records`
+// (when given) takes each source's live records, every frame decoded once, and the output
+// reads them from there (reordering review, P1-R4 (b)).
 // The output is in docid order, unless `order` gives it: [new ordinal] = the source
 // document, every live document exactly once (std::invalid_argument otherwise). Without
 // `order`, a single source whose ordinals are not in docid order keeps its order.
 inline merge_plan merge_segments(std::span<const merge_source> sources, const std::array<std::uint8_t, 16>& segment_id, output& sink, spill& positions_spill,
-	std::string_view key_prefix = {}, std::uint8_t region_shift = format::default_region_shift, const task::cancel_token* cancel = nullptr,
-	flush_charge* memory = nullptr, std::span<const merge_ref> order = {}, scratch* records = nullptr) {
-	return detail::merge_layout(sources, segment_id, sink, positions_spill, key_prefix, region_shift, cancel, memory, order, records);
+	const merge_options& options = {}) {
+	return detail::merge_layout(sources, segment_id, sink, positions_spill, options);
 }
 
 }  // namespace strata

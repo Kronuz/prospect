@@ -222,7 +222,7 @@ int main(int argc, char** argv) {
 		std::string merged;
 		strata::string_output out(merged);
 		strata::string_spill spill;
-		(void)strata::merge_segments(sources, {}, out, spill, {}, strata::format::default_region_shift, nullptr, nullptr, order);
+		(void)strata::merge_segments(sources, {}, out, spill, {.order = order});
 		segments.clear();
 		files = {std::move(merged)};
 		segments.emplace_back(files[0]);

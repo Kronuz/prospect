@@ -95,7 +95,7 @@ int main() {
 		{
 			string_output out(merged);
 			string_spill spill;
-			const auto plan = merge_segments(sources, id, out, spill, "Q");
+			const auto plan = merge_segments(sources, id, out, spill, {.key_prefix = "Q"});
 			CHECK(plan.doc_count == model.size());
 		}
 		// One flush of the live documents in docid order.
@@ -124,7 +124,7 @@ int main() {
 		{
 			string_output out(permuted);
 			string_spill spill;
-			const auto plan = merge_segments(sources, id, out, spill, "Q", format::default_region_shift, nullptr, nullptr, order);
+			const auto plan = merge_segments(sources, id, out, spill, {.order = order, .key_prefix = "Q"});
 			CHECK(plan.doc_count == order.size());
 			for (std::size_t i = 0; i < order.size(); ++i) { CHECK(plan.ordinals[order[i].source][order[i].ord] == ordinal_t(i)); }
 		}
@@ -149,7 +149,7 @@ int main() {
 			std::string again;
 			string_output out(again);
 			string_spill spill;
-			(void)merge_segments(one, id, out, spill, "Q");
+			(void)merge_segments(one, id, out, spill, {.key_prefix = "Q"});
 			CHECK(again == permuted);
 		}
 		// A merge of the permuted segment back into docid order equals the docid-order flush.
@@ -163,7 +163,7 @@ int main() {
 			std::string back;
 			string_output out(back);
 			string_spill spill;
-			(void)merge_segments(one, id, out, spill, "Q", format::default_region_shift, nullptr, nullptr, sorted_order);
+			(void)merge_segments(one, id, out, spill, {.order = sorted_order, .key_prefix = "Q"});
 			CHECK(back == direct);
 		}
 		// An order that misses or repeats a document is refused.
@@ -179,7 +179,7 @@ int main() {
 				std::string junk;
 				string_output out(junk);
 				string_spill spill;
-				(void)merge_segments(sources, id, out, spill, "Q", format::default_region_shift, nullptr, nullptr, wrong);
+				(void)merge_segments(sources, id, out, spill, {.order = wrong, .key_prefix = "Q"});
 			} catch (const std::invalid_argument&) {
 				threw = true;
 			}
