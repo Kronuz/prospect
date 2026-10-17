@@ -91,7 +91,7 @@ def trial(r, floor):
         for tag, qs in by.items():
 
             def supported(e, qs=qs, t=t):
-                return [x for x in qs if t[e][x]["count"] is not None]
+                return [x for x in qs if t[e][x]["count"] is not None and t[e][x]["duration"]]
 
             mean = {
                 e: statistics.fmean(min(t[e][x]["duration"]) for x in supported(e))
