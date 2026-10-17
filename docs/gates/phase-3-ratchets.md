@@ -197,8 +197,37 @@ index; the 5,032,102 key terms add 52 MB to strata's and 27.7 MB to Lucene's. Ag
 Lucene with document reordering the postings are 1.21× its `.doc` (unkeyed; a keyed `-bp`
 build is owed): reordering at merge (Track P1) is not implemented.
 
+**Where the key terms' bytes go** (`strata_engine dictstats` and `dictdump` on the merged
+segment). The keys are the corpus's URLs, 44.6 bytes on average (219.5 MB raw); every key
+term has df 1 and wdf 0. Per key: the single ordinal 3.58 bytes (18.0 MB), the wdf 0
+stored although the term's `no_wdf` flag implies it (5.0 MB), df and flags about one
+byte, and the key text front-coded over the dictionary's alphabet. Delta-coding single
+ordinals within the dictionary's runs of 32 would take them to 9.8 MB, and eliding the
+implied wdf saves 5.0 MB: 78.8 MB, still 1.16×. D12 (`docs/design/phase-4.md`, format 13)
+moves keys into their own section; front-coded blocks of 128 keys compressed take the key
+text to 10.6 MB (zlib level 6 as the stand-in; the codec is D12's to choose against lookup
+cost), so keys about 21 MB plus the unkeyed dictionary's 39.9 MB is about 61 MB, 0.90× of
+Lucene's 67.9 MB. The dictionary row is carried to format 13 on that projection.
+
 `strata_engine merge` commits and exits without reclaiming, so the merged directory still
 holds the 16 sources (5.6 GB in all); only the manifest's files count above.
+
+## Serving memory
+
+`bench/serve_mem.py` on the gate VM after the night's other runs: each engine's `serve`
+through the 962 gate queries for `TOP_10`, `COUNT`, and `TOP_1000` (2,886 queries), the page
+cache dropped first, peaks sampled every 50 queries over the engine's processes; strata
+force-merged, the baselines force-merged by their builders.
+
+| Engine | Anonymous | Mapped index pages | Peak | strata against it |
+|---|---:|---:|---:|---:|
+| strata (merged) | 16 MB | 573 MB | 589 MB | |
+| Tantivy 0.26 | 1 MB | 562 MB | 563 MB | 1.05× |
+| Lucene 10.4.0 | 626 MB (JVM) | 639 MB | 1,265 MB | 0.47× |
+| Lucene 10.4.0 `-bp` | 620 MB (JVM) | 567 MB | 1,187 MB | 0.50× |
+
+A miss against Tantivy, at 1.05×. Mapped pages are 1.02× Tantivy's; strata's anonymous
+memory is 16 MB where Phase 2 measured 3 MB, the part to explain first.
 
 ## Verify and parity
 
@@ -232,7 +261,7 @@ gate records their ratios and gaps, and Phase 4's gate does not pass while they 
 | Queries before merging (baselines unmerged at equal memory) | Owed: calibration on the full corpus, then a scheduled night | — |
 | Indexing, 1 and 8 threads, keyed (T4), five trials at equal memory | Owed: calibration done (a 1,039 MB budget peaks at 2,352 MB against Lucene's 2,398 MB, 1.9% under); the trials run the night of 2026-10-16 | — |
 | Write amplification against Lucene (T3), append-only and replace-heavy | Owed: rescheduled with T4 | — |
-| Memory (serving and indexing peaks), disk after a full merge, per section | Disk: whole index pass (0.98×); postings 1.02× and term dictionary 1.36× miss. Memory: serving run the evening of 2026-10-16, indexing peaks with T4 | "Disk after a full merge" below |
+| Memory (serving and indexing peaks), disk after a full merge, per section | Disk: whole index pass (0.98×); postings 1.02× and term dictionary 1.36× miss. Serving memory 1.05× Tantivy (miss; anonymous 16 MB against Phase 2's 3 MB); indexing peaks with T4 | "Disk after a full merge" and "Serving memory" below |
 | `verify` and `parity` on multi-segment indexes | Pass before and after merging; `parity` with deletes owed | "Verify and parity" below |
 | Coverage targets and the test-parity inventory's Phase 3 rows | Owed: `cost()` checked directly (`cost_test`); scores against Lucene's own, document limits, and nested WAND or C7's cost model remain; reads while a writer commits need a shared-ownership reader (Phase 3R) | `docs/testing/parity.md` |
 | The rows on FreeBSD and arm64 (before Phase 3R) | Owed: FreeBSD VM; an arm64 host | — |
