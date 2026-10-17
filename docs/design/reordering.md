@@ -120,64 +120,151 @@ and orders that miss or repeat a document refused.
 
 The permutation comes from recursive graph bisection over the document-term graph, as
 Dhulipala et al. (KDD 2016) define it and Mackenzie et al. (ECIR 2019) reproduce it, written
-from the papers:
+from the papers. Its presets start from Lucene 10.4's documented `BPIndexReorderer` defaults
+(P1-R7).
 
-- **Graph.** Terms with df between `min_df` (default 4,096) and a fraction `max_df` of the
-  documents (default 0.5), in the merge's output; a forward list of those term ids per
-  document, built from the sources' postings in one pass over the dictionary.
-- **Recursion.** Split the documents' range in halves; for up to 20 iterations, compute
-  each document's move gain from the log-gap cost of each of its terms' degrees in the
-  two halves, sort each half by gain, and swap pairs while the summed gain is positive.
-  Recurse to a leaf of 16 documents or a depth of 30.
-- **Determinism.** The same inputs give the same permutation on every platform and
-  thread count: costs use a fixed integer table for log2 (fixed point, 16 fractional
-  bits), ties order by current position, and parallelism splits only independent halves.
-  Replicas need equal digests, not equal bytes (the digest is layout-independent, D12 of
-  Phase 3), but byte determinism keeps the merge fixtures and `verify` reproducible.
-- **Memory.** The forward lists and the per-term degree arrays are charged to the merge's
-  `flush_charge` (D17); a merge whose graph would exceed its charge falls back to docid
-  order and records why.
-- **When.** `index::options::reorder` (default on for merges whose output holds at least
-  `reorder_min_docs`, default 100,000) and always for `force_merge`. Small flush-sized
-  merges keep docid order, so T4's indexing cost changes only for the large merges.
+- **The graph** (P1-R6). The merge's output documents, numbered in docid order, and every
+  term whose live document frequency lies in [`min_df`, `max_df` × documents]. Term ids are
+  dense, in the merged dictionary's order. df is counted over live postings in the pass that
+  builds the forward index, so deleted documents never shape the order.
+- **The forward index** (P1-R5) is never held whole in memory. It is a merge temporary file
+  written through `IO` (a name in strata's orphan patterns, reserved by storage admission,
+  its bytes counted in T3's write amplification): per document, its graph terms' ids in
+  increasing order, delta-coded LEB128, and a row-offset array beside them. It is built by
+  transposition in passes: for each range of documents whose rows fit in half of
+  `reorder_memory`, every graph term's live postings in that range are read once (each
+  iterator advanced to the range's start) and appended to the rows, which are then written
+  out. At 5M documents the graph has about 308M edges (the review's `graph_size`
+  extrapolation), roughly 0.5 GB on disk, so 4 passes at a 256 MB preset. Bisection reads
+  rows through a mapping of that file: page cache, not anonymous memory.
+- **The cost** (P1-R6). For a term of degree d in a part of n documents,
+  c(d, n) = d · (L(n) − L(d + 1)), the papers' log-gap estimate, where
+  L(x) = round(2^16 · log2 x) in integers: L(x) = 2^16 · ⌊log2 x⌋ + T[m], with m the 10 bits
+  after x's leading one and T a checked-in table of 1,024 constants whose hash a test pins.
+  No libm at run time. A document's move gain is the sum over its graph terms of the cost
+  before the move minus the cost after it, in `int64`: one term's c is under 2^53 for
+  n ≤ 2^32, and the gains of a swap pair stay in range.
+- **The step.** For a part [a, b): the left half is its first ⌊(b − a) / 2⌋ documents of the
+  current order. Per iteration: count each graph term's degree in both halves (one pass over
+  the part's rows), compute every document's gain (a second pass), sort each half by gain
+  descending with ties by current position ascending, and swap the i-th pairs while their
+  summed gain is positive. At most `iterations` (20) per part, stopping early when no pair
+  swaps, which does not change the result. The part recurses into its halves until it holds
+  at most `min_partition` (32) documents. The depth cap is gone: 32-document leaves bound the
+  depth at 27 for a 2^32-document segment.
+- **Threads.** Bisection runs on the merge's own slot of the host executor. With
+  `reorder_threads` above 1 (default 1), independent halves run on the executor's workers,
+  bounded per node; each half's result depends only on its own documents, so 1 and 8
+  threads give the same bytes by construction.
+- **Cancellation.** Bisection checks the merge's token and the executor's checkpoint once
+  per iteration of each part, so `abandon_merges` is never held behind it.
+- **Memory and the fallback** (P1-R5). Bisection's anonymous working set is the order and
+  each document's gain and part (16 bytes a document) plus two degree counters per graph
+  term per thread: about 80 MB at 5M. The fallback is a deterministic function of the
+  inputs and presets, never the budget's state: if that working set exceeds
+  `reorder_memory` (256 MB, the reference `-bp` builder's budget), the merge writes docid
+  order and counts it in a metric. At 256 MB a segment of about 16M documents still
+  reorders. The working set is charged to the merge's `flush_charge` while bisection runs,
+  and a merge without room waits as merges already do (`merge_memory_wait`).
+- **Cost, projected** (P1-R6). About 18 levels × at most 20 iterations × 2 passes over
+  308M edges, about 2 × 10^11 edge reads, plus 18 × 20 sorts of 5M gains: on the order of
+  20–30 minutes on one thread at 5M, before the merge itself. T3 compares the forced merge
+  against the `-bp` builder's force-merge phase, which runs bisection with no executor.
+- **Presets** (P1-R7; `limits.md` gains a presets row): `min_df` 4,096, `max_df` 1.0 (every
+  term), `min_partition` 32, `iterations` 20, `reorder_memory` 256 MB, `reorder_threads`
+  1. They bound no input, so the limits rule's "at least the largest" does not apply; a
+  measured faster preset replaces one.
+- **When** (P1-R7). `index::options::reorder` is `off`, `force_merge` (the default, as the
+  reference builder reorders: only at force merge), or `merges` (every merge whose output
+  holds at least `reorder_min_docs`, Lucene's suggested 262,144). At 5M every natural merge
+  passes 100,000 documents, so reordering natural merges would change T4's indexing cost
+  wholesale; the default leaves it unchanged, and the indexing rows decide whether `merges`
+  becomes the default. `off` also turns off `force_merge`'s reordering.
 
 ## D5. Queries over reordered segments
 
-Ordinal order is no longer docid order inside a reordered segment, so:
+Ordinal order is no longer docid order inside a reordered segment. The paths that assume it
+(P1-R8), each changed to break ties by docid when the segment is not `docid_ordered()`:
 
-1. **Ties.** `top_k`'s heap and the cross-segment collector order equal scores by docid.
-   Within a segment flagged docid-ordered they compare ordinals, as today; within a
-   reordered one they compare `docid(ord)`, read only when scores tie (P6-2's rule).
-2. **The one-segment path** (`searcher.hh:187`) takes the tie rule above instead of
-   assuming ordinal order.
-3. **The equal-bound skip** (`phase-3.md:218–220`) applies only to docid-ordered
-   segments, as R2 requires.
-4. **Collapse and sort keys** (D8, D9 of Phase 4) tie by docid the same way.
-5. **Counting, windows, and scorers** are order-agnostic: they work on ordinals.
+1. **`top_collector`** (`search.hh`): `collect` rejects `score <= min_` without a segment;
+   `docid()` returns the ordinal without one; `order` compares ordinals within a segment;
+   `before_kth` compares ordinals when the k-th is in the current segment; `update_min`
+   without `begin()` makes the k-th score the threshold (the equal-bound skip). A reordered
+   segment always goes through `begin()`, so ties read docids and the threshold stays just
+   below the k-th score, as across segments today.
+2. **`top_k`** ties by ordinal, admits only scores above the k-th, and hands the k-th score
+   to the scorer. It gains the segment, and over a reordered one breaks ties by docid and
+   hands down the score just below the k-th.
+3. **Callers:** `searcher.hh`'s one-segment path, `tools/engine_query.hh`'s engine, and
+   `search_test`'s "every path keeps the smallest ordinals" (which holds for docid-ordered
+   segments only, and gains its reordered counterpart: the smallest docids).
+4. **Sort keys and collapse** (Phase 4): `sortkey::may_compete`'s `docid_ordered` argument
+   means every docid in the block exceeds the worst's, which a segment's flag alone does not
+   give across segments; it is computed from the segment's docid range and order.
+   `collapse::collapser`'s default arrival breaks ties in ordinal order; search passes it a
+   ranking total over (score, docid).
+5. **Docid-order walks** (dump with `skip_to` resume, Bool weighting's docid order) go
+   through the sorted ordinals over a reordered segment, one stored-frame decode per
+   document; they land at Phase 7's seam, and their cost is stated there.
+6. **Counting, windows, and scorers** work on ordinals and are order-agnostic.
 
-The digest, `verify`, and `parity` compare by docid, so they hold unchanged.
+**The equal-bound skip** (D5.3 of the first draft; `search.hh`'s `update_min`) is lost in a
+reordered segment: blocks whose bound equals the k-th score are decoded. Its cost on the
+docid-ordered 5M index, per class and both schemes, is measured before D5's code (P1-R9;
+`bench/night_p1.sh`, step 2). If a class loses, this design states what is accepted. The
+tie rule itself stays: Xapiand's E2E asserts the docid tie-break exactly.
+
+**What checks it.** `verify` compares ties as sets, so it cannot see a tie broken by
+ordinal. The exact checks are `multisegment_test`'s and `engine_query_test`'s R2 case,
+extended to permuted segments: exactly equal scores straddling the k-th at k = 1, 10, and
+100, both schemes, one segment and many, with deletes and floors. And at scale: the
+docid-ordered and the reordered 5M indexes must give every gate query bit-identical top-k
+docids and scores and equal counts, at k = 10, 100, and 1,000, both schemes. `tools/parity.cc`
+maps hits through `docid()` instead of ordinal + 1, and gains a reordered build through a
+reordering merge.
 
 ## D6. Merging deletes and live documents
 
-Deletes address docids and resolve through `ordinal_of`, which D1 keeps logarithmic. The
-live-docs bitmap stays per ordinal.
+Deletes from `apply` address docids and resolve through `ordinal_of`, which D1 keeps
+logarithmic. Deletes made while a merge runs are carried over at install through the merge's
+plan (D3 (a)). The live-docs bitmap stays per ordinal.
+
+## Scale (P1-R16)
+
+Per node, at 1,000 indexes: at most W merges run at once, so bisection's anonymous memory
+peaks at W × `reorder_memory`; its forward index is a temporary file per running merge, under
+storage admission. Its CPU, about 2 × 20 × 18 edge reads per graph edge (roughly 44,000 per
+document at this corpus's 61 edges per document), is not bounded by the merge rate limiter's
+bytes; with the default preset it runs only at force merge, so natural merge throughput and
+merge debt do not change. Each open reordered segment's `docids` section, about 5.8 bytes a
+document (29 MB at 5M), is mapped and verified at open.
 
 ## Gate rows
 
 | Row | Target | Procedure |
 |---|---|---|
-| T1 Disk | Postings and positions ≤ 1.0× Lucene `-bp`'s `.doc` and `.pos`, and the whole index ≤ 1.0× keyed Lucene, the permuted `docids` included | `strata_engine merge` with reordering on the 5M index, `strata_engine sections` against the baselines' files, as "Disk after a full merge" |
-| T2 Queries | The "after merging" rows re-run (five trials, `bench/overnight.sh`'s query step) on the reordered index; no class slower than the docid-ordered index by its interval | `bench/phase2/gate.py`, plus an in-process A/B (`bench/quick/ab.sh`) between the two indexes |
-| T3 Merge cost | The forced merge's wall time and peak RSS with and without reordering, against Lucene `-bp`'s builder; reported, and the reordered merge within the budget's charge | `/usr/bin/time -v` around `strata_engine merge` and Lucene's builder |
-| T4 Correctness | `verify` (C14's form) and `parity` (1, 4, 16 segments) clean on reordered indexes; the digest equal before and after a reordering merge; T1's crash points with reordering merges in the lifecycle workloads | `lifecycle_test`, `strata_engine verify`, `tools/parity.cc` |
-| T5 Decoder | `fuzz_segment` one CPU-hour over the permuted kind; a fixture (`permuted.sx`) pinned; every validation check reached by a resealed unit test | `fuzz/fuzz_segment.cc`, `fixtures_test` |
-| T6 Determinism | The same merge gives the same bytes on Linux x86_64, macOS, and FreeBSD, at 1 and 8 threads | A test hashing a reordered merge's output, run in CI on every platform |
+| T1 Disk (P1-R10) | Every section ≤ 1.0× its smallest counterpart among keyed Lucene, keyed Lucene `-bp`, and Tantivy, and the whole index ≤ 1.0× keyed `-bp`; the permuted `docids` section counted in BENCHMARKS' "docids, versions, `pk_filter`" row against the id field's terms and doc values; the stored row included | `strata_engine merge` with reordering on the 5M index, `strata_engine sections`, against the keyed `-bp` build (`bench/night_p1.sh`, step 3: the one-thread builder with `BP=1`, the reference's bisection settings, so the pair differs only by reordering) |
+| T2 Queries (P1-R12) | Per class, the reordered index over the docid-ordered one ≤ 1.03 by the interval's upper bound; a class above it runs again with ten trials and blocks if it stays above. The carried "after merging" rows run on the reordered index and are scored against PLAN's target, ≤ 1.0× the faster engine, with each ratio's movement stated | Five trials, `bench/phase2/gate.py` (which prints the `-bp` column), and the in-process A/B between the two indexes; blocks decoded per query beside time |
+| T3 Merge cost (P1-R11) | The forced merge's wall time ≤ 1.0× the `-bp` builder's force-merge phase (from its "Merge" line to exit), each side's threads stated, at the same budget; its peak RSS within the budget plus 10%; write amplification (Phase 3's T3), the forward index's temporary file included, ≤ 1.0× | `/usr/bin/time -v` on Linux (`-l` elsewhere) around `strata_engine merge` and the builder's phases |
+| T4 Other axes (P1-R11) | Phase 3's T4 indexing rows with the default preset (1 and 8 threads, keyed, equal memory, five trials) at ≥ 1.0× the faster engine, the indexing peak within the budget plus 10%; serving memory on the reordered index (`bench/serve_mem.py`) ≤ 1.0×; no allocation per match on the tie path, by the allocation-counting build | `bench/index_trials.sh`, `bench/serve_mem.py`, the allocation counter |
+| T5 Correctness (P1-R13) | Tests that hold permuted segments, which test-sized merges do not get from bisection (min_df leaves their graph empty): explicit permutations (reversed, seeded random) through D3's `order`, plus bisection with test presets, asserting permuted segments exist. Merges of permuted sources; deletes during a reordering merge; replace, delete, and get by docid and by key, and expected versions, absent docids inside [min, max] included; the digest and verdict sequence equal to a docid-order run; `check()`; the byte oracle (`merge_test`); parity on a reordered index; T1's crash points with permuted merges | `merge_test`, `docids_test`, `index_test`, `lifecycle_test`, `tools/parity.cc` |
+| T6 Decoder (P1-R14) | `fuzz_segment` one CPU-hour over its permuted, keyed base at the gate's commit; every validation check reached by a resealed segment-level test as well as `docids_test`'s direct ones; `permuted.sx` pinned | `fuzz/fuzz_segment.cc`, `test/docids_test.cc` |
+| T7 Determinism (P1-R15) | The same reordering merge gives the same bytes everywhere: a test compares its output's hash with a pinned constant on Linux x86_64 and arm64, macOS x86_64 and arm64, and FreeBSD (CI's jobs), at `reorder_threads` 1 and 8; zstd is the pinned release (`db0a891`) | A test in CI on every platform |
+
+**T1's projection** (P1-R10), from the gate report's numbers: against the keyed one-thread
+build, `-bp` takes 15.5% off `.doc` and 8.9% off `.pos` (that pair also differs in keys,
+threads, and buffer, which tonight's keyed `-bp` build removes). The same gains put strata's
+postings at about 852 MB, 1.02× `-bp`'s 833.2 MB: a miss; positions at about 1,486 MB
+(0.95×); the whole index at about 2,498 MB before stored growth, about 0.985× of keyed `-bp`
+(about 2,536 MB), a margin near 1%. If P1 leaves postings above 1.0×, what closes them is a
+postings encoding change in format 13 (P4's per-block containers, P13 for positions); whether
+a disk row may be carried until then is the owner's decision (review finding 1).
 
 ## Risks
 
-- The permuted `docids` costs about 29 MB at 5M documents; if the postings gain is small,
-  T1's whole-index row can lose. The fallback is a delta-coded forward array within
-  128-entry blocks, measured before the gate.
-- Bisection time on 5M documents may dominate a forced merge; T3 states it.
-- Tie-breaking by docid adds a docid read per tied candidate in reordered segments; T2's
-  `TOP_10` term class shows its cost.
+- Reordering can grow the stored section: the two Lucene builds store the same ids in 31.9 MB
+  in corpus order and 53.1 MB with `-bp`. T1 includes the stored row.
+- Delta-coded key-term ordinals (the format-13 dictionary projection) lose their locality
+  after reordering, about 14.5 MB at 5M instead of 9.8; that projection is redone with P1.
+- Bisection time may dominate a forced merge; T3 bounds it against the `-bp` builder.
+- The lost equal-bound skip; P1-R9's measurement decides what is accepted.
