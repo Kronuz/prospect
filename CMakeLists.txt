@@ -7,29 +7,29 @@ include(FetchContent)
 # checkouts to develop them together.
 set(TASK_ASIO OFF CACHE BOOL "" FORCE)
 # Each building block is pinned to the commit its Phase 1 gate numbers were measured at.
-FetchContent_Declare(docset GIT_REPOSITORY https://github.com/Kronuz/docset.git GIT_TAG 32580ed37a47a569f649ed0b079b3536f9633e06)
-FetchContent_Declare(bitpack GIT_REPOSITORY https://github.com/Kronuz/bitpack.git GIT_TAG b2de971ad725caee6153374fa8b3a16a5f0adb3e)
-FetchContent_Declare(fst GIT_REPOSITORY https://github.com/Kronuz/fst.git GIT_TAG f8122e23e8864ecb77b31c7c9654e2a54554e236)
-FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG c3c30e49212769e1bbf424517003150de3f20682)
-FetchContent_Declare(hashes GIT_REPOSITORY https://github.com/Kronuz/hashes.git GIT_TAG abff6fa5ac0c19c0cff5509a437700d8f77be41e)
-FetchContent_Declare(termdict GIT_REPOSITORY https://github.com/Kronuz/termdict.git GIT_TAG b10865cbf52f1417a89a2542d0b9fd1701038352)
-FetchContent_Declare(varint GIT_REPOSITORY https://github.com/Kronuz/varint.git GIT_TAG de3d05dbec86cd4c147b3177947f9c3b58312675)
-FetchContent_Declare(residency GIT_REPOSITORY https://github.com/Kronuz/residency.git GIT_TAG 7b9e4f874fdad8075f9f0114d3c9d3d2b6fda693)
-FetchContent_Declare(unicode GIT_REPOSITORY https://github.com/Kronuz/unicode.git GIT_TAG 81219c39deca91ed0186fb5eebd2afcec6f5f8c7)
-FetchContent_Declare(snowball GIT_REPOSITORY https://github.com/Kronuz/snowball.git GIT_TAG 8b0c540173f8f48afc00cd8ab49ce956397992b6)
-FetchContent_Declare(analysis GIT_REPOSITORY https://github.com/Kronuz/analysis.git GIT_TAG d3f94cb5cdac70c3cfa116a3fb761615c66a3f31)
+FetchContent_Declare(docset GIT_REPOSITORY https://github.com/Kronuz/docset.git GIT_TAG 0859e43b38e676fd69f59455d066557bbe9a362e)
+FetchContent_Declare(bitpack GIT_REPOSITORY https://github.com/Kronuz/bitpack.git GIT_TAG abf8972a6317a752ea63840a9c93d7b3f2a688e0)
+FetchContent_Declare(fst GIT_REPOSITORY https://github.com/Kronuz/fst.git GIT_TAG 24da59a9e3d7225865335dcdc71ddeb2e1cb66ec)
+FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG bbb2e14aecb0fe49bcfac2685d64408ef6177c23)
+FetchContent_Declare(hashes GIT_REPOSITORY https://github.com/Kronuz/hashes.git GIT_TAG d8751b2fa5fccc20885bd366173fb0cd63c5bc20)
+FetchContent_Declare(termdict GIT_REPOSITORY https://github.com/Kronuz/termdict.git GIT_TAG c9c4c285f353908d5d3dc58ac0bc2019b58f8cde)
+FetchContent_Declare(varint GIT_REPOSITORY https://github.com/Kronuz/varint.git GIT_TAG 21af82a64fd5860d14d5ec9591bec2ffd5d662d1)
+FetchContent_Declare(residency GIT_REPOSITORY https://github.com/Kronuz/residency.git GIT_TAG 3ac929d14f0545df6dcba7613b7f4694dfce0229)
+FetchContent_Declare(unicode GIT_REPOSITORY https://github.com/Kronuz/unicode.git GIT_TAG c93026cedf9124421886d449528dd6edb16e5ed3)
+FetchContent_Declare(snowball GIT_REPOSITORY https://github.com/Kronuz/snowball.git GIT_TAG 570a0b78fc2967f9ec6a0ec005547d20fcf32b61)
+FetchContent_Declare(analysis GIT_REPOSITORY https://github.com/Kronuz/analysis.git GIT_TAG 4df23c08fd3c09b0f2fbb6d491bd77434c97fc12)
 # Stored records use zstd alone.
 set(COMPRESSORS_DEFLATE OFF CACHE BOOL "" FORCE)
 set(COMPRESSORS_LZ4 OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG ae3ae075aa14aff084f8f9456dc99b2d78614b86)
+FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG ed590c87201afd270afbfbb2d58d5d467c6d23b6)
 # Segments compress stored records with zstd: the pinned release makes their bytes the same
 # on every platform, whatever zstd the system has.
 set(COMPRESSORS_ZSTD_PINNED ON CACHE BOOL "" FORCE)
 FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG 28f4241f22b27aa68ff92cdddc66b124e71f3298)
 # Index I/O goes through kronuz::journal::IO, from the completion library.
-FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG e6c28aaef09c5beff099f7f9cc47ecd517ba02d7)
+FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG da14d1d47a20334535aa096436eda326b6148737)
 # Background merges' default threaded executor: one pool per node, a task group per index.
-FetchContent_Declare(threadpool GIT_REPOSITORY https://github.com/Kronuz/threadpool.git GIT_TAG fdc0a1ef216aaf5357c92a6d09d6b60af65e66db)
+FetchContent_Declare(threadpool GIT_REPOSITORY https://github.com/Kronuz/threadpool.git GIT_TAG 628679a2e27b563cf2709a6f35f98f1657baf7b3)
 FetchContent_MakeAvailable(docset bitpack fst task hashes residency varint termdict unicode snowball analysis compressors fusefilter completion threadpool)
 
 add_library(strata INTERFACE)
