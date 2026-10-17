@@ -275,6 +275,21 @@ union 2.1–3.9×); strata leads it on single terms (0.39–0.87×) and on count
 goal (0.5× the faster of Lucene and Tantivy) is about 2.7× away; the full table is the
 command's output.
 
+**What PISA's harness runs** (`engines/pisa-0.8.2/tools`), which bounds what these ratios
+mean:
+1. Recursive graph bisection at build time, SIMD-BP128 blocks of 128, and block-max data
+   over fixed blocks of 40 postings.
+2. Quantized BM25 (the `quantized` scorer): integer scores, so its top-k is not BM25's.
+3. Top-k unions by block-max WAND, seeded with each term's 10th-best score precomputed at
+   build time. The seed is safe at k = 10 and too high at k = 100 and 1,000, so those
+   unions may drop true hits: PISA's `TOP_100` and `TOP_1000` union, intersection_union,
+   and global rows are not exact.
+4. Single terms and intersections by ranked AND; `TOP_100_COUNT` counts and ranks nothing;
+   phrases are unsupported.
+The harness checks counts only, and PISA's top-k commands answer a count of 1, so no check
+saw (2) or (3). Its `TOP_10` rows are the fair reference; P21 seeds at k = 10, 100, and
+1,000 so that every k stays exact.
+
 ## Gate status (2026-10-16)
 
 PLAN's Phase 3 gate, row by row. The query rows are carried (PLAN, "Carried rows"): the
