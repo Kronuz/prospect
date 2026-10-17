@@ -32,6 +32,7 @@
 #include "fusefilter.hh"
 #include "hashes.hh"
 #include "residency.hh"
+#include "strata/docids.hh"
 #include "strata/format.hh"
 #include "termdict.hh"
 
@@ -150,35 +151,12 @@ public:
 	std::uint64_t max_docid() const noexcept { return footer_.max_docid; }
 
 	// The host docid of an ordinal.
-	std::uint64_t docid(ordinal_t ord) const {
-		if (ord >= doc_count_) { throw std::out_of_range("strata: ordinal out of range"); }
-		if (docids_[0] == format::docids_contiguous) { return format::get<std::uint64_t>(docids_.data() + 1) + ord; }
-		const std::uint64_t b = ord / format::block;
-		std::uint64_t d = format::get<std::uint64_t>(docids_.data() + 9 + 16 * b);
-		const char* p = docid_deltas_ + format::get<std::uint64_t>(docids_.data() + 17 + 16 * b);
-		for (std::uint64_t i = b * format::block; i < ord; ++i) { d += format::get_leb(&p, docids_.data() + docids_.size()); }
-		return d;
-	}
+	std::uint64_t docid(ordinal_t ord) const { return ids_.docid(ord); }
 
-	// The ordinal holding docid, if any (docids increase with ordinals, validated at open).
-	std::optional<ordinal_t> ordinal_of(std::uint64_t docid) const {
-		if (doc_count_ == 0 || docid < footer_.min_docid || docid > footer_.max_docid) { return std::nullopt; }
-		if (docids_[0] == format::docids_contiguous) { return ordinal_t(docid - format::get<std::uint64_t>(docids_.data() + 1)); }
-		const std::uint64_t blocks = (doc_count_ + format::block - 1) / format::block;
-		std::uint64_t lo = 0, hi = blocks;  // the last block whose first docid <= docid
-		while (hi - lo > 1) {
-			const std::uint64_t mid = (lo + hi) / 2;
-			(format::get<std::uint64_t>(docids_.data() + 9 + 16 * mid) <= docid ? lo : hi) = mid;
-		}
-		std::uint64_t d = format::get<std::uint64_t>(docids_.data() + 9 + 16 * lo);
-		const char* p = docid_deltas_ + format::get<std::uint64_t>(docids_.data() + 17 + 16 * lo);
-		const std::uint64_t end = std::min<std::uint64_t>(doc_count_, (lo + 1) * format::block);
-		for (std::uint64_t ord = lo * format::block;; ++ord) {
-			if (d == docid) { return ordinal_t(ord); }
-			if (d > docid || ord + 1 == end) { return std::nullopt; }
-			d += format::get_leb(&p, docids_.data() + docids_.size());
-		}
-	}
+	// The ordinal holding docid, if any.
+	std::optional<ordinal_t> ordinal_of(std::uint64_t docid) const { return ids_.ordinal_of(docid); }
+	// Whether ordinal order is docid order: false only for a reordering merge's output.
+	bool docid_ordered() const noexcept { return ids_.docid_ordered(); }
 
 	// The document's version (0 when the segment's writer recorded none).
 	std::uint64_t version(ordinal_t ord) const {
@@ -387,39 +365,8 @@ public:
 	const termdict::reader& dictionary() const noexcept { return *dict_; }
 
 private:
-	// docids: the kind, then contiguous or monotone (see segment_writer::encode_docids).
-	// Monotone docids are decoded once here: each block's first docid above the previous
-	// block's last, every delta at least 1, offsets in order, no trailing bytes, and the
-	// footer's minimum and maximum equal to the first and last.
-	void validate_docids() {
-		auto bad = [] { throw corrupt_segment("docids"); };
-		if (docids_.empty()) { bad(); }
-		if (docids_[0] == format::docids_contiguous) {
-			if (docids_.size() != 9) { bad(); }
-			const std::uint64_t base = format::get<std::uint64_t>(docids_.data() + 1);
-			if (doc_count_ && (base == 0 || base != footer_.min_docid || base + (doc_count_ - 1) != footer_.max_docid || base + (doc_count_ - 1) < base)) { bad(); }
-			return;
-		}
-		if (docids_[0] != format::docids_monotone || docids_.size() < 9 || format::get<std::uint64_t>(docids_.data() + 1) != doc_count_) { bad(); }
-		const std::uint64_t blocks = (doc_count_ + format::block - 1) / format::block;
-		if (blocks > (docids_.size() - 9) / 16) { bad(); }
-		docid_deltas_ = docids_.data() + 9 + 16 * blocks;
-		const char* p = docid_deltas_;
-		const char* end = docids_.data() + docids_.size();
-		std::uint64_t last = 0;
-		for (std::uint64_t b = 0; b < blocks; ++b) {
-			std::uint64_t d = format::get<std::uint64_t>(docids_.data() + 9 + 16 * b);
-			if (d <= last || format::get<std::uint64_t>(docids_.data() + 17 + 16 * b) != std::uint64_t(p - docid_deltas_)) { bad(); }
-			if (b == 0 && d != footer_.min_docid) { bad(); }
-			for (std::uint64_t i = b * format::block + 1; i < std::min<std::uint64_t>(doc_count_, (b + 1) * format::block); ++i) {
-				const std::uint64_t delta = format::get_leb(&p, end);
-				if (delta == 0 || d + delta < d) { bad(); }
-				d += delta;
-			}
-			last = d;
-		}
-		if (p != end || (doc_count_ && last != footer_.max_docid)) { bad(); }
-	}
+	// docids: see docids.hh; validated whole at open.
+	void validate_docids() { ids_ = docids::reader(docids_, doc_count_, footer_.min_docid, footer_.max_docid); }
 
 	// versions: [min u64][width u8][packed bits]; exactly the bits doc_count needs, and no
 	// version past 2^64 - 1.
@@ -451,7 +398,7 @@ private:
 	}
 
 	std::string_view file_, terms_, term_index_, postings_, positions_, lengths_, docids_, stats_, stored_, norms_, versions_, pk_filter_;
-	const char* docid_deltas_ = nullptr;
+	docids::reader ids_;
 	struct {
 		std::string_view min, max;
 		std::optional<fusefilter::filter8_view> filter;

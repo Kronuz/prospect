@@ -44,6 +44,7 @@
 #include "fusefilter.hh"
 #include "hashes.hh"
 #include "strata/budget.hh"
+#include "strata/docids.hh"
 #include "strata/format.hh"
 #include "task.hh"
 #include "termdict.hh"
@@ -267,6 +268,9 @@ class segment_writer {
 public:
 	// Writes 64-bit skip offsets even where 32 bits fit (tests the wide layout).
 	bool wide_skip_offsets = false;
+	// Documents arrive in output order with distinct docids in any order (a reordering
+	// merge, reordering.md D2); flushes leave it off, so docids increase.
+	bool permuted = false;
 	// The verification region size of every section, as a power of two.
 	std::uint8_t region_shift = format::default_region_shift;
 	// The run's draw on the indexing budget, if any: the term table, posting buffers,
@@ -529,7 +533,7 @@ private:
 	ordinal_t begin_document(std::uint64_t docid, std::uint32_t length, std::string_view stored, std::uint64_t version, std::string_view key) {
 		// Ordinals are 32-bit and the largest value means no more documents.
 		if (lengths_.size() >= std::size_t(no_more_docs) - 1) { throw std::length_error("strata: segment document limit"); }
-		if (docid == 0 || (!docids_.empty() && docid <= docids_.back())) { throw std::invalid_argument("strata: docids must increase within a segment"); }
+		if (docid == 0 || (!permuted && !docids_.empty() && docid <= docids_.back())) { throw std::invalid_argument("strata: docids must increase within a segment"); }
 		if (stored.size() > format::max_stored_record) { throw std::invalid_argument("strata: stored record too large"); }
 		const ordinal_t ord = ordinal_t(lengths_.size());
 		versions_.push_back(version);
@@ -897,28 +901,7 @@ private:
 		return out;
 	}
 
-	// docids: [kind u8], then for contiguous ids (docid = base + ordinal) [base u64];
-	// for monotone ids [count u64][per 128 ordinals: first docid u64, delta offset u64]
-	// [LEB128 deltas, each at least 1, for every ordinal but a block's first].
-	std::string encode_docids() const {
-		std::string out;
-		bool contiguous = true;
-		for (std::size_t i = 1; i < docids_.size() && contiguous; ++i) { contiguous = docids_[i] == docids_[0] + i; }
-		if (contiguous) {
-			out.push_back(char(format::docids_contiguous));
-			format::put<std::uint64_t>(out, docids_.empty() ? 1 : docids_[0]);
-			return out;
-		}
-		out.push_back(char(format::docids_monotone));
-		format::put<std::uint64_t>(out, docids_.size());
-		std::string deltas;
-		for (std::size_t b = 0; b < docids_.size(); b += format::block) {
-			format::put<std::uint64_t>(out, docids_[b]);
-			format::put<std::uint64_t>(out, deltas.size());
-			for (std::size_t i = b + 1; i < std::min(docids_.size(), b + format::block); ++i) { format::put_leb(deltas, docids_[i] - docids_[i - 1]); }
-		}
-		return out + deltas;
-	}
+	std::string encode_docids() const { return docids::encode(docids_, memory); }
 
 	// versions: [min u64][width u8][(version - min) in width bits each, little-endian bit order].
 	std::string encode_versions() const {

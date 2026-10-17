@@ -75,10 +75,6 @@ inline constexpr std::uint64_t max_stored_frame = stored_block_size + max_stored
 inline constexpr std::size_t section_alignment = 64;
 inline constexpr std::size_t block = 128;
 
-// Kinds of the docids section: docid = base + ordinal, or strictly increasing deltas.
-inline constexpr std::uint8_t docids_contiguous = 0;
-inline constexpr std::uint8_t docids_monotone = 1;
-
 enum class section : std::uint16_t {
 	header = 0,
 	terms = 1,

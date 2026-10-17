@@ -17,51 +17,104 @@ the query rows are measured against a reordered index while strata's is not.
 
 ## D1. The permuted `docids` kind
 
-`docids` gains kind 2, permuted, as `phase-3.md` specifies:
+**An amendment to format 12** (review P1-R1). No reader before P1 accepts kind 2: it
+rejected any kind but 0 and 1 as `corrupt_segment("docids")`. The format's version stays
+12, on the premise of the Phase 4 review's R20: no index exists outside tests and
+benchmark runs. Every Phase 3 gate index is rebuilt by one binary with P1, and no binary
+built before P1 reads a directory P1 wrote (the VM's engines are rebuilt first).
+
+The codec is one unit, `include/strata/docids.hh`, for all three kinds; main's
+`segment` and `segment_writer` call it, and so will the layers branch's core (P1-R17).
 
 ```
-[kind u8 = 2][count u64][width u8][ordinal → docid - min_docid, `width` bits each]
-[sorted index: per 128 entries of the docid-sorted order, first docid u64]
-[docid-sorted ordinals, `ordinal width` bits each]
+contiguous (0) [kind u8][base u64]
+monotone (1)   [kind u8][count u64][per 128 ordinals: first docid u64, delta offset u64]
+               [LEB128 deltas, each at least 1]
+permuted (2)   [kind u8][count u64][docid width u8][ordinal width u8]
+               [forward: count entries of docid − min_docid, docid width bits][8 zero bytes]
+               [sorted: the ordinals in docid order, ordinal width bits][8 zero bytes]
+               [index: per 128 sorted entries, the first one's docid u64]
 ```
 
-- `docid(ord)` is one bit-packed read. `ordinal_of(docid)` binary-searches the sparse
-  index, then the 128 docid-sorted entries of that block (decoding their docids through
-  the forward array).
-- Validation at open decodes both arrays once: every docid in [min_docid, max_docid]
-  (the footer's), the sorted ordinals a permutation of [0, count), and their docids
-  strictly increasing. A duplicate docid, a missing ordinal, or an order violation is
-  `corrupt_segment("docids")`.
+- **The kind follows the order written.** The encoder writes kind 0 or 1 whenever the
+  docids increase, and kind 2 only otherwise, so `docid_ordered()` is exact and the
+  equal-bound skip survives wherever it can. A merge whose bisection returns the
+  identity (any test-sized merge: min_df leaves the graph empty) writes the same bytes as
+  today.
+- **Widths.** The docid width is `bit_width(max_docid − min_docid)`, 0 to 64; the ordinal
+  width is `bit_width(count − 1)`. Both are stored and checked equal to those values.
+  Bit arrays are little-endian, entry i at bit i × width. The 8 zero bytes after each
+  array let every entry be read with one 8-byte load and at most one more byte, never
+  past the section; the reader checks the padding is zero.
+- **Reads.** `docid(ord)` is one entry read. `ordinal_of(docid)` binary-searches the
+  index, then the block's at most 128 sorted entries, each a sorted read and a forward
+  read.
+- **Validation at open** (`phase-3.md`'s rule, reviewed in its R9): the count equals the
+  footer's before any size is computed from it; count ≥ 2 and 1 ≤ min_docid < max_docid;
+  the length is exactly the header, both arrays with their padding, and the index; every
+  forward docid lies in [min_docid, max_docid]; the forward docids do not increase (else
+  the section should be kind 0 or 1); the sorted ordinals are a permutation of [0, count)
+  whose docids strictly increase from min_docid to max_docid; and each index entry equals
+  the docid at its position. Each failure is `corrupt_segment("docids")`.
+- **Open cost and serving pages** (P1-R2). Validation reads the forward array once in
+  order and once at random through the sorted ordinals, with a count-bit scratch bitmap.
+  At 5M documents that is about 29 MB of section and 0.6 MB of scratch; its open time and
+  the pages it leaves resident are measured on the first reordered 5M index and decide
+  between keeping eager validation and validating on first use, as `lengths` does.
 - The footer's `min_docid` and `max_docid` keep their meaning, so the cross-segment
   range checks (`search.hh:252–263`) stay valid.
-- The kind records the order (`phase-3.md`: "the segment's docids kind records which"):
-  the reader derives `docid_ordered()` at open, true for kinds 0 and 1, and code branches
-  on that, never on the kind. No other section changes.
-- Size: at 5M documents, 23-bit forward entries and 23-bit sorted ordinals plus the
-  index, about 29 MB against today's 9 bytes (contiguous docids): 2.9% of the postings
-  section, so it costs more than it saves only if reordering gains less than that; T1
-  measures both.
+- **Size** at 5M: 23-bit forward entries and 23-bit sorted ordinals plus the index, about
+  29 MB. Where its bytes count is P1-R10's.
 
 ## D2. The writer
 
 `segment_writer` takes documents in output order. In the permuted mode
 (`segment_writer::permuted = true`), docids must be distinct and nonzero but need not
 increase; the docids encoder writes kind 2. Flushes stay in docid order (D15 of Phase 3:
-"flushes sort by docid"); only merges set the mode.
+"flushes sort by docid"); only merges set the mode, and `begin_document`'s increasing check
+stays for flushes. The encoder sorts (docid, ordinal) pairs to check distinctness and build
+the sorted array, 16 bytes a document and as much again for the arrays it builds from them
+(about 160 MB at 5M); that working memory is charged to the writer's `flush_charge` while it
+lives (P1-R3).
 
 ## D3. The merge
 
 `merge_segments` (on `main`; layers step 5 carries the same contract through
-`merge_context::order` and `docid_order`, `layers.md` L6) gains an optional permutation:
-`order[new ordinal] = (source, old ordinal)`. Without one it writes docid order exactly as
-today, byte for byte (the merge fixtures stay pinned). With one, every per-document
-column (lengths, norms, stored records, versions, key hashes, docids) follows `order`;
-each term's postings are remapped through the inverse map and sorted by new ordinal
-before encoding, as the merge's term loop already re-encodes them.
+`merge_context::order` and `docid_order`, `layers.md` L6) gains an optional permutation,
+`order[new ordinal] = merge_ref{source, old ordinal}`, which must name every live document
+exactly once (`std::invalid_argument` otherwise). Without one it writes docid order exactly
+as today, byte for byte (`merge_test`: a merge equals one flush of its live documents).
+With one, every per-document column (lengths, norms, stored records, versions, key hashes,
+docids) follows `order`; each term's postings are remapped through the plan and sorted by
+new ordinal before encoding, as the merge's term loop already does. The writer runs in its
+permuted mode, and the docids section's kind follows the order actually written (D1).
 
-Merging reordered sources reads them through `ordinal_of` and `docid`, never assuming
-their ordinal order; the merge computes docid order (for the duplicate check) and the
-output order separately.
+- **(a) The plan** (P1-R4). `merge_plan::ordinals[source][old ordinal]` is the new ordinal
+  in the order written, so `install_merge`'s carry-over of deletes made during the merge,
+  which maps through the plan, removes exactly those documents. `merge_test` checks the plan
+  against the order; Phase 3's T2 schedule with permuted merges is T4's.
+- **(b) Stored records.** A permuted order never keeps a source frame's documents
+  contiguous, so I7's raw frame copy never applies and the stored section is re-encoded.
+  Today each document's `stored()` decompresses its whole frame; the reordering merge
+  decodes each source frame once instead, into a record spill indexed by ordinal (charged
+  and reserved like the merge's other temporaries), then writes in `order`. Not built yet;
+  T3 states its cost at 5M.
+- **(c) A single permuted source keeps its order.** Without `order`, a merge of one source
+  whose ordinals are not in docid order writes its live documents in that source's order:
+  the policy's rewrites past the deleted-fraction bound and `force_merge_deletes` do not
+  bisect again. With several sources and no `order`, the output is docid order. Bisection's
+  starting order is docid order (D4).
+- **(d) Under the layers refactor**, the core cannot compute `order` itself (bisection reads
+  `inverted`'s postings). The layout gains an optional order source, called by the core
+  before any plugin's merge; Phase 4's D14 index sort and the RocksDB survey's key order
+  use the same hook. `layers.md` L6 records it before step 5.
+
+Merging reordered sources reads them through `docid`, never assuming their ordinal order;
+the merge sorts by docid for the duplicate check and writes the output order separately.
+`merge_test` checks: a shuffled order's plan and bytes (equal to the permuted writer's
+flush of the same documents in the same order), a single permuted source re-merged
+unchanged, a permuted source merged back to docid order (equal to the docid-order flush),
+and orders that miss or repeat a document refused.
 
 ## D4. Recursive graph bisection
 

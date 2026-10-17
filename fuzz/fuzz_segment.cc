@@ -2,7 +2,8 @@
 // invalid_argument) or answer, never crash, read out of bounds, or allocate past the
 // RSS limit. Base segments are built once, large enough for several skip groups, bitset
 // and FOR blocks, positions whose counts differ from wdf, positioned wdf-0 terms, and
-// stored records past one zstd frame; one base has monotone docids, versions, and keys.
+// stored records past one zstd frame; one base has monotone docids, versions, and keys,
+// and one the same in a permuted order (docids kind 2, a reordering merge's output).
 // The input picks a base and byte changes inside its sections; most inputs then
 // recompute every checksum, so the changes reach the decoders instead of stopping at
 // verification. One base uses 64-bit skip offsets. Run with a -timeout of a few seconds
@@ -11,6 +12,7 @@
 #include "strata/search.hh"
 #include "strata/writer.hh"
 
+#include <algorithm>
 #include <cstdlib>
 #include <random>
 
@@ -18,12 +20,21 @@ namespace {
 
 const char* const vocab[] = {"the", "of", "a", "b", "c", "rare", "bool", "weighted", "nopos"};
 
-// keyed: monotone docids with gaps, versions, and a key term per document (format 12's
-// docids, versions, and pk_filter sections).
-std::string build(std::uint64_t seed, std::uint32_t docs, bool wide = false, bool keyed = false) {
+// keyed: docids with gaps, versions, and a key term per document (format 12's docids,
+// versions, and pk_filter sections); permuted: the same docids in a shuffled order.
+std::string build(std::uint64_t seed, std::uint32_t docs, bool wide = false, bool keyed = false, bool permuted = false) {
 	std::mt19937_64 rng(seed);
 	strata::segment_writer w;
 	w.wide_skip_offsets = wide;
+	w.permuted = permuted;
+	// The permuted base's docids come from their own generator, so the other bases keep their bytes.
+	std::vector<std::uint64_t> ids;
+	if (permuted) {
+		std::mt19937_64 id_rng(seed * 7919);
+		ids.resize(docs);
+		for (std::uint64_t d = 1000; auto& id : ids) { id = d += 1 + (id_rng() % 8 == 0 ? id_rng() % 100000 : id_rng() % 3); }
+		std::shuffle(ids.begin(), ids.end(), id_rng);
+	}
 	std::vector<std::vector<std::uint32_t>> pos(std::size(vocab));
 	std::uint64_t docid = 1000;
 	for (std::uint32_t d = 0; d < docs; ++d) {
@@ -45,7 +56,7 @@ std::string build(std::uint64_t seed, std::uint32_t docs, bool wide = false, boo
 			w.add(d + 1, in, length, rec);
 			continue;
 		}
-		docid += 1 + (rng() % 8 == 0 ? rng() % 100000 : rng() % 3);
+		docid = permuted ? ids[d] : docid + 1 + (rng() % 8 == 0 ? rng() % 100000 : rng() % 3);
 		const std::string key = "Q" + std::to_string(docid);
 		in.push_back({key, 0, {}});
 		w.add(docid, in, length, rec, rng() % 4 == 0 ? rng() : rng() % 40, key);
@@ -53,9 +64,12 @@ std::string build(std::uint64_t seed, std::uint32_t docs, bool wide = false, boo
 	return w.flush({});
 }
 
+// First bytes 250-255 pick the permuted base; the others keep their earlier mapping, so
+// the checked-in corpus still reaches the bases it was grown on.
 const std::string& base(unsigned which) {
 	static const std::string segments[] = {build(1, 300), build(2, 9000), build(3, 20000), build(4, 9000, true), build(5, 3000, false, true)};
-	return segments[which % std::size(segments)];
+	static const std::string permuted = build(6, 3000, false, true, true);
+	return which >= 250 ? permuted : segments[which % std::size(segments)];
 }
 
 // Recomputes every section's checksum and region checksums, then the table of contents'

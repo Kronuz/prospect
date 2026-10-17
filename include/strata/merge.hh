@@ -1,6 +1,7 @@
 // Merging segments (Phase 3 design, "Merges"): one segment holding every live document of
-// its sources, in docid order (ordinal order is docid order in the result), with deleted
-// documents and the terms only they held dropped. Per-document data (lengths, stored
+// its sources, in docid order or in an order the caller gives (a reordering merge,
+// docs/design/reordering.md D3), with deleted documents and the terms only they held
+// dropped. Per-document data (lengths, stored
 // records, versions, keys) copies by docid; postings and positions re-encode term by term
 // through segment_writer::flush_from, so a merge writes exactly what a flush would.
 #pragma once
@@ -28,6 +29,12 @@ struct merge_source {
 	bool live(ordinal_t o) const { return !deleted || !(((*deleted)[o >> 6] >> (o & 63)) & 1); }
 };
 
+// A document of a merge's sources: which source, and its ordinal there.
+struct merge_ref {
+	std::uint32_t source;
+	ordinal_t ord;
+};
+
 // The merged segment's documents: how many, and each source ordinal's new ordinal.
 struct merge_plan {
 	std::uint64_t doc_count = 0;
@@ -39,9 +46,12 @@ struct merge_plan {
 // std::logic_error if two live documents share a docid. With `cancel`, it checks it per
 // document, per term, and per stored frame, and throws task::cancelled; with `memory`,
 // its working memory is charged there.
+// The output is in docid order, unless `order` gives it: [new ordinal] = the source
+// document, every live document exactly once (std::invalid_argument otherwise). Without
+// `order`, a single source whose ordinals are not in docid order keeps its order.
 inline merge_plan merge_segments(std::span<const merge_source> sources, const std::array<std::uint8_t, 16>& segment_id, output& sink, spill& positions_spill,
 	std::string_view key_prefix = {}, std::uint8_t region_shift = format::default_region_shift, const task::cancel_token* cancel = nullptr,
-	flush_charge* memory = nullptr) {
+	flush_charge* memory = nullptr, std::span<const merge_ref> order = {}) {
 	auto check = [&] {
 		if (cancel && cancel->requested()) { throw task::cancelled{}; }
 	};
@@ -85,15 +95,35 @@ inline merge_plan merge_segments(std::span<const merge_source> sources, const st
 		charge(plan.ordinals[s].capacity() * sizeof(ordinal_t));
 	}
 	charge(docs.capacity() * sizeof(doc));
-	std::sort(docs.begin(), docs.end(), [](const doc& a, const doc& b) { return a.docid < b.docid; });
+	// A single permuted source keeps its order (docs are still in its ordinal order here).
+	const bool keep_source_order = order.empty() && sources.size() == 1 && !sources[0].seg->docid_ordered();
+	std::vector<doc> by_docid;
+	if (keep_source_order) { by_docid = docs, charge(by_docid.capacity() * sizeof(doc)); }
+	auto& sorted = keep_source_order ? by_docid : docs;
+	std::sort(sorted.begin(), sorted.end(), [](const doc& a, const doc& b) { return a.docid < b.docid; });
+	for (std::size_t i = 1; i < sorted.size(); ++i) {
+		if (sorted[i - 1].docid == sorted[i].docid) { throw std::logic_error("strata: merge: two live copies of a docid"); }
+	}
+	if (!order.empty()) {
+		if (order.size() != docs.size()) { throw std::invalid_argument("strata: merge order must name every live document once"); }
+		docs.clear();
+		for (const auto& r : order) {
+			if (r.source >= sources.size() || r.ord >= sources[r.source].seg->doc_count() || !sources[r.source].live(r.ord) ||
+				plan.ordinals[r.source][r.ord] != no_more_docs) {
+				throw std::invalid_argument("strata: merge order must name every live document once");
+			}
+			plan.ordinals[r.source][r.ord] = 0;  // seen; the writer assigns it below
+			docs.push_back({sources[r.source].seg->docid(r.ord), r.source, r.ord});
+		}
+	}
 	segment_writer w;
 	w.region_shift = region_shift;
 	w.memory = memory;
 	w.cancel = cancel;
+	w.permuted = !order.empty() || keep_source_order;  // the docids section records the order written
 	for (std::size_t i = 0; i < docs.size(); ++i) {
 		check();
 		const auto& d = docs[i];
-		if (i && docs[i - 1].docid == d.docid) { throw std::logic_error("strata: merge: two live copies of a docid"); }
 		const segment& seg = *sources[d.source].seg;
 		auto k = keys[d.source].find(d.ord);
 		plan.ordinals[d.source][d.ord] = w.add_document(d.docid, seg.length(d.ord), seg.stored(d.ord), seg.version(d.ord), k == keys[d.source].end() ? std::string_view() : std::string_view(k->second));

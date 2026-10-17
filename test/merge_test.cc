@@ -6,6 +6,7 @@
 #include "strata/merge.hh"
 #include "strata/merge_policy.hh"
 
+#include <algorithm>
 #include <bit>
 #include <cstdio>
 #include <cstdlib>
@@ -108,6 +109,82 @@ int main() {
 		const std::string direct = w.flush(id);
 		CHECK(merged == direct);
 		if (merged != direct) { std::fprintf(stderr, "  seed %llu: merged %zu bytes, direct %zu\n", (unsigned long long)seed, merged.size(), direct.size()); }
+
+		// A reordering merge (reordering.md D3): an explicit order, shuffled. Its plan maps
+		// every live document to its position, and its bytes equal the permuted writer's
+		// flush of the same documents in the same order.
+		std::vector<merge_ref> order;
+		for (std::size_t s = 0; s < sources.size(); ++s) {
+			for (ordinal_t o = 0; o < sources[s].seg->doc_count(); ++o) {
+				if (sources[s].live(o)) { order.push_back({std::uint32_t(s), o}); }
+			}
+		}
+		std::shuffle(order.begin(), order.end(), r);
+		std::string permuted;
+		{
+			string_output out(permuted);
+			string_spill spill;
+			const auto plan = merge_segments(sources, id, out, spill, "Q", format::default_region_shift, nullptr, nullptr, order);
+			CHECK(plan.doc_count == order.size());
+			for (std::size_t i = 0; i < order.size(); ++i) { CHECK(plan.ordinals[order[i].source][order[i].ord] == ordinal_t(i)); }
+		}
+		segment_writer pw;
+		pw.permuted = true;
+		std::vector<std::uint64_t> sequence;
+		for (const auto& ref : order) {
+			const std::uint64_t docid = sources[ref.source].seg->docid(ref.ord);
+			sequence.push_back(docid);
+			const auto& l = model.at(docid);
+			in.clear();
+			for (const auto& t : l.doc.terms) { in.push_back({t.term, t.wdf, t.positions}); }
+			pw.add(docid, in, l.doc.length, l.doc.stored, l.version, l.key);
+		}
+		CHECK(permuted == pw.flush(id));
+		const segment ps(permuted);
+		CHECK(!ps.docid_ordered() || order.size() < 2);
+		for (std::size_t i = 0; i < sequence.size(); ++i) { CHECK(ps.docid(ordinal_t(i)) == sequence[i] && ps.ordinal_of(sequence[i]) == ordinal_t(i)); }
+		// A single permuted source keeps its order.
+		{
+			const merge_source one[] = {{&ps, nullptr}};
+			std::string again;
+			string_output out(again);
+			string_spill spill;
+			(void)merge_segments(one, id, out, spill, "Q");
+			CHECK(again == permuted);
+		}
+		// A merge of the permuted segment back into docid order equals the docid-order flush.
+		{
+			const merge_source one[] = {{&ps, nullptr}};
+			std::vector<std::pair<std::uint64_t, ordinal_t>> by_docid;
+			for (ordinal_t o = 0; o < ps.doc_count(); ++o) { by_docid.push_back({ps.docid(o), o}); }
+			std::sort(by_docid.begin(), by_docid.end());
+			std::vector<merge_ref> sorted_order;
+			for (const auto& [d, o] : by_docid) { sorted_order.push_back({0, o}); }
+			std::string back;
+			string_output out(back);
+			string_spill spill;
+			(void)merge_segments(one, id, out, spill, "Q", format::default_region_shift, nullptr, nullptr, sorted_order);
+			CHECK(back == direct);
+		}
+		// An order that misses or repeats a document is refused.
+		for (int bad = 0; bad < 2; ++bad) {
+			auto wrong = order;
+			if (bad == 0) {
+				wrong.pop_back();
+			} else if (wrong.size() > 1) {
+				wrong.back() = wrong.front();
+			}
+			bool threw = false;
+			try {
+				std::string junk;
+				string_output out(junk);
+				string_spill spill;
+				(void)merge_segments(sources, id, out, spill, "Q", format::default_region_shift, nullptr, nullptr, wrong);
+			} catch (const std::invalid_argument&) {
+				threw = true;
+			}
+			CHECK(threw);
+		}
 	}
 	// The policy: merges are 2-10 existing segments under the size cap, and applying them
 	// converges.
