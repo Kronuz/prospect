@@ -26,5 +26,10 @@ Source: the n1 "after merging" trials (5 trials, harness), per query best over t
   check_increasing 4%, skip_sized_impacts 3%. About 300 ns per touched block against
   roughly 90 ns for Lucene: the remaining gap is per-block skip-entry decoding and
   validation, a format 13 question (fixed-width level 0, no impacts on the count path).
+- Rejected: a faster-looking LEB128 decoder in `varint` (a one-byte branch, then one
+  64-bit load for up to ten bytes). On the 600 intersection and phrase queries, in-process
+  A/B against the same build with the byte-loop decoder: `TOP_10` 1.052× [1.039–1.065],
+  `COUNT` 1.020× [1.010–1.031], 0 mismatches. Mispredicted value lengths bound skip-entry
+  streams, not byte loads (varint's `bench/bench.cc`: 0.87× on a one-to-three-byte mix).
 - In-process numbers (`strata_engine bench`) compare strata builds only; the harness
   adds the client pipe (floor 67 us), so they are not comparable with the baselines.
