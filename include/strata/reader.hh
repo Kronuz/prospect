@@ -804,7 +804,8 @@ static_assert(std::is_nothrow_move_constructible_v<segment>);
 // docset::doc_iterator; scorers build on it. Skip groups are decoded on demand.
 class postings_iterator {
 public:
-	postings_iterator(const segment& seg, const format::term_info& info) : seg_(&seg), info_(info), df_(info.df) {
+	postings_iterator(const segment& seg, const format::term_info& info) : postings_iterator(seg.reader<inverted_plugin>(), info) {}
+	postings_iterator(const inverted_plugin::reader& seg, const format::term_info& info) : seg_(&seg), info_(info), df_(info.df) {
 		if (info.flags & format::single_posting) {
 			if (info.postings >= seg.doc_count()) { corrupt("single posting ordinal"); }
 			buf_ords_[0] = ordinal_t(info.postings);
@@ -1364,7 +1365,7 @@ private:
 		verified_to_ = std::min<std::uint64_t>(((to + (std::uint64_t(1) << shift) - 1) >> shift) << shift, seg_->postings_bytes().size());
 	}
 
-	const segment* seg_;
+	const inverted_plugin::reader* seg_;
 	format::term_info info_;
 	std::uint32_t df_;
 	mutable std::uint64_t verified_from_ = 0, verified_to_ = 0;  // postings offsets known good
@@ -1411,7 +1412,8 @@ inline std::vector<format::impact> segment::tail_impacts(const format::term_info
 
 class positions_reader {
 public:
-	positions_reader(const segment& seg, const format::term_info& info) {
+	positions_reader(const segment& seg, const format::term_info& info) : positions_reader(seg.reader<inverted_plugin>(), info) {}
+	positions_reader(const inverted_plugin::reader& seg, const format::term_info& info) {
 		if (info.flags & format::no_positions) {
 			none_ = true;  // a term indexed without positions: every count is 0
 			return;
@@ -1545,7 +1547,7 @@ private:
 		need(p, std::min(largest, avail));
 	}
 
-	const segment* seg_ = nullptr;
+	const inverted_plugin::reader* seg_ = nullptr;
 	const char* end_ = nullptr;
 	const char* count_blocks_ = nullptr;
 	const char* blocks_ = nullptr;
