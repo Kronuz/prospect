@@ -1,7 +1,8 @@
 #!/bin/bash
 # Equal memory (BENCHMARKS.md): indexes the corpus once with REFERENCE and records its
 # peak RSS, then searches strata's node budget (STRATA_BUDGET_MB, D17) for the one whose
-# peak RSS comes within 3% of it, bisecting between 16 MiB and 16 GiB. Every run is
+# peak RSS comes within 3% of it, bisecting between CAL_LO and CAL_HI MiB (16 and 16,384
+# by default). Every run is
 # recorded; the last line is the budget to use. Linux only (GNU time, drop_caches).
 # Results in ~/bench/results/calibrate-NAME.
 #   [DOCS=1000000|all] [KEYED=1] [STRATA_THREADS=1] calibrate_rss.sh NAME REFERENCE
@@ -46,7 +47,7 @@ if [ -f "$out/reference" ]; then read -r target ref_segments < "$out/reference";
 	echo "$target $ref_segments" > "$out/reference"
 fi
 echo "$reference rss ${target} KB segments $ref_segments" | tee "$out/summary"
-lo=16 hi=16384 best=
+lo=${CAL_LO:-16} hi=${CAL_HI:-16384} best=  # CAL_HI keeps the search under the VM's memory
 while [ $((hi - lo)) -gt 8 ]; do
 	mid=$(((lo + hi) / 2))
 	read -r rss segments < <(STRATA_BUDGET_MB=$mid run strata budget-$mid) || exit 1

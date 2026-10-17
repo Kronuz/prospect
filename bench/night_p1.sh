@@ -22,12 +22,14 @@ merged=$G/engines/strata-merged/idx
 for s in query_trials.sh calibrate_rss.sh sample_queries.py quick/ab.sh quick/ab.py; do
 	[ -e ~/bench/$s ] || { log "missing ~/bench/$s"; exit 1; }
 done
-[ -x ~/se-skipexp ] && [ -x ~/se-noskip ] || { log "missing the skip experiment binaries"; exit 1; }
+# The skip A/B's binaries, both built from aad1770: -a as is, -b with STRATA_EXPERIMENT_NO_EQUAL_SKIP.
+[ -x ~/se-skip-a ] && [ -x ~/se-skip-b ] || { log "missing the skip experiment binaries"; exit 1; }
 
 # 1. The quick tier.
 q=$res/query-$name-quick
 mkdir -p "$q"
-engines="strata-merged tantivy-0.26 lucene-10.4.0 lucene-10.4.0-bp xapian-2.1.0"
+# Xapian is left out tonight: its 15 GB index made room for PISA's build (strata is 0.13x it).
+engines="strata-merged tantivy-0.26 lucene-10.4.0 lucene-10.4.0-bp"
 for e in $engines; do [ -f "$res/query-n1-merged/index-$e.done" ] && touch "$q/index-$e.done"; done
 if grep -q "PISA_INDEX_EXIT 0" ~/pisa-idx5m.log 2>/dev/null; then
 	engines="$engines pisa-0.8.2"
@@ -60,7 +62,7 @@ for scheme in bm25 bm25_xapian; do
 	arg=""
 	[ "$scheme" = bm25 ] || arg=$scheme
 	rm -rf "$d"
-	SCHEME=$arg QUERIES=$qs TERMS=$ts ~/bench/quick/ab.sh "$d" ~/se-skipexp "$merged" ~/se-noskip "$merged" $rounds $runs "TOP_10 TOP_100 TOP_1000" > "$d.log" 2>&1 &&
+	SCHEME=$arg QUERIES=$qs TERMS=$ts ~/bench/quick/ab.sh "$d" ~/se-skip-a "$merged" ~/se-skip-b "$merged" $rounds $runs "TOP_10 TOP_100 TOP_1000" > "$d.log" 2>&1 &&
 		python3 ~/bench/quick/ab.py "$d" > "$d.md" && touch "$d.done" || exit 1
 done
 
@@ -83,7 +85,8 @@ if ! grep -q "^BUDGET [0-9][0-9]*$" "$cal" 2>/dev/null; then
 	log "5M calibration"
 	docs=all
 	[ "$dry" = 1 ] && docs=20000
-	DOCS=$docs KEYED=1 ~/bench/calibrate_rss.sh "$name-5m" lucene-10.4.0-st > "$cal.tmp" 2>&1 && mv "$cal.tmp" "$cal" || exit 1
+	# At 1M a 8,200 MB budget peaked at 13.1 GB: the cap keeps every run inside the VM's 15 GB.
+	DOCS=$docs KEYED=1 CAL_HI=4096 ~/bench/calibrate_rss.sh "$name-5m" lucene-10.4.0-st > "$cal.tmp" 2>&1 && mv "$cal.tmp" "$cal" || exit 1
 fi
 log NIGHT_DONE
 echo TRIALS_DONE
