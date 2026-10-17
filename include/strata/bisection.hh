@@ -538,7 +538,11 @@ inline std::vector<std::uint32_t> order(const graph& g, const presets& p = {}, c
 		ready.notify_all();
 	};
 	{
-		std::vector<std::jthread> workers;
+		std::vector<std::thread> workers;  // std::jthread is missing from libc++ on macOS and FreeBSD
+		struct joiner {
+			std::vector<std::thread>& threads;
+			~joiner() { for (auto& t : threads) { t.join(); } }
+		} join_all{workers};
 		for (std::uint32_t t = 1; t < p.threads; ++t) { workers.emplace_back(work); }
 		work();
 	}
