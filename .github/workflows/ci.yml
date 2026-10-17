@@ -2,6 +2,7 @@ name: CI
 on:
   push:
     branches: [main, master, 'phase*/**', 'track*/**', 'design/**']
+    paths-ignore: ['docs/**', '**.md']  # docs-only pushes would cancel the run for real code
   pull_request:
   workflow_dispatch:
   schedule:
