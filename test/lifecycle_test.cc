@@ -123,6 +123,15 @@ static transaction tx_of(operation o) {
 int main() {
 	index::options keyed;
 	keyed.key_prefix = "Q";
+	// STRATA_LIFECYCLE_REORDER: every merge reorders, with test-sized thresholds, so each
+	// crash point, replay, and background schedule below covers reordering merges (T5).
+	const bool reorder_all = std::getenv("STRATA_LIFECYCLE_REORDER") != nullptr;
+	if (reorder_all) {
+		keyed.reordering = index::options::reorder_mode::merges;
+		keyed.reorder_min_docs = 0;
+		keyed.reorder_settings.min_df = 2;
+		keyed.reorder_settings.bisection.min_partition = 4;
+	}
 	// T2: replays under different schedules agree on verdicts and digests, the digest after
 	// every transaction included (the first ten seeds).
 	for (std::uint64_t seed = 0; seed < 40; ++seed) {
@@ -846,6 +855,23 @@ int main() {
 			}
 		}
 	};
+	// In reorder mode the runs above must really have reordered: a forced merge of a
+	// workload's documents writes a permuted segment.
+	if (reorder_all) {
+		faultfs::filesystem fs;
+		faultfs::io io(fs);
+		auto ix = index::create(io, keyed, uuid_a);
+		std::mt19937_64 r(5);
+		for (int i = 0; i < 200; ++i) {
+			operation o;
+			o.type = operation::add;
+			o.doc = make_doc(r, "");
+			(void)ix.apply(tx_of(std::move(o)), {});
+			if (i % 40 == 39) { ix.refresh(); }
+		}
+		ix.force_merge();
+		CHECK(ix.segments().size() == 1 && !ix.segments()[0].seg->docid_ordered());
+	}
 	tally inline_merges, background_merges;
 	t1(false, target, inline_merges);
 	t1(true, bg_target, background_merges);

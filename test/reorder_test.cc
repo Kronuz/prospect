@@ -267,6 +267,52 @@ int main() {
 		CHECK(!has_file(io, "seg-999999.fwd"));
 		CHECK(reopened.segments().size() == 1);
 	}
+	// T7: one reordering merge gives the same bytes on every platform and at 1 and 8 threads,
+	// pinned by hash (zstd is the pinned release, so stored frames match too).
+	{
+		std::vector<std::string> files;
+		std::mt19937_64 r(77);
+		for (int part = 0; part < 4; ++part) {
+			segment_writer w;
+			for (int i = 0; i < 400; ++i) {
+				const std::uint64_t docid = std::uint64_t(part) * 400 + std::uint64_t(i) + 1;
+				std::vector<posting_input> in;
+				static const std::vector<std::uint32_t> pos = {1, 3};
+				const int topic = int(r() % 3);
+				for (int k = 0; k < 6; ++k) {
+					static const char* words[] = {"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"};
+					if (r() % 2) { in.push_back({words[topic * 4 + k % 4], 2, pos}); }
+				}
+				std::sort(in.begin(), in.end(), [](const auto& x, const auto& y) { return x.term < y.term; });
+				in.erase(std::unique(in.begin(), in.end(), [](const auto& x, const auto& y) { return x.term == y.term; }), in.end());
+				w.add(docid, in, 6, "stored " + std::to_string(docid));
+			}
+			files.push_back(w.flush({}));
+		}
+		std::vector<segment> segs;
+		for (const auto& f : files) { segs.emplace_back(f); }
+		std::vector<merge_source> src;
+		for (const auto& sg : segs) { src.push_back({&sg, nullptr}); }
+		std::string out_bytes[2];
+		for (int t = 0; t < 2; ++t) {
+			reorder::settings set;
+			set.min_df = 20;
+			set.bisection.threads = t ? 8 : 1;
+			string_scratch forward, records;
+			const auto order = reorder::order(src, forward, set);
+			CHECK(!order.empty());
+			string_output out(out_bytes[t]);
+			string_spill spill;
+			const std::array<std::uint8_t, 16> id{7};
+			(void)merge_segments(src, id, out, spill, "", format::default_region_shift, nullptr, nullptr, order, &records);
+		}
+		CHECK(out_bytes[0] == out_bytes[1]);
+		const std::uint64_t h = xxh64::hash(out_bytes[0]);
+		constexpr std::uint64_t pinned = 0xed10efddd8c1bc39ull;
+		if (h != pinned) { std::fprintf(stderr, "T7: reordering merge hash %016llx\n", (unsigned long long)h); }
+		CHECK(h == pinned);
+	}
+
 	if (failures) {
 		std::fprintf(stderr, "%d failures\n", failures);
 		return 1;
