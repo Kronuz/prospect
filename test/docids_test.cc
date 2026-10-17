@@ -90,6 +90,35 @@ int main() {
 			round_trip(ids, strata::docids::permuted);
 		}
 	}
+	// Every width (P1-R23): the bit arrays at widths 0-64, at counts ending on every bit
+	// offset, with the largest value; and permuted sections at docid widths 1-64, where
+	// get_bits reads a ninth byte (widths above 57) and width 64 skips the mask.
+	for (unsigned width = 0; width <= 64; ++width) {
+		const std::uint64_t mask = width == 64 ? ~std::uint64_t(0) : (std::uint64_t(1) << width) - 1;
+		for (std::size_t n = 1; n <= 17; ++n) {
+			std::vector<std::uint64_t> v(n);
+			for (auto& x : v) { x = rng() & mask; }
+			v[n / 2] = mask;
+			std::string b;
+			strata::docids::detail::put_bits(b, v, width);
+			CHECK(b.size() == strata::docids::detail::bit_bytes(n, width));
+			for (std::size_t i = 0; i < n; ++i) { CHECK(strata::docids::detail::get_bits(b.data(), i, width) == v[i]); }
+			for (std::size_t i = (n * width + 7) / 8; i < b.size(); ++i) { CHECK(b[i] == 0); }
+		}
+	}
+	for (unsigned width = 1; width <= 64; ++width) {
+		const std::uint64_t lo = 1, hi = width == 64 ? ~std::uint64_t(0) : lo + ((std::uint64_t(1) << width) - 1);
+		for (std::size_t n = 2; n <= 17; ++n) {
+			std::set<std::uint64_t> picked{lo, hi};
+			while (picked.size() < std::min<std::uint64_t>(n, hi - lo + 1)) { picked.insert(lo + rng() % (hi - lo + 1)); }
+			std::vector<std::uint64_t> ids(picked.rbegin(), picked.rend());  // descending: permuted
+			if (ids.size() < 2) { continue; }
+			const std::string sec = strata::docids::encode(ids);
+			CHECK(std::uint8_t(sec[9]) == width);
+			round_trip(ids, strata::docids::permuted);
+		}
+	}
+
 	// Invalid input to the encoder.
 	for (const std::vector<std::uint64_t>& bad_ids : {std::vector<std::uint64_t>{3, 1, 3}, std::vector<std::uint64_t>{2, 0}}) {
 		bool threw = false;
