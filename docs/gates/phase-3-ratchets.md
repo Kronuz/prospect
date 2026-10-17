@@ -171,6 +171,35 @@ P6 bring strata's global excess from 1.58× to 1.33× at `TOP_10`, from 2.09× t
 | `COUNT` | two-phase-critic | 1 | 5 | 37,926 | 47,891 | 27,336 | 136,066 | 1.38× [1.28–1.53] | 1.38× [1.28–1.53]  | 0.279× [0.273–0.283] |
 | `COUNT` | union | 301 | 5 | 1,403 | 1,098 | 2,280 | 67,312 | 1.32× [1.28–1.37] | 1.34× [1.30–1.40]  | 0.018× [0.018–0.019] |
 
+## Disk after a full merge
+
+The 5M index force-merged, keys configured alike (PLAN: "keys configured alike"): strata
+keys every document by its id (`Q` prefix, one key term each, and the `pk_filter`
+section); Lucene 10.4.0 indexed with `KEYED=1` through the single-thread builder
+(`StringField` ids, `updateDocument`), force-merged to one segment. Section sizes from
+`strata_engine sections` (`1baaa6c`); Lucene's by file extension.
+
+| Section | strata | Lucene, keyed | Ratio | Lucene `-bp`, unkeyed | Tantivy, unkeyed |
+|---|---:|---:|---:|---:|---:|
+| Whole index | 2,770.0 MB | 2,819.7 MB | 0.98× | 2,508.1 MB | 3,031.0 MB |
+| Postings (`.doc`) | 1,007.9 MB | 985.6 MB | 1.02× | 833.2 MB | 1,054.6 MB |
+| Positions (`.pos`) | 1,631.2 MB | 1,709.1 MB | 0.95× | 1,556.9 MB | 1,850.5 MB |
+| Terms and term index (`.tim`, `.tip`, `.tmd`) | 92.0 MB | 67.9 MB | 1.36× | 39.6 MB | 47.1 MB |
+| Stored (`.fdt`, `.fdx`, `.fdm`) | 15.5 MB | 31.9 MB | 0.49× | 53.1 MB | 53.6 MB |
+| Norms (`.nvd`) | 5.0 MB | 5.0 MB | 1.00× | 5.0 MB | 5.0 MB |
+| Key filter (`pk_filter`) | 5.7 MB | — | | — | — |
+| Lengths (exact, Xapian's semantics) | 10.1 MB | — | | — | — |
+| Doc values (the harness's `sort_field`) | — | 20.1 MB | | 20.1 MB | 20.1 MB |
+
+The whole index passes (0.98×). Two sections miss: postings at 1.02× and the term
+dictionary at 1.36×. P12 brought the dictionary to 0.992× of Lucene's on an unkeyed
+index; the 5,032,102 key terms add 52 MB to strata's and 27.7 MB to Lucene's. Against
+Lucene with document reordering the postings are 1.21× its `.doc` (unkeyed; a keyed `-bp`
+build is owed): reordering at merge (Track P1) is not implemented.
+
+`strata_engine merge` commits and exits without reclaiming, so the merged directory still
+holds the 16 sources (5.6 GB in all); only the manifest's files count above.
+
 ## Verify and parity
 
 `strata_engine verify` (C14's form: pruned top-k equal to an exhaustive scan at k = 10, 100,
@@ -203,7 +232,7 @@ gate records their ratios and gaps, and Phase 4's gate does not pass while they 
 | Queries before merging (baselines unmerged at equal memory) | Owed: calibration on the full corpus, then a scheduled night | — |
 | Indexing, 1 and 8 threads, keyed (T4), five trials at equal memory | Owed: calibration done (a 1,039 MB budget peaks at 2,352 MB against Lucene's 2,398 MB, 1.9% under); the trials run the night of 2026-10-16 | — |
 | Write amplification against Lucene (T3), append-only and replace-heavy | Owed: rescheduled with T4 | — |
-| Memory (serving and indexing peaks), disk after a full merge, per section | Owed: untimed runs on the VM | — |
+| Memory (serving and indexing peaks), disk after a full merge, per section | Disk: whole index pass (0.98×); postings 1.02× and term dictionary 1.36× miss. Memory: serving run the evening of 2026-10-16, indexing peaks with T4 | "Disk after a full merge" below |
 | `verify` and `parity` on multi-segment indexes | Pass before and after merging; `parity` with deletes owed | "Verify and parity" below |
 | Coverage targets and the test-parity inventory's Phase 3 rows | Owed: `cost()` checked directly (`cost_test`); scores against Lucene's own, document limits, and nested WAND or C7's cost model remain; reads while a writer commits need a shared-ownership reader (Phase 3R) | `docs/testing/parity.md` |
 | The rows on FreeBSD and arm64 (before Phase 3R) | Owed: FreeBSD VM; an arm64 host | — |
