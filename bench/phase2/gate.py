@@ -115,6 +115,11 @@ def trial(r, floor):
                         ),
                     )
             fast = [e for e in FAST if e in row]
+            if not fast:  # no reference engine in these runs: only the side columns
+                row["raw"] = row["sub"] = math.nan
+                row["flag"] = False
+                rows[(cmd, tag)] = row
+                continue
             row["raw"] = max(row[e][0] for e in fast)
             row["sub"] = max(row[e][1] for e in fast)
             faster = min(fast, key=lambda e: mean[e])

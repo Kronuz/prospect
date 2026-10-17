@@ -31,5 +31,10 @@ Source: the n1 "after merging" trials (5 trials, harness), per query best over t
   A/B against the same build with the byte-loop decoder: `TOP_10` 1.052× [1.039–1.065],
   `COUNT` 1.020× [1.010–1.031], 0 mismatches. Mispredicted value lengths bound skip-entry
   streams, not byte loads (varint's `bench/bench.cc`: 0.87× on a one-to-three-byte mix).
+- Open: `bm25_xapian` prunes stopwords poorly. "the" `TOP_10` takes 76.9 ms in-process on
+  the merged 5M index under `bm25_xapian` against 2.3 ms under `bm25` (gate VM, one run each,
+  `db0a891`). The gate rows score with `bm25`; Xapiand's default is Xapian's formula, so this
+  belongs to the Phase 7 seam's query rows. The likely cause, unmeasured: Xapian's smoothed
+  term weight bounds blocks loosely for terms in nearly every document.
 - In-process numbers (`strata_engine bench`) compare strata builds only; the harness
   adds the client pipe (floor 67 us), so they are not comparable with the baselines.
