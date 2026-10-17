@@ -20,7 +20,9 @@ fastest of Lucene, Lucene with reordering, and Tantivy (those present) is the la
 of their geometric means. Across trials:
 the median and the 95% bootstrap interval of the median. A class is flagged when the
 floor exceeds half the mean time of strata or the faster engine. Counts must equal
-every baseline's; mismatches are reported per engine.
+every baseline's; mismatches are reported per engine. A query an engine answers
+UNSUPPORTED (PISA has no phrases) is left out of that engine's ratios and counts.
+PISA, when present, is reported beside Xapian (the stretch goal's reference).
 """
 
 import json
@@ -33,6 +35,7 @@ from collections import defaultdict
 # The reference set: Lucene, Lucene with document reordering (from Phase 3), and Tantivy.
 FAST = ["lucene-10.4.0", "lucene-10.4.0-bp", "tantivy-0.26"]
 XAPIAN = "xapian-2.1.0"
+PISA = "pisa-0.8.2"
 COUNTED = {"COUNT", "TOP_100_COUNT"}
 
 
@@ -73,7 +76,9 @@ def trial(r, floor):
         t = {e: {q["query"]: q for q in per[e]} for e in per}
         mism[cmd] = {
             e: sum(
-                1 for qs, q in t["strata"].items() if q["count"] != t[e][qs]["count"]
+                1
+                for qs, q in t["strata"].items()
+                if t[e][qs]["count"] is not None and q["count"] != t[e][qs]["count"]
             )
             for e in t
             if e != "strata"
@@ -84,15 +89,21 @@ def trial(r, floor):
                 if ":" not in tag:
                     by[tag].append(qs)
         for tag, qs in by.items():
+
+            def supported(e, qs=qs, t=t):
+                return [x for x in qs if t[e][x]["count"] is not None]
+
             mean = {
-                e: statistics.fmean(min(t[e][x]["duration"]) for x in qs) for e in t
+                e: statistics.fmean(min(t[e][x]["duration"]) for x in supported(e))
+                for e in t
+                if supported(e)
             }
             row = {"n": len(qs), "mean": mean}
             for e in t:
-                if e != "strata":
+                if e != "strata" and supported(e):
                     times = [
                         (min(t["strata"][x]["duration"]), min(t[e][x]["duration"]))
-                        for x in qs
+                        for x in supported(e)
                     ]
                     row[e] = (
                         geo(times),
@@ -142,9 +153,9 @@ def main(argv):
     )
     if md:
         print(
-            "\n| Command | Class | n | Trials | strata µs | Lucene µs | Tantivy µs | Xapian µs | Raw | Floor-subtracted | Against Xapian |"
+            "\n| Command | Class | n | Trials | strata µs | Lucene µs | Lucene -bp µs | Tantivy µs | Xapian µs | PISA µs | Raw | Floor-subtracted | Against Xapian | Against PISA |"
         )
-        print("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+        print("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for cmd in dict.fromkeys(cmd for r in results for cmd in r):
         if not md:
             per = defaultdict(list)
@@ -164,8 +175,13 @@ def main(argv):
                 if all(XAPIAN in r for r in rows)
                 else None
             )
+            pisa = (
+                interval([r[PISA][1] for r in rows])
+                if all(PISA in r for r in rows)
+                else None
+            )
             us = {
-                e: statistics.median(r["mean"][e] for r in rows)
+                e: statistics.median(r["mean"][e] for r in rows if e in r["mean"])
                 for e in rows[0]["mean"]
             }
             # PLAN: counted classes within 1.5x; a TOP_K class above it needs a cause and a plan.
@@ -182,13 +198,22 @@ def main(argv):
             n = max(r["n"] for r in rows)
             if md:
                 x = f"{xap[0]:.3f}× [{xap[1]:.3f}–{xap[2]:.3f}]" if xap else "–"
-                xu = f"{us[XAPIAN]:,.0f}" if XAPIAN in us else "–"
+                px = f"{pisa[0]:.2f}× [{pisa[1]:.2f}–{pisa[2]:.2f}]" if pisa else "–"
+
+                def col(e, us=us):
+                    return f"{us[e]:,.0f}" if e in us else "–"
+
                 print(
-                    f"| `{cmd}` | {tag} | {n} | {len(rows)} | {us['strata']:,.0f} | {us['lucene-10.4.0']:,.0f} | {us['tantivy-0.26']:,.0f} | {xu} "
-                    f"| {raw[0]:.2f}× [{raw[1]:.2f}–{raw[2]:.2f}] | {sub[0]:.2f}× [{sub[1]:.2f}–{sub[2]:.2f}] {flag} | {x} |"
+                    f"| `{cmd}` | {tag} | {n} | {len(rows)} | {col('strata')} | {col('lucene-10.4.0')} | {col('lucene-10.4.0-bp')} | {col('tantivy-0.26')} | {col(XAPIAN)} | {col(PISA)} "
+                    f"| {raw[0]:.2f}× [{raw[1]:.2f}–{raw[2]:.2f}] | {sub[0]:.2f}× [{sub[1]:.2f}–{sub[2]:.2f}] {flag} | {x} | {px} |"
                 )
             else:
                 x = f"  Xapian {xap[0]:.3f}x [{xap[1]:.3f}-{xap[2]:.3f}]" if xap else ""
+                x += (
+                    f"  PISA {pisa[0]:.2f}x [{pisa[1]:.2f}-{pisa[2]:.2f}]"
+                    if pisa
+                    else ""
+                )
                 print(
                     f"  {tag:20} n={n:4} t={len(rows)}  raw {raw[0]:5.2f}x [{raw[1]:.2f}-{raw[2]:.2f}]  "
                     f"floor-sub {sub[0]:5.2f}x [{sub[1]:.2f}-{sub[2]:.2f}]{x} {flag} {verdict}"

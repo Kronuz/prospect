@@ -22,6 +22,8 @@ import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.IndexWriterConfig.OpenMode;
+import org.apache.lucene.misc.index.BPIndexReorderer;
+import org.apache.lucene.misc.index.BPReorderingMergePolicy;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSDirectory;
 import org.apache.lucene.util.ThreadInterruptedException;
@@ -44,6 +46,16 @@ public class BuildIndex {
 		final IndexWriterConfig config = new IndexWriterConfig(standardAnalyzer)
 				.setRAMBufferSizeMB(ramMb).setRAMPerThreadHardLimitMB((int) Math.min(ramMb, 2047))
 				.setOpenMode(OpenMode.CREATE);
+		// BP=1: reorder by recursive graph bisection at force merge, with the reference
+		// -bp builder's settings (a 256 MB bisection budget, no reordering of natural merges),
+		// so a keyed pair differs only by reordering (strata's reordering review, P1-R10).
+		if ("1".equals(System.getenv("BP"))) {
+			final BPIndexReorderer reorderer = new BPIndexReorderer();
+			reorderer.setRAMBudgetMB(256);
+			final BPReorderingMergePolicy mp = new BPReorderingMergePolicy(config.getMergePolicy(), reorderer);
+			mp.setMinNaturalMergeNumDocs(Integer.MAX_VALUE);
+			config.setMergePolicy(mp);
+		}
 
 		try (Directory dir = FSDirectory.open(outputPath);
 				IndexWriter writer = new IndexWriter(dir, config);

@@ -4,16 +4,18 @@
 # peak RSS comes within 3% of it, bisecting between 16 MiB and 16 GiB. Every run is
 # recorded; the last line is the budget to use. Linux only (GNU time, drop_caches).
 # Results in ~/bench/results/calibrate-NAME.
-#   [DOCS=1000000] [KEYED=1] [STRATA_THREADS=1] calibrate_rss.sh NAME REFERENCE
+#   [DOCS=1000000|all] [KEYED=1] [STRATA_THREADS=1] calibrate_rss.sh NAME REFERENCE
 set -u
 name=$1 reference=$2
 cd ~/bench/search-benchmark-game
 out=~/bench/results/calibrate-$name
 mkdir -p "$out"
 export PATH=$HOME/.cargo/bin:$PATH KEYED=${KEYED:-1}
-docs=${DOCS:-1000000}
-[ -f corpus-$docs.json ] || head -"$docs" corpus.json > corpus-$docs.json
-export CORPUS=$PWD/corpus-$docs.json
+docs=${DOCS:-1000000}  # a count, or "all" for the full corpus
+if [ "$docs" = all ]; then export CORPUS=$PWD/corpus.json; else
+	[ -f corpus-$docs.json ] || head -"$docs" corpus.json > corpus-$docs.json
+	export CORPUS=$PWD/corpus-$docs.json
+fi
 make -s -C engines/"$reference" compile > /dev/null 2>&1
 make -s -C engines/strata compile > /dev/null 2>&1
 # Runs one engine into a fresh directory; prints its peak RSS in KB and segment count.
