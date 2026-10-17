@@ -462,6 +462,34 @@ int verify_index(const std::string& dir) {
 	return mismatches ? 1 : 0;
 }
 
+// Every query's top k at k = 10, 100, and 1,000 under both schemes, as docids and exact
+// scores (%a), with the live count: two indexes of the same documents print the same lines
+// whatever their segments' order (reordering.md D5, the scale check).
+int dump(const std::string& dir) {
+	kronuz::journal::PosixIO io(dir);
+	strata::index::options o;
+	o.key_prefix = "Q";
+	auto ix = strata::index::open(io, o);
+	std::vector<strata::segment_snapshot> segs;
+	for (const auto& v : ix.segments()) { segs.push_back({v.seg, v.deleted, v.dead}); }
+	LineReader in;
+	for (std::string line; in.next(line);) {
+		const std::string q = query_of(line);
+		if (q.empty()) { continue; }
+		const parsed p = parse(q);
+		for (const auto scheme : {strata::scheme::bm25, strata::scheme::bm25_xapian}) {
+			for (std::size_t k : {10u, 100u, 1000u}) {
+				std::uint64_t n = 0;
+				const auto hits = search_snapshot(segs, p, k, scheme, &n);
+				std::printf("%s\t%d\t%zu\t%llu", q.c_str(), int(scheme), k, (unsigned long long)n);
+				for (const auto& h : hits) { std::printf(" %llu:%a", (unsigned long long)h.docid, h.score); }
+				std::printf("\n");
+			}
+		}
+	}
+	return 0;
+}
+
 int verify(const std::string& dir) {
 	if (!std::filesystem::exists(dir + "/segment.sx")) { return verify_index(dir); }
 	residency::file file;
@@ -683,11 +711,12 @@ int main(int argc, char** argv) {
 	if (mode == "resident" && argc == 3) { return resident(argv[2]); }
 	if (mode == "dictsim" && argc == 3) { return dictsim(argv[2]); }
 	if (mode == "verify" && argc == 3) { return verify(argv[2]); }
+	if (mode == "dump" && argc == 3) { return dump(argv[2]); }
 	if (mode == "churn" && argc == 3) { return churn(argv[2]); }
 	if (mode == "bench" && (argc == 5 || argc == 6)) {
 		const bool xapian = argc == 6 && std::string_view(argv[5]) == "bm25_xapian";
 		return bench(argv[2], argv[3], std::atoi(argv[4]), xapian ? strata::scheme::bm25_xapian : strata::scheme::bm25);
 	}
-	std::cerr << "usage: strata_engine index|serve|terms|dictstats|verify|check|resident|churn DIR | bench DIR COMMAND RUNS < queries\n";
+	std::cerr << "usage: strata_engine index|serve|terms|dictstats|verify|dump|check|resident|churn DIR | bench DIR COMMAND RUNS < queries\n";
 	return 2;
 }
