@@ -185,6 +185,12 @@ int main() {
 			}
 			CHECK(threw);
 		}
+		// The digest is the same before and after merging to one segment (layers.md L14, step 5).
+		const std::uint64_t before = ix.digest();
+		sources.clear();
+		ix.force_merge();
+		CHECK(ix.segments().size() == 1);
+		CHECK(ix.digest() == before);
 	}
 	// The policy: merges are 2-10 existing segments under the size cap, and applying them
 	// converges.

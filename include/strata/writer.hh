@@ -102,6 +102,33 @@ inline void append_built(section_sink& sink, flush_charge* memory, format::secti
 	sink.write(kind, bytes);
 	if (memory) { memory->shrink(bytes.capacity()); }
 }
+// The core's sections that frame a segment (L2): the header first; docids where the
+// layout puts them; stats (the count, then the length provider's fields), the table of
+// contents, and the footer last.
+inline void begin_segment(section_sink& sink, const std::array<std::uint8_t, 16>& segment_id) {
+	sink.write(format::section::header, format::encode_header(segment_id));
+}
+inline void write_docids(section_sink& sink, flush_charge* memory, std::span<const std::uint64_t> docids) {
+	append_built(sink, memory, format::section::docids, docids::encode(docids, memory));
+}
+inline void finish_segment(section_sink& sink, std::span<const std::uint64_t> docids, std::string_view legacy_stats) {
+	std::string stats;
+	format::put<std::uint64_t>(stats, docids.size());
+	stats += legacy_stats;
+	sink.write(format::section::stats, stats);
+	counting_output& o = sink.out();
+	o.align(format::section_alignment);
+	format::footer f;
+	f.toc_offset = o.size();
+	std::string toc_bytes = format::encode_toc(sink.toc());
+	f.toc_length = toc_bytes.size();
+	f.toc_crc = hashes::crc32c(toc_bytes.data(), toc_bytes.size());
+	f.doc_count = std::uint32_t(docids.size());
+	f.min_docid = docids.empty() ? 0 : *std::min_element(docids.begin(), docids.end());
+	f.max_docid = docids.empty() ? 0 : *std::max_element(docids.begin(), docids.end());
+	o.write(toc_bytes);
+	o.write(format::encode_footer(f));
+}
 // Charges a column's growth to `now` bytes, when a budget is given.
 inline void charge_to(flush_charge* memory, std::uint64_t now, std::uint64_t& charged) {
 	if (memory && now > charged) {
@@ -160,6 +187,16 @@ public:
 	std::uint32_t min_length() const noexcept { return lengths_.empty() ? 0 : *std::min_element(lengths_.begin(), lengths_.end()); }
 	std::uint32_t max_length() const noexcept { return lengths_.empty() ? 0 : *std::max_element(lengths_.begin(), lengths_.end()); }
 	std::uint32_t max_positions() const noexcept { return max_positions_; }
+	// Format 12's fields of `stats` after the count: total, minimum, and maximum length, and
+	// the most positions of a term in a document (L9).
+	std::string legacy_stats() const {
+		std::string out;
+		format::put<std::uint64_t>(out, total_length());
+		format::put<std::uint32_t>(out, min_length());
+		format::put<std::uint32_t>(out, max_length());
+		format::put<std::uint32_t>(out, max_positions());
+		return out;
+	}
 
 	// The sections from the builder's own term buffers.
 	void finish_buffered(section_sink& sink, spill& positions_spill) {
@@ -827,34 +864,13 @@ private:
 	void write(const std::array<std::uint8_t, 16>& segment_id, output& out, Inverted&& inverted) {
 		sync();
 		section_sink sink(out, region_shift);
-		sink.write(format::section::header, format::encode_header(segment_id));
+		detail::begin_segment(sink, segment_id);
 		inverted(sink);
-		detail::append_built(sink, memory, format::section::docids, encode_docids());
+		detail::write_docids(sink, memory, docids_);
 		keys_.finish(sink);
 		stored_.finish(sink);
-		std::string stats;
-		format::put<std::uint64_t>(stats, inverted_.doc_count());
-		format::put<std::uint64_t>(stats, inverted_.total_length());
-		format::put<std::uint32_t>(stats, inverted_.min_length());
-		format::put<std::uint32_t>(stats, inverted_.max_length());
-		format::put<std::uint32_t>(stats, inverted_.max_positions());
-		sink.write(format::section::stats, stats);
-		counting_output& o = sink.out();
-		o.align(format::section_alignment);
-
-		format::footer f;
-		f.toc_offset = o.size();
-		std::string toc_bytes = format::encode_toc(sink.toc());
-		f.toc_length = toc_bytes.size();
-		f.toc_crc = hashes::crc32c(toc_bytes.data(), toc_bytes.size());
-		f.doc_count = std::uint32_t(inverted_.doc_count());
-		f.min_docid = docids_.empty() ? 0 : *std::min_element(docids_.begin(), docids_.end());
-		f.max_docid = docids_.empty() ? 0 : *std::max_element(docids_.begin(), docids_.end());
-		o.write(toc_bytes);
-		o.write(format::encode_footer(f));
+		detail::finish_segment(sink, docids_, inverted_.legacy_stats());
 	}
-
-	std::string encode_docids() const { return docids::encode(docids_, memory); }
 
 	inverted_builder inverted_;
 	keys_builder keys_;

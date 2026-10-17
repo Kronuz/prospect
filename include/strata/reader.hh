@@ -85,6 +85,7 @@ struct live_bits {
 struct docids_section {};
 struct inverted_plugin;
 struct keys_plugin;
+struct merge_context;
 struct stored_plugin;
 using search_layout_12 = layout<inverted_plugin, docids_section, keys_plugin, stored_plugin>;
 
@@ -351,6 +352,34 @@ struct inverted_plugin {
 		std::string_view postings_bytes() const noexcept { return postings_.bytes; }
 		std::string_view positions_bytes() const noexcept { return positions_.bytes; }
 		const termdict::reader& dictionary() const noexcept { return *dict_; }
+
+		// Every term in order with its info (impacts left empty below 128 postings), pulled
+		// one at a time, for k-way merges. Neither copied nor moved.
+		class term_cursor {
+		public:
+			explicit term_cursor(const reader& r) : r_(&r), c_(r.dictionary()) {}
+			term_cursor(const term_cursor&) = delete;
+			term_cursor& operator=(const term_cursor&) = delete;
+			// Moves to the next term; false past the last.
+			bool next() {
+				try {
+					if (!c_.next()) { return false; }
+					info_ = format::decode_term_info(c_.value(), run_);
+				} catch (const termdict::corrupt&) {
+					corrupt("terms checksum");
+				}
+				if (info_.df > r_->doc_count()) { corrupt("document frequency"); }
+				return true;
+			}
+			std::string_view term() const noexcept { return c_.key(); }
+			const format::term_info& info() const noexcept { return info_; }
+
+		private:
+			const reader* r_;
+			termdict::reader::cursor c_;
+			format::term_run run_;
+			format::term_info info_;
+		};
 		std::uint64_t doc_count() const noexcept { return doc_count_; }
 
 		// Every byte of the sections checked on first read.
@@ -384,6 +413,8 @@ struct inverted_plugin {
 		std::uint32_t max_positions_ = 0, lengths_crc_ = 0;
 		std::uint8_t length_width_ = 0, postings_shift_ = 0;
 	};
+	// L6: rebuilds the plugin's sections for a merge's output (merge.hh).
+	static built merge(const merge_context& m, std::span<const reader* const> in, section_sink& sink);
 };
 
 // Versions and the key filter.
@@ -481,6 +512,8 @@ struct keys_plugin {
 		std::optional<fusefilter::filter8_view> filter_;
 		std::uint64_t doc_count_;
 	};
+	// L6: rebuilds the plugin's sections for a merge's output (merge.hh).
+	static built merge(const merge_context& m, std::span<const reader* const> in, section_sink& sink);
 };
 
 // Stored records in zstd frames.
@@ -597,6 +630,8 @@ struct stored_plugin {
 		section_handle stored_;
 		std::uint64_t doc_count_;
 	};
+	// L6: rebuilds the plugin's sections for a merge's output (merge.hh).
+	static built merge(const merge_context& m, std::span<const reader* const> in, section_sink& sink);
 };
 
 // --- documents (L10) --------------------------------------------------------------------
@@ -779,30 +814,10 @@ public:
 	template <class F>
 	void scan_dictionary(std::string_view from, F&& f) const { reader<inverted_plugin>().scan_dictionary(from, std::forward<F>(f)); }
 
-	// Every term in order with its info (impacts left empty below 128 postings), pulled one
-	// at a time; scan_terms as a cursor, for k-way merges. Neither copied nor moved.
-	class term_cursor {
+	// The inverted reader's term cursor over this segment.
+	class term_cursor : public inverted_plugin::reader::term_cursor {
 	public:
-		explicit term_cursor(const basic_segment& seg) : seg_(&seg), c_(seg.dictionary()) {}
-		// Moves to the next term; false past the last.
-		bool next() {
-			try {
-				if (!c_.next()) { return false; }
-				info_ = format::decode_term_info(c_.value(), run_);
-			} catch (const termdict::corrupt&) {
-				corrupt("terms checksum");
-			}
-			if (info_.df > seg_->doc_count()) { corrupt("document frequency"); }
-			return true;
-		}
-		std::string_view term() const noexcept { return c_.key(); }
-		const format::term_info& info() const noexcept { return info_; }
-
-	private:
-		const basic_segment* seg_;
-		termdict::reader::cursor c_;
-		format::term_run run_;
-		format::term_info info_;
+		explicit term_cursor(const basic_segment& seg) : inverted_plugin::reader::term_cursor(seg.template reader<inverted_plugin>()) {}
 	};
 
 private:
