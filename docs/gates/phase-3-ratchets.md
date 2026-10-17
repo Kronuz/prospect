@@ -220,8 +220,12 @@ at 06:57:58). T3 misses at 6.6×. Bisection recounted every term's degree on eac
 iteration, three passes over the rows. Updating the degrees of swapped documents only
 (`1698c3f`, with the stored-record spill of `956ec8b`) takes the merge to 2,678 s, 1.46×
 faster, with byte-identical output (peak RSS 5.88 GB, 4.9 GB written; informational: the
-host compiled at low priority meanwhile). T3 is then 4.5×. `reorder_threads` (`7a4afca`)
-is next; whether Lucene's reorderer ran on more than one thread here is to be confirmed.
+host compiled at low priority meanwhile). T3 is then 4.5×. With `reorder_threads` at 8
+(`7a4afca`, at `c80996b`) the merge takes 845.9 s, at 355% CPU and 6.03 GB peak RSS, with
+output byte-identical to the one-thread run's. Lucene's reorderer runs on more than one
+thread: sampled every 5 s from `/proc` during a second keyed `-bp` build's force merge (652
+s that run), its CPU averages 177%, with a fifth of the samples near 300%. T3 is 1.30× to
+1.42× (against 652 s and 595 s), measured under a strict hold.
 
 The whole index passes (0.98×). Two sections miss: postings at 1.02× and the term
 dictionary at 1.36×. P12 brought the dictionary to 0.992× of Lucene's on an unkeyed
