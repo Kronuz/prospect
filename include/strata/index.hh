@@ -1106,9 +1106,11 @@ private:
 				merge_file out(*file, ctx, job, stop);
 				merge_output sink(out, used, chunk);
 				std::vector<merge_ref> order;
-				if (job.reorder) {
-					merge_scratch forward(ctx, job, used, stop, chunk, index_detail::forward_name(job.id));
-					order = strata::reorder::order(sources, forward, ctx.reorder, &stop, &job.memory);
+				if constexpr (order_source<Layout>::exists) {
+					if (job.reorder) {
+						merge_scratch forward(ctx, job, used, stop, chunk, index_detail::forward_name(job.id));
+						order = order_source<Layout>::order(sources, forward, ctx.reorder, &stop, &job.memory);
+					}
 				}
 				{
 					std::optional<merge_scratch> records;

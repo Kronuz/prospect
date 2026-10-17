@@ -236,3 +236,17 @@ inline std::vector<merge_ref> order(std::span<const merge_source> sources, scrat
 }
 
 }  // namespace strata::reorder
+
+namespace strata {
+
+// Format 12's order source: bisection over the inverted plugin's postings (D4).
+template <>
+struct order_source<search_layout_12> {
+	static constexpr bool exists = true;
+	static std::vector<merge_ref> order(std::span<const merge_source> sources, scratch& file, const reorder::settings& set, const task::cancel_token* cancel,
+		flush_charge* memory) {
+		return reorder::order(sources, file, set, cancel, memory);
+	}
+};
+
+}  // namespace strata

@@ -214,6 +214,13 @@ inline built stored_plugin::merge(const merge_context& m, std::span<const reader
 	return {1, {}};
 }
 
+// Where a reordering merge's order comes from (L6, reordering review P1-R4 (d)): a layout
+// names at most one source, which the core calls before any plugin's merge. None by default.
+template <class Layout>
+struct order_source {
+	static constexpr bool exists = false;
+};
+
 namespace detail {
 
 // The core of a merge (L6) over a layout: the plan, then each layout entry in order.
