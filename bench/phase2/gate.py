@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """Phase 2 query gate over harness trials (BENCHMARKS rule 3, Phase 2 review G5).
 
-  gate.py [--md] [--target X] [--strata NAME] TRIAL [TRIAL...]
+  gate.py [--md] [--target X] [--strata NAME] [--baseline FILE] TRIAL [TRIAL...]
                                                     TRIAL: RESULTS_JSON[+RESULTS_JSON...]
+
+--baseline fills in, from baseline.py's cached file, every engine a trial did not run. The
+anchor engine must be in both the trials and the baseline; its times per command and class
+must stay within the baseline's drift (3%) by geometric mean, or the row is marked DRIFT
+and passes nothing.
 
 --strata names the engine scored as strata (e.g. strata-merged); the default is strata.
 
@@ -48,6 +53,36 @@ def load(trial, strata="strata"):
             for e, qs in per.items():
                 merged[cmd]["strata" if e == strata else e] += qs
     return merged
+
+
+def with_baseline(r, base):
+    """r with the baseline's engines filled in where r has none, per command."""
+    for cmd, per in base["results"].items():
+        if cmd not in r:
+            continue
+        for e, qs in per.items():
+            if e not in r[cmd]:
+                r[cmd][e] = qs
+    return r
+
+
+def anchor_drift(r, base):
+    """{(cmd, tag): night / cached} for the anchor, by geometric mean over shared queries."""
+    anchor = base["baseline"]["anchor"]
+    out = {}
+    for cmd, per in r.items():
+        if anchor not in per or anchor not in base["results"].get(cmd, {}):
+            continue
+        cached = {q["query"]: min(q["duration"]) for q in base["results"][cmd][anchor]}
+        by = defaultdict(list)
+        for q in per[anchor]:
+            if q["duration"] and q["query"] in cached:
+                for tag in q["tags"]:
+                    if ":" not in tag:
+                        by[tag].append((min(q["duration"]), cached[q["query"]]))
+        for tag, pairs in by.items():
+            out[(cmd, tag)] = geo(pairs)
+    return out
 
 
 def run_floor(r):
@@ -144,12 +179,32 @@ def main(argv):
     md = "--md" in argv
     target = float(argv[argv.index("--target") + 1]) if "--target" in argv else None
     strata = argv[argv.index("--strata") + 1] if "--strata" in argv else "strata"
+    base = None
+    if "--baseline" in argv:
+        with open(argv[argv.index("--baseline") + 1]) as f:
+            base = json.load(f)
     skip = set()
-    for flag in ("--target", "--strata"):
+    for flag in ("--target", "--strata", "--baseline"):
         if flag in argv:
             skip |= {argv.index(flag), argv.index(flag) + 1}
     paths = [a for i, a in enumerate(argv) if a != "--md" and i not in skip]
     results = [load(p, strata) for p in paths]
+    drift = {}
+    if base:
+        anchor, limit = base["baseline"]["anchor"], base["baseline"]["drift"]
+        if not any(anchor in per for r in results for per in r.values()):
+            sys.exit(f"gate: --baseline needs the anchor {anchor} in the trials")
+        for r in results:
+            for key, ratio in anchor_drift(r, base).items():
+                drift.setdefault(key, []).append(ratio)
+        drift = {k: statistics.median(v) for k, v in drift.items()}
+        bad = {k: v for k, v in drift.items() if abs(v - 1) > limit}
+        print(
+            f"baseline {base['baseline']['made']}, anchor {anchor}: "
+            + (f"{len(bad)} of {len(drift)} classes drift past {limit:.0%}" if bad else f"within {limit:.0%} in all {len(drift)} classes")
+        )
+        drift = {k: abs(v - 1) > limit for k, v in drift.items()}
+        results = [with_baseline(r, base) for r in results]
     floors = [run_floor(r) for r in results]
     floor = min(floors)
     trials = [trial(r, floor) for r in results]
@@ -199,6 +254,8 @@ def main(argv):
             )
             if target is not None:
                 verdict = "FAIL" if sub[2] > target else ""
+            if drift.get((cmd, tag)):
+                verdict = "DRIFT"
             flag = "floor>1/2" if any(r["flag"] for r in rows) else ""
             n = max(r["n"] for r in rows)
             if md:
@@ -210,7 +267,7 @@ def main(argv):
 
                 print(
                     f"| `{cmd}` | {tag} | {n} | {len(rows)} | {col('strata')} | {col('lucene-10.4.0')} | {col('lucene-10.4.0-bp')} | {col('tantivy-0.26')} | {col(XAPIAN)} | {col(PISA)} "
-                    f"| {raw[0]:.2f}× [{raw[1]:.2f}–{raw[2]:.2f}] | {sub[0]:.2f}× [{sub[1]:.2f}–{sub[2]:.2f}] {flag} | {x} | {px} |"
+                    f"| {raw[0]:.2f}× [{raw[1]:.2f}–{raw[2]:.2f}] | {sub[0]:.2f}× [{sub[1]:.2f}–{sub[2]:.2f}] {flag}{' DRIFT' if verdict == 'DRIFT' else ''} | {x} | {px} |"
                 )
             else:
                 x = f"  Xapian {xap[0]:.3f}x [{xap[1]:.3f}-{xap[2]:.3f}]" if xap else ""
