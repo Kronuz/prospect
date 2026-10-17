@@ -5,7 +5,9 @@
 # without document reordering (-bp); the faster sets the reference (BENCHMARKS.md). Units
 # with a result are skipped, so tools/vm/quiet_trials.sh can stop and restart the run.
 # Results in ~/bench/results/query-NAME.
-#   [ENGINES="strata tantivy-0.26"] query_trials.sh NAME [build]
+#   [ENGINES="strata tantivy-0.26"] [SETS="queries terms-stratified"] [TRIALS=5] query_trials.sh NAME [build]
+# SETS names query files in the harness directory (bench/sample_queries.py writes the quick
+# tier's samples there); TRIALS below 5 is the quick tier (BENCHMARKS.md, "Tiers").
 set -u
 name=${1:-run}
 mode=${2:-trials}
@@ -33,9 +35,10 @@ fi
 for e in "${engines[@]}"; do
 	[ -f "$out/index-$e.done" ] || { echo "no index for $e: run build first"; exit 1; }
 done
-for t in 1 2 3 4 5; do
+read -r -a sets <<< "${SETS:-queries terms-stratified}"
+for t in $(seq 1 "${TRIALS:-5}"); do
 	order=$(rotated $((t - 1)))
-	for set in queries terms-stratified; do
+	for set in "${sets[@]}"; do
 		unit=q$t-$set
 		[ -f "$out/$unit.json" ] && continue
 		echo "$(date +%T) $unit: $order"
