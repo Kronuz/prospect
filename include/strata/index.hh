@@ -1411,12 +1411,10 @@ private:
 		if (auto it = versions_.find(std::string(key)); it != versions_.end()) { return it->second; }
 		for (std::size_t i = segs_.size(); i-- > 0;) {
 			const auto& s = *segs_[i];
-			if (!s.seg.may_hold_key(key)) { continue; }
-			auto info = s.seg.term(key);
-			if (!info) { continue; }
-			postings_iterator it(s.seg, *info);
-			for (ordinal_t ord = it.next(); ord != no_more_docs; ord = it.next()) {
-				if (!((s.deleted[ord >> 6] >> (ord & 63)) & 1)) { return key_entry{s.seg.docid(ord), s.seg.version(ord)}; }
+			const auto& keys = s.seg.template reader<keys_plugin>();
+			if (!keys.may_hold(key)) { continue; }
+			if (const auto ord = keys.find(key, live_bits{s.deleted.data()}, s.seg.template deps<keys_plugin>())) {
+				return key_entry{s.seg.docid(*ord), keys.version(*ord)};
 			}
 		}
 		return std::nullopt;

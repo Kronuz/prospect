@@ -73,6 +73,14 @@ struct term_entry {
 
 template <class... Entries>
 struct layout {};
+template <class... Ts>
+struct type_list {};
+
+// A segment's live documents: a bit per ordinal set when deleted (null: none deleted).
+struct live_bits {
+	const std::uint64_t* deleted = nullptr;
+	bool live(ordinal_t o) const noexcept { return !deleted || !((deleted[o >> 6] >> (o & 63)) & 1); }
+};
 // Format 12 only: where the core's docids section sits between plugins in file order.
 struct docids_section {};
 struct inverted_plugin;
@@ -402,6 +410,13 @@ struct keys_plugin {
 		{format::section::pk_filter, section_rule::pinned, section_rule::optional},
 	};
 
+	// Format 12's keys are the inverted plugin's terms with the key prefix, so lookups read
+	// its reader, passed at each call (L3); no reader holds a sibling.
+	using depends_on = type_list<inverted_plugin>;
+	struct deps {
+		const inverted_plugin::reader& inverted;
+	};
+
 	class reader {
 	public:
 		explicit reader(const open_context& c) : versions_(c.section(format::section::versions).bytes), doc_count_(c.doc_count) {
@@ -422,11 +437,17 @@ struct keys_plugin {
 		void verify_all() const {}  // both sections are verified whole at open
 		// Whether the segment may hold a document with this key term: inside its key range
 		// and in its filter (false positives possible, false negatives not).
-		bool may_hold_key(std::string_view key) const {
+		bool may_hold(std::string_view key) const {
 			if (!filter_) { return false; }
 			if (key < min_ || key > max_) { return false; }
 			return filter_->contains(xxh64::hash(key));
 		}
+		// The first live ordinal holding key, if any.
+		std::optional<ordinal_t> find(std::string_view key, live_bits live, const deps& d) const;
+		// Calls f(key, ord) for every ordinal, live or not, of every key starting with
+		// `prefix`, in key order, until f returns false.
+		template <class F>
+		void scan(std::string_view prefix, const deps& d, F&& f) const;
 
 	private:
 		// versions: [min u64][width u8][packed bits]; exactly the bits doc_count needs, and no
@@ -689,6 +710,9 @@ public:
 	template <class P>
 	const auto& reader() const noexcept { return std::get<typename detail::reader_of<P>::type>(readers_); }
 	const core_segment& core() const noexcept { return core_; }
+	// What P's reader needs from the readers it depends on, built at each call (L3).
+	template <class P>
+	typename P::deps deps() const noexcept { return deps_of<P>(typename P::depends_on{}); }
 
 	// Core.
 	std::uint64_t min_docid() const noexcept { return core_.min_docid(); }
@@ -707,7 +731,7 @@ public:
 
 	// keys.
 	std::uint64_t version(ordinal_t ord) const { return reader<keys_plugin>().version(ord); }
-	bool may_hold_key(std::string_view key) const { return reader<keys_plugin>().may_hold_key(key); }
+	bool may_hold_key(std::string_view key) const { return reader<keys_plugin>().may_hold(key); }
 
 	// stored.
 	using stored_frame = stored_plugin::reader::stored_frame;
@@ -786,6 +810,19 @@ private:
 	static readers open(const core_segment& core) {
 		const open_context c{format::version, core.doc_count(), core};
 		return readers{typename detail::reader_of<Entries>::type(c)...};
+	}
+	template <class P, class... Ds>
+	typename P::deps deps_of(type_list<Ds...>) const noexcept {
+		static_assert(((index_of<Ds>() < index_of<P>()) && ...), "a plugin's dependencies come earlier in its layout");
+		return typename P::deps{reader<Ds>()...};
+	}
+	template <class T>
+	static constexpr std::size_t index_of() {  // sizeof...(Entries) when T is not in the layout
+		constexpr bool same[] = {std::is_same_v<T, Entries>...};
+		for (std::size_t i = 0; i < sizeof...(Entries); ++i) {
+			if (same[i]) { return i; }
+		}
+		return sizeof...(Entries);
 	}
 	template <class E>
 	void verify_all_of() const {
@@ -1408,6 +1445,30 @@ inline std::vector<format::impact> segment::tail_impacts(const format::term_info
 	postings_iterator it(*this, info);
 	for (ordinal_t d = it.next(); d != no_more_docs; d = it.next()) { pairs.push_back({it.wdf(), norm(d)}); }
 	return format::competitive(std::move(pairs));
+}
+
+inline std::optional<ordinal_t> keys_plugin::reader::find(std::string_view key, live_bits live, const deps& d) const {
+	const auto info = d.inverted.find_term(key);
+	if (!info) { return std::nullopt; }
+	postings_iterator it(d.inverted, *info);
+	for (ordinal_t ord = it.next(); ord != no_more_docs; ord = it.next()) {
+		if (live.live(ord)) { return ord; }
+	}
+	return std::nullopt;
+}
+
+template <class F>
+void keys_plugin::reader::scan(std::string_view prefix, const deps& d, F&& f) const {
+	d.inverted.scan_dictionary(prefix, [&](std::string_view term, std::string_view) {
+		if (!term.starts_with(prefix)) { return false; }
+		const auto info = d.inverted.find_term(term);
+		if (!info) { corrupt("term index"); }
+		postings_iterator it(d.inverted, *info);
+		for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
+			if (!f(term, o)) { return false; }
+		}
+		return true;
+	});
 }
 
 class positions_reader {

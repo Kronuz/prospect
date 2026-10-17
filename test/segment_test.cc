@@ -492,6 +492,25 @@ int main() {
 			std::size_t false_positives = 0;
 			for (int i = 0; i < 10000; ++i) { false_positives += s.may_hold_key("Qk" + std::to_string(r()) + "x"); }
 			CHECK(false_positives < 200);  // about 1/256 for an 8-bit filter
+			// The keys reader's find and scan (L3), through call-time deps.
+			const auto& kr = s.reader<strata::keys_plugin>();
+			const auto deps = s.deps<strata::keys_plugin>();
+			std::vector<std::uint64_t> deleted((docs + 63) / 64, 0);
+			deleted[0] |= 1;
+			CHECK(kr.find(keys[0], {}, deps) == strata::ordinal_t(0));
+			CHECK(!kr.find(keys[0], {deleted.data()}, deps));
+			CHECK(!kr.find("Qk", {}, deps));
+			std::vector<std::pair<std::string, strata::ordinal_t>> seen, expect;
+			for (std::size_t d = 0; d < docs; ++d) { expect.push_back({keys[d], strata::ordinal_t(d)}); }
+			std::sort(expect.begin(), expect.end());
+			kr.scan("Qk", deps, [&](std::string_view k, strata::ordinal_t o) {
+				seen.push_back({std::string(k), o});
+				return true;
+			});
+			CHECK(seen == expect);
+			std::size_t calls = 0;
+			kr.scan("Qk", deps, [&](std::string_view, strata::ordinal_t) { return ++calls < 2; });
+			CHECK(calls == std::min<std::size_t>(docs, 2));
 		}
 		// A docid that does not increase is refused at add.
 		strata::segment_writer w;
