@@ -17,7 +17,14 @@ here=$(cd "$(dirname "$0")" && pwd)
 log=${STRATA_TRIALS_LOG:-$here/../../.scratch/quiet-trials.log}
 load() { sysctl -n vm.loadavg | awk '{print $2}'; }
 above() { awk -v l="$1" -v m="$LIMIT" 'BEGIN { exit !(l > m) }'; }
+# Other agents' work stays off the host while the trials hold it (cpp-libraries/tools/quiet.sh).
+quiet_sh=${QUIET_SH:-$here/../../../cpp-libraries/tools/quiet.sh}
+[ -x "$quiet_sh" ] || quiet_sh=:
+trap '"$quiet_sh" release strata-trials' EXIT
 for attempt in $(seq 1 200); do
+	"$quiet_sh" release strata-trials  # its own hold must not block its next attempt
+	"$quiet_sh" wait
+	"$quiet_sh" hold strata-trials 720 "strata: gate VM trials ($TRIALS)" $$
 	quiet_since=$(date +%s)
 	while true; do
 		if above "$(load)"; then quiet_since=$(date +%s); fi
