@@ -193,8 +193,33 @@ section); Lucene 10.4.0 indexed with `KEYED=1` through the single-thread builder
 
 **Against keyed Lucene with reordering** (night of 2026-10-16, the one-thread builder with
 `BP=1`, `results/keyed-bp-n2.sizes`): 2,542.5 MB in all; `.doc` 833.7 MB, `.pos` 1,556.1 MB,
-terms 75.8 MB, stored 51.7 MB. That build is PLAN's whole-index reference, and strata is
-1.09× it today; `reordering.md` (T1) projects 0.986× with P1, postings still 1.02×.
+terms 75.8 MB, stored 51.7 MB. That build is PLAN's whole-index reference.
+
+**strata with reordering** (P1 at `4594cce`, the 16-segment 5M index force-merged with
+reordering on the gate VM, 2026-10-17; `strata_engine sections`):
+
+| Section | strata, docid order | strata, reordered | Lucene `-bp`, keyed | Ratio |
+|---|---:|---:|---:|---:|
+| Whole index | 2,770.0 MB | 2,539.3 MB | 2,542.5 MB | 0.999× |
+| Postings (`.doc`) | 1,007.9 MB | 845.6 MB | 833.7 MB | 1.014× |
+| Positions (`.pos`) | 1,631.2 MB | 1,525.0 MB | 1,556.1 MB | 0.980× |
+| Terms and term index | 92.0 MB | 91.2 MB | 75.8 MB | 1.20× |
+| Stored | 15.5 MB | 24.9 MB | 51.7 MB | 0.48× |
+| Docids (the permuted map) | — | 29.2 MB | — | |
+
+The whole index passes against keyed `-bp`. Postings (1.014×) and the term dictionary
+(1.20×) miss and are carried to format 13. The scale check passes: the docid-ordered and
+the reordered indexes give byte-identical `strata_engine dump` output (`aec8d11`, 5,772
+lines: the 962 gate queries at k = 10, 100, and 1,000 under both schemes, docids, `%a`
+scores, and counts).
+
+**The merge's cost** (T3): the forced merge with reordering takes 3,910 s (peak RSS 5.60 GB,
+4.7 GB written) against 404 s in docid order (5.42 GB, 4.4 GB). Keyed Lucene `-bp`'s force
+merge, reordering included, takes 595 s (its log's "Merge" at 06:48:03 to the build's end
+at 06:57:58). T3 misses at 6.6×. Bisection recounts every term's degree on each
+iteration, three passes over the rows; updating the degrees of swapped documents only, as
+the papers do, is the first change, then `reorder_threads`. Whether Lucene's reorderer ran
+on more than one thread here is to be confirmed.
 
 The whole index passes (0.98×). Two sections miss: postings at 1.02× and the term
 dictionary at 1.36×. P12 brought the dictionary to 0.992× of Lucene's on an unkeyed
@@ -304,7 +329,7 @@ gate records their ratios and gaps, and Phase 4's gate does not pass while they 
 | Queries before merging (baselines unmerged at equal memory) | Owed: calibration on the full corpus, then a scheduled night | — |
 | Indexing, 1 and 8 threads, keyed (T4), five trials at equal memory | Owed: calibrated at 5M (a 2,056 MB budget peaks at 4,608 MB against one-thread Lucene's 4,593 MB, 0.3% over; `results/calibrate-n2-5m.out`); the trials wait for P1, since C2 records the rows at a commit that includes it | — |
 | Write amplification against Lucene (T3), append-only and replace-heavy | Owed: rescheduled with T4 | — |
-| Memory (serving and indexing peaks), disk after a full merge, per section | Disk: whole index 0.98× keyed Lucene, 1.09× keyed `-bp` (miss, carried to format 13 with P1's projection); postings 1.02× and term dictionary 1.36× miss. Serving memory 1.05× Tantivy (miss; anonymous 16 MB against Phase 2's 3 MB); indexing peaks with T4 | "Disk after a full merge" and "Serving memory" below |
+| Memory (serving and indexing peaks), disk after a full merge, per section | Disk with P1: whole index 0.999× keyed `-bp` (pass); postings 1.014× and terms 1.20× carried to format 13. Serving memory 1.05× Tantivy (miss; anonymous 16 MB against Phase 2's 3 MB); indexing peaks with T4 | "Disk after a full merge" and "Serving memory" below |
 | `verify` and `parity` on multi-segment indexes | Pass before and after merging; `parity` with deletes owed | "Verify and parity" below |
 | Coverage targets and the test-parity inventory's Phase 3 rows | Owed: `cost()` checked directly (`cost_test`); scores against Lucene's own, document limits, and nested WAND or C7's cost model remain; reads while a writer commits need a shared-ownership reader (Phase 3R) | `docs/testing/parity.md` |
 | The rows on FreeBSD and arm64 (before Phase 3R) | Owed: FreeBSD VM; an arm64 host | — |
