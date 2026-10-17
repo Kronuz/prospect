@@ -60,11 +60,11 @@ static transaction tx(std::vector<operation> ops) {
 static std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> contents(const strata::index& ix) {
 	std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> out;
 	for (const auto& s : ix.segments()) {
-		for (ordinal_t o = 0; o < s.seg->doc_count(); ++o) {
+		for (ordinal_t o = 0; o < s.seg->core().doc_count(); ++o) {
 			if (!s.live(o)) { continue; }
-			const auto docid = s.seg->docid(o);
+			const auto docid = s.seg->core().docid(o);
 			if (out.count(docid)) { std::fprintf(stderr, "two live copies of docid %llu\n", (unsigned long long)docid); }
-			out[docid] = {s.seg->version(o), s.seg->stored(o)};
+			out[docid] = {s.seg->get<strata::keys_plugin>().version(o), s.seg->get<strata::stored_plugin>().stored(o)};
 		}
 	}
 	return out;
@@ -214,7 +214,7 @@ int main() {
 		ix = strata::index::open(io, keyed);
 		auto df = [&] {
 			std::uint64_t n = 0;
-			for (const auto& seg : ix.segments()) { if (auto t = seg.seg->term(body)) { n += t->df; } }
+			for (const auto& seg : ix.segments()) { if (auto t = seg.seg->get<strata::inverted_plugin>().term(body)) { n += t->df; } }
 			return n;
 		};
 		CHECK(ix.find_key(key) == kv(1, 1) && ix.segments().size() == 2 && df() == 2);
@@ -373,7 +373,7 @@ int main() {
 		fs.set_capacity(~std::uint64_t(0));
 		ix.commit();
 		std::size_t live = 0;
-		for (const auto& s : ix.segments()) { for (ordinal_t o = 0; o < s.seg->doc_count(); ++o) { live += s.live(o); } }
+		for (const auto& s : ix.segments()) { for (ordinal_t o = 0; o < s.seg->core().doc_count(); ++o) { live += s.live(o); } }
 		CHECK(live == 2 && contents(ix).size() == 2);
 	}
 	// Merges under faults: ENOSPC leaves the index as it was and the merge succeeds once

@@ -189,7 +189,7 @@ int merge(const std::string& dir) {
 	ix.force_merge(1);
 	ix.commit();
 	const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-	const bool ordered = ix.segments().size() != 1 || ix.segments()[0].seg->docid_ordered();
+	const bool ordered = ix.segments().size() != 1 || ix.segments()[0].seg->core().docid_ordered();
 	std::cerr << "merged: " << ix.segments().size() << " segments, " << (ordered ? "docid order" : "reordered") << ", " << secs << " s\n";
 	return 0;
 }
@@ -229,7 +229,7 @@ int terms(const std::string& dir) {
 	residency::file file;
 	strata::segment seg = open(dir, file);
 	std::ios::sync_with_stdio(false);
-	seg.scan_terms([](std::string_view key, const strata::format::term_info& info) {
+	seg.get<strata::inverted_plugin>().scan_terms([](std::string_view key, const strata::format::term_info& info) {
 		std::cout << key << '\t' << info.df << '\n';
 		return true;
 	});
@@ -242,7 +242,7 @@ int sections(const std::string& dir) {
 	strata::segment seg = open(dir, file);
 	static constexpr const char* names[] = {"header", "terms", "term_index", "postings", "positions", "lengths",
 		"stored", "docids", "stats", "norms", "versions", "pk_filter"};
-	for (const auto& e : seg.sections()) {
+	for (const auto& e : seg.core().sections()) {
 		const auto k = std::size_t(e.kind);
 		std::cout << (k < std::size(names) ? names[k] : "unknown") << '\t' << e.length << '\n';
 	}
@@ -260,7 +260,7 @@ int dictstats(const std::string& dir) {
 	std::uint64_t terms = 0, single = 0, absolute = 0, keys = 0, values = 0, flags = 0, df = 0, cf = 0, ordinal = 0, impacts = 0;
 	std::uint64_t postings_length = 0, postings_offset = 0, positions_length = 0, positions_offset = 0;
 	strata::format::term_run run;
-	seg.dictionary().scan("", [&](std::string_view key, std::string_view value) {
+	seg.get<strata::inverted_plugin>().dictionary().scan("", [&](std::string_view key, std::string_view value) {
 		const auto t = strata::format::decode_term_info(value, run);
 		const bool abs = t.flags & strata::format::absolute;
 		// The cursors an absolute entry stored: where its own bytes start.
@@ -292,7 +292,7 @@ int dictstats(const std::string& dir) {
 		return true;
 	});
 	std::uint64_t section_terms = 0, section_index = 0;
-	for (const auto& e : seg.sections()) {
+	for (const auto& e : seg.core().sections()) {
 		if (e.kind == strata::format::section::terms) { section_terms = e.length; }
 		if (e.kind == strata::format::section::term_index) { section_index = e.length; }
 	}
@@ -324,7 +324,7 @@ int dictdump(const std::string& dir, const std::string& path) {
 	std::FILE* out = std::fopen(path.c_str(), "wb");
 	if (!out) { return 1; }
 	auto u64 = [&](std::uint64_t v) { std::fwrite(&v, 8, 1, out); };
-	seg.scan_terms([&](std::string_view key, const strata::format::term_info& t) {
+	seg.get<strata::inverted_plugin>().scan_terms([&](std::string_view key, const strata::format::term_info& t) {
 		u64(key.size());
 		std::fwrite(key.data(), 1, key.size(), out);
 		for (std::uint64_t v : {std::uint64_t(t.flags), std::uint64_t(t.df), t.cf, t.postings, t.positions, std::uint64_t(t.single_wdf), t.postings_length, t.positions_length,
@@ -431,7 +431,7 @@ int verify_index(const std::string& dir) {
 				if (!all) { continue; }
 				for (auto d = all->next(); d != strata::no_more_docs; d = all->next()) {
 					if (sv.deleted && ((*sv.deleted)[d >> 6] >> (d & 63)) & 1) { continue; }
-					scan.push_back({sv.seg->docid(d), all->score()});
+					scan.push_back({sv.seg->core().docid(d), all->score()});
 				}
 			}
 			std::sort(scan.begin(), scan.end(), [](const auto& a, const auto& b) { return a.score != b.score ? a.score > b.score : a.docid < b.docid; });

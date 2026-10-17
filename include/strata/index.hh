@@ -553,17 +553,19 @@ public:
 		for (const auto& sp : segs_) {
 			const auto& s = *sp;
 			auto dead = [&](ordinal_t o) { return (s.deleted[o >> 6] >> (o & 63)) & 1; };
-			for (ordinal_t o = 0; o < s.seg.doc_count(); ++o) {
-				if (!dead(o)) { document_record(s.seg.docid(o), s.seg.version(o), s.seg.length(o), s.seg.stored(o)); }
+			const core_segment& core = s.seg.core();
+			const auto& inverted = s.seg.template get<inverted_plugin>();
+			for (ordinal_t o = 0; o < core.doc_count(); ++o) {
+				if (!dead(o)) { document_record(core.docid(o), s.seg.template get<keys_plugin>().version(o), inverted.length(o), s.seg.template get<stored_plugin>().stored(o)); }
 			}
-			s.seg.scan_terms([&](std::string_view term, const format::term_info& info) {
-				postings_iterator it(s.seg, info);
-				positions_reader pr(s.seg, info);
+			inverted.scan_terms([&](std::string_view term, const format::term_info& info) {
+				postings_iterator it(inverted, info);
+				positions_reader pr(inverted, info);
 				const bool is_key = !m_.key_prefix.empty() && term.starts_with(m_.key_prefix);
 				for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
 					if (dead(o)) { continue; }
 					if (is_key && !keys.insert(std::string(term)).second) { throw std::logic_error("strata: digest: key invariant"); }
-					posting_record(s.seg.docid(o), term, it.wdf(), pr.read(it));
+					posting_record(core.docid(o), term, it.wdf(), pr.read(it));
 				}
 				return true;
 			});
@@ -655,8 +657,8 @@ public:
 					files::live_docs l;
 					l.segment = mine.id;
 					l.generation = m_.next_live++;
-					l.doc_count = s->seg.doc_count();
-					for (ordinal_t o = 0; o < s->seg.doc_count(); ++o) {
+					l.doc_count = s->seg.core().doc_count();
+					for (ordinal_t o = 0; o < s->seg.core().doc_count(); ++o) {
 						if ((s->deleted[o >> 6] >> (o & 63)) & 1) { l.deleted.push_back(o); }
 					}
 					l.live_count = s->ref.live_count;
@@ -712,7 +714,7 @@ private:
 				if (merging(*s) || s->damaged) { continue; }
 				std::uint64_t deleted = 0;
 				for (auto w : s->deleted) { deleted += std::uint64_t(std::popcount(w)); }
-				c.push_back({s->ref.id, s->ref.size, s->seg.doc_count(), deleted});
+				c.push_back({s->ref.id, s->ref.size, s->seg.core().doc_count(), deleted});
 			}
 			const auto merges = find(std::move(c));
 			if (merges.empty()) { return; }
@@ -768,9 +770,9 @@ private:
 		bool deletes_dirty = false;          // deletes since its live-docs generation
 		bool damaged = false;                // a background merge found it corrupt; heal() clears it
 		std::unique_ptr<kronuz::journal::File> unsynced;  // flushed, awaiting the commit's sync
-		open_segment(files::segment_ref r, std::string b) : ref(r), owned(std::move(b)), seg(owned), deleted((seg.doc_count() + 63) / 64, 0) {}
+		open_segment(files::segment_ref r, std::string b) : ref(r), owned(std::move(b)), seg(owned), deleted((seg.core().doc_count() + 63) / 64, 0) {}
 		open_segment(files::segment_ref r, std::shared_ptr<const kronuz::journal::Mapping> m)
-			: ref(r), mapping(std::move(m)), seg(mapping->bytes()), deleted((seg.doc_count() + 63) / 64, 0) {}
+			: ref(r), mapping(std::move(m)), seg(mapping->bytes()), deleted((seg.core().doc_count() + 63) / 64, 0) {}
 		std::string_view bytes() const noexcept { return mapping ? mapping->bytes() : std::string_view(owned); }
 	};
 	// A background merge. The writer sets everything above `plan` before handing it to the
@@ -875,7 +877,7 @@ private:
 		std::uint64_t live_docs = 0;
 		for (const auto& s : segs_) {
 			if (std::find(ids.begin(), ids.end(), s->ref.id) == ids.end() || merging(*s) || s->damaged) { continue; }
-			const std::uint64_t docs = s->seg.doc_count();
+			const std::uint64_t docs = s->seg.core().doc_count();
 			job->sources.push_back(s);
 			job->deleted.push_back(s->deleted);
 			job->reserved += s->ref.size + 18 * docs + 16 * (docs / format::block + 1);
@@ -1079,7 +1081,7 @@ private:
 			for (std::size_t k = 0; k < job.sources.size(); ++k) {
 				std::uint64_t dead = 0;
 				for (auto w : job.deleted[k]) { dead += std::uint64_t(std::popcount(w)); }
-				live += job.sources[k]->seg.doc_count() - dead;
+				live += job.sources[k]->seg.core().doc_count() - dead;
 				estimate += job.sources[k]->ref.size;
 			}
 			if (live == 0) {  // nothing to write: publication drops the sources
@@ -1114,7 +1116,7 @@ private:
 				}
 				{
 					std::optional<merge_scratch> records;
-					if (!order.empty() || (sources.size() == 1 && !sources[0].seg->docid_ordered())) {
+					if (!order.empty() || (sources.size() == 1 && !sources[0].seg->core().docid_ordered())) {
 						records.emplace(ctx, job, used, stop, chunk, index_detail::records_name(job.id));
 					}
 					merge_spill positions(ctx, job, used, stop, chunk);
@@ -1349,7 +1351,7 @@ private:
 	std::uint64_t commit_allowance() const {
 		std::uint64_t n = manifest_bytes_ + 256;
 		for (const auto& s : segs_) {
-			if (s->deletes_dirty) { n += 96 + (std::uint64_t(s->seg.doc_count()) + 7) / 8; }
+			if (s->deletes_dirty) { n += 96 + (std::uint64_t(s->seg.core().doc_count()) + 7) / 8; }
 		}
 		if (meta_dirty_ || !m_.meta.generation) {
 			n += 96;
@@ -1403,7 +1405,7 @@ private:
 		if (auto it = buffer_docids_.find(docid); it != buffer_docids_.end()) { return {true, it->second, 0, true}; }
 		for (std::size_t i = segs_.size(); i-- > 0;) {
 			const auto& s = *segs_[i];
-			if (auto ord = s.seg.ordinal_of(docid); ord && !((s.deleted[*ord >> 6] >> (*ord & 63)) & 1)) { return {true, i, *ord, false}; }
+			if (auto ord = s.seg.core().ordinal_of(docid); ord && !((s.deleted[*ord >> 6] >> (*ord & 63)) & 1)) { return {true, i, *ord, false}; }
 		}
 		return {};
 	}
@@ -1413,10 +1415,10 @@ private:
 		if (auto it = versions_.find(std::string(key)); it != versions_.end()) { return it->second; }
 		for (std::size_t i = segs_.size(); i-- > 0;) {
 			const auto& s = *segs_[i];
-			const auto& keys = s.seg.template reader<keys_plugin>();
+			const auto& keys = s.seg.template get<keys_plugin>();
 			if (!keys.may_hold(key)) { continue; }
 			if (const auto ord = keys.find(key, live_bits{s.deleted.data()}, s.seg.template deps<keys_plugin>())) {
-				return key_entry{s.seg.docid(*ord), keys.version(*ord)};
+				return key_entry{s.seg.core().docid(*ord), keys.version(*ord)};
 			}
 		}
 		return std::nullopt;
@@ -1481,7 +1483,7 @@ private:
 
 	// Removes a live copy; a version-map entry naming its docid goes with it.
 	void remove_copy(const location& at) {
-		const std::uint64_t docid = at.in_buffer ? buffer_[at.segment].docid : segs_[at.segment]->seg.docid(at.ord);
+		const std::uint64_t docid = at.in_buffer ? buffer_[at.segment].docid : segs_[at.segment]->seg.core().docid(at.ord);
 		if (auto k = docid_keys_.find(docid); k != docid_keys_.end()) { set_key(std::string(k->second), std::nullopt); }
 		if (at.in_buffer) {
 			buffer_[at.segment].dead = true;
@@ -1638,7 +1640,7 @@ private:
 
 	std::uint64_t version_at(const location& at) const {
 		if (at.in_buffer) { return buffer_[at.segment].version; }
-		return segs_[at.segment]->seg.version(at.ord);
+		return segs_[at.segment]->seg.template get<keys_plugin>().version(at.ord);
 	}
 
 	void set_schema(std::uint64_t version) { m_.schema_version = version; }
@@ -1736,7 +1738,7 @@ private:
 	void commit_files() {
 		// A segment whose documents are all deleted leaves without a merge; retention frees
 		// its files.
-		std::erase_if(segs_, [](const auto& s) { return s->dead == s->seg.doc_count(); });
+		std::erase_if(segs_, [](const auto& s) { return s->dead == s->seg.core().doc_count(); });
 		// The manifest lists segments by increasing id, and open() refuses any other order:
 		// a regression fences before anything is written, whichever caller commits.
 		for (std::size_t i = 1; i < segs_.size(); ++i) {
@@ -1757,8 +1759,8 @@ private:
 				files::live_docs l;
 				l.segment = s->ref.id;
 				l.generation = m_.next_live++;
-				l.doc_count = s->seg.doc_count();
-				for (ordinal_t o = 0; o < s->seg.doc_count(); ++o) {
+				l.doc_count = s->seg.core().doc_count();
+				for (ordinal_t o = 0; o < s->seg.core().doc_count(); ++o) {
 					if ((s->deleted[o >> 6] >> (o & 63)) & 1) { l.deleted.push_back(o); }
 				}
 				l.live_count = l.doc_count - l.deleted.size();
@@ -1785,8 +1787,8 @@ private:
 		}
 		for (auto& s : segs_) {
 			if (!s->ref.live.generation) {
-				s->ref.live_count = s->seg.doc_count();
-				s->ref.live_length = s->seg.total_length();
+				s->ref.live_count = s->seg.core().doc_count();
+				s->ref.live_length = s->seg.template get<inverted_plugin>().total_length();
 			}
 		}
 		if (md) {
@@ -1804,7 +1806,7 @@ private:
 		for (const auto& s : segs_) {
 			next.segments.push_back(s->ref);
 			next.doc_count += s->ref.doc_count;
-			next.total_length += s->seg.total_length();
+			next.total_length += s->seg.template get<inverted_plugin>().total_length();
 			next.live_count += s->ref.live_count;
 			next.live_length += s->ref.live_length;
 		}
@@ -1828,8 +1830,8 @@ private:
 
 	std::uint64_t live_length(const open_segment& s) const {
 		std::uint64_t n = 0;
-		for (ordinal_t o = 0; o < s.seg.doc_count(); ++o) {
-			if (!((s.deleted[o >> 6] >> (o & 63)) & 1)) { n += s.seg.length(o); }
+		for (ordinal_t o = 0; o < s.seg.core().doc_count(); ++o) {
+			if (!((s.deleted[o >> 6] >> (o & 63)) & 1)) { n += s.seg.template get<inverted_plugin>().length(o); }
 		}
 		return n;
 	}
@@ -2088,7 +2090,7 @@ private:
 		if (view.size() != r.size) { throw corrupt_index("file size differs from the manifest: " + name); }
 		if (format::decode_footer(view).toc_crc != r.footer_crc) { throw corrupt_index("segment differs from its manifest entry"); }
 		auto s = mapped ? std::make_unique<open_segment>(r, std::move(mapped)) : std::make_unique<open_segment>(r, std::move(bytes));
-		if (s->seg.doc_count() != r.doc_count) { throw corrupt_index("segment document count"); }
+		if (s->seg.core().doc_count() != r.doc_count) { throw corrupt_index("segment document count"); }
 		if (whole) { s->seg.verify_all(); }
 		if (r.live.generation) {
 			const std::string lb = read_named(io, index_detail::live_name(r.id, r.live.generation), r.live.size);

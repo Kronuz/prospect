@@ -71,8 +71,8 @@ static double seconds_since(clock_type::time_point t) { return std::chrono::dura
 static std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> contents(const strata::index& ix) {
 	std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> out;
 	for (const auto& s : ix.segments()) {
-		for (ordinal_t o = 0; o < s.seg->doc_count(); ++o) {
-			if (s.live(o)) { out[s.seg->docid(o)] = {s.seg->version(o), std::string(s.seg->stored(o))}; }
+		for (ordinal_t o = 0; o < s.seg->core().doc_count(); ++o) {
+			if (s.live(o)) { out[s.seg->core().docid(o)] = {s.seg->get<strata::keys_plugin>().version(o), std::string(s.seg->get<strata::stored_plugin>().stored(o))}; }
 		}
 	}
 	return out;
@@ -540,7 +540,7 @@ static void damaged_source(std::size_t threads) {
 	const std::string name = index_detail::segment_name(victim);
 	{
 		const segment seg(fs.view(name));
-		for (const auto& e : seg.sections()) {
+		for (const auto& e : seg.core().sections()) {
 			if (e.kind == format::section::stored) { fs.add_media_fault(name, faultfs::media::bit_flip, e.offset + e.length / 2, e.offset + e.length / 2 + 1, 0); }
 		}
 	}

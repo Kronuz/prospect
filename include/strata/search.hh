@@ -53,7 +53,7 @@ struct statistics {
 	std::uint64_t doc_count = 0, total_length = 0;
 	statistics() = default;
 	statistics(std::uint64_t docs, std::uint64_t length) : doc_count(docs), total_length(length) {}
-	statistics(const segment& seg) : doc_count(seg.doc_count()), total_length(seg.total_length()) {}  // NOLINT: implicit by design
+	statistics(const inverted_plugin::reader& seg) : doc_count(seg.doc_count()), total_length(seg.total_length()) {}  // NOLINT: implicit by design
 	double average_length() const noexcept { return doc_count ? double(total_length) / double(doc_count) : 0.0; }
 };
 
@@ -253,7 +253,7 @@ private:
 	};
 	std::uint64_t docid(const entry& e) const {
 		if (e.seg == none) { return e.ord; }
-		if (!e.docid) { e.docid = segs_[e.seg]->docid(e.ord); }
+		if (!e.docid) { e.docid = segs_[e.seg]->core().docid(e.ord); }
 		return e.docid;
 	}
 	// Best first: by score, then by docid.
@@ -261,21 +261,21 @@ private:
 		const top_collector* c;
 		bool operator()(const entry& a, const entry& b) const {
 			if (a.score != b.score) { return a.score > b.score; }
-			if (a.seg == b.seg && (a.seg == none || c->segs_[a.seg]->docid_ordered())) { return a.ord < b.ord; }
+			if (a.seg == b.seg && (a.seg == none || c->segs_[a.seg]->core().docid_ordered())) { return a.ord < b.ord; }
 			const auto *sa = c->segs_[a.seg], *sb = c->segs_[b.seg];
-			if (sa->max_docid() < sb->min_docid()) { return true; }  // disjoint ranges: no docid read
-			if (sb->max_docid() < sa->min_docid()) { return false; }
+			if (sa->core().max_docid() < sb->core().min_docid()) { return true; }  // disjoint ranges: no docid read
+			if (sb->core().max_docid() < sa->core().min_docid()) { return false; }
 			return c->docid(a) < c->docid(b);
 		}
 	};
 	order better() const { return {this}; }
 	// Whether ordinal d of the current segment precedes the k-th hit by docid.
 	bool before_kth(ordinal_t d) const {
-		if (kth_.seg == cur_ && segs_[cur_]->docid_ordered()) { return d < kth_.ord; }
+		if (kth_.seg == cur_ && segs_[cur_]->core().docid_ordered()) { return d < kth_.ord; }
 		const segment* s = segs_[cur_];
-		if (s->max_docid() < kth_docid_) { return true; }
-		if (s->min_docid() > kth_docid_) { return false; }
-		return s->docid(d) < kth_docid_;
+		if (s->core().max_docid() < kth_docid_) { return true; }
+		if (s->core().min_docid() > kth_docid_) { return false; }
+		return s->core().docid(d) < kth_docid_;
 	}
 	void truncate() {
 		std::nth_element(hits.begin(), hits.begin() + std::ptrdiff_t(k - 1), hits.end(), better());
@@ -293,7 +293,7 @@ private:
 		if (cur_ == none) {
 			min_ = std::max(floor_, equal_bound(kth_.score));
 		} else {
-			min_ = std::max(floor_, segs_[cur_]->min_docid() > kth_docid_ ? kth_.score : std::nextafter(kth_.score, -std::numeric_limits<double>::infinity()));
+			min_ = std::max(floor_, segs_[cur_]->core().min_docid() > kth_docid_ ? kth_.score : std::nextafter(kth_.score, -std::numeric_limits<double>::infinity()));
 		}
 	}
 	std::vector<entry> hits;
@@ -309,10 +309,10 @@ using scorer_ptr = std::unique_ptr<scorer>;
 
 class term_scorer final : public scorer {
 public:
-	term_scorer(const segment& seg, const format::term_info& info, double boost = 1.0)
+	term_scorer(const inverted_plugin::reader& seg, const format::term_info& info, double boost = 1.0)
 		: term_scorer(seg, info, weight::bm25(seg, info.df, boost)) {}
 
-	term_scorer(const segment& seg, const format::term_info& info, const weight& w) : seg_(&seg), it_(seg, info), weight_(w) {
+	term_scorer(const inverted_plugin::reader& seg, const format::term_info& info, const weight& w) : seg_(&seg), it_(seg, info), weight_(w) {
 		// Whole-list bound from the term's competitive pairs.
 		for (const auto& p : info.impacts) { total_bound_ = std::max(total_bound_, weight_(p.wdf, format::decode_length(p.length))); }
 	}
@@ -373,7 +373,7 @@ public:
 	double score_of(ordinal_t ord, std::uint32_t wdf) const {
 		return weight_.kind == scheme::bm25 ? weight_.by_norm(wdf, seg_->norm(ord)) : weight_(wdf, seg_->length(ord));
 	}
-	const segment& seg() const noexcept { return *seg_; }
+	const inverted_plugin::reader& seg() const noexcept { return *seg_; }
 
 private:
 	double bound(std::span<const format::impact> pairs) const {
@@ -429,7 +429,7 @@ private:
 		return d;
 	}
 
-	const segment* seg_;
+	const inverted_plugin::reader* seg_;
 	postings_iterator it_;
 	weight weight_;
 	double total_bound_ = 0, min_ = 0;
@@ -987,7 +987,7 @@ public:
 	// order, spanning fewer than window positions; NEAR needs term_weights.
 	// Lucene mode reads `stats` and each term's `df` (index-wide, one per phrase term) when
 	// given, else the segment's.
-	phrase_scorer(const segment& seg, const std::vector<format::term_info>& infos, std::vector<weight> term_weights = {}, std::uint32_t window = 0,
+	phrase_scorer(const inverted_plugin::reader& seg, const std::vector<format::term_info>& infos, std::vector<weight> term_weights = {}, std::uint32_t window = 0,
 		const statistics* stats = nullptr, std::span<const std::uint64_t> df = {})
 		: seg_(&seg), term_weights_(std::move(term_weights)), window_(window) {
 		if (window_ && term_weights_.size() != infos.size()) { throw std::invalid_argument("strata: NEAR needs a weight per term"); }
@@ -1232,7 +1232,7 @@ private:
 		return pairs_bound(it.info().impacts);
 	}
 
-	const segment* seg_;
+	const inverted_plugin::reader* seg_;
 	std::vector<format::term_info> infos_;  // unique terms
 	std::vector<std::unique_ptr<postings_iterator>> terms_;
 	std::vector<std::unique_ptr<positions_reader>> readers_;
@@ -1282,7 +1282,7 @@ inline std::vector<hit> top_k(const segment& seg, scorer& s, std::size_t k, std:
 	if (floor > 0) { s.set_min_competitive_score(floor); }
 	top_collector c(k, count != nullptr);
 	if (floor > 0) { c.seed(floor); }
-	if (!seg.docid_ordered()) {  // ties read docids, and the threshold stays below the k-th score
+	if (!seg.core().docid_ordered()) {  // ties read docids, and the threshold stays below the k-th score
 		c.begin(seg);
 		if (s.collect_top_k(c)) {
 			if (count) { *count = c.count; }

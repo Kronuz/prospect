@@ -109,20 +109,20 @@ struct snapshot_weights {
 
 strata::scorer_ptr build(const strata::segment& seg, const node& n, const std::map<std::string, std::uint32_t>& wqf, const snapshot_weights* snap = nullptr) {
 	if (n.op.empty()) {
-		auto info = seg.term(n.term);
+		auto info = seg.get<strata::inverted_plugin>().term(n.term);
 		if (!info) { return nullptr; }
-		return std::make_unique<strata::term_scorer>(seg, *info, snap ? snap->of(n.term, wqf.at(n.term)) : strata::weight::bm25_xapian(seg, info->df, wqf.at(n.term)));
+		return std::make_unique<strata::term_scorer>(seg.get<strata::inverted_plugin>(), *info, snap ? snap->of(n.term, wqf.at(n.term)) : strata::weight::bm25_xapian(seg.get<strata::inverted_plugin>(), info->df, wqf.at(n.term)));
 	}
 	if (n.op == "PHRASE" || n.op == "NEAR") {
 		std::vector<strata::format::term_info> infos;
 		std::vector<strata::weight> weights;
 		for (const auto& c : n.children) {
-			auto info = seg.term(c.term);
+			auto info = seg.get<strata::inverted_plugin>().term(c.term);
 			if (!info) { return nullptr; }
 			infos.push_back(*info);
-			weights.push_back(snap ? snap->of(c.term, wqf.at(c.term)) : strata::weight::bm25_xapian(seg, info->df, wqf.at(c.term)));
+			weights.push_back(snap ? snap->of(c.term, wqf.at(c.term)) : strata::weight::bm25_xapian(seg.get<strata::inverted_plugin>(), info->df, wqf.at(c.term)));
 		}
-		return std::make_unique<strata::phrase_scorer>(seg, infos, std::move(weights), n.op == "NEAR" ? n.window : 0);
+		return std::make_unique<strata::phrase_scorer>(seg.get<strata::inverted_plugin>(), infos, std::move(weights), n.op == "NEAR" ? n.window : 0);
 	}
 	std::vector<strata::scorer_ptr> kids;
 	for (const auto& c : n.children) { kids.push_back(build(seg, c, wqf, snap)); }
@@ -227,7 +227,7 @@ int main(int argc, char** argv) {
 		files = {std::move(merged)};
 		segments.emplace_back(files[0]);
 		parts = 1;
-		std::cout << "reordered: " << (segments[0].docid_ordered() ? "no" : "yes") << "\n";
+		std::cout << "reordered: " << (segments[0].core().docid_ordered() ? "no" : "yes") << "\n";
 	}
 	std::vector<strata::segment_snapshot> snaps;
 	for (const auto& s : segments) { snaps.push_back({&s, nullptr}); }
@@ -235,13 +235,13 @@ int main(int argc, char** argv) {
 	const snapshot_weights* snap = parts > 1 ? &weights : nullptr;
 	const strata::segment& seg = segments[0];
 	std::uint64_t total_docs = 0;
-	for (const auto& s : segments) { total_docs += s.doc_count(); }
+	for (const auto& s : segments) { total_docs += s.core().doc_count(); }
 	// The k best across segments as hits by docid - 1 (the ordinal a docid-ordered segment gives).
 	auto search = [&](const node& q, const std::map<std::string, std::uint32_t>& wqf, std::uint64_t* count) {
 		std::vector<strata::hit> out;
 		if (parts == 1) {
 			if (auto s = build(seg, q, wqf)) { out = strata::top_k(seg, *s, 10, count); } else if (count) { *count = 0; }
-			for (auto& h : out) { h.ord = strata::ordinal_t(seg.docid(h.ord) - 1); }
+			for (auto& h : out) { h.ord = strata::ordinal_t(seg.core().docid(h.ord) - 1); }
 			return out;
 		}
 		auto hits = strata::search(snaps, [&](const strata::segment& sg) { return build(sg, q, wqf, snap); }, 10, count);

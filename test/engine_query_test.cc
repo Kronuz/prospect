@@ -82,7 +82,7 @@ struct reference_stats {
 		auto [it, fresh] = df.try_emplace(term, 0);
 		if (fresh) {
 			for (const auto& s : segs) {
-				if (auto info = s.seg->term(term)) { it->second += info->df; }
+				if (auto info = s.seg->get<strata::inverted_plugin>().term(term)) { it->second += info->df; }
 			}
 		}
 		return it->second;
@@ -92,23 +92,23 @@ struct reference_stats {
 static scorer_ptr reference_clause(const segment& seg, const std::vector<std::string>& clause, double boost, scheme sch, reference_stats& snap) {
 	std::vector<format::term_info> infos;
 	for (const auto& t : clause) {
-		auto info = seg.term(t);
+		auto info = seg.get<strata::inverted_plugin>().term(t);
 		if (!info) { return nullptr; }
 		infos.push_back(*info);
 	}
 	const bool xapian = sch == scheme::bm25_xapian;
 	if (infos.size() == 1) {
 		const auto df = snap.of(clause[0]);
-		return std::make_unique<term_scorer>(seg, infos[0], xapian ? weight::bm25_xapian(snap.st, df, std::uint32_t(boost)) : weight::bm25(snap.st, df, boost));
+		return std::make_unique<term_scorer>(seg.get<strata::inverted_plugin>(), infos[0], xapian ? weight::bm25_xapian(snap.st, df, std::uint32_t(boost)) : weight::bm25(snap.st, df, boost));
 	}
 	if (!xapian) {
 		std::vector<std::uint64_t> dfs;
 		for (const auto& t : clause) { dfs.push_back(snap.of(t)); }
-		return std::make_unique<phrase_scorer>(seg, infos, std::vector<weight>{}, 0, &snap.st, dfs);
+		return std::make_unique<phrase_scorer>(seg.get<strata::inverted_plugin>(), infos, std::vector<weight>{}, 0, &snap.st, dfs);
 	}
 	std::vector<weight> weights;
 	for (std::size_t k = 0; k < infos.size(); ++k) { weights.push_back(weight::bm25_xapian(snap.st, snap.of(clause[k]))); }
-	return std::make_unique<phrase_scorer>(seg, infos, std::move(weights));
+	return std::make_unique<phrase_scorer>(seg.get<strata::inverted_plugin>(), infos, std::move(weights));
 }
 
 static scorer_ptr reference_build(const segment& seg, const engine::parsed& q, scheme sch, reference_stats& snap) {
@@ -152,7 +152,7 @@ static std::vector<doc_hit> scan(std::span<const segment_snapshot> segs, const e
 		if (!sc) { continue; }
 		for (ordinal_t o = sc->next(); o != no_more_docs; o = sc->next()) {
 			if (s.deleted && ((*s.deleted)[o >> 6] >> (o & 63)) & 1) { continue; }
-			all.push_back({s.seg->docid(o), sc->score()});
+			all.push_back({s.seg->core().docid(o), sc->score()});
 		}
 	}
 	std::sort(all.begin(), all.end(), [](const doc_hit& a, const doc_hit& b) { return a.score != b.score ? a.score > b.score : a.docid < b.docid; });
@@ -263,7 +263,7 @@ static void check_interleaved(std::mt19937_64& r) {
 	auto segs = snapshot(ix);
 	CHECK(segs.size() > 3);
 	auto largest_first = segs;
-	std::stable_sort(largest_first.begin(), largest_first.end(), [](const segment_snapshot& a, const segment_snapshot& b) { return a.seg->doc_count() > b.seg->doc_count(); });
+	std::stable_sort(largest_first.begin(), largest_first.end(), [](const segment_snapshot& a, const segment_snapshot& b) { return a.seg->core().doc_count() > b.seg->core().doc_count(); });
 	for (const auto* order : {&segs, &largest_first}) {
 		const std::span<const segment_snapshot> view(*order);
 		for (const char* w : vocab) {
@@ -337,12 +337,12 @@ int main() {
 		// find_term plus complete_impacts is term(), field by field.
 		for (const auto& s : segs) {
 			for (const char* t : vocab) {
-				const auto full = s.seg->term(t);
-				auto lazy = s.seg->find_term(t);
+				const auto full = s.seg->get<strata::inverted_plugin>().term(t);
+				auto lazy = s.seg->get<strata::inverted_plugin>().find_term(t);
 				CHECK(bool(full) == bool(lazy));
 				if (!full || !lazy) { continue; }
 				CHECK(lazy->df == full->df && lazy->cf == full->cf && lazy->flags == full->flags);
-				s.seg->complete_impacts(*lazy);
+				s.seg->get<strata::inverted_plugin>().complete_impacts(*lazy);
 				CHECK(lazy->postings == full->postings && lazy->positions == full->positions && lazy->single_wdf == full->single_wdf);
 				CHECK(lazy->postings_length == full->postings_length && lazy->positions_length == full->positions_length);
 				CHECK(lazy->impacts.size() == full->impacts.size());

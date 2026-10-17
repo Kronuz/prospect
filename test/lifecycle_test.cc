@@ -870,7 +870,7 @@ int main() {
 			if (i % 40 == 39) { ix.refresh(); }
 		}
 		ix.force_merge();
-		CHECK(ix.segments().size() == 1 && !ix.segments()[0].seg->docid_ordered());
+		CHECK(ix.segments().size() == 1 && !ix.segments()[0].seg->core().docid_ordered());
 	}
 	tally inline_merges, background_merges;
 	t1(false, target, inline_merges);

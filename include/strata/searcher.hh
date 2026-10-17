@@ -94,8 +94,8 @@ struct doc_hit {
 inline statistics snapshot_statistics(std::span<const segment_snapshot> segs) {
 	statistics st;
 	for (const auto& s : segs) {
-		st.doc_count += s.seg->doc_count();
-		st.total_length += s.seg->total_length();
+		st.doc_count += s.seg->core().doc_count();
+		st.total_length += s.seg->get<inverted_plugin>().total_length();
 	}
 	return st;
 }
@@ -104,7 +104,7 @@ inline statistics snapshot_statistics(std::span<const segment_snapshot> segs) {
 inline std::uint64_t snapshot_df(std::span<const segment_snapshot> segs, std::string_view term) {
 	std::uint64_t df = 0;
 	for (const auto& s : segs) {
-		if (auto info = s.seg->find_term(term)) { df += info->df; }
+		if (auto info = s.seg->get<inverted_plugin>().find_term(term)) { df += info->df; }
 	}
 	return df;
 }
@@ -138,7 +138,7 @@ public:
 		auto& e = c.infos[s];
 		if (!e) { return nullptr; }
 		if (!c.complete[s]) {
-			seg.complete_impacts(*e);
+			seg.get<inverted_plugin>().complete_impacts(*e);
 			c.complete[s] = 1;
 		}
 		return &*e;
@@ -159,7 +159,7 @@ private:
 		c.term = term;
 		c.infos.reserve(segs_.size());
 		for (const auto& s : segs_) {
-			c.infos.push_back(s.seg->find_term(term));
+			c.infos.push_back(s.seg->get<inverted_plugin>().find_term(term));
 			if (c.infos.back()) { c.df += c.infos.back()->df; }
 		}
 		c.complete.assign(segs_.size(), 0);
@@ -190,7 +190,7 @@ inline std::vector<doc_hit> search(std::span<const segment_snapshot> segs, const
 		if (!q) { return {}; }
 		if (s.any_deleted()) { q = std::make_unique<live_scorer>(std::move(q), *s.deleted); }
 		std::vector<doc_hit> out;
-		for (const auto& h : top_k(*s.seg, *q, k, count)) { out.push_back({s.seg->docid(h.ord), h.score}); }
+		for (const auto& h : top_k(*s.seg, *q, k, count)) { out.push_back({s.seg->core().docid(h.ord), h.score}); }
 		return out;
 	}
 	top_collector c(k, false);

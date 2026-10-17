@@ -53,10 +53,10 @@ int main() {
 		const strata::segment seg(file);
 		std::vector<std::string> present;
 		for (const auto& t : vocab) {
-			if (seg.term(t)) { present.push_back(t); }
+			if (seg.get<strata::inverted_plugin>().term(t)) { present.push_back(t); }
 		}
-		auto term = [&](const std::string& t) -> strata::scorer_ptr { return std::make_unique<strata::term_scorer>(seg, *seg.term(t)); };
-		auto df = [&](const std::string& t) { return seg.term(t)->df; };
+		auto term = [&](const std::string& t) -> strata::scorer_ptr { return std::make_unique<strata::term_scorer>(seg.get<strata::inverted_plugin>(), *seg.get<strata::inverted_plugin>().term(t)); };
+		auto df = [&](const std::string& t) { return seg.get<strata::inverted_plugin>().term(t)->df; };
 
 		for (const auto& t : present) {
 			auto s = term(t);
@@ -92,8 +92,8 @@ int main() {
 			CHECK(but.cost() == df(pick[0]));
 			CHECK(matches(but) <= but.cost());
 			std::vector<strata::format::term_info> infos;
-			for (const auto& t : pick) { infos.push_back(*seg.term(t)); }
-			strata::phrase_scorer phrase(seg, infos);
+			for (const auto& t : pick) { infos.push_back(*seg.get<strata::inverted_plugin>().term(t)); }
+			strata::phrase_scorer phrase(seg.get<strata::inverted_plugin>(), infos);
 			CHECK(phrase.cost() == lo);
 			CHECK(matches(phrase) <= phrase.cost());
 		}

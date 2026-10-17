@@ -37,8 +37,8 @@ inline std::vector<merge_ref> docid_order(std::span<const merge_source> sources)
 	};
 	std::vector<doc> docs;
 	for (std::uint32_t s = 0; s < sources.size(); ++s) {
-		for (ordinal_t o = 0; o < sources[s].seg->doc_count(); ++o) {
-			if (sources[s].live(o)) { docs.push_back({sources[s].seg->docid(o), {s, o}}); }
+		for (ordinal_t o = 0; o < sources[s].seg->core().doc_count(); ++o) {
+			if (sources[s].live(o)) { docs.push_back({sources[s].seg->core().docid(o), {s, o}}); }
 		}
 	}
 	std::sort(docs.begin(), docs.end(), [](const doc& a, const doc& b) { return a.docid < b.docid; });
@@ -83,7 +83,7 @@ inline forward_stats write_forward(std::span<const merge_source> sources, output
 		const auto refs = docid_order(sources);
 		if (refs.size() >= none) { throw std::length_error("strata: reorder: more documents than ranks"); }
 		for (std::size_t s = 0; s < sources.size(); ++s) {
-			rank[s].assign(sources[s].seg->doc_count(), none);
+			rank[s].assign(sources[s].seg->core().doc_count(), none);
 			charge(rank[s].capacity() * 4);
 		}
 		for (std::uint32_t r = 0; r < refs.size(); ++r) { rank[refs[r].source][refs[r].ord] = r; }
@@ -101,9 +101,9 @@ inline forward_stats write_forward(std::span<const merge_source> sources, output
 	charge(degree.capacity() * 4);
 	std::uint64_t edges = 0;
 	{
-		std::deque<segment::term_cursor> cursors;
+		std::deque<inverted_plugin::reader::term_cursor> cursors;
 		std::vector<bool> more(sources.size());
-		for (std::size_t s = 0; s < sources.size(); ++s) { more[s] = cursors.emplace_back(*sources[s].seg).next(); }
+		for (std::size_t s = 0; s < sources.size(); ++s) { more[s] = cursors.emplace_back(sources[s].seg->get<inverted_plugin>()).next(); }
 		std::string current;
 		std::vector<holder> here;
 		for (;;) {
@@ -126,7 +126,7 @@ inline forward_stats write_forward(std::span<const merge_source> sources, output
 			ranks.clear();
 			if (any_deleted || double(df) <= max_docs) {
 				for (const auto& h : here) {
-					postings_iterator it(*sources[h.source].seg, h.info);
+					postings_iterator it(sources[h.source].seg->get<inverted_plugin>(), h.info);
 					for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
 						if (const std::uint32_t r = rank[h.source][o]; r != none) { ranks.push_back(r); }
 					}
@@ -176,8 +176,8 @@ inline forward_stats write_forward(std::span<const merge_source> sources, output
 			for (const auto& h : graph_terms[t]) {
 				const segment& seg = *sources[h.source].seg;
 				const auto& rk = rank[h.source];
-				const bool ordered = seg.docid_ordered();  // ranks rise with ordinals
-				postings_iterator it(seg, h.info);
+				const bool ordered = seg.core().docid_ordered();  // ranks rise with ordinals
+				postings_iterator it(seg.get<inverted_plugin>(), h.info);
 				ordinal_t o = !ordered ? it.next() : first[h.source] < rk.size() ? it.advance(ordinal_t(first[h.source])) : no_more_docs;
 				for (; o != no_more_docs; o = it.next()) {
 					const std::uint32_t r = rk[o];

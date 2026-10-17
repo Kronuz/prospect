@@ -245,7 +245,7 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 		if (!key_prefix.empty()) {
 			for (std::size_t s = 0; s < sources.size(); ++s) {
 				const segment_type& seg = *sources[s].seg;
-				seg.template reader<keys_plugin>().scan(key_prefix, seg.template deps<keys_plugin>(), [&](std::string_view key, ordinal_t o) {
+				seg.template get<keys_plugin>().scan(key_prefix, seg.template deps<keys_plugin>(), [&](std::string_view key, ordinal_t o) {
 					if (sources[s].live(o)) {
 						keys[s][o] = std::string(key);
 						charge(64 + key.size());  // a map node and its key
@@ -264,15 +264,15 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 	std::vector<doc> docs;
 	for (std::size_t s = 0; s < sources.size(); ++s) {
 		const segment_type& seg = *sources[s].seg;
-		plan.ordinals[s].assign(seg.doc_count(), no_more_docs);
-		for (ordinal_t o = 0; o < seg.doc_count(); ++o) {
-			if (sources[s].live(o)) { docs.push_back({seg.docid(o), s, o}); }
+		plan.ordinals[s].assign(seg.core().doc_count(), no_more_docs);
+		for (ordinal_t o = 0; o < seg.core().doc_count(); ++o) {
+			if (sources[s].live(o)) { docs.push_back({seg.core().docid(o), s, o}); }
 		}
 		charge(plan.ordinals[s].capacity() * sizeof(ordinal_t));
 	}
 	charge(docs.capacity() * sizeof(doc));
 	// A single permuted source keeps its order (docs are still in its ordinal order here).
-	const bool keep_source_order = order.empty() && sources.size() == 1 && !sources[0].seg->docid_ordered();
+	const bool keep_source_order = order.empty() && sources.size() == 1 && !sources[0].seg->core().docid_ordered();
 	std::vector<doc> by_docid;
 	if (keep_source_order) { by_docid = docs, charge(by_docid.capacity() * sizeof(doc)); }
 	auto& sorted = keep_source_order ? by_docid : docs;
@@ -284,12 +284,12 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 		if (order.size() != docs.size()) { throw std::invalid_argument("strata: merge order must name every live document once"); }
 		docs.clear();
 		for (const auto& r : order) {
-			if (r.source >= sources.size() || r.ord >= sources[r.source].seg->doc_count() || !sources[r.source].live(r.ord) ||
+			if (r.source >= sources.size() || r.ord >= sources[r.source].seg->core().doc_count() || !sources[r.source].live(r.ord) ||
 				plan.ordinals[r.source][r.ord] != no_more_docs) {
 				throw std::invalid_argument("strata: merge order must name every live document once");
 			}
 			plan.ordinals[r.source][r.ord] = 0;  // seen; numbered below
-			docs.push_back({sources[r.source].seg->docid(r.ord), r.source, r.ord});
+			docs.push_back({sources[r.source].seg->core().docid(r.ord), r.source, r.ord});
 		}
 	}
 	// Ordinals are 32-bit and the largest value means no more documents.
@@ -310,7 +310,7 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 		docids.push_back(d.docid);
 		doc_fields f{d.docid, 0, {}};
 		if constexpr (keyed) {
-			f.version = sources[d.source].seg->template reader<keys_plugin>().version(d.ord);
+			f.version = sources[d.source].seg->template get<keys_plugin>().version(d.ord);
 			if (auto k = keys[d.source].find(d.ord); k != keys[d.source].end()) { f.key = k->second; }
 		}
 		fields.push_back(f);
@@ -341,7 +341,7 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 		} else {
 			std::vector<const typename E::reader*> readers;
 			readers.reserve(sources.size());
-			for (const auto& src : sources) { readers.push_back(&src.seg->template reader<E>()); }
+			for (const auto& src : sources) { readers.push_back(&src.seg->template get<E>()); }
 			built b = E::merge(m, readers, sink);
 			if (!b.legacy_stats.empty()) { legacy_stats = std::move(b.legacy_stats); }
 		}

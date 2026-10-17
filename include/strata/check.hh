@@ -20,18 +20,19 @@ struct check_report {
 inline void check_segment(const segment& seg, const std::vector<std::uint64_t>* deleted, check_report& r) {
 	seg.verify_all();
 	++r.segments;
-	r.documents += seg.doc_count();
-	for (ordinal_t o = 0; o < seg.doc_count(); ++o) {
+	r.documents += seg.core().doc_count();
+	for (ordinal_t o = 0; o < seg.core().doc_count(); ++o) {
 		if (deleted && ((*deleted)[o >> 6] >> (o & 63)) & 1) { ++r.deleted; }
-		(void)seg.docid(o);
-		(void)seg.version(o);
-		(void)seg.length(o);
-		r.stored_bytes += seg.stored(o).size();
+		(void)seg.core().docid(o);
+		(void)seg.get<keys_plugin>().version(o);
+		(void)seg.get<inverted_plugin>().length(o);
+		r.stored_bytes += seg.get<stored_plugin>().stored(o).size();
 	}
-	seg.scan_terms([&](std::string_view, const format::term_info& info) {
+	const auto& inverted = seg.get<inverted_plugin>();
+	inverted.scan_terms([&](std::string_view, const format::term_info& info) {
 		++r.terms;
-		postings_iterator it(seg, info);
-		positions_reader pr(seg, info);
+		postings_iterator it(inverted, info);
+		positions_reader pr(inverted, info);
 		for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
 			++r.postings;
 			r.positions += pr.read(it).size();

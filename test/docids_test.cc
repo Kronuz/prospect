@@ -214,14 +214,14 @@ int main() {
 		}
 		CHECK(golden == bytes);
 		const strata::segment seg(golden);
-		CHECK(!seg.docid_ordered());
-		CHECK(seg.min_docid() == 1 && seg.max_docid() == 3 * 259 + 1);
+		CHECK(!seg.core().docid_ordered());
+		CHECK(seg.core().min_docid() == 1 && seg.core().max_docid() == 3 * 259 + 1);
 		for (std::size_t i = 0; i < ids.size(); ++i) {
-			CHECK(seg.docid(ordinal_t(i)) == ids[i]);
-			CHECK(seg.ordinal_of(ids[i]) == ordinal_t(i));
-			CHECK(!seg.ordinal_of(ids[i] + 1));
-			CHECK(seg.stored(ordinal_t(i)) == "record " + std::to_string(ids[i]));
-			CHECK(seg.may_hold_key("Q" + std::to_string(ids[i])));
+			CHECK(seg.core().docid(ordinal_t(i)) == ids[i]);
+			CHECK(seg.core().ordinal_of(ids[i]) == ordinal_t(i));
+			CHECK(!seg.core().ordinal_of(ids[i] + 1));
+			CHECK(seg.get<strata::stored_plugin>().stored(ordinal_t(i)) == "record " + std::to_string(ids[i]));
+			CHECK(seg.get<strata::keys_plugin>().may_hold("Q" + std::to_string(ids[i])));
 		}
 		seg.verify_all();
 		// A flush (docids increasing) still refuses an out-of-order docid.

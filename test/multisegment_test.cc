@@ -60,8 +60,8 @@ static scorer_ptr build(const segment& seg, const query& q, const statistics& st
 		return xapian ? weight::bm25_xapian(st, df) : weight::bm25(st, df);
 	};
 	auto term = [&](const std::string& t) -> scorer_ptr {
-		auto info = seg.term(t);
-		return info ? std::make_unique<term_scorer>(seg, *info, weight_of(t)) : nullptr;
+		auto info = seg.get<strata::inverted_plugin>().term(t);
+		return info ? std::make_unique<term_scorer>(seg.get<strata::inverted_plugin>(), *info, weight_of(t)) : nullptr;
 	};
 	std::vector<scorer_ptr> kids;
 	switch (q.kind) {
@@ -99,14 +99,14 @@ static scorer_ptr build(const segment& seg, const query& q, const statistics& st
 		std::vector<std::uint64_t> dfs;
 		std::vector<weight> ws;
 		for (auto& t : q.terms) {
-			auto info = seg.term(t);
+			auto info = seg.get<strata::inverted_plugin>().term(t);
 			if (!info) { return nullptr; }
 			infos.push_back(*info);
 			dfs.push_back(snapshot_df(segs, t));
 			ws.push_back(weight_of(t));
 		}
-		if (xapian) { return std::make_unique<phrase_scorer>(seg, infos, std::move(ws)); }
-		return std::make_unique<phrase_scorer>(seg, infos, std::vector<weight>{}, 0, &st, dfs);
+		if (xapian) { return std::make_unique<phrase_scorer>(seg.get<strata::inverted_plugin>(), infos, std::move(ws)); }
+		return std::make_unique<phrase_scorer>(seg.get<strata::inverted_plugin>(), infos, std::vector<weight>{}, 0, &st, dfs);
 	}
 	}
 }
@@ -119,7 +119,7 @@ static std::vector<doc_hit> scan(std::span<const segment_snapshot> segs, const s
 		if (!sc) { continue; }
 		for (ordinal_t o = sc->next(); o != no_more_docs; o = sc->next()) {
 			if (s.deleted && ((*s.deleted)[o >> 6] >> (o & 63)) & 1) { continue; }
-			all.push_back({s.seg->docid(o), sc->score()});
+			all.push_back({s.seg->core().docid(o), sc->score()});
 		}
 	}
 	std::sort(all.begin(), all.end(), [](const doc_hit& a, const doc_hit& b) { return a.score != b.score ? a.score > b.score : a.docid < b.docid; });
@@ -224,7 +224,7 @@ int main() {
 		}
 		const std::string one_bytes = one.flush({});
 		const segment single(one_bytes);
-		const std::vector<std::uint64_t> none((single.doc_count() + 63) / 64, 0);
+		const std::vector<std::uint64_t> none((single.core().doc_count() + 63) / 64, 0);
 		const segment_snapshot single_snap[] = {{&single, &none}};
 		for (int qn = 0; qn < 120; ++qn) {
 			query q;
@@ -370,10 +370,10 @@ int main() {
 		}
 		const std::string bytes = w.flush({});
 		const segment seg(bytes);
-		std::vector<std::uint64_t> deleted((seg.doc_count() + 63) / 64, 0);
+		std::vector<std::uint64_t> deleted((seg.core().doc_count() + 63) / 64, 0);
 		for (std::uint32_t d = 0; d < 3000; d += 1 + std::uint32_t(r() % 5)) { deleted[d >> 6] |= std::uint64_t(1) << (d & 63); }
 		auto dead = [&](std::uint32_t d) { return (deleted[d >> 6] >> (d & 63)) & 1; };
-		auto phrase = [&] { return std::make_unique<phrase_scorer>(seg, std::vector<format::term_info>{*seg.term("a"), *seg.term("b")}); };
+		auto phrase = [&] { return std::make_unique<phrase_scorer>(seg.get<strata::inverted_plugin>(), std::vector<format::term_info>{*seg.get<strata::inverted_plugin>().term("a"), *seg.get<strata::inverted_plugin>().term("b")}); };
 		auto live_phrase = [&] { return std::make_unique<live_scorer>(phrase(), deleted); };
 		// "a b" and "c" in live documents, by brute force.
 		std::set<ordinal_t> want;
@@ -387,7 +387,7 @@ int main() {
 		}
 		std::vector<scorer_ptr> kids;
 		kids.push_back(live_phrase());
-		kids.push_back(std::make_unique<term_scorer>(seg, *seg.term("c")));
+		kids.push_back(std::make_unique<term_scorer>(seg.get<strata::inverted_plugin>(), *seg.get<strata::inverted_plugin>().term("c")));
 		conjunction_scorer both(std::move(kids));
 		CHECK(both.two_phase());
 		std::set<ordinal_t> got;
@@ -396,11 +396,11 @@ int main() {
 		// The counting copy, and count() through the wrapper.
 		// (A phrase has no counting copy; a term does, and the wrapper keeps it.)
 		CHECK(!live_phrase()->fresh());
-		auto lt = std::make_unique<live_scorer>(std::make_unique<term_scorer>(seg, *seg.term("c")), deleted);
+		auto lt = std::make_unique<live_scorer>(std::make_unique<term_scorer>(seg.get<strata::inverted_plugin>(), *seg.get<strata::inverted_plugin>().term("c")), deleted);
 		auto copy = lt->fresh();
 		CHECK(copy && count(*copy) == count(*lt));
 		// A window starting off a word boundary clears exactly the deleted ordinals in it.
-		auto all_c = std::make_unique<live_scorer>(std::make_unique<term_scorer>(seg, *seg.term("c")), deleted);
+		auto all_c = std::make_unique<live_scorer>(std::make_unique<term_scorer>(seg.get<strata::inverted_plugin>(), *seg.get<strata::inverted_plugin>().term("c")), deleted);
 		std::uint64_t bits[64] = {};
 		all_c->advance(5);
 		all_c->fill(5, 205, bits);

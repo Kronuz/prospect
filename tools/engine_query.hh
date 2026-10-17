@@ -65,7 +65,7 @@ inline strata::scorer_ptr clause_scorer(const strata::segment& seg, const std::v
 			if (!info) { return nullptr; }
 			infos.push_back(*info);
 		} else {
-			auto info = seg.term(t);
+			auto info = seg.get<strata::inverted_plugin>().term(t);
 			if (!info) { return nullptr; }
 			infos.push_back(*info);
 		}
@@ -75,22 +75,22 @@ inline strata::scorer_ptr clause_scorer(const strata::segment& seg, const std::v
 		if (table) {
 			const auto df = table->df(clause[0]);
 			const auto& st = table->stats();
-			return std::make_unique<strata::term_scorer>(seg, infos[0], xapian ? strata::weight::bm25_xapian(st, df, std::uint32_t(boost)) : strata::weight::bm25(st, df, boost));
+			return std::make_unique<strata::term_scorer>(seg.get<strata::inverted_plugin>(), infos[0], xapian ? strata::weight::bm25_xapian(st, df, std::uint32_t(boost)) : strata::weight::bm25(st, df, boost));
 		}
-		if (xapian) { return std::make_unique<strata::term_scorer>(seg, infos[0], strata::weight::bm25_xapian(seg, infos[0].df, std::uint32_t(boost))); }
-		return std::make_unique<strata::term_scorer>(seg, infos[0], boost);
+		if (xapian) { return std::make_unique<strata::term_scorer>(seg.get<strata::inverted_plugin>(), infos[0], strata::weight::bm25_xapian(seg.get<strata::inverted_plugin>(), infos[0].df, std::uint32_t(boost))); }
+		return std::make_unique<strata::term_scorer>(seg.get<strata::inverted_plugin>(), infos[0], boost);
 	}
 	if (!xapian) {
-		if (!table) { return std::make_unique<strata::phrase_scorer>(seg, infos); }
+		if (!table) { return std::make_unique<strata::phrase_scorer>(seg.get<strata::inverted_plugin>(), infos); }
 		std::vector<std::uint64_t> dfs;
 		for (const auto& t : clause) { dfs.push_back(table->df(t)); }
-		return std::make_unique<strata::phrase_scorer>(seg, infos, std::vector<strata::weight>{}, 0, &table->stats(), dfs);
+		return std::make_unique<strata::phrase_scorer>(seg.get<strata::inverted_plugin>(), infos, std::vector<strata::weight>{}, 0, &table->stats(), dfs);
 	}
 	std::vector<strata::weight> weights;
 	for (std::size_t k = 0; k < infos.size(); ++k) {
-		weights.push_back(table ? strata::weight::bm25_xapian(table->stats(), table->df(clause[k])) : strata::weight::bm25_xapian(seg, infos[k].df));
+		weights.push_back(table ? strata::weight::bm25_xapian(table->stats(), table->df(clause[k])) : strata::weight::bm25_xapian(seg.get<strata::inverted_plugin>(), infos[k].df));
 	}
-	return std::make_unique<strata::phrase_scorer>(seg, infos, std::move(weights));
+	return std::make_unique<strata::phrase_scorer>(seg.get<strata::inverted_plugin>(), infos, std::move(weights));
 }
 
 // Repeated clauses in a group merge into one with the repeat count as boost, as Lucene's
@@ -147,7 +147,7 @@ inline std::uint64_t run(const strata::segment& seg, std::string_view command, s
 	const bool counting = command == "COUNT" || command.ends_with("_COUNT");
 	// A single term's count is its document frequency (one segment, no deletes).
 	if (command == "COUNT" && q.must.size() + q.should.size() == 1 && q.must_not.empty() && (q.must.empty() ? q.should[0] : q.must[0]).size() == 1) {
-		auto info = seg.term((q.must.empty() ? q.should[0] : q.must[0])[0]);
+		auto info = seg.get<strata::inverted_plugin>().term((q.must.empty() ? q.should[0] : q.must[0])[0]);
 		return info ? info->df : 0;
 	}
 	auto s = build(seg, q, scheme);

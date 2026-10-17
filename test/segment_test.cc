@@ -71,11 +71,11 @@ static std::string with_section(const std::string& file, strata::format::section
 // The file with its dictionary rebuilt from its own term infos, `change` editing each.
 static std::string with_terms(const std::string& file, const std::function<void(std::string_view, strata::format::term_info&)>& change) {
 	strata::segment seg(file);
-	termdict::builder b(seg.dictionary().alphabet_bytes().size() == 256 ? std::string_view() : seg.dictionary().alphabet_bytes());
+	termdict::builder b(seg.get<strata::inverted_plugin>().dictionary().alphabet_bytes().size() == 256 ? std::string_view() : seg.get<strata::inverted_plugin>().dictionary().alphabet_bytes());
 	strata::format::term_run run;
-	seg.scan_terms([&](std::string_view term, const strata::format::term_info& info) {
+	seg.get<strata::inverted_plugin>().scan_terms([&](std::string_view term, const strata::format::term_info& info) {
 		auto t = info;
-		if (t.df >= strata::format::block) { t.impacts = seg.term(term)->impacts; }
+		if (t.df >= strata::format::block) { t.impacts = seg.get<strata::inverted_plugin>().term(term)->impacts; }
 		change(term, t);
 		b.add(term, strata::format::encode_term_info(t, run, b.next_is_restart()));
 		return true;
@@ -162,13 +162,13 @@ int main() {
 		// Odd sizes use 4 KiB verification regions, so lazy verification is checked at both sizes.
 		std::string file = build(rng, docs, m, docs % 2 ? 12 : 16);
 		strata::segment seg(file);
-		CHECK(seg.doc_count() == docs);
-		for (std::size_t d = 0; d < docs; ++d) { CHECK(seg.length(strata::ordinal_t(d)) == m.lengths[d]); }
+		CHECK(seg.core().doc_count() == docs);
+		for (std::size_t d = 0; d < docs; ++d) { CHECK(seg.get<strata::inverted_plugin>().length(strata::ordinal_t(d)) == m.lengths[d]); }
 		for (const auto& [term, list] : m.postings) {
-			auto info = seg.term(term);
+			auto info = seg.get<strata::inverted_plugin>().term(term);
 			CHECK(info && info->df == list.size());
 			if (!info) { continue; }
-			strata::postings_iterator it(seg, *info);
+			strata::postings_iterator it(seg.get<strata::inverted_plugin>(), *info);
 			std::size_t i = 0;
 			for (auto d = it.next(); d != strata::no_more_docs; d = it.next(), ++i) {
 				CHECK(i < list.size() && d == list[i].first && it.wdf() == list[i].second);
@@ -176,8 +176,8 @@ int main() {
 			CHECK(i == list.size());
 			// positions of every posting
 			{
-				strata::postings_iterator pi(seg, *info);
-				strata::positions_reader pr(seg, *info);
+				strata::postings_iterator pi(seg.get<strata::inverted_plugin>(), *info);
+				strata::positions_reader pr(seg.get<strata::inverted_plugin>(), *info);
 				std::vector<std::uint32_t> got;
 				std::size_t k = 0;
 				for (auto d = pi.next(); d != strata::no_more_docs; d = pi.next(), ++k) {
@@ -186,8 +186,8 @@ int main() {
 				}
 				// random access after advance
 				for (int round = 0; round < 10 && !list.empty(); ++round) {
-					strata::postings_iterator a(seg, *info);
-					strata::positions_reader ar(seg, *info);
+					strata::postings_iterator a(seg.get<strata::inverted_plugin>(), *info);
+					strata::positions_reader ar(seg.get<strata::inverted_plugin>(), *info);
 					std::size_t idx = rng() % list.size();
 					CHECK(a.advance(list[idx].first) == list[idx].first);
 					ar.read(a, got);
@@ -196,7 +196,7 @@ int main() {
 			}
 			// advance to random targets
 			for (int round = 0; round < 20; ++round) {
-				strata::postings_iterator a(seg, *info);
+				strata::postings_iterator a(seg.get<strata::inverted_plugin>(), *info);
 				strata::ordinal_t target = 0;
 				for (;;) {
 					target += strata::ordinal_t(rng() % 400);
@@ -209,7 +209,7 @@ int main() {
 				}
 			}
 			// block_end and impact bounds
-			strata::postings_iterator b(seg, *info);
+			strata::postings_iterator b(seg.get<strata::inverted_plugin>(), *info);
 			for (std::size_t k = 0; k < list.size(); k += 1 + rng() % 50) {
 				auto end = b.block_end(list[k].first);
 				std::size_t block_last = k / 128 * 128 + 127;
@@ -223,16 +223,16 @@ int main() {
 				CHECK(dominated);
 			}
 		}
-		CHECK(!seg.term("absent"));
-		for (strata::ordinal_t d = 0; d < seg.doc_count(); ++d) { CHECK(seg.stored(d) == m.stored[d]); }
-		for (strata::ordinal_t d = 0; d < seg.doc_count(); ++d) { CHECK(seg.docid(d) == d + 1); }
+		CHECK(!seg.get<strata::inverted_plugin>().term("absent"));
+		for (strata::ordinal_t d = 0; d < seg.core().doc_count(); ++d) { CHECK(seg.get<strata::stored_plugin>().stored(d) == m.stored[d]); }
+		for (strata::ordinal_t d = 0; d < seg.core().doc_count(); ++d) { CHECK(seg.core().docid(d) == d + 1); }
 		// Corruption: truncations and random byte changes never crash.
 		for (std::size_t cut = 0; cut < file.size(); cut += 1 + file.size() / 100) {
 			try { strata::segment s(std::string_view(file).substr(0, cut)); CHECK(false); } catch (const strata::corrupt_segment&) {} catch (const std::invalid_argument&) {}
 		}
 		// A changed byte anywhere but section padding is detected once everything is read:
 		// at open, or by region checksums on first read.
-		const auto layout = seg.sections();
+		const auto layout = seg.core().sections();
 		for (int round = 0; round < 300; ++round) {
 			std::string bad = file;
 			const std::size_t at = rng() % bad.size();
@@ -245,16 +245,16 @@ int main() {
 			try {
 				strata::segment s(bad);
 				for (const auto& [term, list] : m.postings) {
-					auto info = s.term(term);
+					auto info = s.get<strata::inverted_plugin>().term(term);
 					if (!info) { continue; }
-					strata::postings_iterator it(s, *info);
-					strata::positions_reader pr(s, *info);
+					strata::postings_iterator it(s.get<strata::inverted_plugin>(), *info);
+					strata::positions_reader pr(s.get<strata::inverted_plugin>(), *info);
 					std::vector<std::uint32_t> got;
 					for (auto d = it.next(); d != strata::no_more_docs; d = it.next()) { pr.read(it, got); }
 				}
-				s.term("absent");
-				for (strata::ordinal_t d = 0; d < s.doc_count(); ++d) { (void)s.stored(d); }
-				if (s.doc_count()) { (void)s.length(0); }  // the lengths verify whole on first use
+				s.get<strata::inverted_plugin>().term("absent");
+				for (strata::ordinal_t d = 0; d < s.core().doc_count(); ++d) { (void)s.get<strata::stored_plugin>().stored(d); }
+				if (s.core().doc_count()) { (void)s.get<strata::inverted_plugin>().length(0); }  // the lengths verify whole on first use
 			} catch (const strata::corrupt_segment&) {
 				detected = true;
 			} catch (const termdict::corrupt&) {
@@ -273,16 +273,16 @@ int main() {
 			strata::segment s(bad);
 			for (int i = 0; i < 2; ++i) {
 				bool threw = false;
-				try { (void)s.length(0); } catch (const strata::corrupt_segment&) { threw = true; }
+				try { (void)s.get<strata::inverted_plugin>().length(0); } catch (const strata::corrupt_segment&) { threw = true; }
 				CHECK(threw);
 			}
 		}
 		// Regions are verified lazily: opening checks none; reading a term checks its own.
 		{
 			strata::segment s(file);
-			CHECK(s.verified_regions() == 0);
-			auto info = s.term("t1");
-			CHECK(info && s.verified_regions() >= 1);
+			CHECK(s.core().verified_regions() == 0);
+			auto info = s.get<strata::inverted_plugin>().term("t1");
+			CHECK(info && s.core().verified_regions() >= 1);
 		}
 	}
 	// Golden fixture: a small deterministic segment must keep its bytes.
@@ -319,7 +319,7 @@ int main() {
 		}
 		CHECK(golden == bytes);
 		strata::segment seg(golden);
-		CHECK(seg.doc_count() == 300);
+		CHECK(seg.core().doc_count() == 300);
 		// Streaming to a file, positions spilled to a second file, writes the same bytes.
 		{
 			strata::file_output out("segment_test_stream.sx");
@@ -350,9 +350,9 @@ int main() {
 		}
 		std::string bytes = w.flush({});
 		strata::segment s(bytes);
-		auto info = s.term("big");
-		strata::postings_iterator it(s, *info);
-		strata::positions_reader pr(s, *info);
+		auto info = s.get<strata::inverted_plugin>().term("big");
+		strata::postings_iterator it(s.get<strata::inverted_plugin>(), *info);
+		strata::positions_reader pr(s.get<strata::inverted_plugin>(), *info);
 		std::vector<std::uint32_t> got;
 		std::uint32_t d = 0;
 		for (auto o = it.next(); o != strata::no_more_docs; o = it.next(), ++d) {
@@ -361,7 +361,7 @@ int main() {
 			CHECK(got.size() == 3);
 		}
 		CHECK(d == 5000);
-		strata::term_scorer ts(s, *info);
+		strata::term_scorer ts(s.get<strata::inverted_plugin>(), *info);
 		CHECK(strata::top_k(s, ts, 10).size() == 10);
 		CHECK(strata::count(ts) == 5000);
 	}
@@ -376,7 +376,7 @@ int main() {
 		}
 		std::string bytes = w.flush({});
 		strata::segment s(bytes);
-		CHECK(s.docid(0) == 10 && s.docid(1) == 20 && s.docid(2) == 35);
+		CHECK(s.core().docid(0) == 10 && s.core().docid(1) == 20 && s.core().docid(2) == 35);
 	}
 
 	// Resealed corruption that verification cannot see. A skip group's last ordinal lowered
@@ -395,8 +395,8 @@ int main() {
 		std::string file = w.flush({});
 		{
 			strata::segment seg(file);
-			const auto info = *seg.term("a");
-			const char* p = seg.postings_bytes().data() + info.postings;
+			const auto info = *seg.get<strata::inverted_plugin>().term("a");
+			const char* p = seg.get<strata::inverted_plugin>().postings_bytes().data() + info.postings;
 			const char* end = p + info.postings_length;
 			CHECK(strata::format::get_leb(&p, end) == 6 && *p++ == 0);  // six narrow groups
 			for (int i = 0; i < 3; ++i) { (void)strata::format::get_leb(&p, end); }
@@ -408,12 +408,12 @@ int main() {
 		reseal(file);
 		CHECK(throws_corrupt([&] {
 			strata::segment bad(file);
-			strata::term_scorer t(bad, *bad.term("a"));
+			strata::term_scorer t(bad.get<strata::inverted_plugin>(), *bad.get<strata::inverted_plugin>().term("a"));
 			strata::top_k(bad, t, 10);
 		}));
 		CHECK(throws_corrupt([&] {
 			strata::segment bad(file);
-			strata::postings_iterator it(bad, *bad.term("a"));
+			strata::postings_iterator it(bad.get<strata::inverted_plugin>(), *bad.get<strata::inverted_plugin>().term("a"));
 			while (it.next() != strata::no_more_docs) {}
 		}));
 	}
@@ -435,15 +435,15 @@ int main() {
 		strata::segment seg(file);
 		std::vector<strata::ordinal_t> expected;
 		{
-			strata::postings_iterator it(seg, *seg.term("t"));
+			strata::postings_iterator it(seg.get<strata::inverted_plugin>(), *seg.get<strata::inverted_plugin>().term("t"));
 			for (auto o = it.next(); o != strata::no_more_docs; o = it.next()) { expected.push_back(o); }
 		}
 		std::vector<strata::ordinal_t> walked;
-		strata::postings_iterator a(seg, *seg.term("t"));
+		strata::postings_iterator a(seg.get<strata::inverted_plugin>(), *seg.get<strata::inverted_plugin>().term("t"));
 		a.for_each_until(300, [&](strata::ordinal_t o, std::uint32_t) { walked.push_back(o); });
 		CHECK(walked == expected);
 		std::vector<std::uint64_t> bits(5, 0);
-		strata::postings_iterator b(seg, *seg.term("t"));
+		strata::postings_iterator b(seg.get<strata::inverted_plugin>(), *seg.get<strata::inverted_plugin>().term("t"));
 		b.fill(0, 300, bits.data());
 		std::vector<strata::ordinal_t> set;
 		for (strata::ordinal_t o = 0; o < 300; ++o) {
@@ -481,19 +481,19 @@ int main() {
 			std::string bytes = w.flush({});
 			strata::segment s(bytes);
 			for (std::size_t d = 0; d < docs; ++d) {
-				CHECK(s.docid(strata::ordinal_t(d)) == ids[d]);
-				CHECK(s.ordinal_of(ids[d]) == strata::ordinal_t(d));
-				CHECK(!s.ordinal_of(ids[d] + 1) || (d + 1 < docs && ids[d + 1] == ids[d] + 1));
-				CHECK(s.version(strata::ordinal_t(d)) == versions[d]);
-				CHECK(s.may_hold_key(keys[d]));
+				CHECK(s.core().docid(strata::ordinal_t(d)) == ids[d]);
+				CHECK(s.core().ordinal_of(ids[d]) == strata::ordinal_t(d));
+				CHECK(!s.core().ordinal_of(ids[d] + 1) || (d + 1 < docs && ids[d + 1] == ids[d] + 1));
+				CHECK(s.get<strata::keys_plugin>().version(strata::ordinal_t(d)) == versions[d]);
+				CHECK(s.get<strata::keys_plugin>().may_hold(keys[d]));
 			}
-			CHECK(!s.ordinal_of(ids[0] - 1) && !s.ordinal_of(ids.back() + 1));
-			CHECK(!s.may_hold_key("A") && !s.may_hold_key("Z"));
+			CHECK(!s.core().ordinal_of(ids[0] - 1) && !s.core().ordinal_of(ids.back() + 1));
+			CHECK(!s.get<strata::keys_plugin>().may_hold("A") && !s.get<strata::keys_plugin>().may_hold("Z"));
 			std::size_t false_positives = 0;
-			for (int i = 0; i < 10000; ++i) { false_positives += s.may_hold_key("Qk" + std::to_string(r()) + "x"); }
+			for (int i = 0; i < 10000; ++i) { false_positives += s.get<strata::keys_plugin>().may_hold("Qk" + std::to_string(r()) + "x"); }
 			CHECK(false_positives < 200);  // about 1/256 for an 8-bit filter
 			// The keys reader's find and scan (L3), through call-time deps.
-			const auto& kr = s.reader<strata::keys_plugin>();
+			const auto& kr = s.get<strata::keys_plugin>();
 			const auto deps = s.deps<strata::keys_plugin>();
 			std::vector<std::uint64_t> deleted((docs + 63) / 64, 0);
 			deleted[0] |= 1;
@@ -532,7 +532,7 @@ int main() {
 					bool ok = true;
 					try {
 						strata::segment s(bad);
-						for (strata::ordinal_t o = 0; o < s.doc_count(); ++o) { (void)s.docid(o), (void)s.version(o); }
+						for (strata::ordinal_t o = 0; o < s.core().doc_count(); ++o) { (void)s.core().docid(o), (void)s.get<strata::keys_plugin>().version(o); }
 					} catch (const strata::corrupt_segment&) {
 						ok = false;
 					}
@@ -565,7 +565,7 @@ int main() {
 		CHECK(opens(keyed) && opens(plain) && opens(with_section(keyed, section::stats, section_of(keyed, section::stats))));
 		{
 			strata::segment s(keyed);
-			CHECK(throws_out_of_range([&] { (void)s.docid(300); }) && throws_out_of_range([&] { (void)s.version(300); }) && throws_out_of_range([&] { (void)s.stored(300); }));
+			CHECK(throws_out_of_range([&] { (void)s.core().docid(300); }) && throws_out_of_range([&] { (void)s.get<strata::keys_plugin>().version(300); }) && throws_out_of_range([&] { (void)s.get<strata::stored_plugin>().stored(300); }));
 		}
 		// Footer bounds on the table of contents.
 		auto refooter = [&](auto edit) {
@@ -686,7 +686,7 @@ int main() {
 		const std::string plain = build(r5, 200, m5);
 		const std::string zero_frames(4, '\0');
 		const std::string no_frames = with_section(plain, section::stored, zero_frames);
-		CHECK(throws_corrupt([&] { strata::segment s(no_frames); (void)s.stored(0); }));
+		CHECK(throws_corrupt([&] { strata::segment s(no_frames); (void)s.get<strata::stored_plugin>().stored(0); }));
 		{
 			std::string st;
 			for (const auto& e : decode_toc(plain, decode_footer(plain))) {
@@ -697,14 +697,14 @@ int main() {
 			const std::uint32_t one = 1;
 			std::memcpy(st.data() + index_at, &one, 4);  // the first frame starts at ordinal 1
 			const std::string late = with_section(plain, section::stored, st);
-			CHECK(throws_corrupt([&] { strata::segment s(late); (void)s.stored(0); }));
+			CHECK(throws_corrupt([&] { strata::segment s(late); (void)s.get<strata::stored_plugin>().stored(0); }));
 		}
 		// Dictionary values: a df above the document count, a single posting past the last
 		// ordinal, and skip groups that do not fit the term's postings.
 		auto read_all = [](const std::string& f) {
 			strata::segment s(f);
-			s.scan_terms([&](std::string_view, const term_info& info) {
-				strata::postings_iterator it(s, info);
+			s.get<strata::inverted_plugin>().scan_terms([&](std::string_view, const term_info& info) {
+				strata::postings_iterator it(s.get<strata::inverted_plugin>(), info);
 				while (it.next() != strata::no_more_docs) {}
 				return true;
 			});
@@ -766,26 +766,26 @@ int main() {
 					try {
 						strata::segment s(file);
 						std::vector<strata::format::term_info> infos;
-						s.scan_terms([&](std::string_view, const strata::format::term_info& info) {
+						s.get<strata::inverted_plugin>().scan_terms([&](std::string_view, const strata::format::term_info& info) {
 							infos.push_back(info);
-							strata::postings_iterator it(s, info);
-							strata::positions_reader pr(s, info);
+							strata::postings_iterator it(s.get<strata::inverted_plugin>(), info);
+							strata::positions_reader pr(s.get<strata::inverted_plugin>(), info);
 							for (auto d = it.next(); d != strata::no_more_docs; d = it.next()) { (void)pr.read(it); }
-							strata::postings_iterator jump(s, info);
+							strata::postings_iterator jump(s.get<strata::inverted_plugin>(), info);
 							(void)jump.advance(docs / 2);
 							(void)jump.advance(docs - 1);
 							return true;
 						});
 						std::vector<strata::scorer_ptr> both;
-						for (const auto& info : infos) { both.push_back(std::make_unique<strata::term_scorer>(s, info)); }
+						for (const auto& info : infos) { both.push_back(std::make_unique<strata::term_scorer>(s.get<strata::inverted_plugin>(), info)); }
 						strata::conjunction_scorer all(std::move(both));
 						(void)strata::count(all);
 						std::vector<strata::scorer_ptr> dense;  // two dense terms: counting windows
-						dense.push_back(std::make_unique<strata::term_scorer>(s, infos[0]));
-						dense.push_back(std::make_unique<strata::term_scorer>(s, infos[1]));
+						dense.push_back(std::make_unique<strata::term_scorer>(s.get<strata::inverted_plugin>(), infos[0]));
+						dense.push_back(std::make_unique<strata::term_scorer>(s.get<strata::inverted_plugin>(), infos[1]));
 						strata::conjunction_scorer windows(std::move(dense));
 						(void)strata::count(windows);
-						strata::phrase_scorer phrase(s, {infos[0], infos[1]});
+						strata::phrase_scorer phrase(s.get<strata::inverted_plugin>(), {infos[0], infos[1]});
 						(void)strata::top_k(s, phrase, 10);
 					} catch (const strata::corrupt_segment&) {
 						++fenced;
@@ -808,15 +808,15 @@ int main() {
 		const std::string good = w.flush({});
 		const auto walk = [](const std::string& file) {
 			strata::segment s(file);
-			const auto info = *s.term("long");
-			strata::postings_iterator it(s, info);
+			const auto info = *s.get<strata::inverted_plugin>().term("long");
+			strata::postings_iterator it(s.get<strata::inverted_plugin>(), info);
 			std::uint64_t n = 0;
 			for (auto d = it.next(); d != strata::no_more_docs; d = it.next()) { n += it.wdf(); }
 			return n;
 		};
 		CHECK(walk(good) > 0);
 		strata::segment s(good);
-		const auto info = *s.term("long");
+		const auto info = *s.get<strata::inverted_plugin>().term("long");
 		const std::uint64_t region = std::uint64_t(1) << strata::format::default_region_shift;
 		CHECK(info.postings_length > 3 * region);
 		const auto toc = strata::format::decode_toc(good, strata::format::decode_footer(good));
@@ -844,8 +844,8 @@ int main() {
 		auto with_first = [&](std::uint64_t first) {
 			std::string file = good;
 			strata::segment s(file);
-			const auto info = *s.term("p");
-			const char* p = s.postings_bytes().data() + info.postings;
+			const auto info = *s.get<strata::inverted_plugin>().term("p");
+			const char* p = s.get<strata::inverted_plugin>().postings_bytes().data() + info.postings;
 			const char* end = p + info.postings_length;
 			(void)strata::format::get_leb(&p, end);  // groups
 			CHECK(*p++ == 1);                          // wide offsets
@@ -862,8 +862,8 @@ int main() {
 			strata::segment bad_seg(file);
 			std::size_t fenced = 0;
 			for (strata::ordinal_t target : {strata::ordinal_t(150), strata::ordinal_t(250)}) {
-				strata::postings_iterator g(good_seg, *good_seg.term("p")), b(bad_seg, *bad_seg.term("p"));
-				strata::positions_reader gp(good_seg, *good_seg.term("p")), bp(bad_seg, *bad_seg.term("p"));
+				strata::postings_iterator g(good_seg.get<strata::inverted_plugin>(), *good_seg.get<strata::inverted_plugin>().term("p")), b(bad_seg.get<strata::inverted_plugin>(), *bad_seg.get<strata::inverted_plugin>().term("p"));
+				strata::positions_reader gp(good_seg.get<strata::inverted_plugin>(), *good_seg.get<strata::inverted_plugin>().term("p")), bp(bad_seg.get<strata::inverted_plugin>(), *bad_seg.get<strata::inverted_plugin>().term("p"));
 				g.advance(target);
 				const auto want = gp.read(g);
 				try {
@@ -897,9 +897,9 @@ int main() {
 		std::vector<std::uint64_t> lengths;
 		{
 			strata::segment s(good);
-			const auto info = *s.term("dense");
+			const auto info = *s.get<strata::inverted_plugin>().term("dense");
 			const char* base = good.data();
-			const char* p = s.postings_bytes().data() + info.postings;
+			const char* p = s.get<strata::inverted_plugin>().postings_bytes().data() + info.postings;
 			const char* end = p + info.postings_length;
 			const std::uint64_t groups = strata::format::get_leb(&p, end);
 			const bool wide = *p++ == 1;
@@ -923,7 +923,7 @@ int main() {
 		auto window_count = [](const std::string& file) {
 			strata::segment s(file);
 			std::vector<strata::scorer_ptr> kids;
-			for (const char* t : {"dense", "m3", "m5"}) { kids.push_back(std::make_unique<strata::term_scorer>(s, *s.term(t))); }
+			for (const char* t : {"dense", "m3", "m5"}) { kids.push_back(std::make_unique<strata::term_scorer>(s.get<strata::inverted_plugin>(), *s.get<strata::inverted_plugin>().term(t))); }
 			strata::disjunction_scorer any(std::move(kids));
 			return strata::count(any);
 		};
@@ -945,7 +945,7 @@ int main() {
 	{
 		const std::string empty = strata::segment_writer{}.flush({});
 		strata::segment e(empty);
-		CHECK(e.doc_count() == 0 && !e.ordinal_of(5) && !e.term("x"));
+		CHECK(e.core().doc_count() == 0 && !e.core().ordinal_of(5) && !e.get<strata::inverted_plugin>().term("x"));
 		strata::segment_writer zero, wide;
 		std::vector<std::uint32_t> none;
 		for (std::uint32_t d = 0; d < 300; ++d) {
@@ -955,7 +955,7 @@ int main() {
 		}
 		const std::string zero_bytes = zero.flush({}), wide_bytes = wide.flush({});
 		strata::segment z(zero_bytes), wd(wide_bytes);
-		CHECK(z.length(5) == 0 && wd.length(7) == 0xfffffff0u && wd.length(8) == 8);
+		CHECK(z.get<strata::inverted_plugin>().length(5) == 0 && wd.get<strata::inverted_plugin>().length(7) == 0xfffffff0u && wd.get<strata::inverted_plugin>().length(8) == 8);
 		strata::segment_writer full;
 		for (std::uint32_t d = 0; d < 512; ++d) {
 			std::vector<strata::posting_input> in{{d % 2 ? "half" : "other", 1, none}};
@@ -963,8 +963,8 @@ int main() {
 		}
 		const std::string full_bytes = full.flush({});
 		strata::segment f(full_bytes);
-		strata::postings_iterator it(f, *f.term("half"));  // 256 postings: two full blocks
-		CHECK(f.term("half")->df == 256);
+		strata::postings_iterator it(f.get<strata::inverted_plugin>(), *f.get<strata::inverted_plugin>().term("half"));  // 256 postings: two full blocks
+		CHECK(f.get<strata::inverted_plugin>().term("half")->df == 256);
 		strata::ordinal_t last = strata::no_more_docs;
 		for (auto d = it.next(); d != strata::no_more_docs; d = it.next()) { last = d; }
 		CHECK(last == 511);

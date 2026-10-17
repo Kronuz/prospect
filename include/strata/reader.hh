@@ -307,6 +307,21 @@ struct inverted_plugin {
 			return std::uint32_t(v & (w == 32 ? 0xffffffffu : ((1u << w) - 1)));
 		}
 
+		// A term's info, its offsets resolved from its dictionary run and, for a term without
+		// skip blocks, its competitive pairs computed from its postings (at most 127).
+		std::optional<format::term_info> term(std::string_view key) const {
+			auto info = find_term(key);
+			if (info) { complete_impacts(*info); }
+			return info;
+		}
+		// Computes the competitive pairs find_term leaves out (a term below 128 postings).
+		void complete_impacts(format::term_info& info) const {
+			if (info.df < format::block) { info.impacts = tail_impacts(info); }
+		}
+		// Competitive pairs of a term without skip blocks, from its postings.
+		std::vector<format::impact> tail_impacts(const format::term_info& info) const;
+		// The same as term() from one dictionary walk, leaving a term without skip blocks with
+		// no competitive pairs: its df and offsets, for statistics and counts.
 		std::optional<format::term_info> find_term(std::string_view key) const {
 			// The run's values end with key's: the earlier ones only move the cursor.
 			format::term_run run, before;
@@ -713,8 +728,8 @@ struct reader_of<docids_section> {  // the core's section: no reader of its own
 };
 }  // namespace detail
 
-// An open segment of a layout: the core, then each plugin's reader in layout order. Its
-// members forward to the reader that owns each concern, so callers name the segment.
+// An open segment of a layout: the core, then each plugin's reader in layout order.
+// Callers name the reader that owns each concern (L11).
 template <class... Entries>
 class basic_segment<layout<Entries...>> {
 	template <class E>
@@ -740,85 +755,25 @@ public:
 	explicit basic_segment(std::string&&) = delete;
 	explicit basic_segment(std::string_view file) : core_(file, all_rules()), readers_(open(core_)) {}
 
-	template <class P>
-	auto& reader() noexcept { return std::get<typename detail::reader_of<P>::type>(readers_); }
-	template <class P>
-	const auto& reader() const noexcept { return std::get<typename detail::reader_of<P>::type>(readers_); }
+	// The core's view: docids, ordinals, the document count, the table of contents.
 	const core_segment& core() const noexcept { return core_; }
+	// Plugin P's reader: a compile-time offset into the reader tuple (L11).
+	template <class P>
+	const auto& get() const noexcept {
+		static_assert(index_of<P>() < sizeof...(Entries), "the plugin is not in this segment's layout");
+		return std::get<typename detail::reader_of<P>::type>(readers_);
+	}
 	// What P's reader needs from the readers it depends on, built at each call (L3).
 	template <class P>
 	typename P::deps deps() const noexcept { return deps_of<P>(typename P::depends_on{}); }
-
-	// Core.
-	std::uint64_t min_docid() const noexcept { return core_.min_docid(); }
-	std::uint64_t max_docid() const noexcept { return core_.max_docid(); }
-	std::uint64_t docid(ordinal_t ord) const { return core_.docid(ord); }
-	std::optional<ordinal_t> ordinal_of(std::uint64_t docid) const { return core_.ordinal_of(docid); }
-	bool docid_ordered() const noexcept { return core_.docid_ordered(); }
-	std::uint64_t doc_count() const noexcept { return core_.doc_count(); }
-	const std::vector<format::section_entry>& sections() const noexcept { return core_.sections(); }
-	std::size_t verified_regions() const noexcept { return core_.verified_regions(); }
+	// Whether the segment holds P's structure: every plugin of the layout in format 12.
+	template <class P>
+	static constexpr bool holds() noexcept { return index_of<P>() < sizeof...(Entries); }
 	// Verifies every byte of the sections checked on first read; throws corrupt_segment at
 	// the first one that differs.
 	void verify_all() const {
 		(..., verify_all_of<Entries>());
 	}
-
-	// keys.
-	std::uint64_t version(ordinal_t ord) const { return reader<keys_plugin>().version(ord); }
-	bool may_hold_key(std::string_view key) const { return reader<keys_plugin>().may_hold(key); }
-
-	// stored.
-	using stored_frame = stored_plugin::reader::stored_frame;
-	std::uint32_t stored_frames() const { return reader<stored_plugin>().stored_frames(); }
-	void decode_stored_frame(std::uint32_t f, stored_frame& out) const { reader<stored_plugin>().decode_stored_frame(f, out); }
-	std::optional<std::uint32_t> stored_frame_of(ordinal_t ord) const { return reader<stored_plugin>().stored_frame_of(ord); }
-	std::string_view stored(ordinal_t ord, stored_frame& cache) const { return reader<stored_plugin>().stored(ord, cache); }
-	std::string stored(ordinal_t ord) const { return reader<stored_plugin>().stored(ord); }
-
-	// inverted.
-	std::uint8_t norm(ordinal_t ord) const noexcept { return reader<inverted_plugin>().norm(ord); }
-	void verify_postings(std::uint64_t offset, std::uint64_t length) const { reader<inverted_plugin>().verify_postings(offset, length); }
-	std::uint8_t postings_region_shift() const noexcept { return reader<inverted_plugin>().postings_region_shift(); }
-	void verify_positions(std::uint64_t offset, std::uint64_t length) const { reader<inverted_plugin>().verify_positions(offset, length); }
-	std::uint32_t max_positions() const noexcept { return reader<inverted_plugin>().max_positions(); }
-	std::uint64_t total_length() const noexcept { return reader<inverted_plugin>().total_length(); }
-	double average_length() const noexcept { return reader<inverted_plugin>().average_length(); }
-	std::uint32_t length(ordinal_t ord) const { return reader<inverted_plugin>().length(ord); }
-	std::string_view postings_bytes() const noexcept { return reader<inverted_plugin>().postings_bytes(); }
-	std::string_view positions_bytes() const noexcept { return reader<inverted_plugin>().positions_bytes(); }
-	const termdict::reader& dictionary() const noexcept { return reader<inverted_plugin>().dictionary(); }
-
-	// A term's info, its offsets resolved from its dictionary run and, for a term without
-	// skip blocks, its competitive pairs computed from its postings (at most 127).
-	std::optional<format::term_info> term(std::string_view key) const {
-		auto info = find_term(key);
-		if (info) { complete_impacts(*info); }
-		return info;
-	}
-	// The same from one dictionary walk, leaving a term without skip blocks with no
-	// competitive pairs: its df and offsets, for statistics and counts.
-	std::optional<format::term_info> find_term(std::string_view key) const { return reader<inverted_plugin>().find_term(key); }
-	// Computes the competitive pairs find_term leaves out (a term below 128 postings).
-	void complete_impacts(format::term_info& info) const {
-		if (info.df < format::block) { info.impacts = tail_impacts(info); }
-	}
-	// Competitive pairs of a term without skip blocks, from its postings.
-	std::vector<format::impact> tail_impacts(const format::term_info& info) const;
-	// Calls f(term, info) for every term in order (impacts left empty below 128 postings)
-	// until f returns false.
-	template <class F>
-	void scan_terms(F&& f) const { reader<inverted_plugin>().scan_terms(std::forward<F>(f)); }
-	// Calls f(term, value) for every term from `from` in order until f returns false; a
-	// dictionary block that fails its region check throws corrupt_segment.
-	template <class F>
-	void scan_dictionary(std::string_view from, F&& f) const { reader<inverted_plugin>().scan_dictionary(from, std::forward<F>(f)); }
-
-	// The inverted reader's term cursor over this segment.
-	class term_cursor : public inverted_plugin::reader::term_cursor {
-	public:
-		explicit term_cursor(const basic_segment& seg) : inverted_plugin::reader::term_cursor(seg.template reader<inverted_plugin>()) {}
-	};
 
 private:
 	using readers = std::tuple<typename detail::reader_of<Entries>::type...>;
@@ -829,7 +784,7 @@ private:
 	template <class P, class... Ds>
 	typename P::deps deps_of(type_list<Ds...>) const noexcept {
 		static_assert(((index_of<Ds>() < index_of<P>()) && ...), "a plugin's dependencies come earlier in its layout");
-		return typename P::deps{reader<Ds>()...};
+		return typename P::deps{get<Ds>()...};
 	}
 	template <class T>
 	static constexpr std::size_t index_of() {  // sizeof...(Entries) when T is not in the layout
@@ -841,7 +796,7 @@ private:
 	}
 	template <class E>
 	void verify_all_of() const {
-		if constexpr (!std::is_same_v<E, docids_section>) { reader<E>().verify_all(); }
+		if constexpr (!std::is_same_v<E, docids_section>) { get<E>().verify_all(); }
 	}
 
 	core_segment core_;
@@ -856,7 +811,6 @@ static_assert(std::is_nothrow_move_constructible_v<segment>);
 // docset::doc_iterator; scorers build on it. Skip groups are decoded on demand.
 class postings_iterator {
 public:
-	postings_iterator(const segment& seg, const format::term_info& info) : postings_iterator(seg.reader<inverted_plugin>(), info) {}
 	postings_iterator(const inverted_plugin::reader& seg, const format::term_info& info) : seg_(&seg), info_(info), df_(info.df) {
 		if (info.flags & format::single_posting) {
 			if (info.postings >= seg.doc_count()) { corrupt("single posting ordinal"); }
@@ -1454,8 +1408,7 @@ private:
 // Reads one term's position data: per-document counts (when they differ from wdf) and the
 // position stream, decoding one 128-position block at a time. Opening reads a fixed header;
 // blocks are found from the postings skip data and stepped over by their headers.
-template <>
-inline std::vector<format::impact> segment::tail_impacts(const format::term_info& info) const {
+inline std::vector<format::impact> inverted_plugin::reader::tail_impacts(const format::term_info& info) const {
 	std::vector<format::impact> pairs;
 	postings_iterator it(*this, info);
 	for (ordinal_t d = it.next(); d != no_more_docs; d = it.next()) { pairs.push_back({it.wdf(), norm(d)}); }
@@ -1488,7 +1441,6 @@ void keys_plugin::reader::scan(std::string_view prefix, const deps& d, F&& f) co
 
 class positions_reader {
 public:
-	positions_reader(const segment& seg, const format::term_info& info) : positions_reader(seg.reader<inverted_plugin>(), info) {}
 	positions_reader(const inverted_plugin::reader& seg, const format::term_info& info) {
 		if (info.flags & format::no_positions) {
 			none_ = true;  // a term indexed without positions: every count is 0

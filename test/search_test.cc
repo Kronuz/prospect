@@ -52,10 +52,10 @@ int main() {
 		auto tf = [&](std::size_t d, const std::string& t) { return occurrences(d, t) * (t == "h" ? 2 : 1); };
 		bool xapian = false;  // the round's scoring scheme
 		auto weight = [&](const std::string& t) {
-			auto info = seg.term(t);
-			return xapian ? strata::weight::bm25_xapian(seg, info ? info->df : 0) : strata::weight::bm25(seg, info ? info->df : 0);
+			auto info = seg.get<strata::inverted_plugin>().term(t);
+			return xapian ? strata::weight::bm25_xapian(seg.get<strata::inverted_plugin>(), info ? info->df : 0) : strata::weight::bm25(seg.get<strata::inverted_plugin>(), info ? info->df : 0);
 		};
-		auto term = [&](const std::string& t) -> strata::scorer_ptr { return std::make_unique<strata::term_scorer>(seg, *seg.term(t), weight(t)); };
+		auto term = [&](const std::string& t) -> strata::scorer_ptr { return std::make_unique<strata::term_scorer>(seg.get<strata::inverted_plugin>(), *seg.get<strata::inverted_plugin>().term(t), weight(t)); };
 
 		for (int round = 0; round < 300; ++round) {
 			xapian = round % 2 == 1;
@@ -63,13 +63,13 @@ int main() {
 			std::size_t n = 1 + rng() % 3;
 			while (pick.size() < n) {
 				std::string t = vocab[rng() % vocab.size()];
-				if (std::find(pick.begin(), pick.end(), t) == pick.end() && seg.term(t)) { pick.push_back(t); }
+				if (std::find(pick.begin(), pick.end(), t) == pick.end() && seg.get<strata::inverted_plugin>().term(t)) { pick.push_back(t); }
 			}
 			const int kind = int(rng() % 15);
 			const std::size_t need = kind >= 11 ? 4 : kind >= 7 ? 3 : 0;
 			while (pick.size() < need) {
 				std::string t = vocab[rng() % vocab.size()];
-				if (std::find(pick.begin(), pick.end(), t) == pick.end() && seg.term(t)) { pick.push_back(t); }
+				if (std::find(pick.begin(), pick.end(), t) == pick.end() && seg.get<strata::inverted_plugin>().term(t)) { pick.push_back(t); }
 			}
 			// Phrases may repeat a term ("a b a"): one iterator per term, a slot per position.
 			if ((kind == 4 || kind == 5) && pick.size() >= 2 && rng() % 3 == 0) { pick.push_back(pick[0]); }
@@ -189,7 +189,7 @@ int main() {
 					} else if (match) {
 						double idf = 0;
 						for (auto& t : pick) { idf += weight(t).idf; }
-						auto wt = strata::weight::bm25(seg, 1);
+						auto wt = strata::weight::bm25(seg.get<strata::inverted_plugin>(), 1);
 						wt.idf = idf;
 						s = wt(freq, std::uint32_t(tk.size()));
 						if (kind == 5) { s += weight(pick[0])(tf(d, pick[0]), std::uint32_t(tk.size())); }
@@ -260,11 +260,11 @@ int main() {
 				}
 				default: {
 					std::vector<strata::format::term_info> infos;
-					for (auto& t : pick) { infos.push_back(*seg.term(t)); }
+					for (auto& t : pick) { infos.push_back(*seg.get<strata::inverted_plugin>().term(t)); }
 					std::vector<strata::weight> ws;
 					for (auto& t : pick) { ws.push_back(weight(t)); }
-					if (kind == 6) { return std::make_unique<strata::phrase_scorer>(seg, infos, std::move(ws), 3); }
-					auto phrase = xapian ? std::make_unique<strata::phrase_scorer>(seg, infos, std::move(ws)) : std::make_unique<strata::phrase_scorer>(seg, infos);
+					if (kind == 6) { return std::make_unique<strata::phrase_scorer>(seg.get<strata::inverted_plugin>(), infos, std::move(ws), 3); }
+					auto phrase = xapian ? std::make_unique<strata::phrase_scorer>(seg.get<strata::inverted_plugin>(), infos, std::move(ws)) : std::make_unique<strata::phrase_scorer>(seg.get<strata::inverted_plugin>(), infos);
 					if (kind == 4) { return phrase; }
 					kids.push_back(std::move(phrase));
 					kids.push_back(term(pick[0]));
@@ -371,7 +371,7 @@ int main() {
 		}
 		std::string file = w.flush({});
 		strata::segment seg(file);
-		auto term = [&](const std::string& t) -> strata::scorer_ptr { return std::make_unique<strata::term_scorer>(seg, *seg.term(t)); };
+		auto term = [&](const std::string& t) -> strata::scorer_ptr { return std::make_unique<strata::term_scorer>(seg.get<strata::inverted_plugin>(), *seg.get<strata::inverted_plugin>().term(t)); };
 		auto both = [&](const std::string& a, const std::string& b) {
 			std::size_t c = 0;
 			for (auto d : holds[a]) { c += holds[b].count(d); }
@@ -433,7 +433,7 @@ int main() {
 		}
 		std::string file = w.flush({});
 		strata::segment seg(file);
-		auto phrase = [&] { return std::make_unique<strata::phrase_scorer>(seg, std::vector<strata::format::term_info>{*seg.term("a"), *seg.term("b")}); };
+		auto phrase = [&] { return std::make_unique<strata::phrase_scorer>(seg.get<strata::inverted_plugin>(), std::vector<strata::format::term_info>{*seg.get<strata::inverted_plugin>().term("a"), *seg.get<strata::inverted_plugin>().term("b")}); };
 		auto pruned = phrase();
 		auto hits = strata::top_k(seg, *pruned, 10);
 		auto all = phrase();
@@ -460,15 +460,15 @@ int main() {
 			for (std::size_t i = 0; i < hits.size(); ++i) { CHECK(hits[i].ord == i); }
 		};
 		for (bool counted : {false, true}) {
-			strata::term_scorer t(seg, *seg.term("a"));
+			strata::term_scorer t(seg.get<strata::inverted_plugin>(), *seg.get<strata::inverted_plugin>().term("a"));
 			check(t, counted);
 			std::vector<strata::scorer_ptr> v1, v2;
-			v1.push_back(std::make_unique<strata::term_scorer>(seg, *seg.term("a")));
-			v1.push_back(std::make_unique<strata::term_scorer>(seg, *seg.term("b")));
+			v1.push_back(std::make_unique<strata::term_scorer>(seg.get<strata::inverted_plugin>(), *seg.get<strata::inverted_plugin>().term("a")));
+			v1.push_back(std::make_unique<strata::term_scorer>(seg.get<strata::inverted_plugin>(), *seg.get<strata::inverted_plugin>().term("b")));
 			strata::disjunction_scorer u(std::move(v1));
 			check(u, counted);
-			v2.push_back(std::make_unique<strata::term_scorer>(seg, *seg.term("a")));
-			v2.push_back(std::make_unique<strata::term_scorer>(seg, *seg.term("b")));
+			v2.push_back(std::make_unique<strata::term_scorer>(seg.get<strata::inverted_plugin>(), *seg.get<strata::inverted_plugin>().term("a")));
+			v2.push_back(std::make_unique<strata::term_scorer>(seg.get<strata::inverted_plugin>(), *seg.get<strata::inverted_plugin>().term("b")));
 			strata::conjunction_scorer c(std::move(v2));
 			check(c, counted);
 		}
@@ -488,7 +488,7 @@ int main() {
 		}
 		const std::string file = w.flush({});
 		const strata::segment seg(file);
-		CHECK(!seg.docid_ordered());
+		CHECK(!seg.core().docid_ordered());
 		strata::segment_writer w2;
 		for (std::uint32_t d = 0; d < 1000; ++d) {
 			std::vector<std::uint32_t> p1{1}, p2{2};
@@ -498,10 +498,10 @@ int main() {
 		const std::string file2 = w2.flush({});
 		const strata::segment seg2(file2);
 		auto make = [](const strata::segment& sg, int kind) -> strata::scorer_ptr {
-			if (kind == 0) { return std::make_unique<strata::term_scorer>(sg, *sg.term("a")); }
+			if (kind == 0) { return std::make_unique<strata::term_scorer>(sg.get<strata::inverted_plugin>(), *sg.get<strata::inverted_plugin>().term("a")); }
 			std::vector<strata::scorer_ptr> v;
-			v.push_back(std::make_unique<strata::term_scorer>(sg, *sg.term("a")));
-			v.push_back(std::make_unique<strata::term_scorer>(sg, *sg.term("b")));
+			v.push_back(std::make_unique<strata::term_scorer>(sg.get<strata::inverted_plugin>(), *sg.get<strata::inverted_plugin>().term("a")));
+			v.push_back(std::make_unique<strata::term_scorer>(sg.get<strata::inverted_plugin>(), *sg.get<strata::inverted_plugin>().term("b")));
 			if (kind == 1) { return std::make_unique<strata::disjunction_scorer>(std::move(v)); }
 			return std::make_unique<strata::conjunction_scorer>(std::move(v));
 		};
@@ -509,7 +509,7 @@ int main() {
 			// The expected order: every match by score, then docid.
 			std::vector<std::pair<double, std::uint64_t>> all;
 			auto scan = make(seg, kind);
-			for (auto d = scan->next(); d != strata::no_more_docs; d = scan->next()) { all.push_back({scan->score(), seg.docid(d)}); }
+			for (auto d = scan->next(); d != strata::no_more_docs; d = scan->next()) { all.push_back({scan->score(), seg.core().docid(d)}); }
 			std::sort(all.begin(), all.end(), [](const auto& a, const auto& b) { return a.first != b.first ? a.first > b.first : a.second < b.second; });
 			for (std::size_t k : {1u, 10u, 100u}) {
 				for (int mode = 0; mode < 4; ++mode) {  // pruned, counted, a floor below the k-th, one above it
@@ -526,14 +526,14 @@ int main() {
 					CHECK(hits.size() == expect);
 					if (mode == 1) { CHECK(n == all.size()); }
 					for (std::size_t i = 0; i < hits.size() && i < expect; ++i) {
-						CHECK(seg.docid(hits[i].ord) == all[i].second && hits[i].score == all[i].first);
+						CHECK(seg.core().docid(hits[i].ord) == all[i].second && hits[i].score == all[i].first);
 					}
 				}
 				// Across segments, each scored by its own statistics here; the docid-ordered
 				// segment's docids all follow the reordered one's.
 				auto both = all;
 				auto scan2 = make(seg2, kind);
-				for (auto d = scan2->next(); d != strata::no_more_docs; d = scan2->next()) { both.push_back({scan2->score(), seg2.docid(d)}); }
+				for (auto d = scan2->next(); d != strata::no_more_docs; d = scan2->next()) { both.push_back({scan2->score(), seg2.core().docid(d)}); }
 				std::sort(both.begin(), both.end(), [](const auto& a, const auto& b) { return a.first != b.first ? a.first > b.first : a.second < b.second; });
 				const std::vector<strata::segment_snapshot> snaps{{&seg2}, {&seg}};
 				const auto got = strata::search(snaps, [&](const strata::segment& sg) { return make(sg, kind); }, k);
@@ -553,10 +553,10 @@ int main() {
 		}
 		std::string file = w.flush({});
 		strata::segment seg(file);
-		const std::vector<strata::format::term_info> infos{*seg.term("a"), *seg.term("p")};
-		strata::phrase_scorer phrase(seg, infos);
+		const std::vector<strata::format::term_info> infos{*seg.get<strata::inverted_plugin>().term("a"), *seg.get<strata::inverted_plugin>().term("p")};
+		strata::phrase_scorer phrase(seg.get<strata::inverted_plugin>(), infos);
 		CHECK(strata::top_k(seg, phrase, 10).empty());
-		strata::phrase_scorer near(seg, infos, {strata::weight::bm25(seg, 300), strata::weight::bm25(seg, 300)}, 5);
+		strata::phrase_scorer near(seg.get<strata::inverted_plugin>(), infos, {strata::weight::bm25(seg.get<strata::inverted_plugin>(), 300), strata::weight::bm25(seg.get<strata::inverted_plugin>(), 300)}, 5);
 		std::uint64_t n = 1;
 		CHECK(strata::top_k(seg, near, 10, &n).empty() && n == 0);
 	}

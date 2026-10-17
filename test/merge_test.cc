@@ -115,7 +115,7 @@ int main() {
 		// flush of the same documents in the same order.
 		std::vector<merge_ref> order;
 		for (std::size_t s = 0; s < sources.size(); ++s) {
-			for (ordinal_t o = 0; o < sources[s].seg->doc_count(); ++o) {
+			for (ordinal_t o = 0; o < sources[s].seg->core().doc_count(); ++o) {
 				if (sources[s].live(o)) { order.push_back({std::uint32_t(s), o}); }
 			}
 		}
@@ -132,7 +132,7 @@ int main() {
 		pw.permuted = true;
 		std::vector<std::uint64_t> sequence;
 		for (const auto& ref : order) {
-			const std::uint64_t docid = sources[ref.source].seg->docid(ref.ord);
+			const std::uint64_t docid = sources[ref.source].seg->core().docid(ref.ord);
 			sequence.push_back(docid);
 			const auto& l = model.at(docid);
 			in.clear();
@@ -141,8 +141,8 @@ int main() {
 		}
 		CHECK(permuted == pw.flush(id));
 		const segment ps(permuted);
-		CHECK(!ps.docid_ordered() || order.size() < 2);
-		for (std::size_t i = 0; i < sequence.size(); ++i) { CHECK(ps.docid(ordinal_t(i)) == sequence[i] && ps.ordinal_of(sequence[i]) == ordinal_t(i)); }
+		CHECK(!ps.core().docid_ordered() || order.size() < 2);
+		for (std::size_t i = 0; i < sequence.size(); ++i) { CHECK(ps.core().docid(ordinal_t(i)) == sequence[i] && ps.core().ordinal_of(sequence[i]) == ordinal_t(i)); }
 		// A single permuted source keeps its order.
 		{
 			const merge_source one[] = {{&ps, nullptr}};
@@ -156,7 +156,7 @@ int main() {
 		{
 			const merge_source one[] = {{&ps, nullptr}};
 			std::vector<std::pair<std::uint64_t, ordinal_t>> by_docid;
-			for (ordinal_t o = 0; o < ps.doc_count(); ++o) { by_docid.push_back({ps.docid(o), o}); }
+			for (ordinal_t o = 0; o < ps.core().doc_count(); ++o) { by_docid.push_back({ps.core().docid(o), o}); }
 			std::sort(by_docid.begin(), by_docid.end());
 			std::vector<merge_ref> sorted_order;
 			for (const auto& [d, o] : by_docid) { sorted_order.push_back({0, o}); }
@@ -313,7 +313,7 @@ int main() {
 		CHECK(kept == 5);
 		ix.force_merge(1);
 		CHECK(ix.segments().size() == 1 && deleted_in(ix.segments()[0]) == 0);
-		CHECK(ix.segments()[0].seg->doc_count() == 175);
+		CHECK(ix.segments()[0].seg->core().doc_count() == 175);
 		CHECK(ix.digest() == before);
 	}
 	std::printf("merge: %s\n", failures ? "FAILED" : "ok");

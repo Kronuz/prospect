@@ -114,14 +114,14 @@ int main() {
 		const std::string file = build(300, 1000, true);
 		segment first(file);
 		segment moved(std::move(first));
-		const auto info = moved.term("gamma");
+		const auto info = moved.get<strata::inverted_plugin>().term("gamma");
 		CHECK(info && info->df > 0);
-		postings_iterator it(moved, *info);
+		postings_iterator it(moved.get<strata::inverted_plugin>(), *info);
 		std::uint64_t n = 0;
 		for (auto d = it.next(); d != no_more_docs; d = it.next()) { ++n; }
 		CHECK(n == info->df);
-		CHECK(moved.may_hold_key("Q7") && moved.version(6) == 1 + 6 % 3);
-		CHECK(moved.stored(5).size() == 1000);
+		CHECK(moved.get<strata::keys_plugin>().may_hold("Q7") && moved.get<strata::keys_plugin>().version(6) == 1 + 6 % 3);
+		CHECK(moved.get<strata::stored_plugin>().stored(5).size() == 1000);
 		moved.verify_all();
 	}
 	// An empty flush, when the writer allows one.

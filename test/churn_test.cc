@@ -106,8 +106,8 @@ static std::vector<strata::segment_snapshot> snapshot(const strata::index& ix) {
 static void verify(const strata::index& ix, const model& m, std::mt19937_64& r, const char* when) {
 	std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> live;  // docid -> (version, stored)
 	for (const auto& s : ix.segments()) {
-		for (strata::ordinal_t o = 0; o < s.seg->doc_count(); ++o) {
-			if (s.live(o)) { live[s.seg->docid(o)] = {s.seg->version(o), s.seg->stored(o)}; }
+		for (strata::ordinal_t o = 0; o < s.seg->core().doc_count(); ++o) {
+			if (s.live(o)) { live[s.seg->core().docid(o)] = {s.seg->get<strata::keys_plugin>().version(o), s.seg->get<strata::stored_plugin>().stored(o)}; }
 		}
 	}
 	CHECK(live.size() == m.size());
@@ -123,9 +123,9 @@ static void verify(const strata::index& ix, const model& m, std::mt19937_64& r, 
 		std::uint64_t want = 0;
 		for (const auto& [key, doc] : m) { want += std::binary_search(doc.words.begin(), doc.words.end(), word); }
 		const auto got = strata::search_count(segs, [&](const strata::segment& seg) -> strata::scorer_ptr {
-			auto info = seg.term(word);
+			auto info = seg.get<strata::inverted_plugin>().term(word);
 			if (!info) { return nullptr; }
-			return std::make_unique<strata::term_scorer>(seg, *info);
+			return std::make_unique<strata::term_scorer>(seg.get<strata::inverted_plugin>(), *info);
 		});
 		CHECK(got == want);
 	}
@@ -245,7 +245,7 @@ int main() {
 			most_segments = std::max(most_segments, ix.segments().size());
 			std::uint64_t docs = 0, deleted = 0;
 			for (const auto& s : ix.segments()) {
-				docs += s.seg->doc_count();
+				docs += s.seg->core().doc_count();
 				if (s.deleted) {
 					for (auto w : *s.deleted) { deleted += std::uint64_t(std::popcount(w)); }
 				}
