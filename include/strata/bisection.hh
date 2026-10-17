@@ -425,12 +425,14 @@ inline std::vector<std::uint32_t> order(const graph& g, const presets& p = {}, c
 		if (b - a <= p.min_partition) { continue; }
 		const std::uint32_t mid = a + (b - a) / 2;
 		const std::uint64_t nl = mid - a, nr = b - mid;
+		// Degrees are counted once per part and then follow each swap, so an iteration reads
+		// every row once (the gains) and the swapped rows again.
+		for (std::uint32_t i = a; i < b; ++i) {
+			auto& deg = i < mid ? left_deg : right_deg;
+			g.for_row(perm[i], [&](std::uint32_t t) { ++deg[t]; });
+		}
 		for (std::uint32_t it = 0; it < p.iterations; ++it) {
 			if (cancel && cancel->requested()) { throw task::cancelled{}; }
-			for (std::uint32_t i = a; i < b; ++i) {
-				auto& deg = i < mid ? left_deg : right_deg;
-				g.for_row(perm[i], [&](std::uint32_t t) { ++deg[t]; });
-			}
 			left_gain.clear();
 			right_gain.clear();
 			for (std::uint32_t i = a; i < b; ++i) {
@@ -442,19 +444,22 @@ inline std::vector<std::uint32_t> order(const graph& g, const presets& p = {}, c
 				}
 				(i < mid ? left_gain : right_gain).push_back({gain, i});
 			}
-			for (std::uint32_t i = a; i < b; ++i) {  // reset only what this part touched
-				g.for_row(perm[i], [&](std::uint32_t t) { left_deg[t] = right_deg[t] = 0; });
-			}
 			auto by_gain = [](const auto& x, const auto& y) { return x.first != y.first ? x.first > y.first : x.second < y.second; };
 			std::sort(left_gain.begin(), left_gain.end(), by_gain);
 			std::sort(right_gain.begin(), right_gain.end(), by_gain);
 			bool swapped = false;
 			for (std::size_t i = 0; i < left_gain.size() && i < right_gain.size(); ++i) {
 				if (left_gain[i].first + right_gain[i].first <= 0) { break; }
+				const std::uint32_t l = perm[left_gain[i].second], r = perm[right_gain[i].second];
+				g.for_row(l, [&](std::uint32_t t) { --left_deg[t], ++right_deg[t]; });
+				g.for_row(r, [&](std::uint32_t t) { --right_deg[t], ++left_deg[t]; });
 				std::swap(perm[left_gain[i].second], perm[right_gain[i].second]);
 				swapped = true;
 			}
 			if (!swapped) { break; }
+		}
+		for (std::uint32_t i = a; i < b; ++i) {  // reset only what this part touched
+			g.for_row(perm[i], [&](std::uint32_t t) { left_deg[t] = right_deg[t] = 0; });
 		}
 		parts.push_back({mid, b});
 		parts.push_back({a, mid});
