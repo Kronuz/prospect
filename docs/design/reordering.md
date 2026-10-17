@@ -231,8 +231,21 @@ Ordinal order is no longer docid order inside a reordered segment. The paths tha
 **The equal-bound skip** (D5.3 of the first draft; `search.hh`'s `update_min`) is lost in a
 reordered segment: blocks whose bound equals the k-th score are decoded. Its cost on the
 docid-ordered 5M index, per class and both schemes, is measured before D5's code (P1-R9;
-`bench/night_p1.sh`, step 2). If a class loses, this design states what is accepted. The
-tie rule itself stays: Xapiand's E2E asserts the docid tie-break exactly.
+`bench/night_p1.sh`, step 2). The tie rule itself stays: Xapiand's E2E asserts the docid
+tie-break exactly.
+
+Measured (night of 2026-10-16, `ab.sh` in-process, both binaries from `aad1770`, the merged
+5M index, four rounds of three runs, no mismatches), without the skip against with it:
+
+| Command | Gate queries, BM25 | Terms, BM25 | Gate queries, Xapian's BM25 | Terms, Xapian's BM25 |
+|---|---:|---:|---:|---:|
+| `TOP_10` | 1.001 [0.999–1.003] | 0.999 [0.993–1.005] | 1.001 [0.999–1.003] | 1.051 [1.036–1.067] |
+| `TOP_100` | 1.003 [1.001–1.004] | 0.988 [0.982–0.993] | 1.002 [0.999–1.004] | 1.074 [1.065–1.084] |
+| `TOP_1000` | 1.006 [1.005–1.008] | 1.019 [1.013–1.024] | 1.007 [1.004–1.010] | 1.024 [1.018–1.031] |
+
+Accepted: the gate's queries lose at most 0.7%, and single terms under the gate's BM25 at
+most 1.9%. Single terms under Xapian's BM25, whose coarser scores tie more, lose up to 7.4%;
+that scheme is not a gate row, and the loss is stated where Xapiand reports it.
 
 **What checks it.** `verify` compares ties as sets, so it cannot see a tie broken by
 ordinal. The exact checks are `multisegment_test`'s and `engine_query_test`'s R2 case,
@@ -271,14 +284,15 @@ document (29 MB at 5M), is mapped and verified at open.
 | T6 Decoder (P1-R14) | `fuzz_segment` one CPU-hour over its permuted, keyed base at the gate's commit; every validation check reached by a resealed segment-level test as well as `docids_test`'s direct ones; `permuted.sx` pinned | `fuzz/fuzz_segment.cc`, `test/docids_test.cc` |
 | T7 Determinism (P1-R15) | The same reordering merge gives the same bytes everywhere: a test compares its output's hash with a pinned constant on Linux x86_64 and arm64, macOS x86_64 and arm64, and FreeBSD (CI's jobs), at `reorder_threads` 1 and 8; zstd is the pinned release (`db0a891`) | A test in CI on every platform |
 
-**T1's projection** (P1-R10), from the gate report's numbers: against the keyed one-thread
-build, `-bp` takes 15.5% off `.doc` and 8.9% off `.pos` (that pair also differs in keys,
-threads, and buffer, which tonight's keyed `-bp` build removes). The same gains put strata's
-postings at about 852 MB, 1.02× `-bp`'s 833.2 MB: a miss; positions at about 1,486 MB
-(0.95×); the whole index at about 2,498 MB before stored growth, about 0.985× of keyed `-bp`
-(about 2,536 MB), a margin near 1%. If P1 leaves postings above 1.0×, what closes them is a
-postings encoding change in format 13 (P4's per-block containers, P13 for positions); whether
-a disk row may be carried until then is the owner's decision (review finding 1).
+**T1's projection** (P1-R10). The keyed one-thread `-bp` build (night of 2026-10-16,
+`results/keyed-bp-n2.sizes`, 22.5 minutes, 6.7 GB peak) differs from the keyed one-thread
+build only by reordering. It takes 15.4% off `.doc` (833.7 MB) and 9.0% off `.pos`
+(1,556.1 MB); its stored fields grow from 31.9 to 51.7 MB, its terms are 75.8 MB, and the
+whole index is 2,542.5 MB. Today strata is 1.09× that whole. The same gains put strata's
+postings at about 852.5 MB, 1.02×: a miss; positions at about 1,485 MB (0.95×); stored at
+about 25 MB; the whole index, the 29 MB map included, at about 2,507 MB, 0.986×. If P1
+leaves postings above 1.0×, what closes them is format 13's postings change (P4's per-block
+containers, P13 for positions), to which PLAN carries the disk rows.
 
 ## Risks
 
@@ -287,4 +301,4 @@ a disk row may be carried until then is the owner's decision (review finding 1).
 - Delta-coded key-term ordinals (the format-13 dictionary projection) lose their locality
   after reordering, about 14.5 MB at 5M instead of 9.8; that projection is redone with P1.
 - Bisection time may dominate a forced merge; T3 bounds it against the `-bp` builder.
-- The lost equal-bound skip; P1-R9's measurement decides what is accepted.
+- The lost equal-bound skip: measured and accepted (D5).

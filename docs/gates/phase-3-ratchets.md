@@ -191,6 +191,11 @@ section); Lucene 10.4.0 indexed with `KEYED=1` through the single-thread builder
 | Lengths (exact, Xapian's semantics) | 10.1 MB | — | | — | — |
 | Doc values (the harness's `sort_field`) | — | 20.1 MB | | 20.1 MB | 20.1 MB |
 
+**Against keyed Lucene with reordering** (night of 2026-10-16, the one-thread builder with
+`BP=1`, `results/keyed-bp-n2.sizes`): 2,542.5 MB in all; `.doc` 833.7 MB, `.pos` 1,556.1 MB,
+terms 75.8 MB, stored 51.7 MB. That build is PLAN's whole-index reference, and strata is
+1.09× it today; `reordering.md` (T1) projects 0.986× with P1, postings still 1.02×.
+
 The whole index passes (0.98×). Two sections miss: postings at 1.02× and the term
 dictionary at 1.36×. P12 brought the dictionary to 0.992× of Lucene's on an unkeyed
 index; the 5,032,102 key terms add 52 MB to strata's and 27.7 MB to Lucene's. Against
@@ -247,6 +252,29 @@ and 1,000, ordinals and scores, Lucene and Xapian BM25) on the gate VM at `98faf
 variant with deletes (drift against Xapian vectors from the same update stream, exact
 again after a merge drops every deleted document) is not in the tool yet.
 
+## Quick tier with PISA (night of 2026-10-16)
+
+The quick tier (BENCHMARKS.md, "Tiers": 40 sampled queries per class and 40 stratified
+terms, three trials, a 20 s warm-up per engine and command) on the merged 5M indexes,
+strata at `db0a891`, PISA 0.8.2 with its own reordering, block-max WAND, and SIMD-BP128
+(`results/query-n2-quick`; `gate.py --md --target 1.0 --strata strata-merged`). The
+reference is the fastest of Lucene, Lucene `-bp`, and Tantivy, so `-bp` now sets most
+rows; PISA answers no phrases. Global ratios:
+
+| Command | Against the fastest baseline | Against PISA |
+|---|---:|---:|
+| `TOP_10` | 1.43× | 2.30× |
+| `TOP_100` | 1.44× | 2.64× |
+| `TOP_1000` | 1.39× | 3.10× |
+| `TOP_100_COUNT` | 1.42× | 2.55× |
+| `COUNT` | 1.16× | 0.48× |
+
+Over the 35 class and command rows the geometric mean is 1.34× the fastest baseline and,
+over PISA's 25, 1.59× PISA. PISA's lead is in pruned top-k (intersection_union 4.0–4.8×,
+union 2.1–3.9×); strata leads it on single terms (0.39–0.87×) and on counts. The stretch
+goal (0.5× the faster of Lucene and Tantivy) is about 2.7× away; the full table is the
+command's output.
+
 ## Gate status (2026-10-16)
 
 PLAN's Phase 3 gate, row by row. The query rows are carried (PLAN, "Carried rows"): the
@@ -259,9 +287,9 @@ gate records their ratios and gaps, and Phase 4's gate does not pass while they 
 | Disk full: fail closed, no corruption, recovery | Pass | `phase-3-lifecycle.md` (T5) |
 | Queries after merging (strata force-merged, baselines force-merged), five trials | Miss, carried: global 1.33–1.34× | above |
 | Queries before merging (baselines unmerged at equal memory) | Owed: calibration on the full corpus, then a scheduled night | — |
-| Indexing, 1 and 8 threads, keyed (T4), five trials at equal memory | Owed: calibration done (a 1,039 MB budget peaks at 2,352 MB against Lucene's 2,398 MB, 1.9% under); the trials run the night of 2026-10-16 | — |
+| Indexing, 1 and 8 threads, keyed (T4), five trials at equal memory | Owed: calibrated at 5M (a 2,056 MB budget peaks at 4,608 MB against one-thread Lucene's 4,593 MB, 0.3% over; `results/calibrate-n2-5m.out`); the trials wait for P1, since C2 records the rows at a commit that includes it | — |
 | Write amplification against Lucene (T3), append-only and replace-heavy | Owed: rescheduled with T4 | — |
-| Memory (serving and indexing peaks), disk after a full merge, per section | Disk: whole index pass (0.98×); postings 1.02× and term dictionary 1.36× miss. Serving memory 1.05× Tantivy (miss; anonymous 16 MB against Phase 2's 3 MB); indexing peaks with T4 | "Disk after a full merge" and "Serving memory" below |
+| Memory (serving and indexing peaks), disk after a full merge, per section | Disk: whole index 0.98× keyed Lucene, 1.09× keyed `-bp` (miss, carried to format 13 with P1's projection); postings 1.02× and term dictionary 1.36× miss. Serving memory 1.05× Tantivy (miss; anonymous 16 MB against Phase 2's 3 MB); indexing peaks with T4 | "Disk after a full merge" and "Serving memory" below |
 | `verify` and `parity` on multi-segment indexes | Pass before and after merging; `parity` with deletes owed | "Verify and parity" below |
 | Coverage targets and the test-parity inventory's Phase 3 rows | Owed: `cost()` checked directly (`cost_test`); scores against Lucene's own, document limits, and nested WAND or C7's cost model remain; reads while a writer commits need a shared-ownership reader (Phase 3R) | `docs/testing/parity.md` |
 | The rows on FreeBSD and arm64 (before Phase 3R) | Owed: FreeBSD VM; an arm64 host | — |
@@ -277,4 +305,4 @@ gate records their ratios and gaps, and Phase 4's gate does not pass while they 
 - Multi-thread and replace-heavy indexing, write amplification, refresh latency.
 - Index size after a full merge, per section.
 - The query rows on multi-segment indexes, before and after merging, including
-  IResearch (which needs Docker on the VM) and PISA as a reference.
+  IResearch (which needs Docker on the VM); PISA ran in the quick tier only.
