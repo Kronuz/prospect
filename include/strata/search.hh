@@ -174,6 +174,18 @@ struct hit {
 	double score;
 };
 
+// The threshold one segment's collection hands down once the k-th score is known: the score
+// itself, so blocks bounded at it are skipped (a later tie has a larger ordinal, hence a larger
+// docid, and never enters). Built with STRATA_EXPERIMENT_NO_EQUAL_SKIP, the score just below
+// it, as a reordered segment needs (reordering review, P1-R9): the experiment that measures it.
+inline double equal_bound(double kth) noexcept {
+#ifdef STRATA_EXPERIMENT_NO_EQUAL_SKIP
+	return std::nextafter(kth, -std::numeric_limits<double>::infinity());
+#else
+	return kth;
+#endif
+}
+
 // The best k hits, as Tantivy's TopNComputer keeps them: a buffer of up to 2k hits that,
 // when full, keeps its k best (nth_element) and raises the threshold to the k-th best
 // score; amortized constant time per hit. One collector may span segments (P6-2,
@@ -276,7 +288,7 @@ private:
 	void update_min() noexcept {
 		if (!full_) { return; }
 		if (cur_ == none) {
-			min_ = std::max(floor_, kth_.score);
+			min_ = std::max(floor_, equal_bound(kth_.score));
 		} else {
 			min_ = segs_[cur_]->min_docid() > kth_docid_ ? kth_.score : std::nextafter(kth_.score, -std::numeric_limits<double>::infinity());
 		}
@@ -1281,12 +1293,12 @@ inline std::vector<hit> top_k(scorer& s, std::size_t k, std::uint64_t* count = n
 		if (heap.size() < k) {
 			heap.push_back({d, sc});
 			std::push_heap(heap.begin(), heap.end(), worse);
-			if (heap.size() == k && !count) { s.set_min_competitive_score(std::max(floor, heap.front().score)); }
+			if (heap.size() == k && !count) { s.set_min_competitive_score(std::max(floor, equal_bound(heap.front().score))); }
 		} else if (k && sc > heap.front().score) {
 			std::pop_heap(heap.begin(), heap.end(), worse);
 			heap.back() = {d, sc};
 			std::push_heap(heap.begin(), heap.end(), worse);
-			if (!count) { s.set_min_competitive_score(std::max(floor, heap.front().score)); }
+			if (!count) { s.set_min_competitive_score(std::max(floor, equal_bound(heap.front().score))); }
 		}
 	}
 	if (count) { *count = n; }
