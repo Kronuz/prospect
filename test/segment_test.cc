@@ -362,7 +362,7 @@ int main() {
 		}
 		CHECK(d == 5000);
 		strata::term_scorer ts(s, *info);
-		CHECK(strata::top_k(ts, 10).size() == 10);
+		CHECK(strata::top_k(s, ts, 10).size() == 10);
 		CHECK(strata::count(ts) == 5000);
 	}
 
@@ -409,7 +409,7 @@ int main() {
 		CHECK(throws_corrupt([&] {
 			strata::segment bad(file);
 			strata::term_scorer t(bad, *bad.term("a"));
-			strata::top_k(t, 10);
+			strata::top_k(bad, t, 10);
 		}));
 		CHECK(throws_corrupt([&] {
 			strata::segment bad(file);
@@ -767,7 +767,7 @@ int main() {
 						strata::conjunction_scorer windows(std::move(dense));
 						(void)strata::count(windows);
 						strata::phrase_scorer phrase(s, {infos[0], infos[1]});
-						(void)strata::top_k(phrase, 10);
+						(void)strata::top_k(s, phrase, 10);
 					} catch (const strata::corrupt_segment&) {
 						++fenced;
 					}

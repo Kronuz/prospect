@@ -219,7 +219,7 @@ int main(int argc, char** argv) {
 	auto search = [&](const node& q, const std::map<std::string, std::uint32_t>& wqf, std::uint64_t* count) {
 		std::vector<strata::hit> out;
 		if (parts == 1) {
-			if (auto s = build(seg, q, wqf)) { out = strata::top_k(*s, 10, count); } else if (count) { *count = 0; }
+			if (auto s = build(seg, q, wqf)) { out = strata::top_k(seg, *s, 10, count); } else if (count) { *count = 0; }
 			return out;
 		}
 		auto hits = strata::search(snaps, [&](const strata::segment& sg) { return build(sg, q, wqf, snap); }, 10, count);

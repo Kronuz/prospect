@@ -115,10 +115,10 @@ void exercise(const strata::segment& seg) {
 		std::vector<std::uint32_t> got;
 		for (auto d = it.next(); d != strata::no_more_docs; d = it.next()) { pr.read(it, got); }
 		strata::term_scorer s(seg, *info);
-		strata::top_k(s, 10);
+		strata::top_k(seg, s, 10);
 		strata::term_scorer c(seg, *info);
 		std::uint64_t n = 0;
-		strata::top_k(c, 100, &n);
+		strata::top_k(seg, c, 100, &n);
 	}
 	(void)seg.term("absent");
 	if (infos.size() < 3) { return; }
@@ -130,11 +130,11 @@ void exercise(const strata::segment& seg) {
 		return v;
 	};
 	strata::conjunction_scorer conj(pair(0, 1));
-	strata::top_k(conj, 10);
+	strata::top_k(seg, conj, 10);
 	strata::conjunction_scorer conj_count(pair(0, 2));
 	(void)strata::count(conj_count);
 	strata::disjunction_scorer disj(pair(1, 2));
-	strata::top_k(disj, 10);
+	strata::top_k(seg, disj, 10);
 	std::vector<strata::scorer_ptr> three;
 	for (std::size_t i = 0; i < 3; ++i) { three.push_back(term(i)); }
 	strata::disjunction_scorer disj_count(std::move(three));
@@ -142,24 +142,24 @@ void exercise(const strata::segment& seg) {
 	strata::exclusion_scorer excl(term(0), term(2));
 	(void)strata::count(excl);
 	strata::required_optional_scorer req(term(1), term(2));
-	strata::top_k(req, 10);
+	strata::top_k(seg, req, 10);
 	strata::phrase_scorer phrase(seg, {infos[0], infos[1 % infos.size()], infos[0]});
-	strata::top_k(phrase, 10);
+	strata::top_k(seg, phrase, 10);
 	strata::phrase_scorer phrase_count(seg, {infos[2 % infos.size()], infos.back()});
 	std::uint64_t n = 0;
-	strata::top_k(phrase_count, 10, &n);
+	strata::top_k(seg, phrase_count, 10, &n);
 	// Xapian-weighted phrase and NEAR, and a disjunction under pruning parents.
 	const std::vector<strata::format::term_info> two{infos[0], infos[1]};
 	const std::vector<strata::weight> weights{strata::weight::bm25(seg, infos[0].df), strata::weight::bm25(seg, infos[1].df)};
 	strata::phrase_scorer xapian(seg, two, weights);
-	strata::top_k(xapian, 10);
+	strata::top_k(seg, xapian, 10);
 	strata::phrase_scorer near(seg, two, weights, 4);
-	strata::top_k(near, 10, &n);
+	strata::top_k(seg, near, 10, &n);
 	auto either = [&] { return std::make_unique<strata::disjunction_scorer>(pair(0, 1)); };
 	strata::exclusion_scorer either_not(either(), term(2));
-	strata::top_k(either_not, 10);
+	strata::top_k(seg, either_not, 10);
 	strata::required_optional_scorer either_maybe(either(), term(2));
-	strata::top_k(either_maybe, 10);
+	strata::top_k(seg, either_maybe, 10);
 }
 
 }  // namespace

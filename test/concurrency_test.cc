@@ -37,16 +37,16 @@ int main() {
 		for (const char* t : vocab) { infos.push_back(*seg.term(t)); }
 		for (std::size_t i = 0; i < infos.size(); ++i) {
 			strata::term_scorer s(seg, infos[i]);
-			for (const auto& h : strata::top_k(s, 10)) { mix(h.score + h.ord); }
+			for (const auto& h : strata::top_k(seg, s, 10)) { mix(h.score + h.ord); }
 			std::vector<strata::scorer_ptr> v;
 			v.push_back(std::make_unique<strata::term_scorer>(seg, infos[i]));
 			v.push_back(std::make_unique<strata::term_scorer>(seg, infos[(i + 1) % infos.size()]));
 			strata::disjunction_scorer u(std::move(v));
 			std::uint64_t n = 0;
-			for (const auto& h : strata::top_k(u, 10, &n)) { mix(h.score + h.ord); }
+			for (const auto& h : strata::top_k(seg, u, 10, &n)) { mix(h.score + h.ord); }
 			mix(double(n));
 			strata::phrase_scorer p(seg, {infos[i], infos[(i + 1) % infos.size()]});
-			for (const auto& h : strata::top_k(p, 10)) { mix(h.score + h.ord); }
+			for (const auto& h : strata::top_k(seg, p, 10)) { mix(h.score + h.ord); }
 		}
 		for (strata::ordinal_t d = 0; d < seg.doc_count(); d += 97) { mix(double(seg.stored(d).size())); }
 	};

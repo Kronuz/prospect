@@ -190,13 +190,14 @@ inline double equal_bound(double kth) noexcept {
 // when full, keeps its k best (nth_element) and raises the threshold to the k-th best
 // score; amortized constant time per hit. One collector may span segments (P6-2,
 // begin()): hits keep their segment and ordinal, and ties order by docid, read only when
-// two scores tie (within a segment, ordinal order is docid order).
+// two scores tie (within a docid-ordered segment, ordinal order is docid order). A
+// reordered segment always goes through begin() (reordering.md D5).
 struct top_collector {
 	explicit top_collector(std::size_t k, bool counting) : k(k), counting(counting) { hits.reserve(2 * k + 1); }
 	// Scorers may skip whatever scores at or below this (0: nothing yet).
 	double min_competitive() const noexcept { return min_; }
 	// A threshold known before collection starts (another segment's k-th score, made
-	// strictly lower so equal scores still enter); it never decreases. One segment only.
+	// strictly lower so equal scores still enter); no hit at or below it enters.
 	void seed(double floor) noexcept { min_ = floor_ = floor; }
 	// Room for the segments begin() will name, so collection allocates once.
 	void expect_segments(std::size_t n) { segs_.reserve(n); }
@@ -211,6 +212,7 @@ struct top_collector {
 		if (!k) { return; }
 		if (cur_ != none) {
 			// Review R2: a tie with the k-th enters only with a smaller docid.
+			if (floor_ > 0 && score <= floor_) { return; }
 			if (full_ && (score < kth_.score || (score == kth_.score && !before_kth(d)))) { return; }
 		} else if ((full_ || floor_ > 0) && score <= min_) {
 			return;
@@ -218,7 +220,7 @@ struct top_collector {
 		hits.push_back({score, d, cur_, 0});
 		if (hits.size() >= 2 * k) { truncate(); }
 	}
-	// The k best, best first (one segment, no begin()).
+	// The k best of one segment, as ordinals, best first.
 	std::vector<hit> finish() {
 		if (hits.size() > k) { truncate(); }
 		std::sort(hits.begin(), hits.end(), better());
@@ -259,7 +261,7 @@ private:
 		const top_collector* c;
 		bool operator()(const entry& a, const entry& b) const {
 			if (a.score != b.score) { return a.score > b.score; }
-			if (a.seg == b.seg) { return a.ord < b.ord; }
+			if (a.seg == b.seg && (a.seg == none || c->segs_[a.seg]->docid_ordered())) { return a.ord < b.ord; }
 			const auto *sa = c->segs_[a.seg], *sb = c->segs_[b.seg];
 			if (sa->max_docid() < sb->min_docid()) { return true; }  // disjoint ranges: no docid read
 			if (sb->max_docid() < sa->min_docid()) { return false; }
@@ -269,7 +271,7 @@ private:
 	order better() const { return {this}; }
 	// Whether ordinal d of the current segment precedes the k-th hit by docid.
 	bool before_kth(ordinal_t d) const {
-		if (kth_.seg == cur_) { return d < kth_.ord; }
+		if (kth_.seg == cur_ && segs_[cur_]->docid_ordered()) { return d < kth_.ord; }
 		const segment* s = segs_[cur_];
 		if (s->max_docid() < kth_docid_) { return true; }
 		if (s->min_docid() > kth_docid_) { return false; }
@@ -283,14 +285,15 @@ private:
 		full_ = true;
 		update_min();
 	}
-	// One segment: later hits have larger ordinals, so a tie never enters. Across segments:
-	// only when every docid of the current segment exceeds the k-th's (review R2).
+	// One segment: later hits have larger ordinals, so a tie never enters. Across segments
+	// or in a reordered one: only when every docid of the current segment exceeds the
+	// k-th's (review R2).
 	void update_min() noexcept {
 		if (!full_) { return; }
 		if (cur_ == none) {
 			min_ = std::max(floor_, equal_bound(kth_.score));
 		} else {
-			min_ = segs_[cur_]->min_docid() > kth_docid_ ? kth_.score : std::nextafter(kth_.score, -std::numeric_limits<double>::infinity());
+			min_ = std::max(floor_, segs_[cur_]->min_docid() > kth_docid_ ? kth_.score : std::nextafter(kth_.score, -std::numeric_limits<double>::infinity()));
 		}
 	}
 	std::vector<entry> hits;
@@ -1259,9 +1262,9 @@ private:
 
 inline std::uint64_t count(scorer& s);
 
-// The k best hits by score (ties by ordinal), best first. With count, also the number of
-// matches; a count known from statistics leaves the collection free to prune.
-inline std::vector<hit> top_k(scorer& s, std::size_t k, std::uint64_t* count = nullptr, double floor = 0) {
+// The k best hits of seg by score (ties by docid), best first. With count, also the number
+// of matches; a count known from statistics leaves the collection free to prune.
+inline std::vector<hit> top_k(const segment& seg, scorer& s, std::size_t k, std::uint64_t* count = nullptr, double floor = 0) {
 	if (k == 0) {
 		if (count) { *count = strata::count(s); }
 		return {};
@@ -1279,6 +1282,23 @@ inline std::vector<hit> top_k(scorer& s, std::size_t k, std::uint64_t* count = n
 	if (floor > 0) { s.set_min_competitive_score(floor); }
 	top_collector c(k, count != nullptr);
 	if (floor > 0) { c.seed(floor); }
+	if (!seg.docid_ordered()) {  // ties read docids, and the threshold stays below the k-th score
+		c.begin(seg);
+		if (s.collect_top_k(c)) {
+			if (count) { *count = c.count; }
+			return c.finish();
+		}
+		std::uint64_t n = 0;
+		double min = c.counting ? 0.0 : c.min_competitive();
+		for (ordinal_t d = s.next(); d != no_more_docs; d = s.next()) {
+			++n;
+			if (c.counting && c.min_competitive() > 0 && s.current_bound() <= c.min_competitive()) { continue; }  // counted, cannot compete
+			c.collect(d, s.score());
+			if (!c.counting && c.min_competitive() != min) { s.set_min_competitive_score(min = c.min_competitive()); }
+		}
+		if (count) { *count = n; }
+		return c.finish();
+	}
 	if (s.collect_top_k(c)) {
 		if (count) { *count = c.count; }
 		return c.finish();

@@ -190,7 +190,7 @@ inline std::vector<doc_hit> search(std::span<const segment_snapshot> segs, const
 		if (!q) { return {}; }
 		if (s.any_deleted()) { q = std::make_unique<live_scorer>(std::move(q), *s.deleted); }
 		std::vector<doc_hit> out;
-		for (const auto& h : top_k(*q, k, count)) { out.push_back({s.seg->docid(h.ord), h.score}); }
+		for (const auto& h : top_k(*s.seg, *q, k, count)) { out.push_back({s.seg->docid(h.ord), h.score}); }
 		return out;
 	}
 	top_collector c(k, false);

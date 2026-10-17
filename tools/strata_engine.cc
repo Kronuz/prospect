@@ -175,15 +175,20 @@ int index(const std::string& dir) {
 	return 0;
 }
 
-// Merges every segment into one and commits: the "after merging" index of T8.
+// Merges every segment into one and commits: the "after merging" index of T8. The merge
+// reorders (the default); STRATA_REORDER=0 keeps docid order.
 int merge(const std::string& dir) {
 	kronuz::journal::PosixIO io(dir);
 	strata::index::options o;
 	o.key_prefix = "Q";
+	if (const char* r = std::getenv("STRATA_REORDER"); r && std::string_view(r) == "0") { o.reordering = strata::index::options::reorder_mode::off; }
 	auto ix = strata::index::open(io, o);
+	const auto start = std::chrono::steady_clock::now();
 	ix.force_merge(1);
 	ix.commit();
-	std::cerr << "merged: " << ix.segments().size() << " segments\n";
+	const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+	const bool ordered = ix.segments().size() != 1 || ix.segments()[0].seg->docid_ordered();
+	std::cerr << "merged: " << ix.segments().size() << " segments, " << (ordered ? "docid order" : "reordered") << ", " << secs << " s\n";
 	return 0;
 }
 
@@ -478,7 +483,7 @@ int verify(const std::string& dir) {
 			bool ok = strata::count(*counted) == scan.size();
 			for (std::size_t k : {10u, 100u, 1000u}) {
 				auto pruned = build(seg, p, scheme);
-				const auto hits = strata::top_k(*pruned, k);
+				const auto hits = strata::top_k(seg, *pruned, k);
 				const std::size_t n = std::min<std::size_t>(k, scan.size());
 				ok = ok && hits.size() == n;
 				for (std::size_t a = 0; ok && a < n;) {

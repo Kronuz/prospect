@@ -1,11 +1,13 @@
 // Scorers against a brute-force evaluator: disjunction, conjunction, required-plus-optional,
 // exclusion, and phrases; match sets, scores, top-k, and counts.
 #include "strata/search.hh"
+#include "strata/searcher.hh"
 #include "strata/writer.hh"
 
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <map>
 #include <random>
 #include <set>
@@ -280,7 +282,7 @@ int main() {
 			// top-k and count
 			auto q2 = build();
 			std::uint64_t c = 0;
-			auto hits = strata::top_k(*q2, 10, &c);
+			auto hits = strata::top_k(seg, *q2, 10, &c);
 			CHECK(c == want.size());
 			std::vector<std::pair<double, ordinal_t>> sorted;
 			for (auto& [d, s] : want) { sorted.push_back({-s, d}); }
@@ -292,7 +294,7 @@ int main() {
 			// unpruned order, ties broken by ordinal.
 			for (std::size_t k : {1u, 3u, 10u}) {
 				auto q4 = build();
-				auto pruned = strata::top_k(*q4, k);
+				auto pruned = strata::top_k(seg, *q4, k);
 				std::vector<std::pair<double, ordinal_t>> best;
 				for (auto& [d, s] : want) { best.push_back({-s, d}); }
 				std::sort(best.begin(), best.end());
@@ -308,7 +310,7 @@ int main() {
 			if (round % 3 == 0) {
 				for (std::size_t k : {1u, 10u, 100u, 1000u}) {
 					auto q6 = build();
-					const auto full = strata::top_k(*q6, k);
+					const auto full = strata::top_k(seg, *q6, k);
 					std::vector<std::size_t> gaps;
 					for (std::size_t j = 0; j + 1 < full.size(); ++j) {
 						if (full[j].score - full[j + 1].score > 1e-9 * std::max(1.0, full[j].score)) { gaps.push_back(j); }
@@ -319,7 +321,7 @@ int main() {
 					}
 					for (const double floor : floors) {
 						auto q7 = build();
-						const auto got = strata::top_k(*q7, k, nullptr, floor);
+						const auto got = strata::top_k(seg, *q7, k, nullptr, floor);
 						std::size_t n_above = 0;
 						while (n_above < full.size() && full[n_above].score > floor) { ++n_above; }
 						CHECK(got.size() == n_above);
@@ -406,9 +408,9 @@ int main() {
 			CHECK(strata::count(*c) == any.size());
 			auto all = six();
 			std::uint64_t total = 0;
-			const auto exhaustive = strata::top_k(*all, 10, &total);
+			const auto exhaustive = strata::top_k(seg, *all, 10, &total);
 			auto pruned_q = six();
-			const auto pruned = strata::top_k(*pruned_q, 10);
+			const auto pruned = strata::top_k(seg, *pruned_q, 10);
 			CHECK(total == any.size() && pruned.size() == 10 && exhaustive.size() == 10);
 			// The same hits; scores within summation order (the paths add clauses differently).
 			for (std::size_t i = 0; i < pruned.size() && i < exhaustive.size(); ++i) {
@@ -416,7 +418,7 @@ int main() {
 			}
 			auto none = six();
 			std::uint64_t k0 = 0;
-			CHECK(strata::top_k(*none, 0, &k0).empty() && k0 == any.size());
+			CHECK(strata::top_k(seg, *none, 0, &k0).empty() && k0 == any.size());
 		}
 	}
 	// A phrase with a positioned term of wdf 0 (a boolean term): its frequency comes from
@@ -433,10 +435,10 @@ int main() {
 		strata::segment seg(file);
 		auto phrase = [&] { return std::make_unique<strata::phrase_scorer>(seg, std::vector<strata::format::term_info>{*seg.term("a"), *seg.term("b")}); };
 		auto pruned = phrase();
-		auto hits = strata::top_k(*pruned, 10);
+		auto hits = strata::top_k(seg, *pruned, 10);
 		auto all = phrase();
 		std::uint64_t n = 0;
-		auto exhaustive = strata::top_k(*all, 10, &n);
+		auto exhaustive = strata::top_k(seg, *all, 10, &n);
 		CHECK(n == 1000);
 		CHECK(hits.size() == 10 && exhaustive.size() == 10);
 		for (std::size_t i = 0; i < hits.size() && i < exhaustive.size(); ++i) { CHECK(std::abs(hits[i].score - exhaustive[i].score) <= 1e-12); }
@@ -453,7 +455,7 @@ int main() {
 		strata::segment seg(file);
 		auto check = [&](strata::scorer& s, bool counted) {
 			std::uint64_t n = 0;
-			auto hits = counted ? strata::top_k(s, 10, &n) : strata::top_k(s, 10);
+			auto hits = counted ? strata::top_k(seg, s, 10, &n) : strata::top_k(seg, s, 10);
 			CHECK(hits.size() == 10);
 			for (std::size_t i = 0; i < hits.size(); ++i) { CHECK(hits[i].ord == i); }
 		};
@@ -471,6 +473,74 @@ int main() {
 			check(c, counted);
 		}
 	}
+	// The same ties in a reordered segment (reordering.md D5): every path keeps the smallest
+	// docids, best first, at k = 1, 10, and 100, with a few higher scores straddling the k-th,
+	// counted or not, with a floor, and across segments with a docid-ordered one.
+	{
+		strata::segment_writer w;
+		w.permuted = true;
+		for (std::uint32_t d = 0; d < 5000; ++d) {
+			const std::uint64_t docid = 1 + (std::uint64_t(d) * 7919) % 5000;
+			std::vector<std::uint32_t> p1{1, 3}, p2{2};
+			std::vector<strata::posting_input> in{{"a", docid % 97 ? 1u : 2u, docid % 97 ? std::vector<std::uint32_t>{1} : p1}, {"b", 1, p2}};
+			w.add(docid, in, 3);
+		}
+		const std::string file = w.flush({});
+		const strata::segment seg(file);
+		CHECK(!seg.docid_ordered());
+		strata::segment_writer w2;
+		for (std::uint32_t d = 0; d < 1000; ++d) {
+			std::vector<std::uint32_t> p1{1}, p2{2};
+			std::vector<strata::posting_input> in{{"a", 1, p1}, {"b", 1, p2}};
+			w2.add(5001 + d, in, 3);
+		}
+		const std::string file2 = w2.flush({});
+		const strata::segment seg2(file2);
+		auto make = [](const strata::segment& sg, int kind) -> strata::scorer_ptr {
+			if (kind == 0) { return std::make_unique<strata::term_scorer>(sg, *sg.term("a")); }
+			std::vector<strata::scorer_ptr> v;
+			v.push_back(std::make_unique<strata::term_scorer>(sg, *sg.term("a")));
+			v.push_back(std::make_unique<strata::term_scorer>(sg, *sg.term("b")));
+			if (kind == 1) { return std::make_unique<strata::disjunction_scorer>(std::move(v)); }
+			return std::make_unique<strata::conjunction_scorer>(std::move(v));
+		};
+		for (int kind = 0; kind < 3; ++kind) {
+			// The expected order: every match by score, then docid.
+			std::vector<std::pair<double, std::uint64_t>> all;
+			auto scan = make(seg, kind);
+			for (auto d = scan->next(); d != strata::no_more_docs; d = scan->next()) { all.push_back({scan->score(), seg.docid(d)}); }
+			std::sort(all.begin(), all.end(), [](const auto& a, const auto& b) { return a.first != b.first ? a.first > b.first : a.second < b.second; });
+			for (std::size_t k : {1u, 10u, 100u}) {
+				for (int mode = 0; mode < 4; ++mode) {  // pruned, counted, a floor below the k-th, one above it
+					auto q = make(seg, kind);
+					std::uint64_t n = 0;
+					const double below = -std::numeric_limits<double>::infinity();
+					const double floor = std::nextafter(mode == 3 ? all[0].first : all[k - 1].first, below);
+					const auto hits = strata::top_k(seg, *q, k, mode == 1 ? &n : nullptr, mode >= 2 ? floor : 0);
+					std::size_t expect = k;
+					if (mode == 3) {
+						expect = 0;
+						while (expect < k && all[expect].first > floor) { ++expect; }
+					}
+					CHECK(hits.size() == expect);
+					if (mode == 1) { CHECK(n == all.size()); }
+					for (std::size_t i = 0; i < hits.size() && i < expect; ++i) {
+						CHECK(seg.docid(hits[i].ord) == all[i].second && hits[i].score == all[i].first);
+					}
+				}
+				// Across segments, each scored by its own statistics here; the docid-ordered
+				// segment's docids all follow the reordered one's.
+				auto both = all;
+				auto scan2 = make(seg2, kind);
+				for (auto d = scan2->next(); d != strata::no_more_docs; d = scan2->next()) { both.push_back({scan2->score(), seg2.docid(d)}); }
+				std::sort(both.begin(), both.end(), [](const auto& a, const auto& b) { return a.first != b.first ? a.first > b.first : a.second < b.second; });
+				const std::vector<strata::segment_snapshot> snaps{{&seg2}, {&seg}};
+				const auto got = strata::search(snaps, [&](const strata::segment& sg) { return make(sg, kind); }, k);
+				CHECK(got.size() == k);
+				for (std::size_t i = 0; i < got.size() && i < k; ++i) { CHECK(got[i].docid == both[i].second && got[i].score == both[i].first); }
+			}
+		}
+	}
 	// A term indexed without positions in a phrase or NEAR: no matches, no error, in full
 	// blocks and in the tail.
 	{
@@ -484,10 +554,10 @@ int main() {
 		strata::segment seg(file);
 		const std::vector<strata::format::term_info> infos{*seg.term("a"), *seg.term("p")};
 		strata::phrase_scorer phrase(seg, infos);
-		CHECK(strata::top_k(phrase, 10).empty());
+		CHECK(strata::top_k(seg, phrase, 10).empty());
 		strata::phrase_scorer near(seg, infos, {strata::weight::bm25(seg, 300), strata::weight::bm25(seg, 300)}, 5);
 		std::uint64_t n = 1;
-		CHECK(strata::top_k(near, 10, &n).empty() && n == 0);
+		CHECK(strata::top_k(seg, near, 10, &n).empty() && n == 0);
 	}
 	std::printf("search: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;

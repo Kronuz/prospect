@@ -310,13 +310,13 @@ int main() {
 				for (std::size_t k : {1u, 10u, 100u, 1000u}) {
 					auto first = builder(*segs[0].seg);
 					if (!first) { continue; }
-					const auto top = top_k(*first, k);
+					const auto top = top_k(*segs[0].seg, *first, k);
 					if (top.size() < k) { continue; }
 					const double floor = std::nextafter(top.back().score, -std::numeric_limits<double>::infinity());
 					for (std::size_t g : {1u, 2u, 4u}) {
 						auto sc = builder(*segs[g].seg);
 						if (!sc) { continue; }
-						const auto hits = top_k(*sc, k, nullptr, floor);
+						const auto hits = top_k(*segs[g].seg, *sc, k, nullptr, floor);
 						for (const auto& h : hits) { CHECK(h.score > floor); }
 						if (q.kind == 1 && q.terms.size() == 1 && g != 2) { CHECK(hits.empty()); }
 					}

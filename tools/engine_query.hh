@@ -156,7 +156,7 @@ inline std::uint64_t run(const strata::segment& seg, std::string_view command, s
 	std::size_t k = 0;
 	std::from_chars(command.data() + 4, command.data() + command.size(), k);
 	std::uint64_t n = 0;
-	strata::top_k(*s, k, counting ? &n : nullptr);
+	strata::top_k(seg, *s, k, counting ? &n : nullptr);
 	return counting ? n : 1;
 }
 
