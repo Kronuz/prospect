@@ -6,14 +6,18 @@
 // counted and pruned.
 // With SEGMENTS > 1, the same documents are split into that many contiguous segments,
 // weighted with the snapshot's statistics and searched across segments (Phase 3, T8).
+// With PARITY_REORDER=MIN_DF, those segments are merged into one reordered segment
+// (reordering.md D4, graph terms of at least MIN_DF documents) and searched as one.
 //   parity CORPUS_JSON N RANK_JSONL [SEGMENTS]
 #include "analysis.hh"
+#include "strata/reorder.hh"
 #include "strata/search.hh"
 #include "strata/searcher.hh"
 #include "strata/writer.hh"
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -181,7 +185,7 @@ int main(int argc, char** argv) {
 		return 2;
 	}
 	const std::size_t n = std::stoul(argv[2]);
-	const std::size_t parts = argc == 5 ? std::max<std::size_t>(1, std::stoul(argv[4])) : 1;
+	std::size_t parts = argc == 5 ? std::max<std::size_t>(1, std::stoul(argv[4])) : 1;
 	std::vector<strata::segment_writer> writers(parts);
 	{
 		std::ifstream in(argv[1]);
@@ -208,6 +212,23 @@ int main(int argc, char** argv) {
 	for (auto& w : writers) { files.push_back(w.flush({})); }
 	std::vector<strata::segment> segments;
 	for (const auto& f : files) { segments.emplace_back(f); }
+	if (const char* r = std::getenv("PARITY_REORDER")) {
+		std::vector<strata::merge_source> sources;
+		for (const auto& sg : segments) { sources.push_back({&sg, nullptr}); }
+		strata::reorder::settings set;
+		set.min_df = std::uint32_t(std::stoul(r));
+		strata::reorder::string_scratch forward;
+		const auto order = strata::reorder::order(sources, forward, set);
+		std::string merged;
+		strata::string_output out(merged);
+		strata::string_spill spill;
+		(void)strata::merge_segments(sources, {}, out, spill, {}, strata::format::default_region_shift, nullptr, nullptr, order);
+		segments.clear();
+		files = {std::move(merged)};
+		segments.emplace_back(files[0]);
+		parts = 1;
+		std::cout << "reordered: " << (segments[0].docid_ordered() ? "no" : "yes") << "\n";
+	}
 	std::vector<strata::segment_snapshot> snaps;
 	for (const auto& s : segments) { snaps.push_back({&s, nullptr}); }
 	const snapshot_weights weights{snaps, strata::snapshot_statistics(snaps)};
@@ -215,11 +236,12 @@ int main(int argc, char** argv) {
 	const strata::segment& seg = segments[0];
 	std::uint64_t total_docs = 0;
 	for (const auto& s : segments) { total_docs += s.doc_count(); }
-	// The k best across segments as hits by ordinal (docid - 1, as one segment would give).
+	// The k best across segments as hits by docid - 1 (the ordinal a docid-ordered segment gives).
 	auto search = [&](const node& q, const std::map<std::string, std::uint32_t>& wqf, std::uint64_t* count) {
 		std::vector<strata::hit> out;
 		if (parts == 1) {
 			if (auto s = build(seg, q, wqf)) { out = strata::top_k(seg, *s, 10, count); } else if (count) { *count = 0; }
+			for (auto& h : out) { h.ord = strata::ordinal_t(seg.docid(h.ord) - 1); }
 			return out;
 		}
 		auto hits = strata::search(snaps, [&](const strata::segment& sg) { return build(sg, q, wqf, snap); }, 10, count);
