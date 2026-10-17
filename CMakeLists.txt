@@ -21,7 +21,10 @@ FetchContent_Declare(analysis GIT_REPOSITORY https://github.com/Kronuz/analysis.
 # Stored records use zstd alone.
 set(COMPRESSORS_DEFLATE OFF CACHE BOOL "" FORCE)
 set(COMPRESSORS_LZ4 OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG 7a6cc22f8a4eaceefd098374c05cdc2935c0fd19)
+FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG ae3ae075aa14aff084f8f9456dc99b2d78614b86)
+# Segments compress stored records with zstd: the pinned release makes their bytes the same
+# on every platform, whatever zstd the system has.
+set(COMPRESSORS_ZSTD_PINNED ON CACHE BOOL "" FORCE)
 FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG 28f4241f22b27aa68ff92cdddc66b124e71f3298)
 # Index I/O goes through kronuz::journal::IO, from the completion library.
 FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG e6c28aaef09c5beff099f7f9cc47ecd517ba02d7)
