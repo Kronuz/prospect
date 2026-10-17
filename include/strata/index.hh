@@ -13,6 +13,7 @@
 #include "strata/merge_policy.hh"
 #include "strata/rate_limiter.hh"
 #include "strata/reader.hh"
+#include "strata/reorder.hh"
 #include "strata/writer.hh"
 
 #include "completion/io.h"
@@ -91,6 +92,7 @@ namespace index_detail {
 inline std::string segment_name(std::uint64_t id) { return "seg-" + std::to_string(id) + ".sx"; }
 inline std::string live_name(std::uint64_t id, std::uint64_t gen) { return "seg-" + std::to_string(id) + "." + std::to_string(gen) + ".live"; }
 inline std::string spill_name(std::uint64_t id) { return "seg-" + std::to_string(id) + ".spill"; }
+inline std::string forward_name(std::uint64_t id) { return "seg-" + std::to_string(id) + ".fwd"; }
 inline std::string meta_name(std::uint64_t gen) { return "meta-" + std::to_string(gen) + ".kv"; }
 inline std::string manifest_name(std::uint64_t n) { return "manifest-" + std::to_string(n); }
 
@@ -105,7 +107,7 @@ inline std::optional<std::uint64_t> number(std::string_view s) {
 
 // The kind and numbers of one of strata's file names, or nothing for other names.
 struct parsed_name {
-	enum kind { segment, live, meta, manifest, manifest_tmp, spill } type;
+	enum kind { segment, live, meta, manifest, manifest_tmp, spill, forward } type;
 	std::uint64_t a = 0, b = 0;
 };
 inline std::optional<parsed_name> parse_name(std::string_view n) {
@@ -127,6 +129,9 @@ inline std::optional<parsed_name> parse_name(std::string_view n) {
 	}
 	if (auto m = strip("seg-", ".spill")) {
 		if (auto v = number(*m)) { return parsed_name{parsed_name::spill, *v}; }
+	}
+	if (auto m = strip("seg-", ".fwd")) {
+		if (auto v = number(*m)) { return parsed_name{parsed_name::forward, *v}; }
 	}
 	if (auto m = strip("seg-", ".live")) {
 		const auto dot = m->find('.');
@@ -195,6 +200,13 @@ struct index_options {
 	std::uint64_t reclaim_step = 16 << 20;
 	std::uint64_t reclaim_slice = 64 << 20;
 	merge_policy policy;
+	// Reordering at merge (docs/design/reordering.md D4): `force_merge` reorders the merges
+	// force_merge() runs, as Lucene's BP reorderer does; `merges` also every merge whose
+	// output holds at least `reorder_min_docs` live documents.
+	enum class reorder_mode { off, force_merge, merges };
+	reorder_mode reordering = reorder_mode::force_merge;
+	std::uint64_t reorder_min_docs = 262144;
+	strata::reorder::settings reorder_settings;
 };
 
 class index {
@@ -333,7 +345,7 @@ public:
 	// Merges until at most `max_segments` remain and none holds deletes, by the policy's
 	// forced merges. With an executor it waits for every background merge, then for its own.
 	void force_merge(std::size_t max_segments = 1) {
-		run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_forced_merges(std::move(c), max_segments); }, true);
+		run_merges([&](std::vector<merge_policy::candidate> c) { return opts_.policy.find_forced_merges(std::move(c), max_segments); }, true, true);
 	}
 
 	// Merges away the segments whose deleted fraction passes the policy's
@@ -690,7 +702,7 @@ private:
 	// With an executor they run there, on segments not under merge or damaged: one round
 	// without `wait`, otherwise every round, each waited for and published.
 	template <class Find>
-	void run_merges(Find find, bool wait) {
+	void run_merges(Find find, bool wait, bool forced = false) {
 		live();
 		if (wait) { publish_merges(true, false); }
 		for (;;) {
@@ -703,7 +715,7 @@ private:
 			}
 			const auto merges = find(std::move(c));
 			if (merges.empty()) { return; }
-			for (const auto& ids : merges) { schedule(ids); }
+			for (const auto& ids : merges) { schedule(ids, forced); }
 			if (!wait && !own_exec_) { return; }  // the index's own executor runs them now
 			publish_merges(true, true);
 		}
@@ -772,6 +784,7 @@ private:
 		std::array<std::uint8_t, 16> header{};
 		std::vector<std::shared_ptr<open_segment>> sources;
 		std::vector<std::vector<std::uint64_t>> deleted;  // the sources' deletes the merge reads
+		bool reorder = false;                             // a reordering merge (D4)
 		std::uint64_t reserved = 0;                       // on `storage`: the output's estimate, then what it wrote
 		byte_budget::permit storage;
 		flush_charge memory;  // the merge's working memory, then its output's, until published
@@ -858,16 +871,21 @@ private:
 	// Hands the merge of `ids` to the executor. It shares the sources and reads a copy of
 	// their deletes so far; storage admission reserves the output's estimate as merge()
 	// does, on a permit of the merge's own.
-	void schedule(const std::vector<std::uint64_t>& ids) {
+	// `forced`: a merge force_merge() asked for.
+	void schedule(const std::vector<std::uint64_t>& ids, bool forced = false) {
 		auto job = std::make_shared<merge_job>();
 		job->reserved = segment_overhead;
+		std::uint64_t live_docs = 0;
 		for (const auto& s : segs_) {
 			if (std::find(ids.begin(), ids.end(), s->ref.id) == ids.end() || merging(*s) || s->damaged) { continue; }
 			const std::uint64_t docs = s->seg.doc_count();
 			job->sources.push_back(s);
 			job->deleted.push_back(s->deleted);
 			job->reserved += s->ref.size + 18 * docs + 16 * (docs / format::block + 1);
+			live_docs += docs - s->dead;
 		}
+		using mode = index_options::reorder_mode;
+		job->reorder = (opts_.reordering == mode::force_merge && forced) || (opts_.reordering == mode::merges && (forced || live_docs >= opts_.reorder_min_docs));
 		if (job->sources.empty()) { return; }
 		if (storage_permit_) {
 			job->storage = opts_.storage->open();
@@ -879,7 +897,7 @@ private:
 		std::memcpy(job->header.data(), &job->id, 8);
 		std::memcpy(job->header.data() + 8, m_.uuid.data(), 8);
 		pending_.reserve(pending_.size() + 1);
-		const merge_context ctx{io_, exec_, opts_.rate, opts_.budget, opts_.merge_memory_wait, m_.key_prefix};
+		const merge_context ctx{io_, exec_, opts_.rate, opts_.budget, opts_.merge_memory_wait, m_.key_prefix, opts_.reorder_settings};
 		group_->post([job, ctx](const task::cancel_token& stop) { run_merge(*job, ctx, stop); });
 		pending_.push_back(std::move(job));
 	}
@@ -892,6 +910,7 @@ private:
 		byte_budget* budget;
 		std::uint64_t memory_wait;
 		std::string key_prefix;
+		strata::reorder::settings reorder;
 	};
 
 	// A merge's writes to one file, at increasing offsets: before each chunk an executor
@@ -1013,6 +1032,43 @@ private:
 		std::unique_ptr<merge_file> file_;
 	};
 
+	// A reordering merge's forward index, `seg-<id>.fwd`: written through the merge's file
+	// writes (checkpoints, rate limit, storage), mapped back for bisection, and removed when
+	// the order is made. One left by a crash is an orphan open removes.
+	class merge_forward final : public strata::reorder::scratch {
+	public:
+		merge_forward(const merge_context& ctx, merge_job& job, std::uint64_t& used, const task::cancel_token& stop, std::size_t chunk)
+			: ctx_(ctx), used_(used), name_(index_detail::forward_name(job.id)), f_(ctx.io->create_exclusive(name_)), file_(*f_, ctx, job, stop), out_(file_, used, chunk) {}
+		merge_forward(const merge_forward&) = delete;
+		merge_forward& operator=(const merge_forward&) = delete;
+		~merge_forward() override {
+			mapped_.reset();
+			f_.reset();
+			used_ -= std::min(used_, file_.size());
+			try {
+				ctx_.io->remove(name_);
+			} catch (const std::system_error&) {
+			}
+		}
+		output& out() override { return out_; }
+		std::string_view bytes() override {
+			out_.finish();
+			if ((mapped_ = f_->map())) { return mapped_->bytes(); }
+			owned_ = index_detail::read_all(*ctx_.io->open_existing(name_));
+			return owned_;
+		}
+
+	private:
+		const merge_context& ctx_;
+		std::uint64_t& used_;
+		std::string name_;
+		std::unique_ptr<kronuz::journal::File> f_;
+		merge_file file_;
+		merge_output out_;
+		std::shared_ptr<const kronuz::journal::Mapping> mapped_;
+		std::string owned_;
+	};
+
 	// On the executor: reads the sources' segments, which never change, and the job alone.
 	// It waits for room on the indexing budget, charges its working memory there, streams
 	// the output to its file unsynced (as a flush leaves it) under the rate limit with
@@ -1051,9 +1107,14 @@ private:
 				std::uint64_t used = 0;
 				merge_file out(*file, ctx, job, stop);
 				merge_output sink(out, used, chunk);
+				std::vector<merge_ref> order;
+				if (job.reorder) {
+					merge_forward forward(ctx, job, used, stop, chunk);
+					order = strata::reorder::order(sources, forward, ctx.reorder, &stop, &job.memory);
+				}
 				{
 					merge_spill positions(ctx, job, used, stop, chunk);
-					job.plan = merge_segments(sources, job.header, sink, positions, ctx.key_prefix, format::default_region_shift, &stop, &job.memory);
+					job.plan = merge_segments(sources, job.header, sink, positions, ctx.key_prefix, format::default_region_shift, &stop, &job.memory, order);
 				}
 				sink.finish();
 				job.memory.shrink(job.memory.held());  // the build's buffers are gone
@@ -1922,7 +1983,8 @@ private:
 			case index_detail::parsed_name::manifest: top = std::max(top, p->a); break;
 			case index_detail::parsed_name::manifest_tmp: top = std::max(top, p->a); break;
 			case index_detail::parsed_name::segment:
-			case index_detail::parsed_name::spill: max_segment = std::max(max_segment, p->a); break;
+			case index_detail::parsed_name::spill:
+			case index_detail::parsed_name::forward: max_segment = std::max(max_segment, p->a); break;
 			case index_detail::parsed_name::live:
 				max_segment = std::max(max_segment, p->a);
 				max_live = std::max(max_live, p->b);

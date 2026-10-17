@@ -134,8 +134,9 @@ from the papers. Its presets start from Lucene 10.4's documented `BPIndexReorder
   It takes 1 + P passes over the candidate terms (summed source df ≥ `min_df`):
   - **The first pass** counts each candidate's live df, which decides graph membership, and
     each document's degree in the graph.
-  - **The ranges** are then cut on those degrees, at most `reorder_memory` / 2 / 5 documents'
-    worth of edges each (5 bytes is an edge's worst LEB128 width), so every range's rows fit.
+  - **The ranges** are then cut on those degrees, at most `reorder_memory` / 2 / 9 edges
+    each (an edge's 4-byte cell and its worst 5-byte LEB128 encoding), so every range's rows
+    fit.
   - **Each of the P passes** reads every graph term's live postings in its range and appends
     them to the rows, which are then written out. A docid-ordered source maps the range to
     an ordinal range, and its iterator is advanced to the range's start. A permuted source
@@ -177,13 +178,15 @@ from the papers. Its presets start from Lucene 10.4's documented `BPIndexReorder
 - **Cancellation.** Bisection checks the merge's token and the executor's checkpoint once
   per iteration of each part, so `abandon_merges` is never held behind it.
 - **Memory and the fallback** (P1-R5, P1-R20). Bisection's anonymous working set is the
-  order and each document's gain and part (16 bytes a document), the 4-byte rank map when a
-  source is permuted, and two degree counters per graph term for each of the largest
-  `reorder_threads` that the preset allows (8), whatever the run uses. The fallback compares
+  order and each document's gain and position (20 bytes a document), and two degree counters
+  per graph term for each of the largest `reorder_threads` that the preset allows (8),
+  whatever the run uses (`reorder::working_set`). The forward index's build holds less: a
+  4-byte rank per source document, a 4-byte degree and an 8-byte row offset per document,
+  and one range's rows. The fallback compares
   that figure, a function of the document count and the graph's term count alone, with
   `reorder_memory` (256 MB, the reference `-bp` builder's budget): above it the merge writes
   docid order and counts it in a metric. So 1 and 8 threads always make the same choice and
-  the same bytes. It is about 80 MB at 5M; a segment of about 16M documents still reorders.
+  the same bytes. It is about 100 MB at 5M; a segment of about 12M documents still reorders.
   The working set is charged to the merge's `flush_charge` while bisection runs, and a merge
   without room waits as merges already do (`merge_memory_wait`).
 - **Cost, projected** (P1-R6). About 18 levels × at most 20 iterations × 2 passes over

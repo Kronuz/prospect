@@ -22,17 +22,22 @@
 
 // Recursive graph bisection (docs/design/reordering.md, D4; Dhulipala et al., KDD 2016;
 // Mackenzie et al., ECIR 2019): an order of a merge's documents in which those sharing terms
-// sit together. A self-contained unit: rows of graph-term ids per document in, a permutation
-// out. Integer arithmetic only, so every platform and thread count gives the same order.
+// sit together. A self-contained unit: rows of graph-term ids per document in (the forward
+// index's bytes), a permutation out. Integer arithmetic only, so every platform and thread
+// count gives the same order.
 #pragma once
 
 #include "task.hh"
 
 #include <algorithm>
 #include <bit>
+#include <cstring>
 #include <cstdint>
 #include <numeric>
 #include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -332,16 +337,83 @@ struct presets {
 	std::uint32_t iterations = 20;     // passes per part, stopping early when none swaps
 };
 
-// Documents 0..n-1 and their rows: rows[d] is document d's graph-term ids (each < terms).
+// Documents 0..docs-1 and their rows, as the forward index lays them out (D4): per document
+// its graph-term ids increasing, delta-coded LEB128, in `rows`; `offsets` holds docs + 1
+// native u64s, where each row starts and the last row ends.
 struct graph {
-	std::uint32_t terms = 0;
-	std::vector<std::vector<std::uint32_t>> rows;
+	std::uint32_t terms = 0, docs = 0;
+	std::string_view rows, offsets;
+
+	std::uint64_t offset(std::uint32_t d) const noexcept {
+		std::uint64_t v;
+		std::memcpy(&v, offsets.data() + 8 * std::size_t(d), 8);
+		return v;
+	}
+	// Calls f(term) for document d's terms; the graph must have passed check().
+	template <typename F>
+	void for_row(std::uint32_t d, F&& f) const {
+		const auto* p = reinterpret_cast<const std::uint8_t*>(rows.data() + offset(d));
+		const auto* end = reinterpret_cast<const std::uint8_t*>(rows.data() + offset(d + 1));
+		std::uint32_t t = 0;
+		while (p != end) {
+			std::uint32_t v = *p & 0x7f;
+			for (unsigned shift = 7; *p++ & 0x80; shift += 7) { v |= std::uint32_t(*p & 0x7f) << shift; }
+			f(t += v);
+		}
+	}
+	// Throws std::runtime_error unless every row decodes within its bounds to increasing ids
+	// below `terms`: what for_row relies on.
+	void check() const {
+		auto bad = [] { throw std::runtime_error("strata: bisection: a malformed forward index"); };
+		if (offsets.size() != 8 * (std::size_t(docs) + 1) || offset(0) != 0 || offset(docs) != rows.size()) { bad(); }
+		for (std::uint32_t d = 0; d < docs; ++d) {
+			const std::uint64_t a = offset(d), b = offset(d + 1);
+			if (a > b || b > rows.size()) { bad(); }
+			std::uint64_t t = 0;
+			bool first = true;
+			for (std::uint64_t i = a; i < b;) {
+				std::uint64_t v = 0;
+				for (unsigned shift = 0;; shift += 7) {
+					if (i == b || shift > 28) { bad(); }
+					const auto c = std::uint8_t(rows[i++]);
+					v |= std::uint64_t(c & 0x7f) << shift;
+					if (!(c & 0x80)) { break; }
+				}
+				if ((!first && v == 0) || (t += v) >= terms) { bad(); }
+				first = false;
+			}
+		}
+	}
 };
 
-// The order: [position] = document. Starts from 0..n-1; checks `cancel` once per iteration
-// of each part.
+// Builds a graph's bytes row by row, in memory.
+struct graph_buffer {
+	std::string rows, offsets = std::string(8, '\0');
+
+	// `row` holds increasing term ids.
+	void add(std::span<const std::uint32_t> row) {
+		std::uint32_t prev = 0;
+		for (std::uint32_t t : row) {
+			for (std::uint32_t v = t - prev; ; v >>= 7) {
+				if (v < 0x80) {
+					rows.push_back(char(v));
+					break;
+				}
+				rows.push_back(char(0x80 | (v & 0x7f)));
+			}
+			prev = t;
+		}
+		const std::uint64_t end = rows.size();
+		offsets.append(reinterpret_cast<const char*>(&end), 8);
+	}
+	graph view(std::uint32_t terms) const { return {terms, std::uint32_t(offsets.size() / 8 - 1), rows, offsets}; }
+};
+
+// The order: [position] = document. Starts from 0..docs-1; checks `cancel` once per iteration
+// of each part. Calls g.check() first.
 inline std::vector<std::uint32_t> order(const graph& g, const presets& p = {}, const task::cancel_token* cancel = nullptr) {
-	const std::uint32_t n = std::uint32_t(g.rows.size());
+	g.check();
+	const std::uint32_t n = g.docs;
 	std::vector<std::uint32_t> perm(n);
 	std::iota(perm.begin(), perm.end(), 0u);
 	std::vector<std::uint32_t> left_deg(g.terms, 0), right_deg(g.terms, 0);
@@ -357,19 +429,21 @@ inline std::vector<std::uint32_t> order(const graph& g, const presets& p = {}, c
 			if (cancel && cancel->requested()) { throw task::cancelled{}; }
 			for (std::uint32_t i = a; i < b; ++i) {
 				auto& deg = i < mid ? left_deg : right_deg;
-				for (std::uint32_t t : g.rows[perm[i]]) { ++deg[t]; }
+				g.for_row(perm[i], [&](std::uint32_t t) { ++deg[t]; });
 			}
 			left_gain.clear();
 			right_gain.clear();
 			for (std::uint32_t i = a; i < b; ++i) {
 				std::int64_t gain = 0;
-				for (std::uint32_t t : g.rows[perm[i]]) {
-					gain += i < mid ? move_gain(left_deg[t], nl, right_deg[t], nr) : move_gain(right_deg[t], nr, left_deg[t], nl);
+				if (i < mid) {
+					g.for_row(perm[i], [&](std::uint32_t t) { gain += move_gain(left_deg[t], nl, right_deg[t], nr); });
+				} else {
+					g.for_row(perm[i], [&](std::uint32_t t) { gain += move_gain(right_deg[t], nr, left_deg[t], nl); });
 				}
 				(i < mid ? left_gain : right_gain).push_back({gain, i});
 			}
 			for (std::uint32_t i = a; i < b; ++i) {  // reset only what this part touched
-				for (std::uint32_t t : g.rows[perm[i]]) { left_deg[t] = right_deg[t] = 0; }
+				g.for_row(perm[i], [&](std::uint32_t t) { left_deg[t] = right_deg[t] = 0; });
 			}
 			auto by_gain = [](const auto& x, const auto& y) { return x.first != y.first ? x.first > y.first : x.second < y.second; };
 			std::sort(left_gain.begin(), left_gain.end(), by_gain);

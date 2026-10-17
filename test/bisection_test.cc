@@ -44,7 +44,7 @@ double log_gap_cost(const bs::graph& g, const std::vector<std::uint32_t>& perm, 
 		std::vector<std::uint32_t> deg(g.terms, 0);
 		const std::size_t b = std::min(perm.size(), a + block);
 		for (std::size_t i = a; i < b; ++i) {
-			for (auto t : g.rows[perm[i]]) { ++deg[t]; }
+			g.for_row(perm[i], [&](std::uint32_t t) { ++deg[t]; });
 		}
 		for (auto d : deg) {
 			if (d) { cost += d * std::log2(double(b - a) / (d + 1)); }
@@ -95,15 +95,45 @@ int main() {
 	}
 
 	// The order: four clusters of documents, each drawing its terms from its own pool, shuffled.
-	bs::graph g;
-	g.terms = 4 * 60;
+	bs::graph_buffer buf;
 	std::vector<int> cluster;
+	std::vector<std::vector<std::uint32_t>> rows;
 	for (int i = 0; i < 4000; ++i) {
 		const int c = int(rng() % 4);
 		std::set<std::uint32_t> row;
 		for (int k = 0, n = 5 + int(rng() % 10); k < n; ++k) { row.insert(std::uint32_t(c * 60 + rng() % 60)); }
-		g.rows.push_back({row.begin(), row.end()});
+		rows.emplace_back(row.begin(), row.end());
+		buf.add(rows.back());
 		cluster.push_back(c);
+	}
+	const bs::graph g = buf.view(4 * 60);
+	// The bytes round-trip, and check() rejects damage to them.
+	for (std::uint32_t d = 0; d < g.docs; ++d) {
+		std::vector<std::uint32_t> back;
+		g.for_row(d, [&](std::uint32_t t) { back.push_back(t); });
+		CHECK(back == rows[d]);
+	}
+	auto rejects = [](const bs::graph& h) {
+		try {
+			h.check();
+			return false;
+		} catch (const std::runtime_error&) {
+			return true;
+		}
+	};
+	CHECK(!rejects(g));
+	CHECK(rejects(buf.view(4 * 60 - 1)));  // an id past the terms
+	{
+		bs::graph_buffer b2 = buf;
+		b2.rows[g.offset(1) - 1] |= char(0x80);  // a varint running past its row's end
+		CHECK(rejects(b2.view(240)));
+		bs::graph_buffer b3;
+		const std::uint32_t twice[] = {3, 3};
+		b3.add(twice);  // not increasing
+		CHECK(rejects(b3.view(240)));
+		bs::graph short_offsets = g;
+		short_offsets.offsets.remove_suffix(8);
+		CHECK(rejects(short_offsets));
 	}
 	const auto perm = bs::order(g);
 	std::vector<std::uint32_t> sorted = perm;
@@ -123,10 +153,9 @@ int main() {
 	std::printf("clusters: log-gap cost %.0f -> %.0f bits\n", before, after);
 
 	// Parts at or below min_partition are left alone: a small graph keeps its order.
-	bs::graph small;
-	small.terms = 2;
-	small.rows = {{0}, {1}, {0}, {1}};
-	CHECK(bs::order(small) == std::vector<std::uint32_t>({0, 1, 2, 3}));
+	bs::graph_buffer small;
+	for (std::uint32_t t : {0u, 1u, 0u, 1u}) { small.add(std::span<const std::uint32_t>(&t, 1)); }
+	CHECK(bs::order(small.view(2)) == std::vector<std::uint32_t>({0, 1, 2, 3}));
 
 	// Cancellation.
 	task::cancel_source stop;
