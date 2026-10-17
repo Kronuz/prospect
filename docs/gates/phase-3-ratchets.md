@@ -216,10 +216,12 @@ scores, and counts).
 **The merge's cost** (T3): the forced merge with reordering takes 3,910 s (peak RSS 5.60 GB,
 4.7 GB written) against 404 s in docid order (5.42 GB, 4.4 GB). Keyed Lucene `-bp`'s force
 merge, reordering included, takes 595 s (its log's "Merge" at 06:48:03 to the build's end
-at 06:57:58). T3 misses at 6.6×. Bisection recounts every term's degree on each
-iteration, three passes over the rows; updating the degrees of swapped documents only, as
-the papers do, is the first change, then `reorder_threads`. Whether Lucene's reorderer ran
-on more than one thread here is to be confirmed.
+at 06:57:58). T3 misses at 6.6×. Bisection recounted every term's degree on each
+iteration, three passes over the rows. Updating the degrees of swapped documents only
+(`1698c3f`, with the stored-record spill of `956ec8b`) takes the merge to 2,678 s, 1.46×
+faster, with byte-identical output (peak RSS 5.88 GB, 4.9 GB written; informational: the
+host compiled at low priority meanwhile). T3 is then 4.5×. `reorder_threads` (`7a4afca`)
+is next; whether Lucene's reorderer ran on more than one thread here is to be confirmed.
 
 The whole index passes (0.98×). Two sections miss: postings at 1.02× and the term
 dictionary at 1.36×. P12 brought the dictionary to 0.992× of Lucene's on an unkeyed
