@@ -651,3 +651,412 @@ bisection code and the gate run.
 Not run: benchmarks of any tier, the VMs, fuzzing, sanitizer builds, Linux, FreeBSD,
 and arm64 builds, the layers branch build, the 5M corpus and indexes, the n1 raw results,
 and Lucene's source.
+
+## Revision check
+
+- Date: 2026-10-16.
+- Reviewed: `docs/design/reordering.md` at `22fee8a`, diffed against `880e87a`. The code
+  the "Which work starts when" table cleared, at `22fee8a`:
+  - `db0a891`: the pinned zstd on main (P1-R15).
+  - `0401904`: `include/strata/docids.hh`; `reader.hh` and `writer.hh` calling it;
+    `segment_writer::permuted`; `merge_segments`' `order` and its plan;
+    `test/docids_test.cc`; `test/merge_test.cc`'s permuted cases;
+    `test/fixtures/permuted.sx`; `fuzz/fuzz_segment.cc`'s permuted base and
+    `fuzz/corpus/segment/permuted-base`; `phase-3.md` and `layers.md` L6.
+  - `11ad2ae`: `bench/night_p1.sh`, `bench/phase2/gate.py`, `bench/quick/ab.sh`, and the
+    one-thread Lucene builder's `BP=1`.
+  - `docs/design/limits.md`'s presets row.
+- Checked against: this review's P1-R1 to P1-R17, findings 1–7, C1–C4, and "Which work
+  starts when"; PLAN's memory rows (`PLAN.md:102`); `phase-3.md` T1–T3 (`464-480`); the
+  gate report's "Disk after a full merge", "Serving memory", and "Gate status".
+- Checked by:
+  - Building `22fee8a` (`cmake -S . -B .scratch/review-p1/build
+    -DCMAKE_BUILD_TYPE=RelWithDebInfo`, Apple clang 17.0.0, macOS x86_64, `-j4`): no
+    warnings. zstd v1.5.7 is fetched and linked statically (`otool -L strata_engine`
+    lists no libzstd). `ctest -j4`: 30 of 30 passed in 95.6 s.
+  - Homebrew clang 23.1.2 with ASan and UBSan: `docids_test`, `merge_test`, and
+    `fuzz_segment`'s corpus replay (1,090 inputs) pass clean. `asan_sanity.cc` shows that
+    toolchain reports a one-byte heap over-read.
+  - Probes in `.scratch/review-p1/probes/`:
+    - `docids_codec.cc` (ASan, UBSan): kind 2 at every docid width 1–64 and ordinal
+      widths to 17, read from exact-size heap buffers; each check D1 names, alone where
+      it can fail alone; the kind rule on 4,000 sequences.
+    - `merge_order.cc` (plain, and ASan with UBSan): `order`'s refusals, its plan, the
+      identity order's bytes, and a single permuted source with deletes, each against
+      an independent model of every document's terms, positions, stored record, and
+      version.
+    - `gain_resolution.py` and `gain_corpus.py`: D4's integer move gains against the
+      papers' formula in floating point, on synthetic degrees and on the corpus sample's
+      own documents with df scaled to 5M.
+    - `forward_size.py`: D4's forward index on `.scratch/corpus10k.json` at max_df 1.0.
+    - `docids_open_5m.cc`: one open-time validation of a synthetic 5,032,102-document
+      kind-2 section. One run on this host, not quiet: an order of magnitude, not a
+      measurement.
+  - Not run: the closing line.
+
+### Verdict
+
+**APPROVE WITH CONDITIONS stands. The bisection code may start, with P1-R18 to P1-R20
+written into D4 in its first commit. P1-R9 and P1-R10 close only on tonight's results;
+they and the other open items block the gate run.**
+
+What holds, and reproduces:
+
+- The codec is one unit behind `segment` and `segment_writer` (`reader.hh:154-159, 369`;
+  `writer.hh:904`).
+- Every check D1 lists exists and rejects (`docids.hh:252-291`). Probe `docids_codec`
+  damages 20 sections, and 16 of them fail exactly one check. In the other four a second
+  check fails too: a repeated ordinal also breaks the docid order, and the forward range,
+  count ≥ 2, and max > min cannot fail unless the sorted walk or the increasing check
+  also fails, so they serve as backups.
+- The count is bound by the file before the section is read (`reader.hh:139-140`), so the
+  scratch bitmap cannot over-allocate.
+- The padding holds. No read leaves an exact-size buffer at any docid width 1–64 under
+  ASan. The worst case uses 7 of the 8 bytes.
+- `docid_ordered()` is exact. The encoder writes kind 2 only when docids do not strictly
+  increase (`docids.hh:96-116`), the reader rejects an increasing kind 2 (`270-278`) and
+  a non-increasing kind 1 (`226-246`). On 4,000 sequences, 1,731 of them increasing,
+  `docid_ordered()` equals "strictly increasing".
+- `merge_segments`' `order` (probe `merge_order`):
+  - it refuses all six bad orders tried, including a deleted document named in a
+    live one's place;
+  - its plan is each document's position in `order` (`merge.hh:107-130`);
+  - the identity order writes today's bytes;
+  - a single permuted source with a third of it deleted keeps its order, equal to the
+    permuted writer's flush of its live documents. Where the deletes leave the docids
+    increasing, the output is docid-ordered (kind 0 or 1), equal to the docid-order
+    flush.
+- `merge_test`'s byte oracle writes kind 2: it asserts it (`merge_test.cc:144`) over
+  hundreds of documents per seed. Its oracle shares the writer with the merge, so it
+  checks the remapping, and the probe's model checks the columns apart from it.
+- The pinned zstd on main (`CMakeLists.txt:24-27`).
+- D4's step and presets match the papers and Lucene's documented defaults. The depth
+  bound of 27 is right. Reordering at force merge only matches the reference builder.
+
+What blocks, and what it blocks:
+
+- P1-R18 to P1-R20 (the gain, the passes, the fallback) block the bisection code. Each
+  is a change to D4's text plus a test, in the first bisection commit.
+- P1-R22 and P1-R24 block D5's code, which already waits for P1-R9.
+- The gate run waits for P1-R2's open-time choice, P1-R4 (b), P1-R9 to P1-R12, P1-R21,
+  and P1-R23, and for D5's code.
+- P1-R17's branch items carry to the layers rebase.
+
+### Status
+
+Closed:
+
+- **P1-R1.** The amendment and its premise (`reordering.md:20-24`); `phase-3.md:85-91`;
+  `permuted.sx` pinned (`docids_test.cc:174-196`); kinds 3 and up rejected
+  (`docids_test.cc:117`); the kind rule (`docids.hh:96-116`, probe `docids_codec`).
+- **P1-R3.** `docids.hh:117-119, 138` charges 32 bytes a document, 161 MB at 5M, as D2
+  states (`reordering.md:75-78`). `begin_document`'s check stays for flushes
+  (`writer.hh:536`).
+- **P1-R5**, with its details carried by P1-R19 to P1-R21:
+  - the forward index is a temporary file (`reordering.md:130-139`);
+  - the anonymous working set, 16 bytes × 5,032,102 = 80.5 MB, is right;
+  - the segment cap is covered by the fallback, which keeps a segment of about 16.7M
+    documents reordering at 256 MB;
+  - each fallback is counted in a metric.
+  Probe `forward_size`: at max_df 1.0 the sample gives 336M edges at 5M (308M was
+  max_df 0.5), 1.25 bytes an edge, 421 MB of rows and 40 MB of offsets. So "roughly
+  0.5 GB, 4 passes" holds on the sample.
+- **P1-R7.**
+  - The presets are Lucene's documented values (`reordering.md:173-176`), and
+    `limits.md:23` carries them.
+  - Depth 30 is gone: 27 levels for 2^32 documents is right (`154`).
+  - Force merge only is the default, and `off` turns it off (`177-182`). The text still
+    says "passes 100,000" (`180`). At 262,144 the conclusion holds, since every natural
+    merge at 5M joins segments of about 314K.
+- **P1-R13.** T5 lists every case (`reordering.md:250`). The explicit permutations and
+  the byte oracle landed (`merge_test.cc:113-187`).
+- **P1-R14.** A permuted, keyed base with docid gaps (`fuzz_segment.cc:23-37, 67-73`),
+  plus its seed. 95 of the 1,090 corpus inputs start with a byte of 250 or more, so they
+  now mutate the permuted base instead of the base they were grown on. They replay clean
+  under ASan.
+- **P1-R15.** `db0a891`. T7 runs on CI's targets, which the shared workflow provides by
+  default: Linux x86_64 and arm64, macOS arm64 and x86_64, and FreeBSD. It runs at 1 and
+  8 threads, subject to P1-R20.
+- **P1-R16.**
+  - Scale is stated (`reordering.md:232-240`): 720 edge reads per edge.
+  - That is 48,000 a document at max_df 1.0's 66.8 edges, not 44,000.
+  - The map is 5.8 bytes a document (probe: 5.81).
+
+Partially closed:
+
+- **P1-R2.** The widths are derived and checked (`docids.hh:253-256`), the length is
+  exact (`259`), and the padding is checked (`263-269`). What remains:
+  - **Open:** the choice between eager and first-use validation. It is deferred to the
+    first reordered 5M index (`reordering.md:59-63`). Probe `docids_open_5m` gives the
+    order: 29.2 MB, and 0.12 s to validate, warm. Eager looks affordable. Its 29.2 MB
+    stays resident and lands in T4's serving row.
+  - D1's "0 to 64" (`44`) is 1–64 for kind 2, since count ≥ 2 and max > min. Width 0
+    cannot occur.
+  - The suite's widths are P1-R23.
+- **P1-R4.**
+  - **(a) Closed.** The plan (`merge.hh:107-130`, `merge_test.cc:129`, probe). Install's
+    carry-over maps through it unchanged. D3 (a) calls Phase 3's T2 schedule "T4's"
+    (`reordering.md:95`); it is T5.
+  - **(b) Stated, not built.** The design states the spill (`96-101`), but
+    `merge.hh:129` still decodes a frame per document. The spill is owed before T3.
+    T1's projection stops "before stored growth" (`258`), and P1-R4 (b) asked it to
+    include the stored row.
+    - My estimate: Lucene's stored grew 66% under `-bp` (31.9 to 53.1 MB). Applied to
+      strata's 15.5 MB, that is +10.3 MB.
+    - The whole index then lands near 2,508 MB, 0.989× keyed `-bp`.
+  - **(c) Closed.** `merge.hh:98-103, 123`, and the probe with deletes.
+  - **(d) Closed.** `layers.md:385-392`.
+- **P1-R6.** Closed:
+  - the table pinned by hash, with no libm;
+  - the step: ⌊n/2⌋, gains descending, ties by position, swaps while the sum is
+    positive, at most 20 iterations, early stop;
+  - term ids in dictionary order, and live df;
+  - threads, and cancellation per iteration;
+  - the projection.
+  Open: P1-R18 (the gain is noise at the top levels), P1-R19 (the passes), P1-R20 (the
+  fallback). The projection is plausible:
+  - 18 × 20 × 2 × 336M ≈ 2.4 × 10^11 edge reads, 4–12 minutes at 1–3 ns each;
+  - plus random row reads at the top levels and 360 sorts of 5M gains;
+  - so 20–30 minutes on one thread is the right order.
+- **P1-R8.** Covered:
+  - `top_collector`'s paths (`search.hh:197-207, 240-244, 246-256, 258-265, 274-283`)
+    and `top_k` (`1252-1294`), as D5.1 and D5.2 list them;
+  - the callers `searcher.hh:187-194`, `engine_query.hh:159`, and `search_test`;
+  - parity's mapping, verify's sets, and the exact tie tests;
+  - docid-order walks, sort keys, and collapse.
+  Open: P1-R22.
+- **P1-R10.** Closed in the design:
+  - T1's target and the counterpart row (`reordering.md:246`);
+  - the corrected 15.5% and 8.9%, the stated 1.02× miss, what closes postings, and the
+    owner's decision (`254-261`);
+  - `BP=1`, which takes the reference's settings: 256 MB, no reordering of natural merges
+    (`BuildIndex.java:49-58`).
+  Open:
+  - tonight's keyed `-bp` sizes (`night_p1.sh:67-78`);
+  - the projection redone against them with stored growth (P1-R4 (b));
+  - how the docids row's counterpart is measured (finding 10).
+- **P1-R11.** T3 and T4 have targets. Open: P1-R21.
+- **P1-R12.** Closed:
+  - the ≤ 1.03 rule and the ten-trial rerun;
+  - the carried rows on the reordered index;
+  - the `-bp` column (`gate.py:212`).
+  Open: the table still does not name the engine that sets each ratio. `gate.py:117-119`
+  takes the largest ratio over FAST and prints only means. A column printing
+  `max(fast, key=lambda e: row[e][0])` closes it.
+- **P1-R17.** Closed: P1 on main first, the codec as one unit, and step 5's oracle with
+  the permuted path (`layers.md:392`). Not recorded anywhere:
+  - bisection as a unit, with a forward index in and a permutation out;
+  - step 0's fixtures, `permuted.sx` and a reordered merge output;
+  - L15's step-5 merge row, with the output hash equal between A and B;
+  - L6's `docid_order` (`layers.md:378`), "false when the output is reordered", set
+    from the order written as D1's kind rule is, so an identity order keeps today's bytes
+    there too.
+  These carry to the rebase. The branch is unchanged since `8e8e420`.
+
+Open:
+
+- **P1-R9.** The evidence is tonight's step 2 (`night_p1.sh:54-65`). It closes with
+  three things:
+  - `skip-<name>-bm25.md` and `skip-<name>-bm25_xapian.md`, with intervals per class;
+  - the binaries' source (P1-R24);
+  - D5's statement of what is accepted (`reordering.md:211-215`).
+
+### New required changes
+
+18. **P1-R18. D4's move gain, in a form whose error is bounded**
+    (`reordering.md:140-146`). Blocks the bisection code.
+    - **Evidence.** Probe `gain_resolution`, with the halves equal and documents moving
+      from the first half to the second. Units are 2^-16 bits:
+
+      | Per half | d₁ | D4, 10-bit L: max error | L exactly rounded | Rewritten gain |
+      |---:|---|---:|---:|---:|
+      | 2,516,051 | 2,048–2,000,000 | 97,750,926 | 2,423,209 | 87 |
+      | 157,253 | 512–150,000 | 12,137,076 | 185,207 | 89 |
+      | 9,828 | 64–9,000 | 764,889 | 14,297 | 80 |
+
+      At the top level, with 67 graph terms per document and df log-uniform in
+      [4,096, 2.5M], over 2,000 document pairs:
+
+      | Gain | Document gain has the papers' sign | Swap decisions agree |
+      |---|---:|---:|
+      | D4, 10-bit L | 51.4% | 51.7% |
+      | L exactly rounded | 61.6% | 57.2% |
+      | Rewritten gain, 10-bit L | 100% | 100% |
+
+      On the corpus sample's own documents, df scaled to 5M and the first split taken as
+      random (probe `gain_corpus`, 1,500 pairs), D4's swap decisions agree in 52.6%,
+      exactly rounded L's in 51.1%, and the rewritten gain's in 99.1%. Its misses are
+      gains within the table's error of zero.
+    - **Cause.** c(d, n) = d · (L(n) − L(d + 1)) makes each gain a difference of d · L
+      products, so L's error is multiplied by d.
+      - Above 2^11 the 10-bit L is a step function. d · (L(d + 1) − L(d)) is 0 at
+        d = 100,000, 6,101,891 at 100,031, and 49,021,903 at 1,000,447, where the true
+        value is 2^16 / ln 2 = 94,548.
+      - Exact rounding does not save it: 16 fractional bits cannot carry d · ΔL for d in
+        the millions.
+      - As written, bisection swaps at random in the levels that matter most.
+    - **Required.**
+      - The per-term gain is rewritten without the products:
+        g = L(n₁) − L(n₂) − D(d₁) + D(d₂ + 1), where
+        D(d) = d log₂(d + 1) − (d − 1) log₂ d = log₂ d + d log₂(1 + 1/d).
+        D is L(d) plus E(d) = d log₂(1 + 1/d): a table below 2^11, and the constant
+        2^16 / ln 2 above it, which errs by under 24 units. n₁ and n₂ are the halves'
+        sizes, and the other direction is symmetric.
+      - The design states the per-term bound, |g| < 2^23, in place of "c under 2^53".
+      - m is defined for x < 2^10, where fewer than 10 bits follow the leading one
+        (left-aligned and zero-padded, so L is exact below 2^11). D4's
+        "L(x) = round(2^16 · log₂ x)" is corrected: above 2^11 the table form truncates,
+        and differs from it by up to 92 units.
+      - A test pins the gains of fixed (d₁, d₂, n₁, n₂) against values computed offline.
+19. **P1-R19. The forward index's passes** (`reordering.md:126-139`). Blocks the
+    bisection code.
+    - Graph membership is live df, "counted in the pass that builds the forward index".
+      With 4 passes, the first range's rows are written before any term's live df is
+      known.
+      - So a live-df pass over the candidate terms (summed source df ≥ min_df) runs
+        first: 1 + P passes.
+      - The same pass counts each document's degree. The ranges are cut on that count,
+        with an upper bound per edge or a stated sizing rule, since a row's bytes are not
+        known until its deltas are.
+    - A docid-ordered source maps a range of docid-numbered documents to an ordinal
+      range. A permuted source does not, as in a forced merge of a reordered segment
+      with newer ones. Each pass then reads its graph terms' lists whole, through a
+      (source, ordinal) → docid-rank map of 4 bytes a document, charged. The design
+      states it.
+    - The transposition checks the cancel token per term, as the merge does. Today only
+      bisection checks it, once per iteration (`159-160`).
+20. **P1-R20. A fallback independent of `reorder_threads`** (`reordering.md:155-168`).
+    Blocks the bisection code.
+    - The working set counts degree counters per thread, and the fallback compares that
+      total with `reorder_memory`. Near 16.7M documents, then, one thread reorders and
+      eight fall back.
+    - That breaks "1 and 8 threads give the same bytes by construction" (`158`) and T7.
+    - The fallback decides on the document count and the graph's term count alone:
+      counters for the largest thread count, or none.
+21. **P1-R21. T3's memory target, and the `-bp` phase's timing** (`reordering.md:248`).
+    Blocks the gate run.
+    - **The budget.** "Within the budget plus 10%" is PLAN's node-budget rule
+      (`PLAN.md:102`, `BENCHMARKS.md:83`), and the design names no value for the 5M
+      runs. The indexing budget of 1,039 MB already peaks at 2,352 MB RSS
+      (`phase-3-ratchets.md:262`).
+    - **Mapped pages.** Peak RSS counts them: the sources' (about 2.8 GB) and the
+      forward index's (about 0.46 GB at 5M), which every iteration reads whole. "Page
+      cache, not anonymous memory" (`139`) holds for the budget's accounting, not for
+      RSS or a cgroup. The design states:
+      - the expected peak;
+      - how T3 counts mapped pages;
+      - what happens at the node's budget. With the forward index evicted, each of up
+        to 360 iterations rereads it.
+    - **The `-bp` merge phase is not timed.** The builder prints "Merge" with no
+      timestamp (`BuildIndex.java:135-137`), and step 3 times the whole run under
+      `/usr/bin/time`. The procedure timestamps the line, or the builder prints its
+      elapsed time.
+    - "At the same budget" names each side's budget.
+22. **P1-R22. D5's remaining callers, the seed, and the scale check's row**
+    (`reordering.md:186-224`). Blocks D5's code.
+    - **Callers.** `top_k` has three more: `strata_engine.cc:481` (verify on a segment
+      file), `parity.cc:222`, and `fuzz_segment.cc:118-160` over the permuted base.
+      Either the segment becomes a required parameter, so the compiler finds them, or
+      D5 lists them.
+    - **The seed.** `top_collector::seed` works on one segment only
+      (`search.hh:186-188`). On the `begin()` path, `collect` ignores `floor_`
+      (`197-207`) and `update_min` drops it (`281`). A reordered segment routed through
+      `begin()` then loses `top_k`'s floor (`1264-1270`) and P21's seeding. D5 states how
+      the floor holds on that path.
+    - **The scale check.** The 5M bit-identical check (`reordering.md:220-222`) is in no
+      row and names no tool. It becomes a row with its command.
+23. **P1-R23. `docids_test`'s widths** (`docids_test.cc:78-92`). Blocks the gate run
+    (C4).
+    - The case commented "near 2^64: 64-bit widths" (`81`) puts docids near 2^64 with a
+      range of about 4n. The test reaches docid widths up to 17 and ordinal widths up to
+      15 (probe `docids_codec`).
+    - The suite never runs widths 58–64. That is where `get_bits` reads the ninth byte
+      (`docids.hh:69`), and width 64 skips the mask (`70`).
+    - The probe's sweep moves into the test: widths 1–64, at counts that end on every
+      byte offset.
+24. **P1-R24. The skip A/B's binaries, from tracked code** (`night_p1.sh:25, 63`). Blocks
+    P1-R9's closure.
+    - No commit builds `~/se-skipexp` or `~/se-noskip`, and nothing tracked disables the
+      skip.
+    - The change is checked in, as a compile-time switch or a patch under `bench/`, and
+      each binary's commit is recorded with its result.
+
+### New findings
+
+8. **Natural merges undo the reordering.**
+   - **Evidence.** Probe `merge_order`, last case: a permuted source merged with a
+     docid-ordered one, with no `order`, writes docid order (`merge.hh:99-103`). D3 (c)
+     says so (`reordering.md:105`).
+   - **What it means.** Under the default, a reordered segment keeps its order through
+     singleton rewrites and loses it the first time a natural merge includes it.
+     Without an index sort, Lucene's merges keep each source's relative order.
+   - **Forced merges in rounds.** A forced merge of more than 30 segments runs in rounds
+     (`limits.md:22`). Each round would bisect.
+   - **The fix.** The design states the reordering's lifetime under the default, and
+     whether a forced merge bisects once, in its last round, or every round. Not
+     blocking: the gate measures one force-merged index.
+9. **The graph at max_df 1.0** has 336M edges, 66.8 a document (probe `forward_size`),
+   not 308M and 61. The cost projection and Scale's per-document figure scale by 1.09.
+   The sample's documents run short, so the 5M graph is likely larger still.
+10. **Procedures.**
+    - **T1.**
+      - The "docids, versions, `pk_filter`" row compares against Lucene's id-field terms.
+        Those sit inside `.tim`, `.tip`, and `.tmd`, which file sizes do not separate.
+        The gate report's 27.7 MB is keyed minus unkeyed. The procedure says so, and the
+        terms row does not count them again.
+      - "Tantivy" is the unkeyed build. Keys configured alike needs a keyed one, or T1
+        names the sections keys do not touch.
+    - **T2.** No tool prints blocks decoded per query: `ab.sh` records time only. T2
+      names the counter.
+    - **T4.** The serving row names its reference: Tantivy, at 563 MB today.
+    - **Text.**
+      - T5's "T1's crash points" means Phase 3's T1 (`reordering.md:250`).
+      - "A part of n documents" (`140`) means each half's size.
+      - `phase-3.md:85` says "one of two kinds"; there are three.
+11. **Open time** (P1-R2). A 5,032,102-document kind-2 section is 29.2 MB, and validating
+    it took 0.12 s here, warm (probe `docids_open_5m`). That favors eager validation at
+    open. Its 29.2 MB of resident pages is what T4's serving row weighs.
+
+### D4, checked adversarially
+
+- **Transposition.** It is correct for docid-ordered sources and bounded by half of
+  `reorder_memory` per range once a range rule exists. It needs the live-df pass first,
+  and a permuted source's lists are read whole on every pass (P1-R19).
+- **Working set.** The anonymous 80 MB is right. RSS adds the forward index (P1-R21).
+- **Fallback.** It is deterministic in the inputs and presets, but depends on
+  `reorder_threads` (P1-R20).
+- **d = 0 and n = 1.**
+  - c(0, n) = 0, and L(1) = T[0] = 0; c(1, 1) = −2^16.
+  - With `min_partition` 32, every half holds at least 16 documents.
+  - m for x < 2^10 is undefined in the text (P1-R18).
+- **The 10-bit mantissa.** It is enough for L itself: at most 92 units, 0.0014 bits. It
+  is not enough for D4's product-form gain, and neither is exact rounding. The rewrite
+  fixes it (P1-R18).
+- **The swap rule.** It matches Dhulipala et al. and Mackenzie et al. as the design cites
+  them: both halves are sorted by gain, pairs swap while their summed gain is positive,
+  and gains stay fixed within an iteration.
+- **The cost projection.** Plausible, at 2.4 × 10^11 edge reads (P1-R6 above).
+- **Force merge only.** Sound for the gate and for parity with the reference builder,
+  which also reorders only at force merge. The reordering's lifetime is finding 8.
+
+### Which work starts when
+
+| Work | Starts | Waits for |
+|---|---|---|
+| Bisection code | Now | P1-R18 to P1-R20 in D4, in its first commit, with the gain test |
+| The stored spill (P1-R4 (b)) | Now | — |
+| `docids_test`'s width sweep, and `gate.py`'s reference column | Now | — |
+| D5's tie paths | After tonight's A/B | P1-R9, P1-R22, P1-R24 |
+| The gate run | After bisection and D5 land | P1-R2, P1-R4 (b), P1-R9 to P1-R12, P1-R21, P1-R23 |
+| The layers rebase | After the gate run | P1-R17's branch items |
+
+### Conditions
+
+C1 to C4 stand. P1-R18's gain test runs in T7's CI jobs with the hash test.
+
+Not run: benchmarks of any tier (`docids_open_5m` is one run of a probe, not a
+benchmark); tonight's VM program, whose results do not exist yet; the VMs; fuzzing (only
+the corpus replay under ASan); the full suite under ASan and UBSan (only `docids_test`,
+`merge_test`, and the corpus replay); TSan (no new threads at `22fee8a`); Linux,
+FreeBSD, and arm64 builds; the layers branch; the 5M corpus and indexes; and Lucene's
+source.
