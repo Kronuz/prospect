@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Runs the gate VM's benchmark trials only while the host is quiet: waits until the
 # 1-minute load average stays below LIMIT for QUIET_SECONDS, starts ~/bench/trials.sh in
-# the VM, and samples host load every 30 s while it runs; a sample above LIMIT stops the
-# trials, and it waits for quiet again and starts over. The default LIMIT of 6 sits above
+# the VM, and samples host load every 30 s while it runs; NOISY consecutive samples above
+# LIMIT (default 3, so 90 s) stop the trials, and it waits for quiet again and starts over.
+# One sample is not enough: when the VM goes idle between units, its CPU drops at once while
+# the 1-minute load average lags, which reads as a spike. The default LIMIT of 6 sits above
 # the host's idle load (2.5-3.5 on 16 threads) and below a compile's (8 and up). TRIALS
 # names another VM script to run the same way (bench/ab.sh, for one): a script path and
 # arguments, not an environment assignment, and one that does not exec another script,
@@ -11,6 +13,7 @@
 set -uo pipefail
 LIMIT=${1:-6}
 QUIET=${2:-300}
+NOISY=${NOISY:-3}
 TRIALS=${TRIALS:-'~/bench/trials.sh'}
 script=$(basename "${TRIALS%% *}")  # the VM script TRIALS runs, stopped on noise
 here=$(cd "$(dirname "$0")" && pwd)
@@ -39,11 +42,12 @@ for attempt in $(seq 1 200); do
 	done
 	echo "$(date) attempt $attempt: quiet, starting" >> "$log"
 	"$here/linux.sh" ssh 'rm -f ~/bench/results/trials.log; setsid nohup '"$TRIALS"' > ~/bench/results/trials.log 2>&1 < /dev/null &'
-	noisy=0
+	noisy=0 over=0
 	until "$here/linux.sh" ssh 'grep -q TRIALS_DONE ~/bench/results/trials.log' 2>/dev/null; do
 		l=$(load)
 		echo "$(date +%s) $l" >> "$log.samples"
-		if above "$l"; then
+		if above "$l"; then over=$((over + 1)); else over=0; fi
+		if [ "$over" -ge "$NOISY" ]; then
 			noisy=1
 			# The trials script leads its own session: stop it and everything it started.
 			"$here/linux.sh" ssh 'g=$(pgrep -f "^/bin/bash /home/strata/bench/'"$script"'" | head -1); [ -n "$g" ] && kill -TERM -- -$g; sleep 2; pkill -f "strata_engine|do_query|java|xapian_engine"' || true
