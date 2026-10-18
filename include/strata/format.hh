@@ -64,9 +64,12 @@ namespace format {
 
 inline constexpr char header_magic[8] = {'S', 'T', 'R', 'S', 'E', 'G', '0', '1'};
 inline constexpr char footer_magic[4] = {'S', 'E', 'N', 'D'};
-// The version written, and the oldest one read (N - 1 from format 13 on: F2).
-inline constexpr std::uint32_t version = 13;
-inline constexpr std::uint32_t min_read_version = 13;
+// The version written, and the oldest one read (N - 1 from format 13 on: F2). Until format
+// 13 freezes, both are a pre-freeze number, bumped with each byte change and 13 at the
+// freeze, so an index from another pre-freeze build is refused, never misread (CR11).
+inline constexpr std::uint32_t pre_freeze = 0x8000'0001;
+inline constexpr std::uint32_t version = pre_freeze;
+inline constexpr std::uint32_t min_read_version = pre_freeze;
 // Bytes 0-15, frozen in every version: magic, version, CRC-32C of bytes 0-11 (F2).
 inline constexpr std::size_t prefix_size = 16;
 inline constexpr std::size_t header_size = 36;

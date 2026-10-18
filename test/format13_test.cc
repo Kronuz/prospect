@@ -243,7 +243,7 @@ int main() {
 	CHECK(open(good) == outcome::opens);
 	{
 		strata::segment s(good);
-		CHECK(s.core().version() == 13);
+		CHECK(s.core().version() == strata::format::version && strata::format::version == strata::format::pre_freeze);
 		CHECK(s.core().structures() == (bit::inverted | bit::norms | bit::keys | bit::stored));
 		// F5's order: the streamed sections, then the pinned tail by rank.
 		const std::vector<section> order{section::header, section::postings, section::positions, section::terms, section::lengths, section::keys, section::stored,
@@ -259,9 +259,9 @@ int main() {
 
 	// --- F2: the prefix ------------------------------------------------------------------
 	{
-		// The prefix CRC of version 13, from the bytes.
-		CHECK(strata::format::get<std::uint32_t>(good.data() + 12) == 0x4ff2df7bu);
-		CHECK(strata::format::read_version(good) == 13);
+		// The prefix CRC of the pre-freeze version, from the bytes (13's is 0x4ff2df7b).
+		CHECK(strata::format::get<std::uint32_t>(good.data() + 12) == 0x4062b616u);
+		CHECK(strata::format::read_version(good) == strata::format::pre_freeze);
 		// The magic wrong: damage.
 		for (std::size_t at = 0; at < 8; ++at) {
 			std::string bad = good;
@@ -282,6 +282,9 @@ int main() {
 		// Another version with a good CRC: unsupported, below or above (rule 2).
 		CHECK(open(with_version(good, 14)) == outcome::unsupported);
 		CHECK(open(with_version(good, 12)) == outcome::unsupported);
+		// Until the freeze, 13 itself is another build's layout: unsupported (CR11).
+		CHECK(open(with_version(good, 13)) == outcome::unsupported);
+		CHECK(open(with_version(good, strata::format::pre_freeze - 1)) == outcome::unsupported);
 		// Format 12's zero flags word where the CRC sits: unsupported (rule 3).
 		{
 			std::string old = good;
@@ -537,7 +540,7 @@ int main() {
 			ix.commit();
 			const auto m = ix.manifest();
 			CHECK(m.configured == (bit::inverted | bit::norms | bit::keys | bit::stored) && m.mask == m.configured);
-			CHECK(m.min_version == 13 && m.max_version == 13);
+			CHECK(m.min_version == strata::format::pre_freeze && m.max_version == strata::format::pre_freeze);
 			return m.generation;
 		};
 		// Rewrites the head manifest with `edit` applied.
@@ -562,7 +565,9 @@ int main() {
 		CHECK(with([](strata::files::manifest& m) { m.mask |= bit::values; }) == verdict::unsupported);
 		CHECK(with([](strata::files::manifest& m) { m.mask |= bit::compact; }) == verdict::unsupported);
 		// A highest segment version above this binary's: unsupported.
-		CHECK(with([](strata::files::manifest& m) { m.max_version = 14; }) == verdict::unsupported);
+		CHECK(with([](strata::files::manifest& m) { m.max_version = strata::format::version + 1; }) == verdict::unsupported);
+		// An index an earlier pre-freeze build wrote, segments at 13: unsupported (CR11).
+		CHECK(with([](strata::files::manifest& m) { m.min_version = m.max_version = 13; }) == verdict::unsupported);
 		// A segment that sets a bit outside its manifest's mask: damage.
 		CHECK(with([](strata::files::manifest& m) { m.mask = m.configured = bit::inverted | bit::norms | bit::keys; }) == verdict::corrupt);
 		// Configured bits no flush could write: damage at open (CR5). Clearing stored is a
