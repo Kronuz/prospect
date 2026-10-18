@@ -2055,7 +2055,8 @@ private:
 		}
 	}
 	// Refuses an index this binary cannot read before any segment opens (F20): a structure
-	// bit in the manifest's mask it lacks, or segment versions outside what it reads.
+	// bit in the manifest's mask it lacks, or segment versions outside what it reads; then
+	// configured bits no flush could write, as damage.
 	static void check_readable(const files::manifest& m) {
 		if (const std::uint32_t lacked = m.mask & ~segment::readable) {
 			throw unsupported_index("strata: unsupported index: structure bit " + std::to_string(std::countr_zero(lacked)));
@@ -2063,6 +2064,13 @@ private:
 		if (!m.segments.empty() && (m.min_version < format::min_read_version || m.max_version > format::version)) {
 			throw unsupported_index("strata: unsupported index: segment format versions " + std::to_string(m.min_version) + " to " + std::to_string(m.max_version));
 		}
+		// Configured bits a flush can write (CR5): each bit's owner set (F4), and keys set
+		// exactly when the index has a key prefix (F8).
+		for (std::uint32_t b = m.configured; b; b &= b - 1) {
+			const std::uint32_t owner = format::requires_of(b & -b);
+			if (owner && !(m.configured & owner)) { throw corrupt_index("configured structure bit " + std::to_string(std::countr_zero(b)) + " without its owner"); }
+		}
+		if (m.key_prefix.empty() == bool(m.configured & format::bit::keys)) { throw corrupt_index("the key prefix and the configured keys bit disagree"); }
 	}
 	static loaded_files load_files(kronuz::journal::IO& io, const files::manifest& m, bool whole, std::uint64_t* retries = nullptr) {
 		loaded_files out;

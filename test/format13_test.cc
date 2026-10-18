@@ -565,6 +565,11 @@ int main() {
 		CHECK(with([](strata::files::manifest& m) { m.max_version = 14; }) == verdict::unsupported);
 		// A segment that sets a bit outside its manifest's mask: damage.
 		CHECK(with([](strata::files::manifest& m) { m.mask = m.configured = bit::inverted | bit::norms | bit::keys; }) == verdict::corrupt);
+		// Configured bits no flush could write: damage at open (CR5). Clearing stored is a
+		// valid configuration.
+		CHECK(with([](strata::files::manifest& m) { m.configured = bit::inverted | bit::norms | bit::stored; }) == verdict::corrupt);  // keys off, prefix Q
+		CHECK(with([](strata::files::manifest& m) { m.configured = bit::norms | bit::keys | bit::stored; }) == verdict::corrupt);    // norms without inverted
+		CHECK(with([](strata::files::manifest& m) { m.configured = bit::inverted | bit::norms | bit::keys; }) == verdict::opens);
 		// A version-1 manifest: unsupported.
 		{
 			strata::faultfs::filesystem fs;
@@ -595,6 +600,26 @@ int main() {
 				unsupported = true;
 			}
 			CHECK(unsupported);
+		}
+		// install refuses a checkpoint whose configured bits no flush could write (CR5).
+		{
+			strata::faultfs::filesystem fs_a, fs_b;
+			strata::faultfs::io io_a(fs_a), io_b(fs_b);
+			std::uint64_t gen = 0;
+			{
+				auto a = strata::index::create(io_a, o, {});
+				CHECK(apply(a, upsert("Q1", "w")) == strata::verdict::accepted);
+				gen = a.checkpoint();
+			}
+			rewrite(fs_a, io_a, gen, [](strata::files::manifest& m) { m.configured &= ~bit::keys; });
+			auto b = strata::index::create(io_b, o, {});
+			bool corrupt = false;
+			try {
+				b.install(io_a, gen);
+			} catch (const strata::corrupt_index&) {
+				corrupt = true;
+			}
+			CHECK(corrupt);
 		}
 	}
 
