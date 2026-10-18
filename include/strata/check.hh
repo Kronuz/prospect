@@ -41,13 +41,23 @@ inline void check_segment(const segment& seg, const std::vector<std::uint64_t>* 
 		}
 		return true;
 	});
-	// Every key in order, its ordinal in range and its count the index's (keys.hh); a
-	// nonzero version belongs to a key (F9, F13-R9).
+	// Every key in order, its ordinal in range and its count the index's (keys.hh); each
+	// ordinal named once, the range the first and last key, and every key passing the
+	// range and filter that lookups consult (F13-R37); a nonzero version belongs to a key
+	// (F9, F13-R9).
+	const auto& keys = seg.get<keys_plugin>();
 	std::vector<bool> keyed(seg.core().doc_count());
-	for (auto c = seg.get<keys_plugin>().cursor(); c.next();) {
-		++r.keys;
+	std::string first, last;
+	std::uint64_t walked = 0;  // this segment's keys
+	for (auto c = keys.cursor(); c.next();) {
+		if (keyed[c.ordinal()]) { corrupt("an ordinal named by two keys"); }
 		keyed[c.ordinal()] = true;
+		++r.keys;
+		if (!walked++) { first = c.key(); }
+		last = c.key();
+		if (!keys.may_hold(c.key())) { corrupt("a key its range or filter misses"); }
 	}
+	if (keys.key_count() && (keys.min_key() != first || keys.max_key() != last)) { corrupt("key range"); }
 	for (ordinal_t o = 0; o < seg.core().doc_count(); ++o) {
 		if (!keyed[o] && seg.get<keys_plugin>().version(o) != 0) { corrupt("a version without a key"); }
 	}

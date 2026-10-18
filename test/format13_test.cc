@@ -895,6 +895,64 @@ int main() {
 			strata::check_segment(seg, nullptr, plain);  // no prefix: an ordinary term
 			CHECK(plain.terms == 1);
 		}
+		// check() refuses keys sections that lookups would misread (F13-R37), each resealed as
+		// fuzz inputs are: two keys naming one ordinal, a range other than the first and last
+		// key, and a filter that misses held keys.
+		{
+			strata::segment_writer w;
+			for (std::uint32_t d = 0; d < 10; ++d) {
+				std::vector<strata::posting_input> in{{"w", 1, {}}};
+				w.add(d + 1, in, 1, {}, 0, "Q" + std::to_string(d));
+			}
+			const std::string good10 = w.flush({});
+			auto refused = [](const std::string& file) {
+				try {
+					strata::check_report rr;
+					strata::check_segment(strata::segment(file), nullptr, rr, "Q");
+				} catch (const strata::corrupt_segment&) {
+					return true;
+				}
+				return false;
+			};
+			CHECK(!refused(good10));
+			std::vector<std::string> names;
+			for (std::uint32_t d = 0; d < 10; ++d) { names.push_back("Q" + std::to_string(d)); }
+			std::vector<std::pair<std::string_view, strata::ordinal_t>> e;
+			for (std::uint32_t d = 0; d < 10; ++d) { e.push_back({names[d], d == 1 ? 0 : d}); }
+			const auto twice = strata::keys::encode(e);
+			CHECK(refused(with_section(with_section(good10, section::keys, twice.keys), section::key_index, twice.index)));
+			// key_index rebuilt with another maximum, or a filter over other keys.
+			const std::string index = std::string(strata::segment(good10).core().section(section::key_index).bytes);
+			auto reindex = [&](const std::string* max, bool other_filter) {
+				const char* q = index.data();
+				const char* end = q + index.size();
+				const std::uint64_t count = strata::format::get_leb(&q, end);
+				auto field = [&] {
+					const std::uint64_t n = strata::format::get_leb(&q, end);
+					std::string out(q, std::size_t(n));
+					q += n;
+					return out;
+				};
+				const std::string mn = field(), mx = field(), filter = field(), rest(q, end);
+				std::string f = filter;
+				if (other_filter) {
+					std::vector<std::uint64_t> h;
+					for (int i = 0; i < 64; ++i) { h.push_back(xxh64::hash("X" + std::to_string(i))); }
+					f = fusefilter::filter8::build(h).serialize();
+				}
+				std::string out;
+				strata::format::put_leb(out, count);
+				for (const std::string* v : std::initializer_list<const std::string*>{&mn, max ? max : &mx, &f}) {
+					strata::format::put_leb(out, v->size());
+					out += *v;
+				}
+				return out + rest;
+			};
+			const std::string q8 = "Q8", q99 = "Q99";
+			CHECK(refused(with_section(good10, section::key_index, reindex(&q8, false))));   // max below the last key
+			CHECK(refused(with_section(good10, section::key_index, reindex(&q99, false))));  // max above it
+			CHECK(refused(with_section(good10, section::key_index, reindex(nullptr, true))));
+		}
 		// The writer's backstop refuses a key-prefixed term, never drops it.
 		{
 			strata::segment_writer w;

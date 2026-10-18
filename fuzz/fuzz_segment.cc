@@ -109,6 +109,16 @@ void exercise(const strata::segment& seg) {
 		(void)seg.get<strata::keys_plugin>().version(d);
 		(void)seg.get<strata::inverted_plugin>().length(d);
 		(void)seg.get<strata::keys_plugin>().may_hold("Q" + std::to_string(id));
+		(void)seg.get<strata::keys_plugin>().find("Q" + std::to_string(id), {});  // decodes a key block
+	}
+	// The keys section's blocks: a scan from a few bounds and a full walk (F13-R37).
+	{
+		const auto& keys = seg.get<strata::keys_plugin>();
+		for (const char* from : {"", "Q", "Q5", "Q9\xff"}) {
+			std::size_t n = 0;
+			keys.scan(from, [&](std::string_view, strata::ordinal_t) { return ++n < 64; });
+		}
+		for (auto c = keys.cursor(); c.next();) {}
 	}
 	std::vector<strata::format::term_info> infos;
 	for (const char* t : vocab) {
