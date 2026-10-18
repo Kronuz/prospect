@@ -125,9 +125,10 @@ public:
 	core_segment(std::string_view file, std::uint32_t readable) : file_(file) {
 		version_ = format::read_version(file);
 		footer_ = format::decode_footer(file);
+		format::classify_structures(footer_.structures, readable);  // before the table (F13-R35)
 		sections_ = format::decode_toc(file, footer_);
 		if (format::get<std::uint32_t>(file.data() + 16) != 0) { corrupt("header flags"); }
-		format::check_structures(sections_, footer_.structures, readable);
+		format::check_presence(sections_, footer_.structures);
 		// Each regions-checked section's CRCs move to its span; others are dropped. The
 		// table's rank order makes every kind appear at most once.
 		std::vector<residency::verified_regions::span> spans;

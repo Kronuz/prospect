@@ -372,16 +372,22 @@ inline std::vector<section_entry> decode_toc(std::string_view file, const footer
 	return entries;
 }
 
-// Classifies the footer's structures word against the bits this binary reads (F4): a bit
-// without the bit it requires is corruption; a set bit this binary lacks is unsupported.
-// Then each kind is present exactly when its bit is set, mandatory kinds always.
-inline void check_structures(const std::vector<section_entry>& entries, std::uint32_t structures, std::uint32_t readable) {
+// Classifies the footer's structures word against the bits this binary reads (F4), before
+// the table is decoded, since a later release's structure may add kinds or change the
+// table (F23 rules 3 and 5): a bit without the bit it requires is corruption; a set bit
+// this binary lacks is unsupported.
+inline void classify_structures(std::uint32_t structures, std::uint32_t readable) {
 	for (std::uint32_t b = 1; b; b <<= 1) {
 		if ((structures & b) && requires_of(b) && !(structures & requires_of(b))) { corrupt("structure without its owner"); }
 	}
 	if (const std::uint32_t lacked = structures & ~readable) {
 		throw unsupported_segment("structure bit " + std::to_string(std::countr_zero(lacked)));
 	}
+}
+
+// In a segment whose bits this binary reads: each kind present exactly when its bit is
+// set, mandatory kinds always (F4).
+inline void check_presence(const std::vector<section_entry>& entries, std::uint32_t structures) {
 	bool seen[section_kinds] = {};
 	for (const auto& e : entries) { seen[std::uint16_t(e.kind)] = true; }
 	for (const auto& r : kinds) {
@@ -389,6 +395,11 @@ inline void check_structures(const std::vector<section_entry>& entries, std::uin
 		if (seen[std::uint16_t(r.kind)] && (!wanted || r.rank == unranked)) { corrupt("section without its structure"); }
 		if (wanted && r.rank != unranked && !seen[std::uint16_t(r.kind)]) { corrupt("missing section"); }
 	}
+}
+
+inline void check_structures(const std::vector<section_entry>& entries, std::uint32_t structures, std::uint32_t readable) {
+	classify_structures(structures, readable);
+	check_presence(entries, structures);
 }
 
 // --- document lengths in skip data ------------------------------------------------------------

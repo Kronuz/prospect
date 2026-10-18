@@ -18,6 +18,7 @@
 #include <cstring>
 #include <functional>
 #include <map>
+#include <optional>
 #include <random>
 #include <string>
 #include <vector>
@@ -132,6 +133,37 @@ std::string relayout(const std::string& file, const std::function<void(entries&)
 	out += t;
 	if (footer) { footer(f); }
 	return out + strata::format::encode_footer(f);
+}
+
+// A later release's segment (F23): `file`'s sections with `extra` inserted before the first
+// section of kind `before` (at the end without one), laid out canonically, `structures` in
+// the footer, every checksum good; `toc` replaces the table's encoding.
+std::string later_release(const std::string& file, std::optional<std::pair<section, std::string>> extra, std::optional<section> before, std::uint32_t structures,
+	const std::function<std::string(const entries&)>& toc = {}) {
+	auto f = strata::format::decode_footer(file);
+	auto old = strata::format::decode_toc(file, f);
+	std::vector<std::pair<section, std::string>> parts;
+	for (const auto& e : old) { parts.push_back({e.kind, file.substr(e.offset, e.length)}); }
+	if (extra) {
+		auto it = parts.begin();
+		while (before && it != parts.end() && it->first != *before) { ++it; }
+		if (!before) { it = parts.end(); }
+		parts.insert(it, *extra);
+	}
+	std::string out;
+	entries es;
+	for (const auto& [kind, bytes] : parts) {
+		while (out.size() % strata::format::section_alignment) { out.push_back('\0'); }
+		es.push_back(strata::format::describe(kind, out.size(), bytes));
+		out += bytes;
+	}
+	while (out.size() % strata::format::section_alignment) { out.push_back('\0'); }
+	const std::string t = toc ? toc(es) : strata::format::encode_toc(es);
+	f.toc_offset = out.size();
+	f.toc_length = t.size();
+	f.toc_crc = hashes::crc32c(t.data(), t.size());
+	f.structures = structures;
+	return out + t + strata::format::encode_footer(f);
 }
 
 // The file with one section's bytes replaced, laid out again with every checksum good.
@@ -389,6 +421,25 @@ int main() {
 			CHECK(got == outcome::unsupported);
 		}
 		CHECK(with_bits(built | bit::values | bit::index_sort) == outcome::unsupported);
+		// What a later format-13 release writes, its sections placed by F3's rule and its table
+		// changed where its bit allows: unsupported, since the bits are read before the table
+		// (F23 rules 3 and 5; F13-R35).
+		const std::string opaque(64, '\x5a');
+		CHECK(open(later_release(good, std::pair{section::pair_summaries, opaque}, section::keys, built | bit::pair_summaries)) == outcome::unsupported);
+		CHECK(open(later_release(good, std::pair{section::key_hash, opaque}, section::stored, built | bit::key_hash)) == outcome::unsupported);
+		CHECK(open(later_release(good, std::pair{section::points, opaque}, section::docids, built | bit::points)) == outcome::unsupported);
+		CHECK(open(later_release(good, std::pair{section(23), opaque}, std::nullopt, built | (1u << 16))) == outcome::unsupported);
+		CHECK(open(later_release(good, std::nullopt, std::nullopt, built | bit::compact, [](const entries& es) {
+			std::string t;  // offsets implied, lengths as LEB128: a form this binary cannot parse
+			strata::format::put<std::uint32_t>(t, std::uint32_t(es.size()));
+			for (const auto& e : es) {
+				strata::format::put<std::uint16_t>(t, std::uint16_t(e.kind));
+				strata::format::put_leb(t, e.length);
+			}
+			return t;
+		})) == outcome::unsupported);
+		// The same kinds with their bits clear stay damage.
+		CHECK(open(later_release(good, std::pair{section::pair_summaries, opaque}, section::keys, built)) == outcome::corrupt);
 		// The classification at the format level.
 		const auto toc = strata::format::decode_toc(good, strata::format::decode_footer(good));
 		bool threw = false;
