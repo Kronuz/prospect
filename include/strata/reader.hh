@@ -509,12 +509,16 @@ struct inverted_plugin {
 struct keys_plugin {
 	static constexpr std::string_view id = "keys";
 
-	// A document's key is the core's field (L10), held exactly as given. Without a key
-	// prefix the index is keyless and has none (F13-R33); with one, a key that lacks it is
-	// invalid (F13-R25 item 2).
+	// A document's key is the core's field (L10), held exactly as given. A keyless index
+	// (no key prefix) refuses a document that carries one (F13-R39); with a prefix, a key
+	// that lacks it is invalid (F13-R25 item 2).
 	static std::optional<std::string> key_of(const validate_context& vc, const core_part& d, bool& valid) {
 		valid = true;
-		if (vc.key_prefix.empty() || d.key.empty()) { return std::nullopt; }
+		if (d.key.empty()) { return std::nullopt; }
+		if (vc.key_prefix.empty()) {
+			valid = false;
+			return std::nullopt;
+		}
 		if (!d.key.starts_with(vc.key_prefix)) { valid = false; }
 		return d.key;
 	}

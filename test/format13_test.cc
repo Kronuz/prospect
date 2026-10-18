@@ -967,8 +967,9 @@ int main() {
 			CHECK(threw);
 		}
 	}
-	// A keyless index: no prefix, so no routing and no refusal (F13-R33). A term that
-	// starts like a key is an ordinary term, and a document's key is ignored.
+	// A keyless index: no prefix, so no routing and no term refused for its bytes (F13-R33). A
+	// term that starts like a key is an ordinary term; a document that carries a key is
+	// invalid, never stored with its key dropped (F13-R39).
 	{
 		strata::faultfs::filesystem fs;
 		strata::faultfs::io io(fs);
@@ -978,8 +979,13 @@ int main() {
 		op.type = strata::operation::add;
 		op.doc.terms.push_back({"Qa", 1, {1}});
 		op.doc.terms.push_back({"w", 1, {2}});
-		op.doc.key = "Qa";
 		op.doc.length = 2;
+		strata::operation keyed = op;
+		keyed.doc.key = "Qa";
+		CHECK(apply(ix, keyed) == strata::verdict::invalid);
+		keyed.type = strata::operation::replace_docid;
+		keyed.docid = 1;
+		CHECK(apply(ix, keyed) == strata::verdict::invalid);
 		CHECK(apply(ix, op) == strata::verdict::accepted);
 		ix.commit();
 		CHECK(matches(ix, "Qa", {}).size() == 1 && matches(ix, "w", {}).size() == 1);
