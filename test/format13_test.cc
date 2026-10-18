@@ -3,6 +3,7 @@
 // words, the sink's file order, and the format-12 refusal fixtures.
 #include "strata/faultfs.hh"
 #include "strata/index.hh"
+#include "strata/merge.hh"
 #include "strata/check.hh"
 #include "strata/reader.hh"
 #include "strata/search.hh"
@@ -44,6 +45,37 @@ const char* name(outcome o) {
 outcome open(const std::string& file) {
 	try {
 		strata::segment s(file);
+		return outcome::opens;
+	} catch (const strata::corrupt_segment&) {
+		return outcome::corrupt;
+	} catch (const strata::unsupported_segment&) {
+		return outcome::unsupported;
+	} catch (...) {
+		return outcome::other;
+	}
+}
+
+// A keyed segment holding `structures` (keys always, until 7c-5).
+std::string profile_segment(std::uint32_t structures, std::uint32_t first = 1) {
+	strata::segment_writer w;
+	w.structures = structures;
+	const bool inverted = structures & strata::format::bit::inverted, stored = structures & strata::format::bit::stored;
+	for (std::uint32_t d = 0; d < 200; ++d) {
+		const std::vector<std::uint32_t> pos{1, 3};
+		std::vector<strata::posting_input> in;
+		if (inverted) { in.push_back({d % 2 ? "odd" : "even", 2, pos}); }
+		w.add(first + d, in, inverted ? 2 + d % 9 : 0, stored ? std::string(1 + d % 5, 's') : std::string(), 1 + d % 4, "Q" + std::to_string(first - 1 + d));
+	}
+	return w.flush({});
+}
+
+using document_layout = strata::layout<strata::keys_plugin, strata::stored_plugin>;
+using document_segment = strata::basic_segment<document_layout>;
+
+template <class S>
+outcome open_as(const std::string& file) {
+	try {
+		S s(file);
 		return outcome::opens;
 	} catch (const strata::corrupt_segment&) {
 		return outcome::corrupt;
@@ -378,6 +410,99 @@ int main() {
 			unsupported = true;
 		}
 		CHECK(corrupt && !unsupported);
+	}
+
+	// --- F4: free and absent structures, and the document profile (7c-4) -------------------
+	{
+		const std::uint32_t all = bit::inverted | bit::norms | bit::keys | bit::stored;
+		const std::string full = profile_segment(all), no_stored = profile_segment(all & ~bit::stored),
+			no_norms = profile_segment(all & ~bit::norms), document = profile_segment(bit::keys | bit::stored);
+		// stored absent with its bit clear: opens, every record empty.
+		{
+			strata::segment s(no_stored);
+			CHECK(!s.holds<strata::stored_plugin>() && s.holds<strata::inverted_plugin>() && s.holds<strata::keys_plugin>());
+			CHECK(s.core().entry(section::stored) == nullptr);
+			for (strata::ordinal_t o = 0; o < s.core().doc_count(); ++o) { CHECK(s.get<strata::stored_plugin>().stored(o).empty()); }
+			CHECK(s.get<strata::keys_plugin>().version(3) == 1 + 3 % 4);
+			s.verify_all();
+		}
+		// norms absent with its bit clear: each document's from its exact length, so scores
+		// equal a segment that built them.
+		{
+			strata::segment with(full), without(no_norms);
+			CHECK(without.core().entry(section::norms) == nullptr && without.holds<strata::inverted_plugin>());
+			for (strata::ordinal_t o = 0; o < 200; ++o) { CHECK(without.get<strata::inverted_plugin>().norm(o) == with.get<strata::inverted_plugin>().norm(o)); }
+			for (const char* t : {"odd", "even"}) {
+				const auto a = with.get<strata::inverted_plugin>().term(t), b = without.get<strata::inverted_plugin>().term(t);
+				CHECK(a && b);
+				strata::term_scorer sa(with.get<strata::inverted_plugin>(), *a), sb(without.get<strata::inverted_plugin>(), *b);
+				for (auto d = sa.next(), e = sb.next(); d != strata::no_more_docs || e != strata::no_more_docs; d = sa.next(), e = sb.next()) {
+					CHECK(d == e && sa.score() == sb.score());
+					if (d != e) { break; }
+				}
+			}
+		}
+		// inverted absent with its bit clear, the document profile (L12): no terms, every
+		// length 0, keys and records as written; the search layout reads it too.
+		{
+			strata::segment s(document);
+			CHECK(!s.holds<strata::inverted_plugin>() && s.holds<strata::keys_plugin>() && s.holds<strata::stored_plugin>());
+			const auto& inv = s.get<strata::inverted_plugin>();
+			CHECK(!inv.term("odd") && inv.length(7) == 0 && inv.total_length() == 0 && inv.norm(7) == 0);
+			std::size_t terms = 0;
+			inv.scan_terms([&](std::string_view, const strata::format::term_info&) { return ++terms, true; });
+			CHECK(terms == 0);
+			CHECK(s.get<strata::keys_plugin>().find("Q7", {}) == strata::ordinal_t(7) && s.get<strata::stored_plugin>().stored(7) == std::string(3, 's'));
+			s.verify_all();
+			// A binary with the document layout opens it, and refuses one with inverted.
+			CHECK(open_as<document_segment>(document) == outcome::opens);
+			CHECK(open_as<document_segment>(full) == outcome::unsupported);
+			document_segment d(document);
+			CHECK(d.get<strata::keys_plugin>().find("Q9", {}) == strata::ordinal_t(9) && d.get<strata::stored_plugin>().stored(9).size() == 5);
+			CHECK(!d.holds<strata::inverted_plugin>());
+			// A clear bit with its sections present, or a set bit with them absent: damage.
+			CHECK(open(relayout(document, [](entries&) {}, [](strata::format::footer& f) { f.structures |= bit::inverted; })) == outcome::corrupt);
+			CHECK(open(relayout(no_stored, [](entries&) {}, [](strata::format::footer& f) { f.structures |= bit::stored; })) == outcome::corrupt);
+			CHECK(open(relayout(full, [](entries&) {}, [](strata::format::footer& f) { f.structures &= ~bit::stored; })) == outcome::corrupt);
+		}
+		// The writer takes structures from its configuration and refuses what they cannot
+		// hold; keyless segments wait for F9's version rule (7c-5, F13-R18).
+		{
+			auto refuses = [](std::uint32_t structures, bool terms, bool record) {
+				strata::segment_writer w;
+				w.structures = structures;
+				std::vector<strata::posting_input> in;
+				if (terms) { in.push_back({"t", 1, {}}); }
+				try {
+					w.add(1, in, 1, record ? "r" : "");
+					(void)w.flush({});
+				} catch (const std::invalid_argument&) {
+					return true;
+				}
+				return false;
+			};
+			CHECK(refuses(bit::inverted | bit::norms | bit::stored, true, true));  // no keys
+			CHECK(refuses(bit::norms | bit::keys | bit::stored, false, true));    // norms without inverted
+			CHECK(refuses(bit::keys | bit::stored, true, false));                 // terms without inverted
+			CHECK(refuses(bit::inverted | bit::keys, true, true));                // a record without stored
+			CHECK(!refuses(bit::keys | bit::stored, false, true));
+		}
+		// A merge takes its layout's structures, whatever its inputs held: records absent from
+		// a source read as empty, terms absent as none.
+		{
+			const std::string later = profile_segment(bit::keys | bit::stored, 1001);
+			strata::segment x(no_stored), y(later);
+			const std::vector<strata::merge_source> src{{&x, nullptr}, {&y, nullptr}};
+			std::string out;
+			strata::string_output o(out);
+			strata::string_spill spill;
+			(void)strata::merge_segments(src, {}, o, spill, {});
+			strata::segment m(out);
+			CHECK(m.core().structures() == all && m.core().doc_count() == 400);
+			CHECK(m.get<strata::stored_plugin>().stored(0).empty() && m.get<strata::stored_plugin>().stored(200) == std::string(1, 's'));
+			CHECK(m.get<strata::inverted_plugin>().term("odd")->df == 100 && m.get<strata::inverted_plugin>().length(200) == 0);
+			CHECK(m.get<strata::keys_plugin>().find("Q1000", {}) == strata::ordinal_t(200) && m.get<strata::keys_plugin>().version(200) == 1);
+		}
 	}
 
 	// --- F8: keys leave the dictionary (7c-3) ------------------------------------------------

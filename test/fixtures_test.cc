@@ -108,6 +108,13 @@ int main() {
 	pin("stored-frames.sx", build(300, 1000, true));
 	// No keys: no key filter section.
 	pin("keyless.sx", build(200, 0, false));
+	// The document profile (L12): keys and stored records, no inverted structure (F4).
+	{
+		segment_writer w;
+		w.structures = format::bit::keys | format::bit::stored;
+		for (std::uint32_t d = 0; d < 150; ++d) { w.add(d + 1, {}, 0, "record " + std::to_string(d), 1 + d % 3, "Q" + std::to_string(d)); }
+		pin("document.sx", w.flush(id));
+	}
 	// Wide skip offsets.
 	pin("wide-skips.sx", build(5000, 0, true, true));
 	// A two-segment merge, and one with deletes in both inputs.

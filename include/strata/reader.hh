@@ -249,6 +249,10 @@ struct inverted_plugin {
 	class reader {
 	public:
 		explicit reader(const open_context& c) : state_(std::make_unique<state>()), doc_count_(c.doc_count) {
+			if (!c.present) {
+				open_absent(c);
+				return;
+			}
 			// term_index: [total length u64][minimum length u32][maximum length u32][most
 			// positions u32], then the dictionary's index (F7), all under its section CRC.
 			const std::string_view term_index = c.section(format::section::term_index).bytes;
@@ -266,6 +270,13 @@ struct inverted_plugin {
 			length_width_ = std::uint8_t(lengths_[0]);
 			if (length_width_ > 32 || lengths_.size() != 1 + (doc_count_ + 127) / 128 * bitpack::packed_bytes(length_width_)) {
 				corrupt("lengths size");
+			}
+			if (!(c.core.structures() & format::bit::norms)) {
+				// Norms not built (F4): each document's from its exact length, verified first.
+				verify_lengths();
+				state_->owned_norms.resize(doc_count_);
+				for (ordinal_t o = 0; o < doc_count_; ++o) { state_->owned_norms[o] = char(format::encode_length(length(o))); }
+				norms_ = state_->owned_norms;
 			}
 			if (norms_.size() != doc_count_) { corrupt("norms size"); }
 			// The term index is copied out of the mapping (verified at open), so later lookups
@@ -413,10 +424,28 @@ struct inverted_plugin {
 		static bool verify_terms(void* context, std::uint64_t offset, std::uint64_t length) {
 			return static_cast<state*>(context)->terms.verify(offset, length);
 		}
+		// A segment without the structure (F4): no terms, every length 0, norms 0, from
+		// owned stand-ins, so every read path stays the one it is.
+		void open_absent(const open_context& c) {
+			// Empty handles that still verify through the segment's region state.
+			state_->terms = c.section(format::section::terms);
+			postings_ = c.section(format::section::postings);
+			positions_ = c.section(format::section::positions);
+			auto tables = termdict::builder().finish();
+			state_->owned_blocks = std::move(tables.blocks);
+			state_->pinned_index = std::move(tables.index);
+			state_->owned_lengths.assign(1, '\0');  // width 0
+			lengths_ = state_->owned_lengths;
+			lengths_crc_ = hashes::crc32c(lengths_.data(), lengths_.size());
+			state_->owned_norms.assign(doc_count_, '\0');
+			norms_ = state_->owned_norms;
+			dict_.emplace(state_->owned_blocks, state_->pinned_index);
+		}
 		// Heap-held, so the dictionary's verifier context survives moving the segment.
 		struct state {
 			section_handle terms;
 			std::string pinned_index;  // the term index, copied out of the mapping
+			std::string owned_blocks, owned_lengths, owned_norms;  // stand-ins for absent sections
 			std::atomic<std::uint8_t> lengths_state{0};  // 0 unverified, 1 good, 2 bad
 		};
 		std::unique_ptr<state> state_;
@@ -456,13 +485,15 @@ struct keys_plugin {
 	public:
 		explicit reader(const open_context& c)
 			: state_(std::make_unique<state>()), versions_(c.section(format::section::versions).bytes), doc_count_(c.doc_count) {
+			state_->keys = c.section(format::section::keys);  // empty when absent, verifying as any handle
+			if (!c.present) { return; }  // no keys; every version 0 (F4, F9)
 			validate_versions();
-			state_->keys = c.section(format::section::keys);
 			keys_ = keys::reader(state_->keys.bytes, c.section(format::section::key_index).bytes, doc_count_, &verify_keys, state_.get());
 		}
 		// The document's version (0 when the segment's writer recorded none).
 		std::uint64_t version(ordinal_t ord) const {
 			if (ord >= doc_count_) { throw std::out_of_range("strata: ordinal out of range"); }
+			if (versions_.empty()) { return 0; }
 			const unsigned width = std::uint8_t(versions_[8]);
 			std::uint64_t v = 0;
 			for (unsigned b = 0; b < width; ++b) {

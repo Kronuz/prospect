@@ -149,6 +149,7 @@ public:
 	// The index's key prefix: a term with it is refused, never dropped (F8's backstop to
 	// stage 1); empty for none.
 	std::string_view key_prefix;
+	bool norms = true;  // whether the norms sub-structure is built (F4)
 
 	struct token {
 		std::string_view term;
@@ -324,9 +325,10 @@ public:
 		sink.write(format::section::terms, tables.blocks);
 		sink.write(format::section::term_index, statistics() + tables.index);
 		detail::append_built(sink, memory, format::section::lengths, pack_u32(lengths_));
-		std::string norms(lengths_.size(), '\0');
-		for (std::size_t i = 0; i < lengths_.size(); ++i) { norms[i] = char(format::encode_length(lengths_[i])); }
-		detail::append_built(sink, memory, format::section::norms, norms);
+		if (!norms) { return; }
+		std::string bytes(lengths_.size(), '\0');
+		for (std::size_t i = 0; i < lengths_.size(); ++i) { bytes[i] = char(format::encode_length(lengths_[i])); }
+		detail::append_built(sink, memory, format::section::norms, bytes);
 	}
 
 private:
@@ -780,6 +782,9 @@ public:
 	const task::cancel_token* cancel = nullptr;
 	// The index's key prefix, for the inverted builder's backstop (F8); empty for none.
 	std::string key_prefix;
+	// The structures the segment holds, set from the index's configuration, never from its
+	// documents (F4). keys stays until keyless segments arrive with F9's version rule.
+	std::uint32_t structures = format::bit::inverted | format::bit::norms | format::bit::keys | format::bit::stored;
 
 	// Adds a document and returns its ordinal. Docids strictly increase, so ordinal order
 	// is docid order. `length` is the document length used by weighting (Xapian: the sum
@@ -788,6 +793,7 @@ public:
 	// Each term appears once, with its wdf and its positions in increasing order.
 	ordinal_t add(std::uint64_t docid, std::span<const posting_input> terms, std::uint32_t length, std::string_view stored = {},
 		std::uint64_t version = 0, std::string_view key = {}) {
+		if (!terms.empty() && !(structures & format::bit::inverted)) { throw std::invalid_argument("strata: terms in a segment without inverted"); }
 		const ordinal_t ord = begin_document(docid, length, stored, version, key);
 		inverted_.add_terms(ord, terms);
 		return ord;
@@ -799,6 +805,7 @@ public:
 	using token = inverted_builder::token;
 	ordinal_t add_tokens(std::uint64_t docid, std::span<const token> tokens, std::uint32_t length, std::string_view stored = {},
 		std::uint64_t version = 0, std::string_view key = {}) {
+		if (!tokens.empty() && !(structures & format::bit::inverted)) { throw std::invalid_argument("strata: terms in a segment without inverted"); }
 		const ordinal_t ord = begin_document(docid, length, stored, version, key);
 		inverted_.add_tokens(ord, tokens);
 		return ord;
@@ -842,6 +849,7 @@ private:
 		inverted_.memory = keys_.memory = stored_.memory = memory;
 		inverted_.wide_skip_offsets = wide_skip_offsets;
 		inverted_.key_prefix = key_prefix;
+		inverted_.norms = (structures & format::bit::norms) != 0;
 		stored_.cancel = cancel;
 	}
 
@@ -852,6 +860,7 @@ private:
 		if (inverted_.doc_count() >= std::size_t(no_more_docs) - 1) { throw std::length_error("strata: segment document limit"); }
 		if (docid == 0 || (!permuted && !docids_.empty() && docid <= docids_.back())) { throw std::invalid_argument("strata: docids must increase within a segment"); }
 		if (stored.size() > format::max_stored_record) { throw std::invalid_argument("strata: stored record too large"); }
+		if (!stored.empty() && !(structures & format::bit::stored)) { throw std::invalid_argument("strata: a stored record in a segment without stored"); }
 		keys_.add({docid, version, key});
 		stored_.add(stored);
 		const ordinal_t ord = inverted_.begin(length);
@@ -866,13 +875,17 @@ private:
 	template <class Inverted>
 	void write(const std::array<std::uint8_t, 16>& segment_id, output& out, Inverted&& inverted) {
 		sync();
+		constexpr std::uint32_t known = format::bit::inverted | format::bit::norms | format::bit::keys | format::bit::stored;
+		if ((structures & ~known) || !(structures & format::bit::keys) || ((structures & format::bit::norms) && !(structures & format::bit::inverted))) {
+			throw std::invalid_argument("strata: segment structures");
+		}
 		section_sink sink(out, region_shift, nullptr, memory);
 		detail::begin_segment(sink, segment_id);
-		inverted(sink);
+		if (structures & format::bit::inverted) { inverted(sink); }
 		detail::write_docids(sink, memory, docids_);
 		keys_.finish(sink);
-		stored_.finish(sink);
-		detail::finish_segment(sink, docids_, format::bit::inverted | format::bit::norms | format::bit::keys | format::bit::stored);
+		if (structures & format::bit::stored) { stored_.finish(sink); }
+		detail::finish_segment(sink, docids_, structures);
 	}
 
 	inverted_builder inverted_;

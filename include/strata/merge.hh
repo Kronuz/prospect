@@ -351,10 +351,9 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 	section_sink sink(out, region_shift, &positions_spill, memory);
 	begin_segment(sink, segment_id);
 	std::uint32_t structures = 0;
+	write_docids(sink, memory, docids);  // the core's, in the tail by rank (F5)
 	auto merge_entry = [&]<class E>(std::type_identity<E>) {
-		if constexpr (std::is_same_v<E, docids_section>) {
-			write_docids(sink, memory, docids);
-		} else {
+		if constexpr (!std::is_same_v<E, docids_section>) {
 			std::vector<const typename E::reader*> readers;
 			readers.reserve(sources.size());
 			for (const auto& src : sources) { readers.push_back(&src.seg->template get<E>()); }
