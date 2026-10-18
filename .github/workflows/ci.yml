@@ -1,7 +1,7 @@
 name: CI
 on:
   push:
-    branches: [main, master, 'phase*/**', 'track*/**', 'design/**']
+    branches: [main, master, 'phase*/**', 'track*/**', 'design/**', 'perf/**', 'research/**']
     paths-ignore: ['docs/**', '**.md']  # docs-only pushes would cancel the run for real code
   pull_request:
   workflow_dispatch:
@@ -14,5 +14,7 @@ jobs:
   ci:
     uses: Kronuz/cpp-libraries/.github/workflows/cmake.yml@main
     with:
-      # The ASan+UBSan suite runs 35-60 minutes; the default cap of 60 cancels it.
+      # The ASan+UBSan suite ran 35-60 minutes at -O0; -O1 and four tests at once cut it.
       asan_timeout_minutes: 120
+      asan_cxx_flags: -O1
+      test_parallel: 4
