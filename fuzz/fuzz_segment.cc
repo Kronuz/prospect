@@ -1,5 +1,5 @@
 // libFuzzer target: corrupt segments must fence (corrupt_segment, termdict::corrupt,
-// invalid_argument) or answer, never crash, read out of bounds, or allocate past the
+// unsupported_segment) or answer, never crash, read out of bounds, or allocate past the
 // RSS limit. Base segments are built once, large enough for several skip groups, bitset
 // and FOR blocks, positions whose counts differ from wdf, positioned wdf-0 terms, and
 // stored records past one zstd frame; one base has monotone docids, versions, and keys,
@@ -8,6 +8,7 @@
 // recompute every checksum, so the changes reach the decoders instead of stopping at
 // verification. One base uses 64-bit skip offsets. Run with a -timeout of a few seconds
 // so a hang counts as a finding.
+#include "strata/check.hh"
 #include "strata/reader.hh"
 #include "strata/search.hh"
 #include "strata/writer.hh"
@@ -101,6 +102,10 @@ void refresh_toc_checksum(std::string& file) {
 }
 
 void exercise(const strata::segment& seg) {
+	// Every third ordinal deleted, for find's live bits.
+	std::vector<std::uint64_t> deleted((seg.core().doc_count() + 63) / 64);
+	for (strata::ordinal_t d = 0; d < seg.core().doc_count(); d += 3) { deleted[d >> 6] |= std::uint64_t(1) << (d & 63); }
+	const strata::live_bits live{deleted.data()};
 	for (strata::ordinal_t d = 0; d < seg.core().doc_count(); d += 1 + d / 64) {
 		(void)seg.get<strata::stored_plugin>().stored(d);
 		const std::uint64_t id = seg.core().docid(d);
@@ -110,6 +115,8 @@ void exercise(const strata::segment& seg) {
 		(void)seg.get<strata::inverted_plugin>().length(d);
 		(void)seg.get<strata::keys_plugin>().may_hold("Q" + std::to_string(id));
 		(void)seg.get<strata::keys_plugin>().find("Q" + std::to_string(id), {});  // decodes a key block
+		(void)seg.get<strata::keys_plugin>().find("Q" + std::to_string(id), live);
+		(void)seg.get<strata::keys_plugin>().find("Q" + std::to_string(id) + "x", live);  // a miss inside the range
 	}
 	// The keys section's blocks: a scan from a few bounds and a full walk (F13-R37).
 	{
@@ -119,6 +126,12 @@ void exercise(const strata::segment& seg) {
 			keys.scan(from, [&](std::string_view, strata::ordinal_t) { return ++n < 64; });
 		}
 		for (auto c = keys.cursor(); c.next();) {}
+	}
+	try {
+		strata::check_report r;
+		strata::check_segment(seg, &deleted, r, "Q");  // every byte, every key against its range and filter (CR2)
+	} catch (const strata::corrupt_segment&) {
+		// damage found; the query paths below still run over what opened
 	}
 	std::vector<strata::format::term_info> infos;
 	for (const char* t : vocab) {
@@ -210,8 +223,6 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 		verdict = "unsupported_segment";  // a resealed version or structure bit this binary lacks: refused (F2, F4)
 	} catch (const termdict::corrupt&) {
 		verdict = "termdict::corrupt";
-	} catch (const std::invalid_argument&) {
-		verdict = "invalid_argument";
 	}
 	if (verdicts) { std::printf("%s\n", verdict); }
 	return 0;
