@@ -25,7 +25,6 @@ static_assert(residency::backend<residency::sync_backend>);
 // The layers' plugins (layers.md L4) and format 13's document profile (L12) against a stub
 // keys plugin that depends on nothing, until format 13's keys plugin exists.
 static_assert(strata::section_plugin<strata::inverted_plugin> && strata::section_plugin<strata::keys_plugin> && strata::section_plugin<strata::stored_plugin>);
-static_assert(!strata::section_plugin<strata::docids_section>);
 struct stub_keys {
 	static constexpr std::string_view id = "keys";
 	static constexpr strata::format::owner owner = strata::format::owner::keys;

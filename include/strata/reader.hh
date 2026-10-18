@@ -106,17 +106,15 @@ struct live_bits {
 	const std::uint64_t* deleted = nullptr;
 	bool live(ordinal_t o) const noexcept { return !deleted || !((deleted[o >> 6] >> (o & 63)) & 1); }
 };
-// Format 12 only: where the core's docids section sits between plugins in file order.
-struct docids_section {};
 struct inverted_plugin;
 struct keys_plugin;
 struct merge_context;
 struct stored_plugin;
-using search_layout_12 = layout<inverted_plugin, docids_section, keys_plugin, stored_plugin>;
+using search_layout = layout<inverted_plugin, keys_plugin, stored_plugin>;
 
 template <class Layout>
 class basic_segment;
-using segment = basic_segment<search_layout_12>;
+using segment = basic_segment<search_layout>;
 
 // The core of an open segment (L7): the prefix first (F2), then the footer, table of
 // contents, and header; the structure bits against those this binary reads (F4); every
@@ -767,44 +765,30 @@ private:
 		}
 	}
 };
-using document = basic_document<search_layout_12>;
+using document = basic_document<search_layout>;
 namespace detail {
-struct document_12 {  // format 12's document, before the parts, and its key (F8)
+struct document_fields {  // the document's fields, before the parts
 	std::string key;
 	std::vector<term_entry> terms;
 	std::uint32_t length = 0;
 	std::string stored;
 };
 }  // namespace detail
-static_assert(sizeof(document) == sizeof(detail::document_12), "doc_bytes and every flush trigger depend on it");
+static_assert(sizeof(document) == sizeof(detail::document_fields), "doc_bytes and every flush trigger depend on it");
 
 namespace detail {
 template <class E>
 struct reader_of {
 	using type = typename E::reader;
 };
-template <>
-struct reader_of<docids_section> {  // the core's section: no reader of its own
-	struct type {
-		explicit type(const open_context&) {}
-	};
-};
-// The structure bits a layout entry reads, and its own bit (none for the core's docids).
+// The structure bits a layout entry reads, and its own bit.
 template <class E>
 constexpr std::uint32_t structures_of() {
-	if constexpr (std::is_same_v<E, docids_section>) {
-		return 0;
-	} else {
-		return E::structures;
-	}
+	return E::structures;
 }
 template <class E>
 constexpr std::uint32_t structure_of() {
-	if constexpr (std::is_same_v<E, docids_section>) {
-		return 0;
-	} else {
-		return E::structure;
-	}
+	return E::structure;
 }
 // No two plugins of a layout share an owner, so none claims another's kinds (F3), and no
 // two read one bit (F4).
@@ -818,7 +802,7 @@ consteval bool owners_distinct() {
 	}());
 	std::array<int, 8> owners{};
 	(..., [&] {
-		if constexpr (!std::is_same_v<Entries, docids_section>) { ok = ok && owners[std::size_t(Entries::owner)]++ == 0; }
+		ok = ok && owners[std::size_t(Entries::owner)]++ == 0;
 	}());
 	return ok;
 }
@@ -848,8 +832,7 @@ concept section_plugin = requires(const typename P::reader& r) {
 // Callers name the reader that owns each concern (L11).
 template <class... Entries>
 class basic_segment<layout<Entries...>> {
-	static_assert(((std::is_same_v<Entries, docids_section> || section_plugin<Entries>) && ...), "every layout entry is a section plugin");
-	static_assert((std::size_t(std::is_same_v<Entries, docids_section>) + ... + 0) <= 1, "docids_section appears at most once");
+	static_assert((section_plugin<Entries> && ...), "every layout entry is a section plugin");
 	static_assert(detail::owners_distinct<Entries...>(), "two plugins share an owner or a structure bit");
 
 public:
@@ -897,10 +880,10 @@ public:
 private:
 	using readers = std::tuple<typename detail::reader_of<Entries>::type...>;
 	static_assert(sizeof...(Entries) <= 32, "a layout's presence mask holds 32 entries");
-	// Bit i: entry i's own structure bit is set in the footer (the core's docids always).
+	// Bit i: entry i's own structure bit is set in the footer.
 	static std::uint32_t presence(const core_segment& core) noexcept {
 		std::uint32_t out = 0, i = 0;
-		(..., (out |= std::uint32_t(!detail::structure_of<Entries>() || (core.structures() & detail::structure_of<Entries>())) << i++));
+		(..., (out |= std::uint32_t((core.structures() & detail::structure_of<Entries>()) != 0) << i++));
 		return out;
 	}
 	static readers open(const core_segment& core, std::uint32_t present) {
@@ -923,7 +906,7 @@ private:
 	}
 	template <class E>
 	void verify_all_of() const {
-		if constexpr (!std::is_same_v<E, docids_section>) { get<E>().verify_all(); }
+		get<E>().verify_all();
 	}
 
 	core_segment core_;

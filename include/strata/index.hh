@@ -48,7 +48,7 @@ struct basic_operation {
 	basic_document<Layout> doc;                    // add, replace_*
 	std::string meta_key, meta_value;              // set_meta, delete_meta
 };
-using operation = basic_operation<search_layout_12>;
+using operation = basic_operation<search_layout>;
 
 template <class Layout>
 struct basic_transaction {
@@ -56,7 +56,7 @@ struct basic_transaction {
 	std::optional<std::uint64_t> expected_schema;  // the schema version it was built against
 	std::optional<std::uint64_t> set_schema;       // the schema version it sets
 };
-using transaction = basic_transaction<search_layout_12>;
+using transaction = basic_transaction<search_layout>;
 
 // Apply's answer. A rejected transaction left no trace.
 struct verdict {
@@ -204,7 +204,7 @@ struct index_options {
 	strata::reorder::settings reorder_settings;
 };
 
-// An index of a layout's segments (layers.md L2); `index` is format 12's search layout.
+// An index of a layout's segments (layers.md L2); `index` is the search layout's.
 template <class Layout>
 class basic_index {
 public:
@@ -2165,6 +2165,6 @@ private:
 	bool meta_dirty_ = false;
 	bool fenced_ = false;
 };
-using index = basic_index<search_layout_12>;
+using index = basic_index<search_layout>;
 
 }  // namespace strata

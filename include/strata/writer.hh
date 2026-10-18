@@ -141,7 +141,7 @@ inline void charge_to(flush_charge* memory, std::uint64_t now, std::uint64_t& ch
 }  // namespace detail
 
 // Terms, postings, positions, lengths, and norms: the inverted plugin's builder
-// (layers.md L5). Its sections go to the sink in format 12's order.
+// (layers.md L5). Its sections go to the sink in rank order (F5).
 class inverted_builder {
 public:
 	bool wide_skip_offsets = false;  // 64-bit skip offsets even where 32 bits fit
@@ -879,8 +879,8 @@ private:
 	}
 
 	// The file in F5's order: the header; the streamed sections (the inverted ones, then
-	// stored); the pinned tail by rank; then the table of contents and footer. Every
-	// structure of format 12's layout is built (F4).
+	// stored); the pinned tail by rank; then the table of contents and footer, with the
+	// configured structures (F4).
 	template <class Inverted>
 	void write(const std::array<std::uint8_t, 16>& segment_id, output& out, Inverted&& inverted) {
 		sync();

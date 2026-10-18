@@ -31,7 +31,7 @@ struct basic_merge_source {
 	const std::vector<std::uint64_t>* deleted = nullptr;  // bit per ordinal; null: none deleted
 	bool live(ordinal_t o) const { return !deleted || !(((*deleted)[o >> 6] >> (o & 63)) & 1); }
 };
-using merge_source = basic_merge_source<search_layout_12>;
+using merge_source = basic_merge_source<search_layout>;
 
 // A document of a merge's sources: which source, and its ordinal there.
 struct merge_ref {
@@ -357,7 +357,7 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 	std::uint32_t structures = 0;
 	write_docids(sink, memory, docids);  // the core's, in the tail by rank (F5)
 	auto merge_entry = [&]<class E>(std::type_identity<E>) {
-		if constexpr (!std::is_same_v<E, docids_section>) {
+		{
 			if (!(options.structures & E::structure)) { return; }  // not configured: none of its sections (F4)
 			std::vector<const typename E::reader*> readers;
 			readers.reserve(sources.size());
