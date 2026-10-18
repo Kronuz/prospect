@@ -10,6 +10,9 @@
 #include "strata/searcher.hh"
 #include "strata/writer.hh"
 
+#include <sys/mman.h>
+#include <unistd.h>
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -265,6 +268,41 @@ int main() {
 			if (got != outcome::unsupported) { std::fprintf(stderr, "format12/%s: %s\n", f, name(got)); }
 			CHECK(got == outcome::unsupported);
 		}
+	}
+
+	// --- T7: a fresh open touches the header page and the tail only (F13-R25 item 5) -----------
+	{
+		// Large enough that whole pages lie between the header page and the tail at any page
+		// size the CI hosts use (16 KiB on macOS arm64).
+		strata::segment_writer w;
+		std::mt19937_64 r(5);
+		for (std::uint32_t d = 0; d < 20000; ++d) {
+			const std::vector<std::uint32_t> pos{1 + d % 7};
+			const std::string term = "t" + std::to_string(r() % 5000);  // outlives the posting's view
+			std::vector<strata::posting_input> in{{term, 1, pos}, {"all", 1, {}}};
+			w.add(d + 1, in, 2 + d % 11, std::string(40 + d % 60, char('a' + d % 26)), 1 + d % 9, "Q" + std::to_string(d));
+		}
+		const std::string file = w.flush({});
+		const std::size_t page = std::size_t(::sysconf(_SC_PAGESIZE));
+		const std::size_t mapped = (file.size() + page - 1) / page * page;
+		void* map = ::mmap(nullptr, mapped, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+		CHECK(map != MAP_FAILED);
+		std::memcpy(map, file.data(), file.size());
+		// The tail starts at the first pinned section after the header (F5).
+		std::uint64_t tail = file.size();
+		for (const auto& e : strata::format::decode_toc(file, strata::format::decode_footer(file))) {
+			if (e.kind != section::header && strata::format::rule_of(e.kind)->verify == strata::format::check::pinned) { tail = std::min(tail, e.offset); }
+		}
+		const std::size_t from = page, to = std::size_t(tail) / page * page;  // whole pages strictly between
+		CHECK(to > from);
+		if (to > from) { CHECK(::mprotect(static_cast<char*>(map) + from, to - from, PROT_NONE) == 0); }
+		{
+			strata::segment s(std::string_view(static_cast<const char*>(map), file.size()));  // a read there faults
+			CHECK(s.core().verified_regions() == 0);
+			CHECK(s.core().doc_count() == 20000 && s.get<strata::keys_plugin>().may_hold("Q7"));
+		}
+		if (to > from) { CHECK(::mprotect(static_cast<char*>(map) + from, to - from, PROT_READ | PROT_WRITE) == 0); }
+		::munmap(map, mapped);
 	}
 
 	// --- F3 and F5: kinds and the canonical layout -----------------------------------------

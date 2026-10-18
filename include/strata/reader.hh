@@ -281,11 +281,8 @@ struct inverted_plugin {
 			if (const auto* e = c.core.entry(format::section::lengths)) { lengths_crc_ = e->crc; }
 			if (const auto* e = c.core.entry(format::section::postings)) { postings_shift_ = e->region_shift; }
 			norms_ = c.section(format::section::norms).bytes;
+			// lengths' bytes, its width included, are read on first use only (F7, T7).
 			if (lengths_.empty()) { corrupt("lengths"); }
-			length_width_ = std::uint8_t(lengths_[0]);
-			if (length_width_ > 32 || lengths_.size() != 1 + (doc_count_ + 127) / 128 * bitpack::packed_bytes(length_width_)) {
-				corrupt("lengths size");
-			}
 			if (!(c.core.structures() & format::bit::norms)) {
 				// Norms not built (F4): each document's from its exact length, verified first.
 				verify_lengths();
@@ -322,7 +319,7 @@ struct inverted_plugin {
 		// section is verified whole on the first call (the default scheme reads norms only).
 		std::uint32_t length(ordinal_t ord) const {
 			if (state_->lengths_state.load(std::memory_order_acquire) != 1) [[unlikely]] { verify_lengths(); }
-			const unsigned w = length_width_;
+			const unsigned w = state_->length_width.load(std::memory_order_relaxed);
 			if (w == 0) { return 0; }
 			const char* block = lengths_.data() + 1 + std::size_t(ord / 128) * bitpack::packed_bytes(w);
 			const unsigned j = ord % 128, lane = j & 3, row = j >> 2;
@@ -431,10 +428,17 @@ struct inverted_plugin {
 		}
 
 	private:
+		// Checks lengths whole on first use: its CRC, then its width against its size.
 		void verify_lengths() const {
 			auto& st = state_->lengths_state;
-			if (st.load(std::memory_order_acquire) == 0) { st.store(hashes::crc32c(lengths_.data(), lengths_.size()) == lengths_crc_ ? 1 : 2, std::memory_order_release); }
-			if (st.load(std::memory_order_acquire) != 1) { corrupt("lengths checksum"); }
+			if (st.load(std::memory_order_acquire) == 0) {
+				const unsigned w = std::uint8_t(lengths_[0]);
+				const bool good = hashes::crc32c(lengths_.data(), lengths_.size()) == lengths_crc_ && w <= 32 &&
+					lengths_.size() == 1 + (doc_count_ + 127) / 128 * bitpack::packed_bytes(w);
+				state_->length_width.store(std::uint8_t(w), std::memory_order_relaxed);
+				st.store(good ? 1 : 2, std::memory_order_release);
+			}
+			if (st.load(std::memory_order_acquire) != 1) { corrupt("lengths checksum or size"); }
 		}
 		static bool verify_terms(void* context, std::uint64_t offset, std::uint64_t length) {
 			return static_cast<state*>(context)->terms.verify(offset, length);
@@ -462,6 +466,7 @@ struct inverted_plugin {
 			std::string pinned_index;  // the term index, copied out of the mapping
 			std::string owned_blocks, owned_lengths, owned_norms;  // stand-ins for absent sections
 			std::atomic<std::uint8_t> lengths_state{0};  // 0 unverified, 1 good, 2 bad
+			std::atomic<std::uint8_t> length_width{0};   // lengths' width, set by verify_lengths
 		};
 		std::unique_ptr<state> state_;
 		section_handle postings_, positions_;
@@ -469,7 +474,7 @@ struct inverted_plugin {
 		std::optional<termdict::reader> dict_;
 		std::uint64_t doc_count_ = 0, total_length_ = 0;
 		std::uint32_t max_positions_ = 0, lengths_crc_ = 0;
-		std::uint8_t length_width_ = 0, postings_shift_ = 0;
+		std::uint8_t postings_shift_ = 0;
 	};
 	// L6: rebuilds the plugin's sections for a merge's output (merge.hh).
 	static built merge(const merge_context& m, std::span<const reader* const> in, section_sink& sink);
