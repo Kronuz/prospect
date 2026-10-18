@@ -227,8 +227,8 @@ public:
 		ix.clear_uncreated();
 		ix.m_.uuid = uuid;
 		ix.m_.key_prefix = opts.key_prefix;
-		// Every structure of the layout, keys only with a key prefix (F4, F20).
-		ix.m_.configured = format::bit::inverted | format::bit::norms | format::bit::stored | (opts.key_prefix.empty() ? 0 : format::bit::keys);
+		// Every structure the index's layout reads, keys only with a key prefix (F4, F20).
+		ix.m_.configured = segment::readable & ~(opts.key_prefix.empty() ? format::bit::keys : 0);
 		ix.opts_ = opts;
 		if (opts.budget) { ix.permit_ = opts.budget->open(); }
 		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }

@@ -1,6 +1,6 @@
-// Fixtures pinning format 12's bytes and the index digest before the layers refactor
-// (layers.md, L14 step 0): every refactor step must reproduce them exactly. Regenerate
-// only for an intended format change: STRATA_WRITE_FIXTURES=1 fixtures_test.
+// Fixtures pinning format 13's bytes and the index digest (format-13.md F22): every commit must
+// reproduce them exactly. Regenerate only for an intended format change:
+// STRATA_WRITE_FIXTURES=1 fixtures_test.
 #include "strata/faultfs.hh"
 #include "strata/index.hh"
 #include "strata/merge.hh"
@@ -140,7 +140,7 @@ int main() {
 		CHECK(moved.get<strata::keys_plugin>().may_hold("Q7") && moved.get<strata::keys_plugin>().version(6) == 1 + 6 % 3);
 		CHECK(moved.get<strata::stored_plugin>().stored(5).size() == 1000);
 		moved.verify_all();
-		// Presence is per segment (L11): a format-12 segment holds every plugin of its layout.
+		// Presence is per segment (L11): this segment holds every plugin of its layout.
 		CHECK(moved.holds<strata::inverted_plugin>() && moved.holds<strata::keys_plugin>() && moved.holds<strata::stored_plugin>());
 		CHECK(!moved.holds<outside_plugin>());
 		CHECK(docs_if_held<strata::inverted_plugin>(moved) == 300 && docs_if_held<outside_plugin>(moved) == 0);

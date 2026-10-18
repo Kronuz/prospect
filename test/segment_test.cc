@@ -304,7 +304,7 @@ int main() {
 					length += std::uint32_t(pos[k].size());
 				}
 			}
-			// Format 12: monotone docids with gaps, versions, and a key term per document.
+			// Monotone docids with gaps, versions, and a key per document.
 			const std::string key = "Q" + std::to_string(d);
 			w.add(2 * d + 1, in, length, {}, 1 + d % 5, key);
 		}
@@ -464,8 +464,8 @@ int main() {
 		CHECK(throws_corrupt([&] { strata::segment s(file); }));
 	}
 
-	// Format 12's docids, versions, and key filter: random monotone docids map both ways,
-	// versions read back, keys are never missed, and keys outside the range are rejected.
+	// docids, versions, and keys: random monotone docids map both ways, versions read back,
+	// keys are never missed, and keys outside the range are rejected.
 	{
 		std::mt19937_64 r(12);
 		for (std::size_t docs : {1u, 127u, 128u, 129u, 5000u}) {

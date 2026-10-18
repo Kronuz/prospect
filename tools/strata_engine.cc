@@ -616,7 +616,7 @@ int resident(const std::string& dir) {
 }
 
 // A document of whitespace tokens: each distinct token with its wdf and positions, the
-// key term (wdf 0), and the id stored.
+// key (F8), and the id stored.
 
 int churn(const std::string& dir) {
 	std::ios::sync_with_stdio(false);

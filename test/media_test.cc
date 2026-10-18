@@ -137,7 +137,7 @@ int main() {
 						CHECK(*d == reference);  // never a wrong answer
 						++sticky_unread;
 					}
-					// A merge reads the key terms and every posting: it fails only as corruption
+					// A merge reads every key and every posting: it fails only as corruption
 					// (condition 16), never with another library's error.
 					try {
 						ix.force_merge(1);
