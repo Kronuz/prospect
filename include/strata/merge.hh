@@ -221,13 +221,14 @@ struct order_source {
 	static constexpr bool exists = false;
 };
 
-// How a merge runs (L6, F13-R11): named, so a call that leaves a field out cannot rebind
-// the next one. Callers use designated initializers, in declaration order.
+// How a merge runs (L6, F13-R11): designated initializers only, in declaration order, so a
+// removed field fails to compile; positional initialization still compiles (review rule).
 struct merge_options {
 	std::uint8_t region_shift = format::default_region_shift;
 	const task::cancel_token* cancel = nullptr;  // checked per document, per term, and per stored frame
 	flush_charge* memory = nullptr;              // charged with the merge's working memory
-	std::span<const merge_ref> order;            // [new ordinal] = the source document; empty: docid order
+	std::span<const merge_ref> order;            // [new ordinal] = the source document; empty: docid order, but
+	                                             // a single source out of docid order keeps its order
 	scratch* records = nullptr;                  // out of docid order: where each source's live records spill
 	std::string_view key_prefix;                 // format 12: the key terms' prefix (empty: none)
 };
