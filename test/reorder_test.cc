@@ -101,7 +101,7 @@ int main() {
 			if (kind < 6) {
 				o.type = operation::replace_key;
 				o.key = key;
-				d.terms.insert(d.terms.begin(), {key, 0, {}});
+				d.key = key;
 				o.doc = d;
 			} else if (kind < 7) {
 				o.type = operation::delete_key;
@@ -308,7 +308,7 @@ int main() {
 		}
 		CHECK(out_bytes[0] == out_bytes[1]);
 		const std::uint64_t h = xxh64::hash(out_bytes[0]);
-		constexpr std::uint64_t pinned = 0xe44abc023251520dull;
+		constexpr std::uint64_t pinned = 0x86064e5af3769367ull;
 		if (h != pinned) { std::fprintf(stderr, "T7: reordering merge hash %016llx\n", (unsigned long long)h); }
 		CHECK(h == pinned);
 	}

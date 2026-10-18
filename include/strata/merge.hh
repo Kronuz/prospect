@@ -65,6 +65,7 @@ struct merge_context {
 	const task::cancel_token* cancel = nullptr;
 	flush_charge* memory = nullptr;           // the merge's working memory, when budgeted
 	scratch* records = nullptr;               // out of docid order: where stored records spill
+	std::string_view key_prefix;              // the index's, for the inverted builder's backstop (F8)
 	void check() const {
 		if (cancel && cancel->requested()) { throw task::cancelled{}; }
 	}
@@ -78,6 +79,7 @@ struct merge_context {
 inline built inverted_plugin::merge(const merge_context& m, std::span<const reader* const> in, section_sink& sink) {
 	inverted_builder b;
 	b.memory = m.memory;
+	b.key_prefix = m.key_prefix;
 	for (const auto& src : m.order) { (void)b.begin(in[src.source]->length(src.ord)); }
 	std::deque<reader::term_cursor> terms;
 	std::vector<bool> more(in.size());
@@ -230,7 +232,7 @@ struct merge_options {
 	std::span<const merge_ref> order;            // [new ordinal] = the source document; empty: docid order, but
 	                                             // a single source out of docid order keeps its order
 	scratch* records = nullptr;                  // out of docid order: where each source's live records spill
-	std::string_view key_prefix;                 // format 12: the key terms' prefix (empty: none)
+	std::string_view key_prefix;                 // the index's, only for the inverted builder's backstop (F8)
 };
 
 namespace detail {
@@ -240,7 +242,6 @@ template <class... Entries>
 merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> sources, const std::array<std::uint8_t, 16>& segment_id, output& out,
 	spill& positions_spill, const merge_options& options) {
 	using segment_type = basic_segment<layout<Entries...>>;
-	const std::string_view key_prefix = options.key_prefix;
 	const std::uint8_t region_shift = options.region_shift;
 	const task::cancel_token* const cancel = options.cancel;
 	flush_charge* const memory = options.memory;
@@ -255,20 +256,18 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 	check();
 	merge_plan plan;
 	plan.ordinals.resize(sources.size());
-	// Each live document's key, if any, from the keys reader (L3).
+	// Each live document's key, if any, from the keys reader's scan from the empty key (L3).
 	std::vector<std::unordered_map<ordinal_t, std::string>> keys(sources.size());
 	if constexpr (keyed) {
-		if (!key_prefix.empty()) {
-			for (std::size_t s = 0; s < sources.size(); ++s) {
-				const segment_type& seg = *sources[s].seg;
-				seg.template get<keys_plugin>().scan(key_prefix, seg.template deps<keys_plugin>(), [&](std::string_view key, ordinal_t o) {
-					if (sources[s].live(o)) {
-						keys[s][o] = std::string(key);
-						charge(64 + key.size());  // a map node and its key
-					}
-					return true;
-				});
-			}
+		for (std::size_t s = 0; s < sources.size(); ++s) {
+			const segment_type& seg = *sources[s].seg;
+			seg.template get<keys_plugin>().scan("", [&](std::string_view key, ordinal_t o) {
+				if (sources[s].live(o)) {
+					keys[s][o] = std::string(key);
+					charge(64 + key.size());  // a map node and its key
+				}
+				return true;
+			});
 		}
 	}
 	// Documents in docid order.
@@ -347,6 +346,7 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 	m.cancel = cancel;
 	m.memory = memory;
 	m.records = options.records;
+	m.key_prefix = options.key_prefix;
 
 	section_sink sink(out, region_shift, &positions_spill, memory);
 	begin_segment(sink, segment_id);
@@ -369,8 +369,9 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 
 }  // namespace detail
 
-// Writes the merge of `sources` to sink (positions through spill). `key_prefix` names the
-// documents' key terms, which the result's key filter covers. Throws std::logic_error if
+// Writes the merge of `sources` to sink (positions through spill). Each live document keeps
+// its key, from the keys reader; `key_prefix` is the index's, for the inverted builder's
+// backstop (F8). Throws std::logic_error if
 // two live documents share a docid. With `cancel`, it throws task::cancelled when asked.
 // Stored records are read a frame at a time per source; out of docid order, `records`
 // (when given) takes each source's live records, every frame decoded once, and the output

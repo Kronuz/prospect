@@ -46,6 +46,7 @@
 #include "strata/budget.hh"
 #include "strata/docids.hh"
 #include "strata/format.hh"
+#include "strata/keys.hh"
 #include "strata/section_io.hh"
 #include "task.hh"
 #include "termdict.hh"
@@ -145,6 +146,9 @@ class inverted_builder {
 public:
 	bool wide_skip_offsets = false;  // 64-bit skip offsets even where 32 bits fit
 	flush_charge* memory = nullptr;
+	// The index's key prefix: a term with it is refused, never dropped (F8's backstop to
+	// stage 1); empty for none.
+	std::string_view key_prefix;
 
 	struct token {
 		std::string_view term;
@@ -261,6 +265,7 @@ public:
 			const std::string_view key = *got;
 			if (!first_term && key <= std::string_view(last_key)) { throw std::invalid_argument("strata: terms must increase"); }
 			first_term = false;
+			refuse_key(key);
 			last_key.assign(key);
 			const auto& t = tp;
 			const auto& ords = tp.ords;
@@ -384,6 +389,9 @@ private:
 		std::uint32_t buffer = 0;
 	};
 
+	void refuse_key(std::string_view term) const {
+		if (!key_prefix.empty() && term.starts_with(key_prefix)) { throw std::invalid_argument("strata: a term with the key prefix (F8)"); }
+	}
 	term_buffer& buffer_for(std::string_view term) {
 		if (table_.empty()) {
 			table_.resize(1 << 16);
@@ -396,6 +404,7 @@ private:
 			if (!sl.key) { break; }
 			if (sl.hash == h && sl.length == term.size() && std::memcmp(sl.key, term.data(), term.size()) == 0) { return buffers_[sl.buffer]; }
 		}
+		refuse_key(term);
 		// Term bytes live in stable arena chunks so slots can point at them.
 		if (arena_.empty() || arena_.back().size() + term.size() > arena_.back().capacity()) {
 			arena_.emplace_back();
@@ -655,27 +664,28 @@ private:
 	std::uint64_t charged_ = 0;  // the lengths column's charged capacity
 };
 
-// Versions and the key filter: the keys plugin's builder in format 12.
+// Keys and versions: the keys plugin's builder (F8, F9). keys streams with the plugins'
+// sections; key_index and versions go to the tail.
 class keys_builder {
 public:
 	flush_charge* memory = nullptr;
 
 	void add(const doc_fields& f) {
-		versions_.push_back(f.version);
 		if (!f.key.empty()) {
-			key_hashes_.push_back(xxh64::hash(f.key));
-			if (keys_min_.empty() && keys_max_.empty()) {
-				keys_min_ = keys_max_ = f.key;
-			} else {
-				if (f.key < keys_min_) { keys_min_ = f.key; }
-				if (f.key > keys_max_) { keys_max_ = f.key; }
-			}
+			key_bytes_ += f.key.size();
+			keys_.push_back({std::string(f.key), ordinal_t(versions_.size())});
 		}
-		detail::charge_to(memory, (versions_.capacity() + key_hashes_.capacity()) * sizeof(std::uint64_t), charged_);
+		versions_.push_back(f.version);
+		detail::charge_to(memory, versions_.capacity() * sizeof(std::uint64_t) + keys_.capacity() * sizeof(keys_[0]) + key_bytes_, charged_);
 	}
 	void finish(section_sink& sink) {
+		std::vector<std::pair<std::string_view, ordinal_t>> entries;
+		entries.reserve(keys_.size());
+		for (const auto& [k, o] : keys_) { entries.push_back({k, o}); }
+		auto sections = keys::encode(std::move(entries));
+		detail::append_built(sink, memory, format::section::keys, sections.keys);
 		detail::append_built(sink, memory, format::section::versions, encode_versions());
-		if (!key_hashes_.empty()) { detail::append_built(sink, memory, format::section::pk_filter, encode_pk_filter()); }
+		detail::append_built(sink, memory, format::section::key_index, sections.index);
 	}
 
 private:
@@ -700,21 +710,9 @@ private:
 		return out + bits;
 	}
 
-	// pk_filter: [smallest key LEB length, bytes][largest key, likewise][fuse filter over
-	// the keys' xxHash64].
-	std::string encode_pk_filter() const {
-		std::string out;
-		format::put_leb(out, keys_min_.size());
-		out += keys_min_;
-		format::put_leb(out, keys_max_.size());
-		out += keys_max_;
-		return out + fusefilter::filter8::build(key_hashes_).serialize();
-	}
-
 	std::vector<std::uint64_t> versions_;
-	std::vector<std::uint64_t> key_hashes_;
-	std::string keys_min_, keys_max_;
-	std::uint64_t charged_ = 0;
+	std::vector<std::pair<std::string, ordinal_t>> keys_;
+	std::uint64_t key_bytes_ = 0, charged_ = 0;
 };
 
 // Stored records: the stored plugin's builder.
@@ -780,11 +778,13 @@ public:
 	flush_charge* memory = nullptr;
 	// When given, the stored section checks it per frame and throws task::cancelled.
 	const task::cancel_token* cancel = nullptr;
+	// The index's key prefix, for the inverted builder's backstop (F8); empty for none.
+	std::string key_prefix;
 
 	// Adds a document and returns its ordinal. Docids strictly increase, so ordinal order
 	// is docid order. `length` is the document length used by weighting (Xapian: the sum
 	// of wdf over non-boolean terms). `stored` is the document's stored record, returned
-	// by segment::stored. `key` is the document's key term (one of its terms) or empty.
+	// by segment::stored. `key` is the document's key (F8), never one of its terms, or empty.
 	// Each term appears once, with its wdf and its positions in increasing order.
 	ordinal_t add(std::uint64_t docid, std::span<const posting_input> terms, std::uint32_t length, std::string_view stored = {},
 		std::uint64_t version = 0, std::string_view key = {}) {
@@ -841,6 +841,7 @@ private:
 	void sync() noexcept {
 		inverted_.memory = keys_.memory = stored_.memory = memory;
 		inverted_.wide_skip_offsets = wide_skip_offsets;
+		inverted_.key_prefix = key_prefix;
 		stored_.cancel = cancel;
 	}
 

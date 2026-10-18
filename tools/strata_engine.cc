@@ -98,7 +98,7 @@ strata::document tokens_document(std::string_view id, std::string_view text) {
 		i = j + 1;
 	}
 	strata::document d;
-	d.terms.push_back({"Q" + std::string(id), 0, {}});
+	d.key = "Q" + std::string(id);
 	for (auto& [t, positions] : at) { d.terms.push_back({std::string(t), std::uint32_t(positions.size()), std::move(positions)}); }
 	d.length = pos;
 	d.stored = std::string(id);
@@ -418,7 +418,7 @@ int verify_index(const std::string& dir) {
 		++queries;
 		const parsed p = parse(q);
 		for (const auto scheme : {strata::scheme::bm25, strata::scheme::bm25_xapian}) {
-			strata::term_table table(view);
+			strata::term_table table(view, o.key_prefix);
 			auto builder = [&](const strata::segment& seg) { return build(seg, p, scheme, &table); };
 			std::vector<strata::doc_hit> scan;
 			for (const auto& sv : segs) {
@@ -477,7 +477,7 @@ int dump(const std::string& dir) {
 		for (const auto scheme : {strata::scheme::bm25, strata::scheme::bm25_xapian}) {
 			for (std::size_t k : {10u, 100u, 1000u}) {
 				std::uint64_t n = 0;
-				const auto hits = search_snapshot(segs, p, k, scheme, &n);
+				const auto hits = search_snapshot(segs, p, k, scheme, &n, o.key_prefix);
 				std::printf("%s\t%d\t%zu\t%llu", q.c_str(), int(scheme), k, (unsigned long long)n);
 				for (const auto& h : hits) { std::printf(" %llu:%a", (unsigned long long)h.docid, h.score); }
 				std::printf("\n");
@@ -574,7 +574,7 @@ int bench(const std::string& dir, std::string_view command, int runs, strata::sc
 		for (const auto& v : ix.segments()) { segs.push_back({v.seg, v.deleted, v.dead}); }
 		std::cerr << "bench: " << segs.size() << " segments\n";
 		const std::span<const strata::segment_snapshot> view(segs);
-		return bench_queries(runs, [&](std::string_view query) { return run(view, command, query, scheme); });
+		return bench_queries(runs, [&](std::string_view query) { return run(view, command, query, scheme, o.key_prefix); });
 	}
 	residency::file file;
 	strata::segment seg = open(dir, file);

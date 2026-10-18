@@ -197,7 +197,6 @@ int main() {
 				if ((i + k) % (k + 2) == 0) { in.push_back({words[k], 2, pos}); }
 			}
 			const std::string key = "Q" + std::to_string(ids[i]);
-			in.push_back({key, 0, {}});
 			w.add(ids[i], in, 4, "record " + std::to_string(ids[i]), 1 + i % 3, key);
 		}
 		const std::string bytes = w.flush({});

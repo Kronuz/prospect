@@ -3,13 +3,18 @@
 // words, the sink's file order, and the format-12 refusal fixtures.
 #include "strata/faultfs.hh"
 #include "strata/index.hh"
+#include "strata/check.hh"
 #include "strata/reader.hh"
+#include "strata/search.hh"
+#include "strata/searcher.hh"
 #include "strata/writer.hh"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <map>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -54,7 +59,7 @@ std::string keyed_segment() {
 	for (std::uint32_t d = 0; d < 300; ++d) {
 		const std::string key = "Q" + std::to_string(d);
 		const std::vector<std::uint32_t> pos{1, 4}, beta{7};
-		std::vector<strata::posting_input> in{{"alpha", 2, pos}, {key, 0, {}}};
+		std::vector<strata::posting_input> in{{"alpha", 2, pos}};
 		if (d % 3 == 0) { in.push_back({"beta", 1, beta}); }
 		w.add(2 * d + 1, in, 3, std::string(d % 7, 'x'), 1 + d % 5, key);
 	}
@@ -100,6 +105,40 @@ std::string with_version(std::string file, std::uint32_t v) {
 	return file;
 }
 
+// The docids a term query matches over an index's live documents, through the planner's
+// routing (F8): the term table resolves a key-prefixed term as a key leaf.
+std::vector<std::uint64_t> matches(const strata::index& ix, std::string_view term, std::string_view key_prefix) {
+	std::vector<strata::segment_snapshot> segs;
+	for (const auto& v : ix.segments()) { segs.push_back({v.seg, v.deleted, v.dead}); }
+	strata::term_table table(segs, key_prefix);
+	auto build = [&](const strata::segment& seg) -> strata::scorer_ptr {
+		const auto* info = table.info(seg, term);
+		if (!info) { return nullptr; }
+		return std::make_unique<strata::term_scorer>(seg.get<strata::inverted_plugin>(), *info);
+	};
+	std::vector<std::uint64_t> out;
+	for (const auto& h : strata::search(segs, build, 1000)) { out.push_back(h.docid); }
+	std::sort(out.begin(), out.end());
+	return out;
+}
+
+strata::operation upsert(const std::string& key, const std::string& word) {
+	strata::operation op;
+	op.type = strata::operation::replace_key;
+	op.key = key;
+	op.doc.key = key;
+	op.doc.terms.push_back({word, 1, {1}});
+	op.doc.length = 1;
+	op.doc.stored = key;
+	return op;
+}
+
+strata::verdict::outcome apply(strata::index& ix, const strata::operation& op) {
+	strata::transaction t;
+	t.ops.push_back(op);
+	return ix.apply(t, {}).result;
+}
+
 std::string read_file(const std::string& path) {
 	std::string out;
 	if (std::FILE* f = std::fopen(path.c_str(), "rb")) {
@@ -119,8 +158,8 @@ int main() {
 		CHECK(s.core().version() == 13);
 		CHECK(s.core().structures() == (bit::inverted | bit::norms | bit::keys | bit::stored));
 		// F5's order: the streamed sections, then the pinned tail by rank.
-		const std::vector<section> order{section::header, section::postings, section::positions, section::terms, section::lengths, section::stored,
-			section::docids, section::stats, section::norms, section::term_index, section::versions, section::pk_filter};
+		const std::vector<section> order{section::header, section::postings, section::positions, section::terms, section::lengths, section::keys, section::stored,
+			section::docids, section::stats, section::norms, section::term_index, section::versions, section::key_index};
 		std::vector<section> got;
 		for (const auto& e : s.core().sections()) { got.push_back(e.kind); }
 		CHECK(got == order);
@@ -178,16 +217,15 @@ int main() {
 	// --- F3 and F5: kinds and the canonical layout -----------------------------------------
 	{
 		const auto toc = strata::format::decode_toc(good, strata::format::decode_footer(good));
-		// Every section removed: damage. pk_filter is optional until key_index replaces it.
+		// Every section removed: damage.
 		for (std::size_t i = 0; i < toc.size(); ++i) {
-			if (toc[i].kind == section::pk_filter) { continue; }
 			const auto got = open(relayout(good, [&](entries& t) { t.erase(t.begin() + std::ptrdiff_t(i)); }));
 			if (got != outcome::corrupt) { std::fprintf(stderr, "removing %s: %s\n", strata::format::name_of(toc[i].kind), name(got)); }
 			CHECK(got == outcome::corrupt);
 		}
-		// Kinds outside F3's table, and kinds whose structure bit is clear (the reserved ones,
-		// and keys and key_index before F8), in place of the last section: damage.
-		for (std::uint16_t kind : {12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 200, 0xffff}) {
+		// Kinds outside F3's table, the retired pk_filter, and kinds whose structure bit is
+		// clear (the reserved ones), in place of the last section: damage.
+		for (std::uint16_t kind : {11, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 200, 0xffff}) {
 			const auto got = open(relayout(good, [&](entries& t) { t.back().kind = section(kind); }));
 			if (got != outcome::corrupt) { std::fprintf(stderr, "kind %u: %s\n", unsigned(kind), name(got)); }
 			CHECK(got == outcome::corrupt);
@@ -313,7 +351,7 @@ int main() {
 		op.type = strata::operation::replace_key;
 		op.key = "Q1";
 		op.doc.terms.push_back({"alpha", 1, {1}});
-		op.doc.terms.push_back({"Q1", 0, {}});
+		op.doc.key = "Q1";
 		op.doc.length = 1;
 		t.ops.push_back(op);
 		ix.apply(t, {});
@@ -340,6 +378,121 @@ int main() {
 			unsupported = true;
 		}
 		CHECK(corrupt && !unsupported);
+	}
+
+	// --- F8: keys leave the dictionary (7c-3) ------------------------------------------------
+	{
+		strata::faultfs::filesystem fs;
+		strata::faultfs::io io(fs);
+		strata::index::options o;
+		o.key_prefix = "Q";
+		o.auto_merge = false;
+		auto ix = strata::index::create(io, o, {});
+		// Stage 1: a term with the key prefix, a key without it, and a key unlike the
+		// operation's are invalid (F8; F13-R25 item 2).
+		{
+			auto op = upsert("Qa", "w");
+			op.doc.terms.push_back({"Qb", 0, {}});
+			CHECK(apply(ix, op) == strata::verdict::invalid);
+			auto add = upsert("Qa", "w");
+			add.type = strata::operation::add;
+			add.doc.key = "Xa";
+			CHECK(apply(ix, add) == strata::verdict::invalid);
+			auto other = upsert("Qa", "w");
+			other.doc.key = "Qz";
+			CHECK(apply(ix, other) == strata::verdict::invalid);
+		}
+		// Keys across segments, replaced and deleted, against a model of the live ones.
+		std::map<std::string, std::uint64_t> live;  // key -> its live docid
+		std::mt19937_64 r(13);
+		for (int i = 0; i < 600; ++i) {
+			const std::string key = "Q" + std::to_string(r() % 120);
+			if (r() % 5 == 0) {
+				strata::operation del;
+				del.type = strata::operation::delete_key;
+				del.key = key;
+				(void)apply(ix, del);
+				live.erase(key);
+			} else {
+				CHECK(apply(ix, upsert(key, "w" + std::to_string(r() % 7))) == strata::verdict::accepted);
+				live[key] = 0;
+			}
+			if (i % 97 == 96) { ix.commit(); }
+		}
+		ix.commit();
+		for (auto& [k, d] : live) { d = ix.find_key(k)->first; }
+		CHECK(ix.segments().size() > 2);
+		for (int k = 0; k < 120; ++k) {
+			const std::string key = "Q" + std::to_string(k);
+			const auto got = matches(ix, key, o.key_prefix);
+			const auto it = live.find(key);
+			CHECK(got == (it == live.end() ? std::vector<std::uint64_t>{} : std::vector<std::uint64_t>{it->second}));
+			// The dictionary holds no key: without the prefix's routing, nothing matches.
+			CHECK(matches(ix, key, {}).empty());
+		}
+		// The term table's df counts the segments holding a key, deleted copies included.
+		{
+			std::vector<strata::segment_snapshot> segs;
+			std::uint64_t held = 0;
+			for (const auto& v : ix.segments()) {
+				segs.push_back({v.seg, v.deleted, v.dead});
+				held += v.seg->get<strata::keys_plugin>().find("Q7", {}).has_value();
+			}
+			CHECK(strata::snapshot_df(segs, "Q7", o.key_prefix) == held);
+		}
+		const auto report = ix.check();
+		CHECK(report.keys >= live.size() && report.terms >= 7);
+		// check() refuses a dictionary that holds a key-prefixed term.
+		{
+			strata::segment_writer w;
+			std::vector<strata::posting_input> in{{"Qx", 1, {}}};
+			w.add(1, in, 1);
+			const std::string bytes = w.flush({});
+			strata::segment seg(bytes);
+			strata::check_report rr;
+			bool threw = false;
+			try {
+				strata::check_segment(seg, nullptr, rr, "Q");
+			} catch (const strata::corrupt_segment&) {
+				threw = true;
+			}
+			CHECK(threw);
+			strata::check_report plain;
+			strata::check_segment(seg, nullptr, plain);  // no prefix: an ordinary term
+			CHECK(plain.terms == 1);
+		}
+		// The writer's backstop refuses a key-prefixed term, never drops it.
+		{
+			strata::segment_writer w;
+			w.key_prefix = "Q";
+			std::vector<strata::posting_input> in{{"Qx", 1, {}}};
+			bool threw = false;
+			try {
+				w.add(1, in, 1);
+			} catch (const std::invalid_argument&) {
+				threw = true;
+			}
+			CHECK(threw);
+		}
+	}
+	// A keyless index: no prefix, so no routing and no refusal (F13-R33). A term that
+	// starts like a key is an ordinary term, and a document's key is ignored.
+	{
+		strata::faultfs::filesystem fs;
+		strata::faultfs::io io(fs);
+		strata::index::options o;
+		auto ix = strata::index::create(io, o, {});
+		strata::operation op;
+		op.type = strata::operation::add;
+		op.doc.terms.push_back({"Qa", 1, {1}});
+		op.doc.terms.push_back({"w", 1, {2}});
+		op.doc.key = "Qa";
+		op.doc.length = 2;
+		CHECK(apply(ix, op) == strata::verdict::accepted);
+		ix.commit();
+		CHECK(matches(ix, "Qa", {}).size() == 1 && matches(ix, "w", {}).size() == 1);
+		CHECK(!ix.find_key("Qa"));
+		CHECK(ix.check().keys == 0);
 	}
 
 	std::printf("format13: %s\n", failures ? "FAILED" : "ok");

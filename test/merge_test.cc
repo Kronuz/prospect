@@ -42,7 +42,7 @@ int main() {
 		static const char* words[] = {"a", "b", "c", "d", "rare", "Bool"};
 		auto make = [&](const std::string& key) {
 			document d;
-			if (!key.empty()) { d.terms.push_back({key, 0, {}}); }
+			d.key = key;
 			std::uint32_t pos = 0;
 			for (const char* w : words) {
 				if (r() % 3) { continue; }
@@ -246,7 +246,8 @@ int main() {
 			operation o;
 			o.type = operation::replace_key;
 			o.key = "Q" + std::to_string(r() % 500);
-			o.doc.terms = {{o.key, 0, {}}, {"w" + std::to_string(r() % 30), 1, {1}}};
+			o.doc.key = o.key;
+			o.doc.terms = {{"w" + std::to_string(r() % 30), 1, {1}}};
 			o.doc.length = 1;
 			t.ops.push_back(o);
 			a.apply(t, {});
@@ -284,7 +285,8 @@ int main() {
 			op.type = type;
 			op.key = key;
 			if (type == operation::replace_key) {
-				op.doc.terms = {{key, 0, {}}, {"w", 1, {1}}};
+				op.doc.key = key;
+				op.doc.terms = {{"w", 1, {1}}};
 				op.doc.length = 1;
 			}
 			t.ops.push_back(op);

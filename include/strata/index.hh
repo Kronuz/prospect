@@ -566,18 +566,22 @@ public:
 				}
 				return true;
 			});
-			// One live copy per key, from the keys reader's scan (L3, L8).
-			if (!m_.key_prefix.empty()) {
-				s.seg.template get<keys_plugin>().scan(m_.key_prefix, s.seg.template deps<keys_plugin>(), [&](std::string_view key, ordinal_t o) {
-					if (!dead(o) && !keys.insert(std::string(key)).second) { throw std::logic_error("strata: digest: key invariant"); }
-					return true;
-				});
-			}
+			// One live copy per key, from the keys reader's scan (L3, L8). Until the digest's
+			// split (7c-5), each live key keeps the record its key term gave (F13-R5).
+			s.seg.template get<keys_plugin>().scan("", [&](std::string_view key, ordinal_t o) {
+				if (dead(o)) { return true; }
+				if (!keys.insert(std::string(key)).second) { throw std::logic_error("strata: digest: key invariant"); }
+				posting_record(core.docid(o), key, 0, {});
+				return true;
+			});
 		}
 		for (const auto& b : buffer_) {
 			if (b.dead) { continue; }
 			document_record(b.docid, b.version, b.doc.length, b.doc.stored);
-			if (!b.key.empty() && !keys.insert(b.key).second) { throw std::logic_error("strata: digest: key invariant"); }
+			if (!b.key.empty()) {
+				if (!keys.insert(b.key).second) { throw std::logic_error("strata: digest: key invariant"); }
+				posting_record(b.docid, b.key, 0, {});  // the interim key record, as for segments
+			}
 			for (const auto& t : b.doc.terms) { posting_record(b.docid, t.term, t.wdf, t.positions); }
 		}
 		rec.push_back('L');
@@ -601,7 +605,7 @@ public:
 	// per docid and per key, every docid at or below lastdocid. Throws at the first problem.
 	check_report check() const {
 		check_report r;
-		for (const auto& s : segs_) { check_segment(s->seg, &s->deleted, r); }
+		for (const auto& s : segs_) { check_segment(s->seg, &s->deleted, r, m_.key_prefix); }
 		(void)digest();
 		return r;
 	}
@@ -1421,7 +1425,7 @@ private:
 			const auto& s = *segs_[i];
 			const auto& keys = s.seg.template get<keys_plugin>();
 			if (!keys.may_hold(key)) { continue; }
-			if (const auto ord = keys.find(key, live_bits{s.deleted.data()}, s.seg.template deps<keys_plugin>())) {
+			if (const auto ord = keys.find(key, live_bits{s.deleted.data()})) {
 				return key_entry{s.seg.core().docid(*ord), keys.version(*ord)};
 			}
 		}
@@ -1525,7 +1529,7 @@ private:
 		m_.last_docid = docid;
 	}
 
-	// The key term of a document: its one term with the index's key prefix.
+	// The core's stage-1 context: the index's key prefix (F8).
 	validate_context context() const { return {m_.key_prefix}; }
 	std::optional<std::string> key_of(const document& d, bool& valid) const { return keys_plugin::key_of(context(), d, valid); }
 
@@ -1677,6 +1681,7 @@ private:
 					{
 						segment_writer w;
 						if (opts_.budget) { w.memory = &charge; }
+						w.key_prefix = m_.key_prefix;
 						std::vector<posting_input> in;
 						for (std::size_t i = begin; i < end; ++i) {
 							const buffered* b = docs[i];

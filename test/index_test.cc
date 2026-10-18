@@ -24,7 +24,7 @@ static const std::array<char, 16> uuid = {'s', 't', 'r', 'a', 't', 'a', '-', 't'
 
 static document doc(const std::string& key, const std::string& body, std::uint32_t pos = 1) {
 	document d;
-	if (!key.empty()) { d.terms.push_back({key, 0, {}}); }
+	d.key = key;
 	d.terms.push_back({body, 1, {pos}});
 	d.length = 1;
 	d.stored = body;
@@ -193,7 +193,7 @@ int main() {
 		o.doc = bad;
 		CHECK(ix.apply(tx({o}), {}).result == verdict::invalid);
 		document two_keys = doc("Qy", "y");
-		two_keys.terms.push_back({"Qz", 0, {}});
+		two_keys.terms.push_back({"Qz", 0, {}});  // a term with the key prefix: invalid (F8)
 		o.doc = two_keys;
 		CHECK(ix.apply(tx({o}), {}).result == verdict::invalid);
 		CHECK(ix.apply(tx({add("Qa", "again")}), {}).result == verdict::version_conflict);
@@ -472,7 +472,7 @@ int main() {
 			for (auto& c : body) { c = char(r()); }
 			operation old;
 			old.type = operation::add;
-			old.doc.terms.push_back({"Qold", 0, {}});
+			old.doc.key = "Qold";
 			old.doc.stored = body;
 			ix.apply(tx({old}), {});
 			ix.commit();
@@ -1275,7 +1275,7 @@ int main() {
 			for (int i = 0; i < 400; ++i) { ix.apply(tx({replace("Q" + std::to_string(i % 150), "w" + std::to_string(i % 17))}), {}); }
 			ix.commit();
 			const auto r = ix.check();
-			CHECK(r.segments == 1 && r.documents == 150 && r.terms > 150 && r.postings >= 2 * 150 && r.stored_bytes > 0 && r.deleted == 0);
+			CHECK(r.segments == 1 && r.documents == 150 && r.terms == 17 && r.keys == 150 && r.postings == 150 && r.stored_bytes > 0 && r.deleted == 0);
 			// Deleted documents are counted, not skipped.
 			for (int i = 0; i < 10; ++i) { ix.apply(tx({erase("Q" + std::to_string(i))}), {}); }
 			ix.commit();

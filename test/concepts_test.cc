@@ -46,7 +46,7 @@ static_assert(!strata::section_plugin<stub_two_bits>);
 using document_layout = strata::layout<stub_keys, strata::stored_plugin>;
 template struct strata::basic_document<document_layout>;
 template class strata::basic_segment<document_layout>;
-static_assert(sizeof(strata::basic_document<document_layout>) == sizeof(strata::stored_plugin::part));
+static_assert(sizeof(strata::basic_document<document_layout>) == sizeof(strata::core_part) + sizeof(strata::stored_plugin::part));
 
 int main() {
 	docset::sorted_set s(100, {1, 5, 9});

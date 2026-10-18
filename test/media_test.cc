@@ -29,7 +29,7 @@ static const std::array<char, 16> uuid = {'s', 't', 'r', 'a', 't', 'a', '-', 'm'
 static operation add(const std::string& key, const std::string& body) {
 	operation o;
 	o.type = operation::add;
-	o.doc.terms.push_back({key, 0, {}});
+	o.doc.key = key;
 	std::uint32_t pos = 0;
 	for (std::size_t i = 0; i < body.size(); i += 3) { o.doc.terms.push_back({body.substr(i, 3), 1, {++pos}}); }
 	o.doc.length = pos;

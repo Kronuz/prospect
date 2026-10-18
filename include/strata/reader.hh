@@ -34,6 +34,7 @@
 #include "residency.hh"
 #include "strata/docids.hh"
 #include "strata/format.hh"
+#include "strata/keys.hh"
 #include "strata/section_io.hh"
 #include "termdict.hh"
 
@@ -63,7 +64,12 @@ using docset::no_more_docs;
 
 // What stage-1 checks may consult (L4); Phase 4 adds the slot table.
 struct validate_context {
-	std::string_view key_prefix;  // the manifest's, until format 13
+	std::string_view key_prefix;  // the index's (F8); empty in a keyless index
+};
+
+// The core's fields of a document (L10): its key, empty for none (F8).
+struct core_part {
+	std::string key;
 };
 
 // One term of a document as the host builds it; terms are unique within a document.
@@ -206,12 +212,14 @@ struct inverted_plugin {
 		std::vector<term_entry> terms;
 		std::uint32_t length = 0;
 	};
-	// Stage-1 checks (D10): terms non-empty, within the term limit, unique, positions increasing.
-	static bool validate(const validate_context&, const part& p) {
+	// Stage-1 checks (D10): terms non-empty, within the term limit, unique, positions
+	// increasing, and none with the index's key prefix, which names keys (F8).
+	static bool validate(const validate_context& vc, const part& p) {
 		std::vector<std::string_view> seen;
 		seen.reserve(p.terms.size());
 		for (const auto& t : p.terms) {
 			if (t.term.empty() || t.term.size() > format::max_term_bytes) { return false; }
+			if (!vc.key_prefix.empty() && t.term.starts_with(vc.key_prefix)) { return false; }
 			seen.push_back(t.term);
 			for (std::size_t i = 1; i < t.positions.size(); ++i) {
 				if (t.positions[i] <= t.positions[i - 1]) { return false; }
@@ -423,41 +431,34 @@ struct inverted_plugin {
 	static built merge(const merge_context& m, std::span<const reader* const> in, section_sink& sink);
 };
 
-// Versions and the key filter.
+// The document's key in its own dictionary (F8), and versions (F9).
 struct keys_plugin {
 	static constexpr std::string_view id = "keys";
 
-	// Format 12: a document's key is its one term with the index's key prefix (none
-	// without a prefix); `valid` turns false when it has two.
-	static std::optional<std::string> key_of(const validate_context& vc, const inverted_plugin::part& d, bool& valid) {
+	// A document's key is the core's field (L10), held exactly as given. Without a key
+	// prefix the index is keyless and has none (F13-R33); with one, a key that lacks it is
+	// invalid (F13-R25 item 2).
+	static std::optional<std::string> key_of(const validate_context& vc, const core_part& d, bool& valid) {
 		valid = true;
-		const std::string_view prefix = vc.key_prefix;
-		if (prefix.empty()) { return std::nullopt; }
-		std::optional<std::string> key;
-		for (const auto& t : d.terms) {
-			if (t.term.starts_with(prefix)) {
-				if (key) { valid = false; }
-				key = t.term;
-			}
-		}
-		return key;
+		if (vc.key_prefix.empty() || d.key.empty()) { return std::nullopt; }
+		if (!d.key.starts_with(vc.key_prefix)) { valid = false; }
+		return d.key;
 	}
 	static constexpr format::owner owner = format::owner::keys;
 	static constexpr std::uint32_t structure = format::bit::keys;
 	static constexpr std::uint32_t structures = format::bit::keys;
 
-	// Format 12's keys are the inverted plugin's terms with the key prefix, so lookups read
-	// its reader, passed at each call (L3); no reader holds a sibling.
-	using depends_on = type_list<inverted_plugin>;
-	struct deps {
-		const inverted_plugin::reader& inverted;
-	};
+	// Keys are this plugin's own section, so its reader needs no other (L3).
+	using depends_on = type_list<>;
+	struct deps {};
 
 	class reader {
 	public:
-		explicit reader(const open_context& c) : versions_(c.section(format::section::versions).bytes), doc_count_(c.doc_count) {
+		explicit reader(const open_context& c)
+			: state_(std::make_unique<state>()), versions_(c.section(format::section::versions).bytes), doc_count_(c.doc_count) {
 			validate_versions();
-			if (auto pk = c.section(format::section::pk_filter).bytes; !pk.empty()) { open_pk_filter(pk); }
+			state_->keys = c.section(format::section::keys);
+			keys_ = keys::reader(state_->keys.bytes, c.section(format::section::key_index).bytes, doc_count_, &verify_keys, state_.get());
 		}
 		// The document's version (0 when the segment's writer recorded none).
 		std::uint64_t version(ordinal_t ord) const {
@@ -470,21 +471,27 @@ struct keys_plugin {
 			}
 			return format::get<std::uint64_t>(versions_.data()) + v;
 		}
-		void verify_all() const {}  // both sections are verified whole at open
-		// Whether the segment may hold a document with this key term: inside its key range
-		// and in its filter (false positives possible, false negatives not).
-		bool may_hold(std::string_view key) const {
-			if (!filter_) { return false; }
-			if (key < min_ || key > max_) { return false; }
-			return filter_->contains(xxh64::hash(key));
+		void verify_all() const {
+			if (!state_->keys.verify(0, state_->keys.bytes.size())) { corrupt("section checksum"); }
 		}
-		// The first live ordinal holding key, if any.
-		std::optional<ordinal_t> find(std::string_view key, live_bits live, const deps& d) const;
-		// Calls f(key, ord) for every ordinal, live or not, of every key starting with
-		// `prefix`, in key order, until f returns false. Format 12 cannot tell a key from
-		// another term, so `prefix` must start with the index's key prefix.
+		// Whether the segment may hold this key: inside its key range and in its filter
+		// (false positives possible, false negatives not).
+		bool may_hold(std::string_view key) const { return keys_.may_hold(key); }
+		// The key's ordinal, if the segment holds it and it is live.
+		std::optional<ordinal_t> find(std::string_view key, live_bits live) const {
+			const auto ord = keys_.find(key);
+			if (ord && !live.live(*ord)) { return std::nullopt; }
+			return ord;
+		}
+		// Calls f(key, ord) for every key >= from, in order, deleted copies included, until f
+		// returns false (F8; PLAN.md:47-48).
 		template <class F>
-		void scan(std::string_view prefix, const deps& d, F&& f) const;
+		void scan(std::string_view from, F&& f) const {
+			keys_.scan(from, std::forward<F>(f));
+		}
+		// The keys' count, and every key in order with its ordinal, checked as walked.
+		std::uint64_t key_count() const noexcept { return keys_.size(); }
+		keys::reader::cursor cursor() const { return keys::reader::cursor(keys_); }
 
 	private:
 		// versions: [min u64][width u8][packed bits]; exactly the bits doc_count needs, and no
@@ -498,24 +505,15 @@ struct keys_plugin {
 				corrupt("versions");
 			}
 		}
-		// pk_filter: the smallest and largest key, then the fuse filter.
-		void open_pk_filter(std::string_view pk) {
-			const char* p = pk.data();
-			const char* end = p + pk.size();
-			auto bytes = [&] {
-				const std::uint64_t n = format::get_leb(&p, end);
-				if (n > std::uint64_t(end - p)) { corrupt("pk_filter"); }
-				std::string_view out(p, n);
-				p += n;
-				return out;
-			};
-			min_ = bytes();
-			max_ = bytes();
-			filter_ = fusefilter::filter8_view::parse(std::string_view(p, std::size_t(end - p)));  // reads the mapping in place
-			if (!filter_ || min_ > max_ || min_.empty()) { corrupt("pk_filter"); }
+		static bool verify_keys(void* context, std::uint64_t offset, std::uint64_t length) {
+			return static_cast<state*>(context)->keys.verify(offset, length);
 		}
-		std::string_view versions_, min_, max_;
-		std::optional<fusefilter::filter8_view> filter_;
+		struct state {  // heap-held, so the dictionary's verifier context survives a move
+			section_handle keys;
+		};
+		std::unique_ptr<state> state_;
+		std::string_view versions_;
+		keys::reader keys_;
 		std::uint64_t doc_count_;
 	};
 	// L6: rebuilds the plugin's sections for a merge's output (merge.hh).
@@ -658,7 +656,6 @@ template <class E>
 using plugin_part_t = typename plugin_part<E>::type;
 }  // namespace detail
 
-struct core_part {};
 template <class Layout>
 struct basic_document;
 // The document is its parts: `d.terms`, `d.length`, and `d.stored` name the plugins'.
@@ -698,7 +695,8 @@ private:
 };
 using document = basic_document<search_layout_12>;
 namespace detail {
-struct document_12 {  // format 12's document, before the parts
+struct document_12 {  // format 12's document, before the parts, and its key (F8)
+	std::string key;
 	std::vector<term_entry> terms;
 	std::uint32_t length = 0;
 	std::string stored;
@@ -1468,30 +1466,6 @@ inline std::vector<format::impact> inverted_plugin::reader::tail_impacts(const f
 	postings_iterator it(*this, info);
 	for (ordinal_t d = it.next(); d != no_more_docs; d = it.next()) { pairs.push_back({it.wdf(), norm(d)}); }
 	return format::competitive(std::move(pairs));
-}
-
-inline std::optional<ordinal_t> keys_plugin::reader::find(std::string_view key, live_bits live, const deps& d) const {
-	const auto info = d.inverted.find_term(key);
-	if (!info) { return std::nullopt; }
-	postings_iterator it(d.inverted, *info);
-	for (ordinal_t ord = it.next(); ord != no_more_docs; ord = it.next()) {
-		if (live.live(ord)) { return ord; }
-	}
-	return std::nullopt;
-}
-
-template <class F>
-void keys_plugin::reader::scan(std::string_view prefix, const deps& d, F&& f) const {
-	d.inverted.scan_dictionary(prefix, [&](std::string_view term, std::string_view) {
-		if (!term.starts_with(prefix)) { return false; }
-		const auto info = d.inverted.find_term(term);
-		if (!info) { corrupt("term index"); }
-		postings_iterator it(d.inverted, *info);
-		for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
-			if (!f(term, o)) { return false; }
-		}
-		return true;
-	});
 }
 
 class positions_reader {

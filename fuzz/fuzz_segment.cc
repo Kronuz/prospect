@@ -21,8 +21,8 @@ namespace {
 
 const char* const vocab[] = {"the", "of", "a", "b", "c", "rare", "bool", "weighted", "nopos"};
 
-// keyed: docids with gaps, versions, and a key term per document (format 12's docids,
-// versions, and pk_filter sections); permuted: the same docids in a shuffled order.
+// keyed: docids with gaps, versions, and a key per document (the docids, versions, keys,
+// and key_index sections); permuted: the same docids in a shuffled order.
 std::string build(std::uint64_t seed, std::uint32_t docs, bool wide = false, bool keyed = false, bool permuted = false) {
 	std::mt19937_64 rng(seed);
 	strata::segment_writer w;
@@ -59,7 +59,6 @@ std::string build(std::uint64_t seed, std::uint32_t docs, bool wide = false, boo
 		}
 		docid = permuted ? ids[d] : docid + 1 + (rng() % 8 == 0 ? rng() % 100000 : rng() % 3);
 		const std::string key = "Q" + std::to_string(docid);
-		in.push_back({key, 0, {}});
 		w.add(docid, in, length, rec, rng() % 4 == 0 ? rng() : rng() % 40, key);
 	}
 	return w.flush({});

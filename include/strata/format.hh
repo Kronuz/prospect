@@ -103,9 +103,9 @@ enum class section : std::uint16_t {
 	stats = 8,
 	norms = 9,  // one encode_length byte per document, for Lucene-compatible scoring
 	versions = 10,   // one version per ordinal, bit-packed from the segment's minimum
-	pk_filter = 11,  // the key terms' range and a binary fuse filter, until key_index (F8)
-	keys = 12,
-	key_index = 13,
+	pk_filter = 11,  // retired: format 12's key filter; corruption wherever it appears
+	keys = 12,       // key blocks: key -> ordinal (keys.hh, F8)
+	key_index = 13,  // count, range, filter, and the key blocks' index (keys.hh, F8)
 	values = 14,
 	points = 15,
 	term_lists = 16,
@@ -153,7 +153,6 @@ struct kind_rule {
 	std::uint32_t needs;  // the structure bit that requires it; 0: mandatory
 	check verify;
 	std::uint8_t rank;
-	bool optional = false;  // pk_filter only: present with keys, until key_index replaces it
 };
 inline constexpr kind_rule kinds[section_kinds] = {
 	{section::header, "header", owner::core, 0, check::pinned, 0},
@@ -167,9 +166,9 @@ inline constexpr kind_rule kinds[section_kinds] = {
 	{section::stats, "stats", owner::core, 0, check::pinned, 10},
 	{section::norms, "norms", owner::inverted, bit::norms, check::pinned, 12},
 	{section::versions, "versions", owner::keys, bit::keys, check::pinned, 14},
-	{section::pk_filter, "pk_filter", owner::keys, bit::keys, check::pinned, 15, true},
-	{section::keys, "keys", owner::keys, bit::keys, check::regions, unranked},
-	{section::key_index, "key_index", owner::keys, bit::keys, check::pinned, unranked},
+	{section::pk_filter, "pk_filter", owner::core, 0, check::pinned, unranked},  // retired
+	{section::keys, "keys", owner::keys, bit::keys, check::regions, 5},
+	{section::key_index, "key_index", owner::keys, bit::keys, check::pinned, 15},
 	{section::values, "values", owner::values, bit::values, check::regions, unranked},
 	{section::points, "points", owner::points, bit::points, check::regions, unranked},
 	{section::term_lists, "term_lists", owner::term_lists, bit::term_lists, check::regions, unranked},
@@ -388,7 +387,7 @@ inline void check_structures(const std::vector<section_entry>& entries, std::uin
 	for (const auto& r : kinds) {
 		const bool wanted = r.needs == 0 || (structures & r.needs);
 		if (seen[std::uint16_t(r.kind)] && (!wanted || r.rank == unranked)) { corrupt("section without its structure"); }
-		if (wanted && r.rank != unranked && !r.optional && !seen[std::uint16_t(r.kind)]) { corrupt("missing section"); }
+		if (wanted && r.rank != unranked && !seen[std::uint16_t(r.kind)]) { corrupt("missing section"); }
 	}
 }
 

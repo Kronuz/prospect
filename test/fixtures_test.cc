@@ -65,10 +65,7 @@ static std::string build(std::uint32_t docs, std::size_t stored, bool keyed, boo
 	for (std::uint32_t d = 0; d < docs; ++d) {
 		std::uint32_t length = terms_of(d, pos, in);
 		std::string key;
-		if (keyed) {
-			key = "Q" + std::to_string(first + d * step);
-			in.push_back({key, 0, {}});
-		}
+		if (keyed) { key = "Q" + std::to_string(first + d * step); }  // the document's key, not a term (F8)
 		if (in.empty()) {
 			pos[0] = {1};
 			in.push_back({words[0], 1, pos[0]});
@@ -165,7 +162,7 @@ int main() {
 				for (std::uint32_t p = 0; p < x.terms.back().wdf; ++p) { x.terms.back().positions.push_back(1 + k + 7 * p); }
 				x.length += x.terms.back().wdf;
 			}
-			x.terms.push_back({"Q" + std::to_string(d % 50), 0, {}});
+			x.key = "Q" + std::to_string(d % 50);
 			x.stored = "doc" + std::to_string(d);
 			return x;
 		};
