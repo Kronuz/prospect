@@ -511,11 +511,11 @@ struct keys_plugin {
 
 	// A document's key is the core's field (L10), held exactly as given. A keyless index
 	// (no key prefix) refuses a document that carries one (F13-R39); with a prefix, a key
-	// that lacks it is invalid (F13-R25 item 2).
+	// that lacks it or passes the terms' limit is invalid (F13-R25 item 2, CR12).
 	static std::optional<std::string> key_of(const validate_context& vc, const core_part& d, bool& valid) {
 		valid = true;
 		if (d.key.empty()) { return std::nullopt; }
-		if (vc.key_prefix.empty()) {
+		if (vc.key_prefix.empty() || d.key.size() > format::max_term_bytes) {
 			valid = false;
 			return std::nullopt;
 		}
@@ -765,9 +765,10 @@ template <class... Entries>
 struct basic_document<layout<Entries...>> : core_part, detail::plugin_part_t<Entries>... {
 	// Stage-1 checks in layout order; false on the first that fails.
 	bool valid(const validate_context& vc) const { return (valid_part<Entries>(vc) && ...); }
-	// Buffer memory beyond the document object, and the parts' disk estimate.
-	std::uint64_t part_bytes() const { return (part_bytes_of<Entries>() + ... + 0); }
-	std::uint64_t disk_estimate() const { return (disk_estimate_of<Entries>() + ... + 0); }
+	// Buffer memory beyond the document object, and the parts' disk estimate; the core's key
+	// counts as a term does (its bytes, and an ordinal and version on disk).
+	std::uint64_t part_bytes() const { return key.size() + (part_bytes_of<Entries>() + ... + 0); }
+	std::uint64_t disk_estimate() const { return (key.empty() ? 0 : key.size() + 12) + (disk_estimate_of<Entries>() + ... + 0); }
 
 private:
 	template <class E>

@@ -554,7 +554,7 @@ public:
 		}
 		for (const auto& b : buffer_) {
 			if (b.dead) { continue; }
-			document_record(b.docid, b.version, b.key);
+			document_record(b.docid, b.version, b.doc.key);
 			if (configured & inverted_plugin::structure) { inverted_plugin::records(b.docid, b.doc, emit); }
 			if (configured & stored_plugin::structure) { stored_plugin::records(b.docid, b.doc, emit); }
 		}
@@ -780,8 +780,7 @@ private:
 	};
 	struct buffered {
 		std::uint64_t docid, version;
-		std::string key;
-		document doc;
+		document doc;  // its key is doc.key
 		bool dead = false;
 	};
 	// Where a docid's live copy is.
@@ -1615,7 +1614,7 @@ private:
 			const std::uint64_t version = !key ? 0 : exists ? current + 1 : 1;
 			bump_last_docid(docid);
 			buffer_docids_[docid] = buffer_.size();
-			buffer_.push_back({docid, version, key.value_or(std::string()), o.doc});
+			buffer_.push_back({docid, version, o.doc});
 			buffer_bytes_ += doc_bytes(o.doc);
 			undo_.push_back({undo_step::buffer_push});
 			if (key) { set_key(*key, key_entry{docid, version}); }
@@ -1668,7 +1667,7 @@ private:
 							const buffered* b = docs[i];
 							in.clear();
 							for (const auto& t : b->doc.terms) { in.push_back({t.term, t.wdf, t.positions}); }
-							w.add(b->docid, in, b->doc.length, b->doc.stored, b->version, b->key);
+							w.add(b->docid, in, b->doc.length, b->doc.stored, b->version, b->doc.key);
 						}
 						std::array<std::uint8_t, 16> header{};
 						std::memcpy(header.data(), &ids[k], 8);

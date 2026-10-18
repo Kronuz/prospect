@@ -993,6 +993,15 @@ int main() {
 		CHECK(ix.check().keys == 0);
 	}
 
+	// The buffer and the disk estimate count a document's key as they count a term (CR12).
+	{
+		strata::document d;
+		d.terms.push_back({"w", 1, {}});
+		const std::uint64_t bytes = d.part_bytes(), disk = d.disk_estimate();
+		d.key = "Q" + std::string(999, 'k');
+		CHECK(d.part_bytes() == bytes + 1000 && d.disk_estimate() >= disk + 1000);
+	}
+
 	std::printf("format13: %s\n", failures ? "FAILED" : "ok");
 	return failures ? 1 : 0;
 }
