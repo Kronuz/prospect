@@ -15,7 +15,14 @@ TRIALS=${TRIALS:-'~/bench/trials.sh'}
 script=$(basename "${TRIALS%% *}")  # the VM script TRIALS runs, stopped on noise
 here=$(cd "$(dirname "$0")" && pwd)
 log=${STRATA_TRIALS_LOG:-$here/../../.scratch/quiet-trials.log}
-load() { sysctl -n vm.loadavg | awk '{print $2}'; }
+vm_pid=$(cat "$here/../../.scratch/linux-vm/qemu.pid" 2>/dev/null)
+# Host load from everything but the VM: the trials' own threads (up to its vCPUs) are not noise.
+load() {
+	local l q
+	l=$(sysctl -n vm.loadavg | awk '{print $2}')
+	q=$( [ -n "$vm_pid" ] && ps -o %cpu= -p "$vm_pid" 2>/dev/null || echo 0)
+	awk -v l="$l" -v q="${q:-0}" 'BEGIN { x = l - q / 100; printf "%.2f\n", (x < 0 ? 0 : x) }'
+}
 above() { awk -v l="$1" -v m="$LIMIT" 'BEGIN { exit !(l > m) }'; }
 # Other agents' work stays off the host while the trials hold it (`quiet`, where installed).
 quiet_sh=${QUIET_SH:-$(command -v quiet || echo :)}
