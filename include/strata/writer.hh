@@ -103,18 +103,17 @@ inline void append_built(section_sink& sink, flush_charge* memory, format::secti
 	if (memory) { memory->shrink(bytes.capacity()); }
 }
 // The core's sections that frame a segment (F5): the header first; docids and stats (the
-// count, then the length provider's fields) held for the tail; then the table of contents
-// and the footer, which records the structures built (F4).
+// document count, F7) held for the tail; then the table of contents and the footer, which
+// records the structures built (F4).
 inline void begin_segment(section_sink& sink, const std::array<std::uint8_t, 16>& segment_id) {
 	sink.write(format::section::header, format::encode_header(segment_id));
 }
 inline void write_docids(section_sink& sink, flush_charge* memory, std::span<const std::uint64_t> docids) {
 	append_built(sink, memory, format::section::docids, docids::encode(docids, memory));
 }
-inline void finish_segment(section_sink& sink, std::span<const std::uint64_t> docids, std::string_view legacy_stats, std::uint32_t structures) {
+inline void finish_segment(section_sink& sink, std::span<const std::uint64_t> docids, std::uint32_t structures) {
 	std::string stats;
 	format::put<std::uint64_t>(stats, docids.size());
-	stats += legacy_stats;
 	sink.write(format::section::stats, stats);
 	sink.finish();
 	counting_output& o = sink.out();
@@ -189,9 +188,9 @@ public:
 	std::uint32_t min_length() const noexcept { return lengths_.empty() ? 0 : *std::min_element(lengths_.begin(), lengths_.end()); }
 	std::uint32_t max_length() const noexcept { return lengths_.empty() ? 0 : *std::max_element(lengths_.begin(), lengths_.end()); }
 	std::uint32_t max_positions() const noexcept { return max_positions_; }
-	// Format 12's fields of `stats` after the count: total, minimum, and maximum length, and
-	// the most positions of a term in a document (L9).
-	std::string legacy_stats() const {
+	// The statistics that lead term_index (F7, L9): total, minimum, and maximum length, and
+	// the most positions of a term in a document; 20 bytes.
+	std::string statistics() const {
 		std::string out;
 		format::put<std::uint64_t>(out, total_length());
 		format::put<std::uint32_t>(out, min_length());
@@ -318,7 +317,7 @@ public:
 		auto tables = dict.finish();
 		if (memory) { memory->grow(tables.blocks.capacity() + tables.index.capacity()); }
 		sink.write(format::section::terms, tables.blocks);
-		sink.write(format::section::term_index, tables.index);
+		sink.write(format::section::term_index, statistics() + tables.index);
 		detail::append_built(sink, memory, format::section::lengths, pack_u32(lengths_));
 		std::string norms(lengths_.size(), '\0');
 		for (std::size_t i = 0; i < lengths_.size(); ++i) { norms[i] = char(format::encode_length(lengths_[i])); }
@@ -872,7 +871,7 @@ private:
 		detail::write_docids(sink, memory, docids_);
 		keys_.finish(sink);
 		stored_.finish(sink);
-		detail::finish_segment(sink, docids_, inverted_.legacy_stats(), format::bit::inverted | format::bit::norms | format::bit::keys | format::bit::stored);
+		detail::finish_segment(sink, docids_, format::bit::inverted | format::bit::norms | format::bit::keys | format::bit::stored);
 	}
 
 	inverted_builder inverted_;

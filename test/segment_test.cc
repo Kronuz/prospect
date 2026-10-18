@@ -69,6 +69,8 @@ static std::string with_section(const std::string& file, strata::format::section
 	return with_sections(file, {{kind, std::string(bytes)}}, edit);
 }
 
+static std::string section_of(const std::string& file, strata::format::section kind);
+
 // The file with its dictionary rebuilt from its own term infos, `change` editing each.
 static std::string with_terms(const std::string& file, const std::function<void(std::string_view, strata::format::term_info&)>& change) {
 	strata::segment seg(file);
@@ -82,7 +84,8 @@ static std::string with_terms(const std::string& file, const std::function<void(
 		return true;
 	});
 	auto t = b.finish();
-	return with_sections(file, {{strata::format::section::terms, t.blocks}, {strata::format::section::term_index, t.index}});
+	const std::string statistics = section_of(file, strata::format::section::term_index).substr(0, strata::inverted_plugin::statistics_size);
+	return with_sections(file, {{strata::format::section::terms, t.blocks}, {strata::format::section::term_index, statistics + t.index}});
 }
 
 static std::string section_of(const std::string& file, strata::format::section kind) {
@@ -581,8 +584,10 @@ int main() {
 		CHECK(!opens(refooter([&](auto& f) { f.toc_offset = body + 1; })));
 		CHECK(!opens(refooter([&](auto& f) { f.toc_length = body - f.toc_offset + 1; })));
 		CHECK(!opens(refooter([&](auto& f) { --f.toc_length; })));
-		// stats: not 28 bytes.
-		CHECK(!opens(with_section(keyed, section::stats, section_of(keyed, section::stats).substr(0, 27))));
+		// stats: the count alone, 8 bytes (F7); term_index: its 20 bytes of statistics first.
+		CHECK(!opens(with_section(keyed, section::stats, section_of(keyed, section::stats).substr(0, 7))));
+		CHECK(!opens(with_section(keyed, section::stats, section_of(keyed, section::stats) + std::string(20, '\0'))));
+		CHECK(!opens(with_section(keyed, section::term_index, section_of(keyed, section::term_index).substr(0, 19))));
 		// Contiguous docids: size, base 0, base unlike the footer, and a range that wraps.
 		const std::string cd = section_of(plain, section::docids);
 		auto with_base = [&](std::uint64_t base) {

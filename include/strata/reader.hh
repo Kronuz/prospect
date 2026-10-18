@@ -123,7 +123,7 @@ public:
 			if (e.kind == format::section::docids) { docids_ = file.substr(e.offset, e.length); }
 			if (e.kind == format::section::stats) { stats_ = file.substr(e.offset, e.length); }
 		}
-		if (stats_.size() != 28) { corrupt("stats"); }
+		if (stats_.size() != 8) { corrupt("stats"); }
 		doc_count_ = format::get<std::uint64_t>(stats_.data());
 		if (doc_count_ != footer_.doc_count) { corrupt("document count"); }
 		std::sort(spans.begin(), spans.end(), [](const auto& a, const auto& b) { return a.offset < b.offset; });
@@ -231,6 +231,8 @@ struct inverted_plugin {
 		for (const auto& t : p.terms) { n += t.term.size() + 12 + 4 * t.positions.size(); }
 		return n;
 	}
+	// The bytes of its statistics at the head of term_index (F7).
+	static constexpr std::size_t statistics_size = 20;
 	// Its sections are F3's rows owned by it; its bits are F4's (L4).
 	static constexpr format::owner owner = format::owner::inverted;
 	static constexpr std::uint32_t structure = format::bit::inverted;
@@ -239,9 +241,12 @@ struct inverted_plugin {
 	class reader {
 	public:
 		explicit reader(const open_context& c) : state_(std::make_unique<state>()), doc_count_(c.doc_count) {
-			const std::string_view stats = c.core.stats();
-			max_positions_ = format::get<std::uint32_t>(stats.data() + 24);
-			total_length_ = format::get<std::uint64_t>(stats.data() + 8);
+			// term_index: [total length u64][minimum length u32][maximum length u32][most
+			// positions u32], then the dictionary's index (F7), all under its section CRC.
+			const std::string_view term_index = c.section(format::section::term_index).bytes;
+			if (term_index.size() < statistics_size) { corrupt("term index statistics"); }
+			total_length_ = format::get<std::uint64_t>(term_index.data());
+			max_positions_ = format::get<std::uint32_t>(term_index.data() + 16);
 			state_->terms = c.section(format::section::terms);
 			postings_ = c.section(format::section::postings);
 			positions_ = c.section(format::section::positions);
@@ -257,7 +262,7 @@ struct inverted_plugin {
 			if (norms_.size() != doc_count_) { corrupt("norms size"); }
 			// The term index is copied out of the mapping (verified at open), so later lookups
 			// never read bytes that could change or fault under the FST's unchecked traversal.
-			state_->pinned_index.assign(c.section(format::section::term_index).bytes);
+			state_->pinned_index.assign(term_index.substr(statistics_size));
 			try {
 				dict_.emplace(state_->terms.bytes, state_->pinned_index, &verify_terms, state_.get());  // validates the FST index
 			} catch (const termdict::corrupt&) {
