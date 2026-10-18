@@ -675,6 +675,16 @@ int main() {
 		CHECK(!opens(with_section(keyed, section::key_index, key_index(count, lo, hi, "junk"))));
 		CHECK(!opens(with_section(keyed, section::key_index, key_index(count, hi, lo, filter))));
 		CHECK(!opens(with_section(keyed, section::key_index, key_index(count, "", hi, filter))));
+		// A malformed key blocks' index (the FST) is damage, never std::invalid_argument (CR4).
+		{
+			std::string head = key_index(count, lo, hi, filter);
+			head.resize(head.size() - dict.size());
+			std::string flipped = dict;
+			flipped.back() ^= 0x5a;
+			for (const std::string& d : {dict.substr(0, dict.size() / 2), flipped, std::string("not an fst"), std::string()}) {
+				CHECK(!opens(with_section(keyed, section::key_index, head + d)));
+			}
+		}
 	}
 	// C13: decoders reached with crafted bytes: term-info ranges that wrap, impact lists
 	// whose sizes, counts, or ends disagree, a stored index without frames or whose first
