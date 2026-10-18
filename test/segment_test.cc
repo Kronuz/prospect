@@ -685,6 +685,36 @@ int main() {
 				CHECK(!opens(with_section(keyed, section::key_index, head + d)));
 			}
 		}
+		// One key whose range has a minimum unlike its maximum (CR6, M2).
+		{
+			strata::segment_writer w1;
+			std::vector<std::uint32_t> one{1};
+			std::vector<strata::posting_input> in{{"w", 1, one}};
+			w1.add(5, in, 1, "r", 1, "Qk5");
+			const std::string single = w1.flush({});
+			const std::string k1 = section_of(single, section::key_index);
+			const char* q = k1.data();
+			const char* qend = q + k1.size();
+			std::string one_index;
+			strata::format::put_leb(one_index, strata::format::get_leb(&q, qend));
+			std::vector<std::string> parts;
+			for (int i = 0; i < 3; ++i) {
+				const std::uint64_t n = strata::format::get_leb(&q, qend);
+				parts.emplace_back(q, std::size_t(n));
+				q += n;
+			}
+			CHECK(parts[0] == "Qk5" && parts[1] == "Qk5");
+			auto with_range = [&](std::string_view a, std::string_view b) {
+				std::string out = one_index;
+				for (std::string_view v : {a, b, std::string_view(parts[2])}) {
+					strata::format::put_leb(out, v.size());
+					out += v;
+				}
+				return with_section(single, section::key_index, out + std::string(q, qend));
+			};
+			CHECK(opens(with_range("Qk5", "Qk5")));
+			CHECK(!opens(with_range("Qk5", "Qk6")));
+		}
 	}
 	// C13: decoders reached with crafted bytes: term-info ranges that wrap, impact lists
 	// whose sizes, counts, or ends disagree, a stored index without frames or whose first

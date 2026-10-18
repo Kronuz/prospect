@@ -836,6 +836,13 @@ int main() {
 			CHECK(ix.apply(t2, {}).versions == std::vector<std::uint64_t>{0});  // flushed
 			ix.commit();
 			for (const auto& sv : ix.segments()) { CHECK(!sv.seg->holds<strata::keys_plugin>() && sv.seg->core().entry(section::versions) == nullptr); }
+			// A merge's output takes the configuration too (F4; CR6, M4).
+			CHECK(apply(ix, add) == strata::verdict::accepted);
+			ix.commit();
+			ix.force_merge();
+			CHECK(ix.segments().size() == 1);
+			for (const auto& sv : ix.segments()) { CHECK(!sv.seg->holds<strata::keys_plugin>() && sv.seg->core().entry(section::keys) == nullptr); }
+			CHECK(ix.digest() != before);
 		}
 	}
 
@@ -978,6 +985,37 @@ int main() {
 			CHECK(refused(with_section(good10, section::key_index, reindex(&q99, false))));  // max above it
 			CHECK(refused(with_section(good10, section::key_index, reindex(nullptr, true))));
 		}
+		// The merge's backstop refuses a key-prefixed term too, never drops it (F13-R10; CR6, M33).
+		{
+			strata::segment_writer w;
+			std::vector<strata::posting_input> in{{"Qx", 1, {}}};
+			w.add(1, in, 1);
+			const std::string bytes = w.flush({});
+			strata::segment seg(bytes);
+			const std::vector<strata::merge_source> src{{&seg, nullptr}};
+			std::string out;
+			strata::string_output so(out);
+			strata::string_spill spill;
+			strata::merge_options mo;
+			mo.key_prefix = "Q";
+			bool threw = false;
+			try {
+				(void)strata::merge_segments(src, {}, so, spill, mo);
+			} catch (const std::invalid_argument&) {
+				threw = true;
+			}
+			CHECK(threw);
+		}
+		// A length-0 document keeps its length record through a flush (F21; CR6, M5).
+		{
+			auto empty = upsert("Qempty", "w");
+			empty.doc.terms.clear();
+			empty.doc.length = 0;
+			CHECK(apply(ix, empty) == strata::verdict::accepted);
+			const std::uint64_t buffered = ix.digest();
+			ix.commit();
+			CHECK(ix.digest() == buffered);
+		}
 		// The writer's backstop refuses a key-prefixed term, never drops it.
 		{
 			strata::segment_writer w;
@@ -1016,6 +1054,26 @@ int main() {
 		CHECK(matches(ix, "Qa", {}).size() == 1 && matches(ix, "w", {}).size() == 1);
 		CHECK(!ix.find_key("Qa"));
 		CHECK(ix.check().keys == 0);
+	}
+
+	// inverted's statistics equal its documents' (F7; CR6, M28): total, minimum, and maximum
+	// length, and most positions, at the head of term_index.
+	{
+		strata::segment_writer w;
+		const std::uint32_t lengths[] = {3, 7, 5};
+		const std::vector<std::uint32_t> pos[] = {{1}, {1, 2, 3, 4}, {2, 5}};
+		for (std::uint32_t d = 0; d < 3; ++d) {
+			std::vector<strata::posting_input> in{{"w", std::uint32_t(pos[d].size()), pos[d]}};
+			w.add(d + 1, in, lengths[d], {});
+		}
+		const std::string bytes = w.flush({});
+		strata::segment s(bytes);
+		const auto& inv = s.get<strata::inverted_plugin>();
+		CHECK(inv.total_length() == 15 && inv.max_positions() == 4);
+		const std::string_view head = s.core().section(section::term_index).bytes;
+		CHECK(strata::format::get<std::uint64_t>(head.data()) == 15);
+		CHECK(strata::format::get<std::uint32_t>(head.data() + 8) == 3 && strata::format::get<std::uint32_t>(head.data() + 12) == 7);
+		CHECK(strata::format::get<std::uint32_t>(head.data() + 16) == 4);
 	}
 
 	// The buffer and the disk estimate count a document's key as they count a term (CR12).
