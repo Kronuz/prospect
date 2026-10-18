@@ -54,6 +54,7 @@ static std::string with_sections(const std::string& file, const std::map<strata:
 		e = strata::format::describe(e.kind, out.size(), b, e.region_shift);
 		out += b;
 	}
+	while (out.size() % strata::format::section_alignment) { out.push_back('\0'); }
 	const std::string toc_bytes = strata::format::encode_toc(toc);
 	f.toc_offset = out.size();
 	f.toc_length = toc_bytes.size();
@@ -237,9 +238,9 @@ int main() {
 			std::string bad = file;
 			const std::size_t at = rng() % bad.size();
 			bad[at] = char(bad[at] ^ char(1 + rng() % 255));
-			bool in_section = at >= file.size() - 48;  // the footer
+			bool in_section = at >= file.size() - strata::format::footer_size;
 			for (const auto& e : layout) { in_section = in_section || (at >= e.offset && at < e.offset + e.length); }
-			const std::uint64_t toc_at = strata::format::get<std::uint64_t>(file.data() + file.size() - 48);
+			const std::uint64_t toc_at = strata::format::get<std::uint64_t>(file.data() + file.size() - strata::format::footer_size);
 			in_section = in_section || at >= toc_at;
 			bool detected = false;
 			try {

@@ -95,37 +95,29 @@ template <class Layout>
 class basic_segment;
 using segment = basic_segment<search_layout_12>;
 
-// The core of an open segment (L7): the footer, table of contents, and header; every
+// The core of an open segment (L7): the prefix first (F2), then the footer, table of
+// contents, and header; the structure bits against those this binary reads (F4); every
 // pinned section's checksum; stats' document count; docids; and the one verified-region
 // state that every regions-checked section shares.
 class core_segment {
 public:
-	core_segment(std::string_view file, std::span<const section_rule> rules) : file_(file) {
+	core_segment(std::string_view file, std::uint32_t readable) : file_(file) {
+		version_ = format::read_version(file);
 		footer_ = format::decode_footer(file);
 		sections_ = format::decode_toc(file, footer_);
-		if (sections_.empty() || sections_[0].kind != format::section::header || sections_[0].offset != 0 ||
-			sections_[0].length != format::header_size) {
-			corrupt("header entry");
-		}
-		if (std::memcmp(file.data(), format::header_magic, 8) != 0 || format::get<std::uint32_t>(file.data() + 8) != format::version) {
-			corrupt("header magic or version");
-		}
-		// Kinds no rule claims are left alone in format 12, as before the split; a kind listed
-		// twice is corrupt.
+		if (format::get<std::uint32_t>(file.data() + 16) != 0) { corrupt("header flags"); }
+		format::check_structures(sections_, footer_.structures, readable);
+		// Each regions-checked section's CRCs move to its span; others are dropped. The
+		// table's rank order makes every kind appear at most once.
 		std::vector<residency::verified_regions::span> spans;
-		std::vector<format::section> seen;
-		// Each regions-checked section's CRCs move to its span; others are dropped.
 		for (auto& e : sections_) {
-			if (std::find(seen.begin(), seen.end(), e.kind) != seen.end()) { corrupt("section listed twice"); }
-			seen.push_back(e.kind);
-			const section_rule* r = rule_of(rules, e.kind);
-			if (r && r->check == section_rule::regions) {
+			const format::check c = format::rule_of(e.kind)->verify;
+			if (c == format::check::regions) {
 				spans.push_back({e.offset, e.length, e.region_shift, std::move(e.region_crcs)});
 			} else {
 				std::vector<std::uint32_t>().swap(e.region_crcs);
 			}
-			if (!r) { continue; }
-			if (r->check == section_rule::pinned) {
+			if (c == format::check::pinned) {
 				if (hashes::crc32c(file.data() + e.offset, e.length) != e.crc) { corrupt("section checksum"); }
 			}
 			if (e.kind == format::section::docids) { docids_ = file.substr(e.offset, e.length); }
@@ -144,12 +136,8 @@ public:
 		validate_docids();
 	}
 
-	// The core's own sections, all verified whole at open.
-	static constexpr section_rule rules[] = {
-		{format::section::header, section_rule::pinned, section_rule::with_plugin},
-		{format::section::docids, section_rule::pinned, section_rule::with_plugin},
-		{format::section::stats, section_rule::pinned, section_rule::with_plugin},
-	};
+	// The structure bits the core reads (F4): none until index_sort's reader (F18).
+	static constexpr std::uint32_t reads = 0;
 
 	// The handle for a section, or an empty one when the segment lacks it.
 	section_handle section(format::section kind) const {
@@ -166,6 +154,9 @@ public:
 	}
 
 	std::uint64_t doc_count() const noexcept { return doc_count_; }
+	std::uint32_t version() const noexcept { return version_; }
+	// The footer's structure bits (F4).
+	std::uint32_t structures() const noexcept { return footer_.structures; }
 	std::string_view stats() const noexcept { return stats_; }
 	const std::vector<format::section_entry>& sections() const noexcept { return sections_; }
 	std::uint64_t min_docid() const noexcept { return footer_.min_docid; }
@@ -181,12 +172,6 @@ public:
 	bool docid_ordered() const noexcept { return ids_.docid_ordered(); }
 
 private:
-	static const section_rule* rule_of(std::span<const section_rule> rules, format::section kind) {
-		for (const auto& r : rules) {
-			if (r.kind == kind) { return &r; }
-		}
-		return nullptr;
-	}
 	// docids: see docids.hh; validated whole at open.
 	void validate_docids() { ids_ = docids::reader(docids_, doc_count_, footer_.min_docid, footer_.max_docid); }
 
@@ -199,13 +184,16 @@ private:
 	std::vector<format::section_entry> sections_;
 	std::unique_ptr<shared> regions_ = std::make_unique<shared>();  // stable address for handles
 	std::uint64_t doc_count_ = 0;
+	std::uint32_t version_ = 0;
 };
 
-// What a plugin reader's constructor sees (L7).
+// What a plugin reader's constructor sees (L7): `present` is its structure bit, which the
+// core read from the footer before any reader opened.
 struct open_context {
 	std::uint32_t version;
 	std::uint64_t doc_count;
 	const core_segment& core;
+	bool present = true;
 	section_handle section(format::section kind) const { return core.section(kind); }
 };
 
@@ -243,14 +231,10 @@ struct inverted_plugin {
 		for (const auto& t : p.terms) { n += t.term.size() + 12 + 4 * t.positions.size(); }
 		return n;
 	}
-	static constexpr section_rule rules[] = {
-		{format::section::terms, section_rule::regions, section_rule::with_plugin},
-		{format::section::term_index, section_rule::pinned, section_rule::with_plugin},
-		{format::section::postings, section_rule::regions, section_rule::with_plugin},
-		{format::section::positions, section_rule::regions, section_rule::with_plugin},
-		{format::section::lengths, section_rule::first_use, section_rule::with_plugin},
-		{format::section::norms, section_rule::pinned, section_rule::with_plugin},
-	};
+	// Its sections are F3's rows owned by it; its bits are F4's (L4).
+	static constexpr format::owner owner = format::owner::inverted;
+	static constexpr std::uint32_t structure = format::bit::inverted;
+	static constexpr std::uint32_t structures = format::bit::inverted | format::bit::norms;
 
 	class reader {
 	public:
@@ -453,10 +437,9 @@ struct keys_plugin {
 		}
 		return key;
 	}
-	static constexpr section_rule rules[] = {
-		{format::section::versions, section_rule::pinned, section_rule::with_plugin},
-		{format::section::pk_filter, section_rule::pinned, section_rule::optional},
-	};
+	static constexpr format::owner owner = format::owner::keys;
+	static constexpr std::uint32_t structure = format::bit::keys;
+	static constexpr std::uint32_t structures = format::bit::keys;
 
 	// Format 12's keys are the inverted plugin's terms with the key prefix, so lookups read
 	// its reader, passed at each call (L3); no reader holds a sibling.
@@ -544,9 +527,9 @@ struct stored_plugin {
 	static bool validate(const validate_context&, const part& p) { return p.stored.size() <= format::max_stored_record; }
 	static std::uint64_t bytes(const part& p) { return p.stored.size(); }
 	static std::uint64_t disk_estimate(const part& p) { return p.stored.size() + p.stored.size() / 16; }
-	static constexpr section_rule rules[] = {
-		{format::section::stored, section_rule::regions, section_rule::with_plugin},
-	};
+	static constexpr format::owner owner = format::owner::stored;
+	static constexpr std::uint32_t structure = format::bit::stored;
+	static constexpr std::uint32_t structures = format::bit::stored;
 
 	class reader {
 	public:
@@ -729,38 +712,50 @@ struct reader_of<docids_section> {  // the core's section: no reader of its own
 		explicit type(const open_context&) {}
 	};
 };
+// The structure bits a layout entry reads, and its own bit (none for the core's docids).
 template <class E>
-constexpr std::span<const section_rule> rules_of() {
+constexpr std::uint32_t structures_of() {
 	if constexpr (std::is_same_v<E, docids_section>) {
-		return {};
+		return 0;
 	} else {
-		return E::rules;
+		return E::structures;
 	}
 }
-// No two of the core and the layout's plugins claim one section kind (L2).
-template <class... Entries>
-consteval bool kinds_disjoint() {
-	std::array<format::section, 64> kinds{};
-	std::size_t n = 0;
-	for (const auto& r : core_segment::rules) { kinds[n++] = r.kind; }
-	(..., [&] {
-		for (const auto& r : rules_of<Entries>()) { kinds[n++] = r.kind; }
-	}());
-	for (std::size_t i = 0; i < n; ++i) {
-		for (std::size_t j = i + 1; j < n; ++j) {
-			if (kinds[i] == kinds[j]) { return false; }
-		}
+template <class E>
+constexpr std::uint32_t structure_of() {
+	if constexpr (std::is_same_v<E, docids_section>) {
+		return 0;
+	} else {
+		return E::structure;
 	}
-	return true;
+}
+// No two plugins of a layout share an owner, so none claims another's kinds (F3), and no
+// two read one bit (F4).
+template <class... Entries>
+consteval bool owners_distinct() {
+	std::uint32_t bits = core_segment::reads;
+	bool ok = true;
+	(..., [&] {
+		ok = ok && !(bits & structures_of<Entries>());
+		bits |= structures_of<Entries>();
+	}());
+	std::array<int, 8> owners{};
+	(..., [&] {
+		if constexpr (!std::is_same_v<Entries, docids_section>) { ok = ok && owners[std::size_t(Entries::owner)]++ == 0; }
+	}());
+	return ok;
 }
 }  // namespace detail
 
-// A plugin's shape in format 12 (L4): format 13 adds P::structure and P::structures, and
-// the builder joins it at the writer façade's split.
+// A plugin's shape (L4): its owner in F3's table and its bits in F4's, its own bit among
+// them; the builder joins it at the writer façade's split.
 template <class P>
 concept section_plugin = requires(const typename P::reader& r) {
 	{ P::id } -> std::convertible_to<std::string_view>;
-	{ P::rules } -> std::convertible_to<std::span<const section_rule>>;
+	{ P::owner } -> std::convertible_to<format::owner>;
+	{ P::structure } -> std::convertible_to<std::uint32_t>;
+	{ P::structures } -> std::convertible_to<std::uint32_t>;
+	requires ((P::structures & P::structure) == P::structure) && (std::popcount(P::structure) == 1);
 	r.verify_all();
 } && std::constructible_from<typename P::reader, const open_context&> &&
 	requires(const merge_context& m, std::span<const typename P::reader* const> in, section_sink& sink) {
@@ -778,21 +773,16 @@ template <class... Entries>
 class basic_segment<layout<Entries...>> {
 	static_assert(((std::is_same_v<Entries, docids_section> || section_plugin<Entries>) && ...), "every layout entry is a section plugin");
 	static_assert((std::size_t(std::is_same_v<Entries, docids_section>) + ... + 0) <= 1, "docids_section appears at most once");
-	static_assert(detail::kinds_disjoint<Entries...>(), "two owners claim one section kind");
-	static std::vector<section_rule> all_rules() {
-		std::vector<section_rule> out(std::begin(core_segment::rules), std::end(core_segment::rules));
-		(..., [&] {
-			for (const auto& r : detail::rules_of<Entries>()) { out.push_back(r); }
-		}());
-		return out;
-	}
+	static_assert(detail::owners_distinct<Entries...>(), "two plugins share an owner or a structure bit");
+	// The bits this layout reads (F4; layers R16): the core's and each entry's.
+	static constexpr std::uint32_t readable = (core_segment::reads | ... | detail::structures_of<Entries>());
 
 public:
 	// Verifies the footer, the table of contents, the header, and the pinned sections in
 	// full; other sections are verified per region as they are read. The file's bytes
 	// must outlive the segment; a temporary string cannot be one.
 	explicit basic_segment(std::string&&) = delete;
-	explicit basic_segment(std::string_view file) : core_(file, all_rules()), present_(presence(core_)), readers_(open(core_)) {}
+	explicit basic_segment(std::string_view file) : core_(file, readable), present_(presence(core_)), readers_(open(core_, present_)) {}
 
 	// The core's view: docids, ordinals, the document count, the table of contents.
 	const core_segment& core() const noexcept { return core_; }
@@ -829,13 +819,16 @@ public:
 private:
 	using readers = std::tuple<typename detail::reader_of<Entries>::type...>;
 	static_assert(sizeof...(Entries) <= 32, "a layout's presence mask holds 32 entries");
-	// Format 12 requires every plugin of the layout; format 13 reads the footer's flags (L7).
-	static std::uint32_t presence(const core_segment&) noexcept {
-		return std::uint32_t((std::uint64_t(1) << sizeof...(Entries)) - 1);
+	// Bit i: entry i's own structure bit is set in the footer (the core's docids always).
+	static std::uint32_t presence(const core_segment& core) noexcept {
+		std::uint32_t out = 0, i = 0;
+		(..., (out |= std::uint32_t(!detail::structure_of<Entries>() || (core.structures() & detail::structure_of<Entries>())) << i++));
+		return out;
 	}
-	static readers open(const core_segment& core) {
-		const open_context c{format::version, core.doc_count(), core};
-		return readers{typename detail::reader_of<Entries>::type(c)...};
+	static readers open(const core_segment& core, std::uint32_t present) {
+		std::uint32_t i = 0;
+		auto context = [&](std::uint32_t at) { return open_context{core.version(), core.doc_count(), core, bool((present >> at) & 1)}; };
+		return readers{typename detail::reader_of<Entries>::type(context(i++))...};
 	}
 	template <class P, class... Ds>
 	typename P::deps deps_of(type_list<Ds...>) const noexcept {
@@ -856,7 +849,7 @@ private:
 	}
 
 	core_segment core_;
-	std::uint32_t present_;  // bit i: layout entry i is present; set before the readers open (L7)
+	std::uint32_t present_;  // bit i: layout entry i is present; set before the readers open (F4)
 	readers readers_;
 };
 

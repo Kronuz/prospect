@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
 #include <random>
 
 namespace {
@@ -72,9 +73,14 @@ const std::string& base(unsigned which) {
 	return which >= 250 ? permuted : segments[which % std::size(segments)];
 }
 
-// Recomputes every section's checksum and region checksums, then the table of contents'
-// and the footer's, so the file passes verification with whatever its sections hold.
+// Recomputes the prefix's CRC, every section's checksum and region checksums, then the
+// table of contents' and the footer's, so the file passes verification with whatever its
+// sections hold.
 void refresh_checksums(std::string& file) {
+	if (file.size() >= strata::format::prefix_size) {
+		const std::uint32_t crc = hashes::crc32c(file.data(), 12);
+		std::memcpy(file.data() + 12, &crc, 4);
+	}
 	const auto footer = strata::format::decode_footer(file);
 	auto toc = strata::format::decode_toc(file, footer);
 	for (auto& e : toc) { e = strata::format::describe(e.kind, e.offset, std::string_view(file).substr(e.offset, e.length), e.region_shift); }
@@ -191,6 +197,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 		exercise(seg);
 	} catch (const strata::corrupt_segment&) {
 		verdict = "corrupt_segment";
+	} catch (const strata::unsupported_segment&) {
+		verdict = "unsupported_segment";  // a resealed version or structure bit this binary lacks: refused (F2, F4)
 	} catch (const termdict::corrupt&) {
 		verdict = "termdict::corrupt";
 	} catch (const std::invalid_argument&) {

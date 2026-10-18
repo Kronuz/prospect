@@ -837,7 +837,7 @@ private:
 	// A segment just written to f: mapped when the backend maps and the mapping holds what
 	// was written (size and footer), so its bytes leave memory; else kept.
 	static std::unique_ptr<open_segment> written_segment(kronuz::journal::File& f, const files::segment_ref& r, std::string bytes) {
-		if (auto m = f.map(); m && m->bytes().size() == r.size && format::decode_footer(m->bytes()).toc_crc == r.footer_crc) {
+		if (auto m = f.map(); m && m->bytes().size() == r.size && (format::read_version(m->bytes()), format::decode_footer(m->bytes()).toc_crc == r.footer_crc)) {
 			return std::make_unique<open_segment>(r, std::move(m));
 		}
 		return std::make_unique<open_segment>(r, std::move(bytes));
@@ -2078,7 +2078,16 @@ private:
 		}
 		return out;
 	}
+	// A manifest names only segments its own binary wrote, so until the manifest records a
+	// version range and a structure mask (F20), an unsupported one is damage (F2).
 	static std::unique_ptr<open_segment> load_segment(kronuz::journal::IO& io, const files::segment_ref& r, bool whole) {
+		try {
+			return load_segment_of(io, r, whole);
+		} catch (const unsupported_segment& e) {
+			throw corrupt_segment(e.what());
+		}
+	}
+	static std::unique_ptr<open_segment> load_segment_of(kronuz::journal::IO& io, const files::segment_ref& r, bool whole) {
 		const std::string name = index_detail::segment_name(r.id);
 		std::unique_ptr<kronuz::journal::File> f;
 		try {
@@ -2092,6 +2101,7 @@ private:
 		if (!mapped) { bytes = index_detail::read_all(*f); }
 		const std::string_view view = mapped ? mapped->bytes() : std::string_view(bytes);
 		if (view.size() != r.size) { throw corrupt_index("file size differs from the manifest: " + name); }
+		(void)format::read_version(view);
 		if (format::decode_footer(view).toc_crc != r.footer_crc) { throw corrupt_index("segment differs from its manifest entry"); }
 		auto s = mapped ? std::make_unique<open_segment>(r, std::move(mapped)) : std::make_unique<open_segment>(r, std::move(bytes));
 		if (s->seg.core().doc_count() != r.doc_count) { throw corrupt_index("segment document count"); }

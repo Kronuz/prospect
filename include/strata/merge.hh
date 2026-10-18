@@ -150,7 +150,7 @@ inline built inverted_plugin::merge(const merge_context& m, std::span<const read
 			return std::string_view(current);
 		}
 	});
-	return {1, b.legacy_stats()};
+	return {format::bit::inverted | format::bit::norms, b.legacy_stats()};
 }
 
 // Rebuilt from the core's fields: each new ordinal's version and key.
@@ -159,7 +159,7 @@ inline built keys_plugin::merge(const merge_context& m, std::span<const reader* 
 	b.memory = m.memory;
 	for (const auto& f : m.fields) { b.add(f); }
 	b.finish(sink);
-	return {1, {}};
+	return {format::bit::keys, {}};
 }
 
 // Rebuilt record by record in output order. In docid order each input's frames are read
@@ -211,7 +211,7 @@ inline built stored_plugin::merge(const merge_context& m, std::span<const reader
 		b.add(rec);
 	}
 	b.finish(sink);
-	return {1, {}};
+	return {format::bit::stored, {}};
 }
 
 // Where a reordering merge's order comes from (L6, reordering review P1-R4 (d)): a layout
@@ -348,9 +348,10 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 	m.memory = memory;
 	m.records = options.records;
 
-	section_sink sink(out, region_shift, &positions_spill);
+	section_sink sink(out, region_shift, &positions_spill, memory);
 	begin_segment(sink, segment_id);
 	std::string legacy_stats;
+	std::uint32_t structures = 0;
 	auto merge_entry = [&]<class E>(std::type_identity<E>) {
 		if constexpr (std::is_same_v<E, docids_section>) {
 			write_docids(sink, memory, docids);
@@ -359,11 +360,12 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 			readers.reserve(sources.size());
 			for (const auto& src : sources) { readers.push_back(&src.seg->template get<E>()); }
 			built b = E::merge(m, readers, sink);
+			structures |= b.structures;
 			if (!b.legacy_stats.empty()) { legacy_stats = std::move(b.legacy_stats); }
 		}
 	};
 	(merge_entry(std::type_identity<Entries>{}), ...);
-	finish_segment(sink, docids, legacy_stats);
+	finish_segment(sink, docids, legacy_stats, structures);
 	return plan;
 }
 

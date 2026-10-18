@@ -240,12 +240,7 @@ int terms(const std::string& dir) {
 int sections(const std::string& dir) {
 	residency::file file;
 	strata::segment seg = open(dir, file);
-	static constexpr const char* names[] = {"header", "terms", "term_index", "postings", "positions", "lengths",
-		"stored", "docids", "stats", "norms", "versions", "pk_filter"};
-	for (const auto& e : seg.core().sections()) {
-		const auto k = std::size_t(e.kind);
-		std::cout << (k < std::size(names) ? names[k] : "unknown") << '\t' << e.length << '\n';
-	}
+	for (const auto& e : seg.core().sections()) { std::cout << strata::format::name_of(e.kind) << '\t' << e.length << '\n'; }
 	std::cout << "file\t" << file.size() << '\n';
 	return 0;
 }
@@ -605,7 +600,6 @@ int resident(const std::string& dir) {
 	if (core(&::mincore) != 0) { return 1; }
 	const std::string_view bytes(static_cast<const char*>(map), size);
 	const auto toc = strata::format::decode_toc(bytes, strata::format::decode_footer(bytes));
-	const char* names[] = {"header", "terms", "term_index", "postings", "positions", "lengths", "stored", "docids", "stats", "norms", "versions", "pk_filter"};
 	std::uint64_t total = 0;
 	for (const auto& e : toc) {
 		std::uint64_t held = 0;  // the section's bytes on resident pages
@@ -613,8 +607,7 @@ int resident(const std::string& dir) {
 			if (in[p] & 1) { held += std::min<std::uint64_t>((p + 1) * page, e.offset + e.length) - std::max<std::uint64_t>(p * page, e.offset); }
 		}
 		total += held;
-		const auto k = std::size_t(e.kind);
-		std::printf("%-12s %12llu bytes %10.1f MB resident (%.1f%%)\n", k < std::size(names) ? names[k] : "?", (unsigned long long)e.length, double(held) / 1e6,
+		std::printf("%-12s %12llu bytes %10.1f MB resident (%.1f%%)\n", strata::format::name_of(e.kind), (unsigned long long)e.length, double(held) / 1e6,
 			e.length ? 100.0 * double(held) / double(e.length) : 0.0);
 	}
 	std::printf("total %.1f MB resident of %.1f MB\n", double(total) / 1e6, double(size) / 1e6);

@@ -98,7 +98,14 @@ int main() {
 	for (const auto& name : names) {
 		const std::uint64_t size = fs.view(name).size();
 		const std::uint64_t stride = std::max<std::uint64_t>(1, size / 48);
+		// A segment's frozen prefix byte by byte (format-13.md F2), then a stride over the rest.
+		const std::uint64_t prefix = name.starts_with("seg-") ? std::min<std::uint64_t>(strata::format::prefix_size, size) : 0;
+		std::vector<std::uint64_t> offsets;
+		for (std::uint64_t at = 0; at < prefix; ++at) { offsets.push_back(at); }
 		for (std::uint64_t at = 0; at < size; at += stride) {
+			if (at >= prefix) { offsets.push_back(at); }
+		}
+		for (const std::uint64_t at : offsets) {
 			for (faultfs::media kind : {faultfs::media::bit_flip, faultfs::media::read_error}) {
 				// Transient: the medium returns the right bytes on the next read.
 				fs.clear_faults();

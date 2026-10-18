@@ -102,20 +102,21 @@ inline void append_built(section_sink& sink, flush_charge* memory, format::secti
 	sink.write(kind, bytes);
 	if (memory) { memory->shrink(bytes.capacity()); }
 }
-// The core's sections that frame a segment (L2): the header first; docids where the
-// layout puts them; stats (the count, then the length provider's fields), the table of
-// contents, and the footer last.
+// The core's sections that frame a segment (F5): the header first; docids and stats (the
+// count, then the length provider's fields) held for the tail; then the table of contents
+// and the footer, which records the structures built (F4).
 inline void begin_segment(section_sink& sink, const std::array<std::uint8_t, 16>& segment_id) {
 	sink.write(format::section::header, format::encode_header(segment_id));
 }
 inline void write_docids(section_sink& sink, flush_charge* memory, std::span<const std::uint64_t> docids) {
 	append_built(sink, memory, format::section::docids, docids::encode(docids, memory));
 }
-inline void finish_segment(section_sink& sink, std::span<const std::uint64_t> docids, std::string_view legacy_stats) {
+inline void finish_segment(section_sink& sink, std::span<const std::uint64_t> docids, std::string_view legacy_stats, std::uint32_t structures) {
 	std::string stats;
 	format::put<std::uint64_t>(stats, docids.size());
 	stats += legacy_stats;
 	sink.write(format::section::stats, stats);
+	sink.finish();
 	counting_output& o = sink.out();
 	o.align(format::section_alignment);
 	format::footer f;
@@ -126,6 +127,7 @@ inline void finish_segment(section_sink& sink, std::span<const std::uint64_t> do
 	f.doc_count = std::uint32_t(docids.size());
 	f.min_docid = docids.empty() ? 0 : *std::min_element(docids.begin(), docids.end());
 	f.max_docid = docids.empty() ? 0 : *std::max_element(docids.begin(), docids.end());
+	f.structures = structures;
 	o.write(toc_bytes);
 	o.write(format::encode_footer(f));
 }
@@ -858,18 +860,19 @@ private:
 		return ord;
 	}
 
-	// The file in format 12's order (L2): header; the inverted sections; docids; versions
-	// and the key filter; stored; stats; then the table of contents and footer.
+	// The file in F5's order: the header; the streamed sections (the inverted ones, then
+	// stored); the pinned tail by rank; then the table of contents and footer. Every
+	// structure of format 12's layout is built (F4).
 	template <class Inverted>
 	void write(const std::array<std::uint8_t, 16>& segment_id, output& out, Inverted&& inverted) {
 		sync();
-		section_sink sink(out, region_shift);
+		section_sink sink(out, region_shift, nullptr, memory);
 		detail::begin_segment(sink, segment_id);
 		inverted(sink);
 		detail::write_docids(sink, memory, docids_);
 		keys_.finish(sink);
 		stored_.finish(sink);
-		detail::finish_segment(sink, docids_, inverted_.legacy_stats());
+		detail::finish_segment(sink, docids_, inverted_.legacy_stats(), format::bit::inverted | format::bit::norms | format::bit::keys | format::bit::stored);
 	}
 
 	inverted_builder inverted_;
