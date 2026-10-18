@@ -47,6 +47,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -284,14 +285,12 @@ struct inverted_plugin {
 			norms_ = c.section(format::section::norms).bytes;
 			// lengths' bytes, its width included, are read on first use only (F7, T7).
 			if (lengths_.empty()) { corrupt("lengths"); }
-			if (!(c.core.structures() & format::bit::norms)) {
-				// Norms not built (F4): each document's from its exact length, verified first.
-				verify_lengths();
-				state_->owned_norms.resize(doc_count_);
-				for (ordinal_t o = 0; o < doc_count_; ++o) { state_->owned_norms[o] = char(format::encode_length(length(o))); }
-				norms_ = state_->owned_norms;
+			// Norms not built (F4) are derived from the exact lengths on first use, so an open
+			// reads no byte of lengths (T7; F13-R36).
+			if (c.core.structures() & format::bit::norms) {
+				if (norms_.size() != doc_count_) { corrupt("norms size"); }
+				norms_at_ = norms_.data();
 			}
-			if (norms_.size() != doc_count_) { corrupt("norms size"); }
 			// The term index is copied out of the mapping (verified at open), so later lookups
 			// never read bytes that could change or fault under the FST's unchecked traversal.
 			state_->pinned_index.assign(term_index.substr(statistics_size));
@@ -304,7 +303,13 @@ struct inverted_plugin {
 			}
 		}
 
-		std::uint8_t norm(ordinal_t ord) const noexcept { return std::uint8_t(norms_[ord]); }
+		// A document's encode_length byte: the norms section's, or derived once from lengths
+		// when the segment has none, which throws corrupt_segment if lengths is damaged.
+		std::uint8_t norm(ordinal_t ord) const {
+			const char* n = norms_at_;
+			if (!n) [[unlikely]] { n = derived_norms(); }
+			return std::uint8_t(n[ord]);
+		}
 		void verify_postings(std::uint64_t offset, std::uint64_t length) const {
 			if (!postings_.verify(offset, length)) { corrupt("postings checksum"); }
 		}
@@ -429,6 +434,18 @@ struct inverted_plugin {
 		}
 
 	private:
+		const char* derived_norms() const {
+			if (!state_->norms_ready.load(std::memory_order_acquire)) {
+				std::lock_guard lock(state_->norms_mutex);
+				if (!state_->norms_ready.load(std::memory_order_relaxed)) {
+					std::string n(doc_count_, '\0');
+					for (ordinal_t o = 0; o < doc_count_; ++o) { n[o] = char(format::encode_length(length(o))); }
+					state_->owned_norms = std::move(n);
+					state_->norms_ready.store(true, std::memory_order_release);
+				}
+			}
+			return state_->owned_norms.data();
+		}
 		// Checks lengths whole on first use: its CRC, then its width against its size.
 		void verify_lengths() const {
 			auto& st = state_->lengths_state;
@@ -457,8 +474,6 @@ struct inverted_plugin {
 			state_->owned_lengths.assign(1, '\0');  // width 0
 			lengths_ = state_->owned_lengths;
 			lengths_crc_ = hashes::crc32c(lengths_.data(), lengths_.size());
-			state_->owned_norms.assign(doc_count_, '\0');
-			norms_ = state_->owned_norms;
 			dict_.emplace(state_->owned_blocks, state_->pinned_index);
 		}
 		// Heap-held, so the dictionary's verifier context survives moving the segment.
@@ -468,10 +483,13 @@ struct inverted_plugin {
 			std::string owned_blocks, owned_lengths, owned_norms;  // stand-ins for absent sections
 			std::atomic<std::uint8_t> lengths_state{0};  // 0 unverified, 1 good, 2 bad
 			std::atomic<std::uint8_t> length_width{0};   // lengths' width, set by verify_lengths
+			std::mutex norms_mutex;                      // derives norms once, when not built
+			std::atomic<bool> norms_ready{false};
 		};
 		std::unique_ptr<state> state_;
 		section_handle postings_, positions_;
 		std::string_view lengths_, norms_;
+		const char* norms_at_ = nullptr;  // the norms section's bytes; null until derived
 		std::optional<termdict::reader> dict_;
 		std::uint64_t doc_count_ = 0, total_length_ = 0;
 		std::uint32_t max_positions_ = 0, lengths_crc_ = 0;
