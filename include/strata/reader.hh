@@ -766,6 +766,11 @@ public:
 	// What P's reader needs from the readers it depends on, built at each call (L3).
 	template <class P>
 	typename P::deps deps() const noexcept { return deps_of<P>(typename P::depends_on{}); }
+	// Whether P is in this layout, at compile time (L11): guard get<P>() with `if constexpr`.
+	template <class P>
+	static constexpr bool contains() noexcept {
+		return index_of<P>() < sizeof...(Entries);
+	}
 	// Whether this segment holds P's structure (L11): a bit per layout entry, set at open;
 	// false, with no load, for a plugin outside the layout.
 	template <class P>

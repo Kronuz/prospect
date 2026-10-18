@@ -94,6 +94,18 @@ static std::string merged(const std::vector<std::string>& files, const std::vect
 	return out;
 }
 
+// Generic over layouts (L11): contains<P>() guards get<P>() at compile time, holds<P>() reads the file.
+struct outside_plugin {};
+template <class P, class S>
+static std::uint64_t docs_if_held(const S& s) {
+	if constexpr (S::template contains<P>()) {
+		if (s.template holds<P>()) { return s.template get<P>().doc_count(); }
+	}
+	return 0;
+}
+static_assert(segment::contains<strata::inverted_plugin>() && segment::contains<strata::keys_plugin>() && segment::contains<strata::stored_plugin>());
+static_assert(!segment::contains<outside_plugin>());
+
 int main() {
 	// Stored records across several 64 KiB frames.
 	pin("stored-frames.sx", build(300, 1000, true));
@@ -124,9 +136,9 @@ int main() {
 		CHECK(moved.get<strata::stored_plugin>().stored(5).size() == 1000);
 		moved.verify_all();
 		// Presence is per segment (L11): a format-12 segment holds every plugin of its layout.
-		struct outside_plugin {};
 		CHECK(moved.holds<strata::inverted_plugin>() && moved.holds<strata::keys_plugin>() && moved.holds<strata::stored_plugin>());
 		CHECK(!moved.holds<outside_plugin>());
+		CHECK(docs_if_held<strata::inverted_plugin>(moved) == 300 && docs_if_held<outside_plugin>(moved) == 0);
 	}
 	// An empty flush, when the writer allows one.
 	try {
