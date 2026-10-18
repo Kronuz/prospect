@@ -140,12 +140,13 @@ int main() {
 		CHECK(!moved.holds<outside_plugin>());
 		CHECK(docs_if_held<strata::inverted_plugin>(moved) == 300 && docs_if_held<outside_plugin>(moved) == 0);
 	}
-	// An empty flush, when the writer allows one.
+	// An empty flush: empty.sx is pinned, so a writer that starts refusing one fails here.
 	try {
 		segment_writer w;
 		pin("empty.sx", w.flush(id));
-	} catch (const std::exception&) {
-		std::printf("  empty: the writer refuses an empty flush\n");
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "empty.sx: the writer refuses an empty flush: %s\n", e.what());
+		CHECK(false);
 	}
 	// The digest of a fixed script: keys, replaces, deletes, metadata, buffered documents.
 	{

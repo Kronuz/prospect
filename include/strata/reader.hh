@@ -38,8 +38,10 @@
 #include "termdict.hh"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
+#include <concepts>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -491,7 +493,8 @@ struct keys_plugin {
 		// The first live ordinal holding key, if any.
 		std::optional<ordinal_t> find(std::string_view key, live_bits live, const deps& d) const;
 		// Calls f(key, ord) for every ordinal, live or not, of every key starting with
-		// `prefix`, in key order, until f returns false.
+		// `prefix`, in key order, until f returns false. Format 12 cannot tell a key from
+		// another term, so `prefix` must start with the index's key prefix.
 		template <class F>
 		void scan(std::string_view prefix, const deps& d, F&& f) const;
 
@@ -726,24 +729,60 @@ struct reader_of<docids_section> {  // the core's section: no reader of its own
 		explicit type(const open_context&) {}
 	};
 };
+template <class E>
+constexpr std::span<const section_rule> rules_of() {
+	if constexpr (std::is_same_v<E, docids_section>) {
+		return {};
+	} else {
+		return E::rules;
+	}
+}
+// No two of the core and the layout's plugins claim one section kind (L2).
+template <class... Entries>
+consteval bool kinds_disjoint() {
+	std::array<format::section, 64> kinds{};
+	std::size_t n = 0;
+	for (const auto& r : core_segment::rules) { kinds[n++] = r.kind; }
+	(..., [&] {
+		for (const auto& r : rules_of<Entries>()) { kinds[n++] = r.kind; }
+	}());
+	for (std::size_t i = 0; i < n; ++i) {
+		for (std::size_t j = i + 1; j < n; ++j) {
+			if (kinds[i] == kinds[j]) { return false; }
+		}
+	}
+	return true;
+}
 }  // namespace detail
+
+// A plugin's shape in format 12 (L4): format 13 adds P::structure and P::structures, and
+// the builder joins it at the writer façade's split.
+template <class P>
+concept section_plugin = requires(const typename P::reader& r) {
+	{ P::id } -> std::convertible_to<std::string_view>;
+	{ P::rules } -> std::convertible_to<std::span<const section_rule>>;
+	r.verify_all();
+} && std::constructible_from<typename P::reader, const open_context&> &&
+	requires(const merge_context& m, std::span<const typename P::reader* const> in, section_sink& sink) {
+		{ P::merge(m, in, sink) } -> std::same_as<built>;
+	} &&
+	(!requires { typename P::part; } || requires(const validate_context& vc, const typename P::part& part) {
+		{ P::validate(vc, part) } -> std::same_as<bool>;
+		{ P::bytes(part) } -> std::same_as<std::uint64_t>;
+		{ P::disk_estimate(part) } -> std::same_as<std::uint64_t>;
+	});
 
 // An open segment of a layout: the core, then each plugin's reader in layout order.
 // Callers name the reader that owns each concern (L11).
 template <class... Entries>
 class basic_segment<layout<Entries...>> {
-	template <class E>
-	static constexpr auto rules_of() {
-		if constexpr (std::is_same_v<E, docids_section>) {
-			return std::span<const section_rule>{};
-		} else {
-			return std::span<const section_rule>(E::rules);
-		}
-	}
+	static_assert(((std::is_same_v<Entries, docids_section> || section_plugin<Entries>) && ...), "every layout entry is a section plugin");
+	static_assert((std::size_t(std::is_same_v<Entries, docids_section>) + ... + 0) <= 1, "docids_section appears at most once");
+	static_assert(detail::kinds_disjoint<Entries...>(), "two owners claim one section kind");
 	static std::vector<section_rule> all_rules() {
 		std::vector<section_rule> out(std::begin(core_segment::rules), std::end(core_segment::rules));
 		(..., [&] {
-			for (const auto& r : rules_of<Entries>()) { out.push_back(r); }
+			for (const auto& r : detail::rules_of<Entries>()) { out.push_back(r); }
 		}());
 		return out;
 	}

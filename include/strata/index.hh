@@ -561,14 +561,18 @@ public:
 			inverted.scan_terms([&](std::string_view term, const format::term_info& info) {
 				postings_iterator it(inverted, info);
 				positions_reader pr(inverted, info);
-				const bool is_key = !m_.key_prefix.empty() && term.starts_with(m_.key_prefix);
 				for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
-					if (dead(o)) { continue; }
-					if (is_key && !keys.insert(std::string(term)).second) { throw std::logic_error("strata: digest: key invariant"); }
-					posting_record(core.docid(o), term, it.wdf(), pr.read(it));
+					if (!dead(o)) { posting_record(core.docid(o), term, it.wdf(), pr.read(it)); }
 				}
 				return true;
 			});
+			// One live copy per key, from the keys reader's scan (L3, L8).
+			if (!m_.key_prefix.empty()) {
+				s.seg.template get<keys_plugin>().scan(m_.key_prefix, s.seg.template deps<keys_plugin>(), [&](std::string_view key, ordinal_t o) {
+					if (!dead(o) && !keys.insert(std::string(key)).second) { throw std::logic_error("strata: digest: key invariant"); }
+					return true;
+				});
+			}
 		}
 		for (const auto& b : buffer_) {
 			if (b.dead) { continue; }
@@ -1096,7 +1100,7 @@ private:
 			}
 			job.memory = flush_charge(ctx.budget);
 			if (!ctx.exec->checkpoint(stop)) { throw task::cancelled{}; }
-			std::vector<merge_source> sources;
+			std::vector<basic_merge_source<Layout>> sources;
 			for (std::size_t k = 0; k < job.sources.size(); ++k) { sources.push_back({&job.sources[k]->seg, &job.deleted[k]}); }
 			const std::string name = index_detail::segment_name(job.id);
 			auto file = ctx.io->create_exclusive(name);
@@ -1120,7 +1124,7 @@ private:
 						records.emplace(ctx, job, used, stop, chunk, index_detail::records_name(job.id));
 					}
 					merge_spill positions(ctx, job, used, stop, chunk);
-					job.plan = merge_segments(sources, job.header, sink, positions,
+					job.plan = detail::merge_layout(std::span<const basic_merge_source<Layout>>(sources), job.header, sink, positions,
 						{.cancel = &stop, .memory = &job.memory, .order = order, .records = records ? &*records : nullptr, .key_prefix = ctx.key_prefix});
 				}
 				sink.finish();
