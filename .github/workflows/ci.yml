@@ -13,3 +13,6 @@ concurrency:
 jobs:
   ci:
     uses: Kronuz/cpp-libraries/.github/workflows/cmake.yml@main
+    with:
+      # The ASan+UBSan suite runs 35-60 minutes; the default cap of 60 cancels it.
+      asan_timeout_minutes: 120
