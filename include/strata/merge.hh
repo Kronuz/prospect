@@ -66,6 +66,7 @@ struct merge_context {
 	flush_charge* memory = nullptr;           // the merge's working memory, when budgeted
 	scratch* records = nullptr;               // out of docid order: where stored records spill
 	std::string_view key_prefix;              // the index's, for the inverted builder's backstop (F8)
+	std::uint32_t structures = ~std::uint32_t(0);  // the output's configured bits (F4)
 	void check() const {
 		if (cancel && cancel->requested()) { throw task::cancelled{}; }
 	}
@@ -80,6 +81,7 @@ inline built inverted_plugin::merge(const merge_context& m, std::span<const read
 	inverted_builder b;
 	b.memory = m.memory;
 	b.key_prefix = m.key_prefix;
+	b.norms = (m.structures & format::bit::norms) != 0;
 	for (const auto& src : m.order) { (void)b.begin(in[src.source]->length(src.ord)); }
 	std::deque<reader::term_cursor> terms;
 	std::vector<bool> more(in.size());
@@ -152,7 +154,7 @@ inline built inverted_plugin::merge(const merge_context& m, std::span<const read
 			return std::string_view(current);
 		}
 	});
-	return {format::bit::inverted | format::bit::norms};
+	return {format::bit::inverted | (b.norms ? format::bit::norms : 0)};
 }
 
 // Rebuilt from the core's fields: each new ordinal's version and key.
@@ -233,6 +235,7 @@ struct merge_options {
 	                                             // a single source out of docid order keeps its order
 	scratch* records = nullptr;                  // out of docid order: where each source's live records spill
 	std::string_view key_prefix;                 // the index's, only for the inverted builder's backstop (F8)
+	std::uint32_t structures = ~std::uint32_t(0);  // the index's configured bits (F4); default: every one of the layout's
 };
 
 namespace detail {
@@ -347,6 +350,7 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 	m.memory = memory;
 	m.records = options.records;
 	m.key_prefix = options.key_prefix;
+	m.structures = options.structures;
 
 	section_sink sink(out, region_shift, &positions_spill, memory);
 	begin_segment(sink, segment_id);
@@ -354,6 +358,7 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 	write_docids(sink, memory, docids);  // the core's, in the tail by rank (F5)
 	auto merge_entry = [&]<class E>(std::type_identity<E>) {
 		if constexpr (!std::is_same_v<E, docids_section>) {
+			if (!(options.structures & E::structure)) { return; }  // not configured: none of its sections (F4)
 			std::vector<const typename E::reader*> readers;
 			readers.reserve(sources.size());
 			for (const auto& src : sources) { readers.push_back(&src.seg->template get<E>()); }

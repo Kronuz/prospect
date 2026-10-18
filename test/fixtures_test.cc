@@ -60,6 +60,7 @@ static std::uint32_t terms_of(std::uint32_t d, std::vector<std::vector<std::uint
 static std::string build(std::uint32_t docs, std::size_t stored, bool keyed, bool wide = false, std::uint32_t first = 1, std::uint32_t step = 1) {
 	segment_writer w;
 	w.wide_skip_offsets = wide;
+	if (!keyed) { w.structures &= ~format::bit::keys; }  // keyless: no keys structure (F4, F9)
 	std::vector<std::vector<std::uint32_t>> pos;
 	std::vector<posting_input> in;
 	for (std::uint32_t d = 0; d < docs; ++d) {
@@ -73,7 +74,7 @@ static std::string build(std::uint32_t docs, std::size_t stored, bool keyed, boo
 		}
 		std::string record;
 		for (std::size_t i = 0; i < stored; ++i) { record.push_back(char('a' + (d + i) % 26)); }
-		w.add(first + d * step, in, length, record, 1 + d % 3, key);
+		w.add(first + d * step, in, length, record, keyed ? 1 + d % 3 : 0, key);  // a version belongs to a key (F9)
 	}
 	return w.flush(id);
 }

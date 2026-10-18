@@ -41,8 +41,16 @@ inline void check_segment(const segment& seg, const std::vector<std::uint64_t>* 
 		}
 		return true;
 	});
-	// Every key in order, its ordinal in range and its count the index's (keys.hh).
-	for (auto c = seg.get<keys_plugin>().cursor(); c.next();) { ++r.keys; }
+	// Every key in order, its ordinal in range and its count the index's (keys.hh); a
+	// nonzero version belongs to a key (F9, F13-R9).
+	std::vector<bool> keyed(seg.core().doc_count());
+	for (auto c = seg.get<keys_plugin>().cursor(); c.next();) {
+		++r.keys;
+		keyed[c.ordinal()] = true;
+	}
+	for (ordinal_t o = 0; o < seg.core().doc_count(); ++o) {
+		if (!keyed[o] && seg.get<keys_plugin>().version(o) != 0) { corrupt("a version without a key"); }
+	}
 }
 
 }  // namespace strata

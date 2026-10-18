@@ -673,6 +673,8 @@ public:
 	flush_charge* memory = nullptr;
 
 	void add(const doc_fields& f) {
+		// A version belongs to a key (F9, F13-R9).
+		if (f.key.empty() && f.version != 0) { throw std::invalid_argument("strata: a version without a key"); }
 		if (!f.key.empty()) {
 			key_bytes_ += f.key.size();
 			keys_.push_back({std::string(f.key), ordinal_t(versions_.size())});
@@ -694,9 +696,15 @@ private:
 	// versions: [min u64][width u8][(version - min) in width bits each, little-endian bit order].
 	std::string encode_versions() const {
 		std::string out;
-		const std::uint64_t lo = versions_.empty() ? 0 : *std::min_element(versions_.begin(), versions_.end());
+		std::uint64_t lo = versions_.empty() ? 0 : *std::min_element(versions_.begin(), versions_.end());
 		const std::uint64_t hi = versions_.empty() ? 0 : *std::max_element(versions_.begin(), versions_.end());
-		const unsigned width = unsigned(std::bit_width(hi - lo));
+		unsigned width = unsigned(std::bit_width(hi - lo));
+		// The reader requires lo + 2^width - 1 to fit in 64 bits; when it would not, the base is
+		// 0 and the width 64, since every version then exceeds 2^63 (F13-R25 item 7).
+		if (width && lo > ~std::uint64_t(0) - (width >= 64 ? ~std::uint64_t(0) : (std::uint64_t(1) << width) - 1)) {
+			lo = 0;
+			width = 64;
+		}
 		format::put<std::uint64_t>(out, lo);
 		out.push_back(char(width));
 		std::string bits((versions_.size() * width + 7) / 8, '\0');
@@ -783,7 +791,7 @@ public:
 	// The index's key prefix, for the inverted builder's backstop (F8); empty for none.
 	std::string key_prefix;
 	// The structures the segment holds, set from the index's configuration, never from its
-	// documents (F4). keys stays until keyless segments arrive with F9's version rule.
+	// documents (F4).
 	std::uint32_t structures = format::bit::inverted | format::bit::norms | format::bit::keys | format::bit::stored;
 
 	// Adds a document and returns its ordinal. Docids strictly increase, so ordinal order
@@ -861,6 +869,7 @@ private:
 		if (docid == 0 || (!permuted && !docids_.empty() && docid <= docids_.back())) { throw std::invalid_argument("strata: docids must increase within a segment"); }
 		if (stored.size() > format::max_stored_record) { throw std::invalid_argument("strata: stored record too large"); }
 		if (!stored.empty() && !(structures & format::bit::stored)) { throw std::invalid_argument("strata: a stored record in a segment without stored"); }
+		if (!key.empty() && !(structures & format::bit::keys)) { throw std::invalid_argument("strata: a key in a segment without keys"); }
 		keys_.add({docid, version, key});
 		stored_.add(stored);
 		const ordinal_t ord = inverted_.begin(length);
@@ -876,14 +885,14 @@ private:
 	void write(const std::array<std::uint8_t, 16>& segment_id, output& out, Inverted&& inverted) {
 		sync();
 		constexpr std::uint32_t known = format::bit::inverted | format::bit::norms | format::bit::keys | format::bit::stored;
-		if ((structures & ~known) || !(structures & format::bit::keys) || ((structures & format::bit::norms) && !(structures & format::bit::inverted))) {
+		if ((structures & ~known) || ((structures & format::bit::norms) && !(structures & format::bit::inverted))) {
 			throw std::invalid_argument("strata: segment structures");
 		}
 		section_sink sink(out, region_shift, nullptr, memory);
 		detail::begin_segment(sink, segment_id);
 		if (structures & format::bit::inverted) { inverted(sink); }
 		detail::write_docids(sink, memory, docids_);
-		keys_.finish(sink);
+		if (structures & format::bit::keys) { keys_.finish(sink); }
 		if (structures & format::bit::stored) { stored_.finish(sink); }
 		detail::finish_segment(sink, docids_, structures);
 	}

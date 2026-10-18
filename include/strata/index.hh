@@ -514,91 +514,69 @@ public:
 
 	// --- deterministic core -------------------------------------------------------------
 
-	// The logical-content digest (design D12): the sum modulo 2^64 of xxHash64 over a
-	// record per live posting, live document, `lastdocid`, schema version, and metadata
-	// entry, so equal content gives equal digests whatever its segment layout. It checks
-	// at most one live copy per docid and per key, every docid at or below `lastdocid`,
-	// and throws std::logic_error otherwise.
+	// The logical-content digest (design D12; format 13's split, L8 and F21): the sum modulo
+	// 2^64 of xxHash64 over records. The core's D record per live document holds its docid,
+	// version, and key; each configured plugin adds its own records; the core adds
+	// `lastdocid`, the schema version, and each metadata entry. Equal content gives equal
+	// digests whatever its segment layout. It checks at most one live copy per docid and per
+	// key, every docid at or below `lastdocid`, and throws std::logic_error otherwise.
 	std::uint64_t digest() const {
 		std::uint64_t sum = 0;
-		std::string rec;
-		auto u32 = [&](std::uint32_t v) { rec.append(reinterpret_cast<const char*>(&v), 4); };
-		auto u64 = [&](std::uint64_t v) { rec.append(reinterpret_cast<const char*>(&v), 8); };
-		auto add = [&] {
-			sum += xxh64::hash(rec);
-			rec.clear();
-		};
+		auto emit = [&](std::string_view rec) { sum += xxh64::hash(rec); };
 		std::set<std::uint64_t> docids;
 		std::set<std::string> keys;
-		auto document_record = [&](std::uint64_t docid, std::uint64_t version, std::uint32_t length, std::string_view stored) {
+		auto document_record = [&](std::uint64_t docid, std::uint64_t version, std::string_view key) {
 			if (docid == 0 || docid > m_.last_docid || !docids.insert(docid).second) { throw std::logic_error("strata: digest: docid invariant"); }
-			rec.push_back('D');
-			u64(docid);
-			u64(version);
-			u32(length);
-			u32(std::uint32_t(stored.size()));
-			rec += stored;
-			add();
+			if (!key.empty() && !keys.insert(std::string(key)).second) { throw std::logic_error("strata: digest: key invariant"); }
+			digest_record rec('D');
+			rec.u64(docid);
+			rec.u64(version);
+			rec.bytes(key);
+			emit(rec.data());
 		};
-		auto posting_record = [&](std::uint64_t docid, std::string_view term, std::uint32_t wdf, std::span<const std::uint32_t> positions) {
-			rec.push_back('P');
-			u64(docid);
-			u32(std::uint32_t(term.size()));
-			rec += term;
-			u32(wdf);
-			u32(std::uint32_t(positions.size()));
-			for (auto p : positions) { u32(p); }
-			add();
-		};
+		const std::uint32_t configured = configured_structures();
 		for (const auto& sp : segs_) {
 			const auto& s = *sp;
-			auto dead = [&](ordinal_t o) { return (s.deleted[o >> 6] >> (o & 63)) & 1; };
+			auto live = [&](ordinal_t o) { return !((s.deleted[o >> 6] >> (o & 63)) & 1); };
 			const core_segment& core = s.seg.core();
-			const auto& inverted = s.seg.template get<inverted_plugin>();
-			for (ordinal_t o = 0; o < core.doc_count(); ++o) {
-				if (!dead(o)) { document_record(core.docid(o), s.seg.template get<keys_plugin>().version(o), inverted.length(o), s.seg.template get<stored_plugin>().stored(o)); }
-			}
-			inverted.scan_terms([&](std::string_view term, const format::term_info& info) {
-				postings_iterator it(inverted, info);
-				positions_reader pr(inverted, info);
-				for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
-					if (!dead(o)) { posting_record(core.docid(o), term, it.wdf(), pr.read(it)); }
-				}
-				return true;
-			});
-			// One live copy per key, from the keys reader's scan (L3, L8). Until the digest's
-			// split (7c-5), each live key keeps the record its key term gave (F13-R5).
+			std::vector<std::string> key_of(core.doc_count());  // from the keys reader's scan (L3)
 			s.seg.template get<keys_plugin>().scan("", [&](std::string_view key, ordinal_t o) {
-				if (dead(o)) { return true; }
-				if (!keys.insert(std::string(key)).second) { throw std::logic_error("strata: digest: key invariant"); }
-				posting_record(core.docid(o), key, 0, {});
+				key_of[o] = key;
 				return true;
 			});
+			for (ordinal_t o = 0; o < core.doc_count(); ++o) {
+				if (live(o)) { document_record(core.docid(o), s.seg.template get<keys_plugin>().version(o), key_of[o]); }
+			}
+			if (configured & inverted_plugin::structure) { inverted_plugin::records(s.seg.template get<inverted_plugin>(), core, live, emit); }
+			if (configured & stored_plugin::structure) { stored_plugin::records(s.seg.template get<stored_plugin>(), core, live, emit); }
 		}
 		for (const auto& b : buffer_) {
 			if (b.dead) { continue; }
-			document_record(b.docid, b.version, b.doc.length, b.doc.stored);
-			if (!b.key.empty()) {
-				if (!keys.insert(b.key).second) { throw std::logic_error("strata: digest: key invariant"); }
-				posting_record(b.docid, b.key, 0, {});  // the interim key record, as for segments
-			}
-			for (const auto& t : b.doc.terms) { posting_record(b.docid, t.term, t.wdf, t.positions); }
+			document_record(b.docid, b.version, b.key);
+			if (configured & inverted_plugin::structure) { inverted_plugin::records(b.docid, b.doc, emit); }
+			if (configured & stored_plugin::structure) { stored_plugin::records(b.docid, b.doc, emit); }
 		}
-		rec.push_back('L');
-		u64(m_.last_docid);
-		add();
-		rec.push_back('S');
-		u64(m_.schema_version);
-		add();
+		digest_record last('L');
+		last.u64(m_.last_docid);
+		emit(last.data());
+		digest_record schema('S');
+		schema.u64(m_.schema_version);
+		emit(schema.data());
 		for (const auto& [k, v] : meta_) {
-			rec.push_back('M');
-			u32(std::uint32_t(k.size()));
-			rec += k;
-			u32(std::uint32_t(v.size()));
-			rec += v;
-			add();
+			digest_record m('M');
+			m.bytes(k);
+			m.bytes(v);
+			emit(m.data());
 		}
 		return sum;
+	}
+
+	// The structures this index is configured with (F4, F20): every one of its layout's, keys
+	// only with a key prefix. Flushes and merges write them; the digest records them (F21).
+	std::uint32_t configured_structures() const noexcept {
+		std::uint32_t bits = format::bit::inverted | format::bit::norms | format::bit::stored;
+		if (!m_.key_prefix.empty()) { bits |= format::bit::keys; }
+		return bits;
 	}
 
 	// Checks every segment whole (check_segment) and the digest's invariants: one live copy
@@ -904,7 +882,7 @@ private:
 		std::memcpy(job->header.data(), &job->id, 8);
 		std::memcpy(job->header.data() + 8, m_.uuid.data(), 8);
 		pending_.reserve(pending_.size() + 1);
-		const merge_context ctx{io_, exec_, opts_.rate, opts_.budget, opts_.merge_memory_wait, m_.key_prefix, opts_.reorder_settings};
+		const merge_context ctx{io_, exec_, opts_.rate, opts_.budget, opts_.merge_memory_wait, m_.key_prefix, opts_.reorder_settings, configured_structures()};
 		group_->post([job, ctx](const task::cancel_token& stop) { run_merge(*job, ctx, stop); });
 		pending_.push_back(std::move(job));
 	}
@@ -918,6 +896,7 @@ private:
 		std::uint64_t memory_wait;
 		std::string key_prefix;
 		strata::reorder::settings reorder;
+		std::uint32_t structures;  // the index's configured bits (F4)
 	};
 
 	// A merge's writes to one file, at increasing offsets: before each chunk an executor
@@ -1129,7 +1108,7 @@ private:
 					}
 					merge_spill positions(ctx, job, used, stop, chunk);
 					job.plan = detail::merge_layout(std::span<const basic_merge_source<Layout>>(sources), job.header, sink, positions,
-						{.cancel = &stop, .memory = &job.memory, .order = order, .records = records ? &*records : nullptr, .key_prefix = ctx.key_prefix});
+						{.cancel = &stop, .memory = &job.memory, .order = order, .records = records ? &*records : nullptr, .key_prefix = ctx.key_prefix, .structures = ctx.structures});
 				}
 				sink.finish();
 				job.memory.shrink(job.memory.held());  // the build's buffers are gone
@@ -1632,7 +1611,8 @@ private:
 				docid = m_.last_docid + 1;
 			}
 			if (exists) { remove_copy(by_key ? locate_docid(by_key->docid) : by_docid); }
-			const std::uint64_t version = exists ? current + 1 : 1;
+			// A version belongs to a key: a document without one has version 0 (F9).
+			const std::uint64_t version = !key ? 0 : exists ? current + 1 : 1;
 			bump_last_docid(docid);
 			buffer_docids_[docid] = buffer_.size();
 			buffer_.push_back({docid, version, key.value_or(std::string()), o.doc});
@@ -1682,6 +1662,7 @@ private:
 						segment_writer w;
 						if (opts_.budget) { w.memory = &charge; }
 						w.key_prefix = m_.key_prefix;
+						w.structures = configured_structures();
 						std::vector<posting_input> in;
 						for (std::size_t i = begin; i < end; ++i) {
 							const buffered* b = docs[i];

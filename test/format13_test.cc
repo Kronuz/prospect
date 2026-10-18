@@ -55,7 +55,7 @@ outcome open(const std::string& file) {
 	}
 }
 
-// A keyed segment holding `structures` (keys always, until 7c-5).
+// A segment holding `structures`, keyed when they include keys.
 std::string profile_segment(std::uint32_t structures, std::uint32_t first = 1) {
 	strata::segment_writer w;
 	w.structures = structures;
@@ -64,7 +64,9 @@ std::string profile_segment(std::uint32_t structures, std::uint32_t first = 1) {
 		const std::vector<std::uint32_t> pos{1, 3};
 		std::vector<strata::posting_input> in;
 		if (inverted) { in.push_back({d % 2 ? "odd" : "even", 2, pos}); }
-		w.add(first + d, in, inverted ? 2 + d % 9 : 0, stored ? std::string(1 + d % 5, 's') : std::string(), 1 + d % 4, "Q" + std::to_string(first - 1 + d));
+		const bool keyed = structures & strata::format::bit::keys;
+		w.add(first + d, in, inverted ? 2 + d % 9 : 0, stored ? std::string(1 + d % 5, 's') : std::string(), keyed ? 1 + d % 4 : 0,
+			keyed ? "Q" + std::to_string(first - 1 + d) : std::string());
 	}
 	return w.flush({});
 }
@@ -127,6 +129,25 @@ std::string relayout(const std::string& file, const std::function<void(entries&)
 	out += t;
 	if (footer) { footer(f); }
 	return out + strata::format::encode_footer(f);
+}
+
+// The file with one section's bytes replaced, laid out again with every checksum good.
+std::string with_section(const std::string& file, section kind, const std::string& bytes) {
+	auto f = strata::format::decode_footer(file);
+	auto toc = strata::format::decode_toc(file, f);
+	std::string out;
+	for (auto& e : toc) {
+		while (out.size() % strata::format::section_alignment) { out.push_back('\0'); }
+		const std::string b = e.kind == kind ? bytes : file.substr(e.offset, e.length);
+		e = strata::format::describe(e.kind, out.size(), b, e.region_shift);
+		out += b;
+	}
+	while (out.size() % strata::format::section_alignment) { out.push_back('\0'); }
+	const std::string t = strata::format::encode_toc(toc);
+	f.toc_offset = out.size();
+	f.toc_length = t.size();
+	f.toc_crc = hashes::crc32c(t.data(), t.size());
+	return out + t + strata::format::encode_footer(f);
 }
 
 // The file with its prefix's version set to v and the prefix CRC recomputed.
@@ -466,22 +487,26 @@ int main() {
 			CHECK(open(relayout(full, [](entries&) {}, [](strata::format::footer& f) { f.structures &= ~bit::stored; })) == outcome::corrupt);
 		}
 		// The writer takes structures from its configuration and refuses what they cannot
-		// hold; keyless segments wait for F9's version rule (7c-5, F13-R18).
+		// hold, and a nonzero version without a key anywhere (F9, F13-R9).
 		{
-			auto refuses = [](std::uint32_t structures, bool terms, bool record) {
+			auto refuses = [](std::uint32_t structures, bool terms, bool record, std::uint64_t version = 0, std::string key = {}) {
 				strata::segment_writer w;
 				w.structures = structures;
 				std::vector<strata::posting_input> in;
 				if (terms) { in.push_back({"t", 1, {}}); }
 				try {
-					w.add(1, in, 1, record ? "r" : "");
+					w.add(1, in, 1, record ? "r" : "", version, key);
 					(void)w.flush({});
 				} catch (const std::invalid_argument&) {
 					return true;
 				}
 				return false;
 			};
-			CHECK(refuses(bit::inverted | bit::norms | bit::stored, true, true));  // no keys
+			CHECK(!refuses(bit::inverted | bit::norms | bit::stored, true, true));        // keyless (the log profile)
+			CHECK(refuses(bit::inverted | bit::norms | bit::stored, true, true, 0, "Q1"));  // a key without keys
+			CHECK(refuses(bit::inverted | bit::norms | bit::stored, true, true, 3));        // a version without a key
+			CHECK(refuses(bit::inverted | bit::norms | bit::keys | bit::stored, true, true, 3));
+			CHECK(!refuses(bit::inverted | bit::norms | bit::keys | bit::stored, true, true, 3, "Q1"));
 			CHECK(refuses(bit::norms | bit::keys | bit::stored, false, true));    // norms without inverted
 			CHECK(refuses(bit::keys | bit::stored, true, false));                 // terms without inverted
 			CHECK(refuses(bit::inverted | bit::keys, true, true));                // a record without stored
@@ -502,6 +527,83 @@ int main() {
 			CHECK(m.get<strata::stored_plugin>().stored(0).empty() && m.get<strata::stored_plugin>().stored(200) == std::string(1, 's'));
 			CHECK(m.get<strata::inverted_plugin>().term("odd")->df == 100 && m.get<strata::inverted_plugin>().length(200) == 0);
 			CHECK(m.get<strata::keys_plugin>().find("Q1000", {}) == strata::ordinal_t(200) && m.get<strata::keys_plugin>().version(200) == 1);
+		}
+	}
+
+	// --- F9: keyless segments and the version rule (7c-5) ------------------------------------
+	{
+		// keys absent with its bit clear (the log profile): no key, every version 0.
+		const std::string log = profile_segment(bit::inverted | bit::norms | bit::stored, 1);
+		{
+			strata::segment s(log);
+			CHECK(!s.holds<strata::keys_plugin>() && s.holds<strata::inverted_plugin>());
+			for (section k : {section::keys, section::key_index, section::versions}) { CHECK(s.core().entry(k) == nullptr); }
+			const auto& keys = s.get<strata::keys_plugin>();
+			CHECK(keys.version(5) == 0 && !keys.may_hold("Q5") && !keys.find("Q5", {}) && keys.key_count() == 0);
+			std::size_t n = 0;
+			keys.scan("", [&](std::string_view, strata::ordinal_t) { return ++n, true; });
+			CHECK(n == 0);
+			CHECK(s.get<strata::inverted_plugin>().term("odd")->df == 100);
+		}
+		// Versions near 2^64 - 1 at a width above 1: the writer writes base 0 at width 64, so
+		// the reader's range check passes (F13-R25 item 7).
+		{
+			strata::segment_writer w;
+			const std::uint64_t top = ~std::uint64_t(0);
+			w.add(1, {}, 0, {}, top - 2, "Q1");
+			w.add(2, {}, 0, {}, top, "Q2");
+			const std::string bytes = w.flush({});
+			CHECK(open(bytes) == outcome::opens);
+			strata::segment s(bytes);
+			CHECK(s.get<strata::keys_plugin>().version(0) == top - 2 && s.get<strata::keys_plugin>().version(1) == top);
+		}
+		// check() refuses a nonzero version without a key (F13-R9), which no writer writes.
+		{
+			strata::segment_writer w;
+			for (std::uint64_t d = 1; d <= 10; ++d) { w.add(d, {}, 0, {}, d == 3 ? 7 : 0, d == 3 ? "Q3" : ""); }
+			const std::string good_versions = w.flush({});
+			strata::check_report r;
+			strata::check_segment(strata::segment(good_versions), nullptr, r, "Q");
+			std::string v;
+			strata::format::put<std::uint64_t>(v, 5);
+			v.push_back('\0');  // every document at version 5, width 0
+			const std::string bad = with_section(good_versions, section::versions, v);
+			CHECK(open(bad) == outcome::opens);
+			bool threw = false;
+			try {
+				strata::check_report rr;
+				strata::check_segment(strata::segment(bad), nullptr, rr, "Q");
+			} catch (const strata::corrupt_segment&) {
+				threw = true;
+			}
+			CHECK(threw);
+		}
+		// A keyless index writes keyless segments, and a document's version is 0 before and
+		// after a flush, a docid replace included (F9, F13-R18).
+		{
+			strata::faultfs::filesystem fs;
+			strata::faultfs::io io(fs);
+			auto ix = strata::index::create(io, strata::index::options{}, {});
+			strata::operation add;
+			add.type = strata::operation::add;
+			add.doc.terms.push_back({"w", 1, {1}});
+			add.doc.length = 1;
+			strata::transaction t;
+			t.ops.push_back(add);
+			const auto v1 = ix.apply(t, {});
+			CHECK(v1.result == strata::verdict::accepted && v1.versions == std::vector<std::uint64_t>{0});
+			strata::operation replace = add;
+			replace.type = strata::operation::replace_docid;
+			replace.docid = v1.docids[0];
+			strata::transaction t2;
+			t2.ops.push_back(replace);
+			CHECK(ix.apply(t2, {}).versions == std::vector<std::uint64_t>{0});  // buffered
+			const std::uint64_t before = ix.digest();
+			ix.commit();
+			CHECK(ix.digest() == before);
+			CHECK(ix.apply(t2, {}).versions == std::vector<std::uint64_t>{0});  // flushed
+			ix.commit();
+			for (const auto& sv : ix.segments()) { CHECK(!sv.seg->holds<strata::keys_plugin>() && sv.seg->core().entry(section::versions) == nullptr); }
 		}
 	}
 

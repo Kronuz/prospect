@@ -147,7 +147,8 @@ int main() {
 		faultfs::io io(fs);
 		auto ix = strata::index::create(io, keyed, uuid);
 		auto v = ix.apply(tx({add("Qa", "alpha"), add("Qb", "beta"), add("", "anonymous")}), {});
-		CHECK(v.result == verdict::accepted && v.docids == std::vector<std::uint64_t>({1, 2, 3}) && v.versions == std::vector<std::uint64_t>({1, 1, 1}));
+		// A document without a key has version 0 (F9).
+		CHECK(v.result == verdict::accepted && v.docids == std::vector<std::uint64_t>({1, 2, 3}) && v.versions == std::vector<std::uint64_t>({1, 1, 0}));
 		CHECK(ix.find_key("Qa") == kv(1, 1));  // from the version map
 		ix.refresh();
 		CHECK(ix.find_key("Qa") == kv(1, 1));  // from the segment

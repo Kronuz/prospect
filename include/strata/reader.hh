@@ -67,6 +67,23 @@ struct validate_context {
 	std::string_view key_prefix;  // the index's (F8); empty in a keyless index
 };
 
+// One digest record (L8): a tag, then little-endian fixed-width fields; strings carry their
+// length as u32.
+class digest_record {
+public:
+	explicit digest_record(char tag) : rec_(1, tag) {}
+	void u32(std::uint32_t v) { format::put<std::uint32_t>(rec_, v); }
+	void u64(std::uint64_t v) { format::put<std::uint64_t>(rec_, v); }
+	void bytes(std::string_view b) {
+		u32(std::uint32_t(b.size()));
+		rec_ += b;
+	}
+	std::string_view data() const noexcept { return rec_; }
+
+private:
+	std::string rec_;
+};
+
 // The core's fields of a document (L10): its key, empty for none (F8).
 struct core_part {
 	std::string key;
@@ -458,6 +475,12 @@ struct inverted_plugin {
 	};
 	// L6: rebuilds the plugin's sections for a merge's output (merge.hh).
 	static built merge(const merge_context& m, std::span<const reader* const> in, section_sink& sink);
+	// Its digest records (L8, F21): per document a length record, length 0 included, and per
+	// posting a P record; over a segment's live ordinals, or a buffered document.
+	template <class Live, class Emit>
+	static void records(const reader& r, const core_segment& core, Live&& live, Emit&& emit);
+	template <class Emit>
+	static void records(std::uint64_t docid, const part& p, Emit&& emit);
 };
 
 // The document's key in its own dictionary (F8), and versions (F9).
@@ -667,6 +690,26 @@ struct stored_plugin {
 	};
 	// L6: rebuilds the plugin's sections for a merge's output (merge.hh).
 	static built merge(const merge_context& m, std::span<const reader* const> in, section_sink& sink);
+	// Its digest records (L8, F21): a record of a document's stored bytes, none for an empty one.
+	template <class Live, class Emit>
+	static void records(const reader& r, const core_segment& core, Live&& live, Emit&& emit) {
+		reader::stored_frame cache;
+		for (ordinal_t o = 0; o < core.doc_count(); ++o) {
+			if (live(o)) { record(core.docid(o), r.stored(o, cache), emit); }
+		}
+	}
+	template <class Emit>
+	static void records(std::uint64_t docid, const part& p, Emit&& emit) {
+		record(docid, p.stored, emit);
+	}
+	template <class Emit>
+	static void record(std::uint64_t docid, std::string_view bytes, Emit& emit) {
+		if (bytes.empty()) { return; }
+		digest_record rec('R');
+		rec.u64(docid);
+		rec.bytes(bytes);
+		emit(rec.data());
+	}
 };
 
 // --- documents (L10) --------------------------------------------------------------------
@@ -1651,5 +1694,49 @@ private:
 	std::uint64_t decoded_counts_ = std::numeric_limits<std::uint64_t>::max();
 	std::uint64_t decoded_block_ = std::numeric_limits<std::uint64_t>::max(), decoded_offset_ = 0;
 };
+
+template <class Live, class Emit>
+void inverted_plugin::records(const reader& r, const core_segment& core, Live&& live, Emit&& emit) {
+	for (ordinal_t o = 0; o < core.doc_count(); ++o) {
+		if (!live(o)) { continue; }
+		digest_record rec('N');
+		rec.u64(core.docid(o));
+		rec.u32(r.length(o));
+		emit(rec.data());
+	}
+	r.scan_terms([&](std::string_view term, const format::term_info& info) {
+		postings_iterator it(r, info);
+		positions_reader pr(r, info);
+		for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
+			if (!live(o)) { continue; }
+			const auto positions = pr.read(it);
+			digest_record rec('P');
+			rec.u64(core.docid(o));
+			rec.bytes(term);
+			rec.u32(it.wdf());
+			rec.u32(std::uint32_t(positions.size()));
+			for (auto q : positions) { rec.u32(q); }
+			emit(rec.data());
+		}
+		return true;
+	});
+}
+
+template <class Emit>
+void inverted_plugin::records(std::uint64_t docid, const part& p, Emit&& emit) {
+	digest_record len('N');
+	len.u64(docid);
+	len.u32(p.length);
+	emit(len.data());
+	for (const auto& t : p.terms) {
+		digest_record rec('P');
+		rec.u64(docid);
+		rec.bytes(t.term);
+		rec.u32(t.wdf);
+		rec.u32(std::uint32_t(t.positions.size()));
+		for (auto q : t.positions) { rec.u32(q); }
+		emit(rec.data());
+	}
+}
 
 }  // namespace strata
