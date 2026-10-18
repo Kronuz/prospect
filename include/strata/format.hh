@@ -122,14 +122,14 @@ inline constexpr std::uint16_t section_kinds = 23;
 namespace bit {
 inline constexpr std::uint32_t inverted = 1, norms = 2, keys = 4, stored = 8, values = 16, points = 32, term_lists = 64, index_sort = 128,
 	pair_summaries = 256, stored_dictionary = 512, stored_holes = 1024, quantized_impacts = 2048, key_hash = 4096, stored_spans = 8192,
-	compact = 32768;
+	postings_runs = 16384, compact = 32768;
 }  // namespace bit
 
 // The bit a structure's bit requires (F4): a sub-structure its owner's, index_sort values;
 // 0 for none.
 inline constexpr std::uint32_t requires_of(std::uint32_t b) noexcept {
 	switch (b) {
-	case bit::norms: case bit::pair_summaries: case bit::quantized_impacts: return bit::inverted;
+	case bit::norms: case bit::pair_summaries: case bit::quantized_impacts: case bit::postings_runs: return bit::inverted;
 	case bit::stored_dictionary: case bit::stored_holes: case bit::stored_spans: return bit::stored;
 	case bit::key_hash: return bit::keys;
 	case bit::index_sort: return bit::values;

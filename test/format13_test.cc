@@ -378,6 +378,7 @@ int main() {
 		// A sub-structure without its owner's bit: damage, whatever the binary reads.
 		CHECK(with_bits(bit::norms | bit::keys | bit::stored) == outcome::corrupt);
 		CHECK(with_bits((built & ~bit::stored) | bit::stored_spans) == outcome::corrupt);
+		CHECK(with_bits(bit::keys | bit::stored | bit::postings_runs) == outcome::corrupt);  // bit 14 without inverted (F13-R32)
 		// Every other bit, defined, reserved, or unlisted: one this binary lacks, so
 		// unsupported (F4; F13-R30), and never read past.
 		for (unsigned b = 0; b < 32; ++b) {
