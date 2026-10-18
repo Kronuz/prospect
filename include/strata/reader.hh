@@ -851,10 +851,11 @@ class basic_segment<layout<Entries...>> {
 	static_assert(((std::is_same_v<Entries, docids_section> || section_plugin<Entries>) && ...), "every layout entry is a section plugin");
 	static_assert((std::size_t(std::is_same_v<Entries, docids_section>) + ... + 0) <= 1, "docids_section appears at most once");
 	static_assert(detail::owners_distinct<Entries...>(), "two plugins share an owner or a structure bit");
+
+public:
 	// The bits this layout reads (F4; layers R16): the core's and each entry's.
 	static constexpr std::uint32_t readable = (core_segment::reads | ... | detail::structures_of<Entries>());
 
-public:
 	// Verifies the footer, the table of contents, the header, and the pinned sections in
 	// full; other sections are verified per region as they are read. The file's bytes
 	// must outlive the segment; a temporary string cannot be one.

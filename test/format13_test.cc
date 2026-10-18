@@ -391,7 +391,94 @@ int main() {
 		CHECK(sink.toc()[3].offset % strata::format::section_alignment == 0);
 	}
 
-	// --- At the index: a manifest-named unsupported segment is damage (before F20) -----------
+	// --- F20: the manifest's structures and versions (7c-6) -----------------------------------
+	{
+		enum class verdict { opens, corrupt, unsupported, other };
+		auto open_index = [](kronuz::journal::IO& io, const strata::index::options& o) {
+			try {
+				auto ix = strata::index::open(io, o);
+				return verdict::opens;
+			} catch (const strata::unsupported_index&) {
+				return verdict::unsupported;
+			} catch (const strata::corrupt_index&) {
+				return verdict::corrupt;
+			} catch (const strata::corrupt_segment&) {
+				return verdict::corrupt;
+			} catch (...) {
+				return verdict::other;
+			}
+		};
+		strata::index::options o;
+		o.key_prefix = "Q";
+		// A committed index; returns its head manifest's generation.
+		auto make = [&](strata::faultfs::io& io) {
+			auto ix = strata::index::create(io, o, {});
+			CHECK(apply(ix, upsert("Q1", "w")) == strata::verdict::accepted);
+			ix.commit();
+			const auto m = ix.manifest();
+			CHECK(m.configured == (bit::inverted | bit::norms | bit::keys | bit::stored) && m.mask == m.configured);
+			CHECK(m.min_version == 13 && m.max_version == 13);
+			return m.generation;
+		};
+		// Rewrites the head manifest with `edit` applied.
+		auto rewrite = [](strata::faultfs::filesystem& fs, strata::faultfs::io& io, std::uint64_t gen, auto edit) {
+			const std::string name = strata::index_detail::manifest_name(gen);
+			auto m = strata::files::decode_manifest(std::string(fs.view(name)));
+			edit(m);
+			const std::string bytes = strata::files::encode(m);
+			auto f = io.open_existing(name);
+			f->truncate(0);
+			f->write_at(0, bytes);
+		};
+		const auto with = [&](auto edit) {
+			strata::faultfs::filesystem fs;
+			strata::faultfs::io io(fs);
+			const auto gen = make(io);
+			rewrite(fs, io, gen, edit);
+			return open_index(io, o);
+		};
+		CHECK(with([](strata::files::manifest&) {}) == verdict::opens);
+		// A mask bit this binary cannot read: unsupported, before any segment opens.
+		CHECK(with([](strata::files::manifest& m) { m.mask |= bit::values; }) == verdict::unsupported);
+		CHECK(with([](strata::files::manifest& m) { m.mask |= bit::compact; }) == verdict::unsupported);
+		// A highest segment version above this binary's: unsupported.
+		CHECK(with([](strata::files::manifest& m) { m.max_version = 14; }) == verdict::unsupported);
+		// A segment that sets a bit outside its manifest's mask: damage.
+		CHECK(with([](strata::files::manifest& m) { m.mask = m.configured = bit::inverted | bit::norms | bit::keys; }) == verdict::corrupt);
+		// A version-1 manifest: unsupported.
+		{
+			strata::faultfs::filesystem fs;
+			strata::faultfs::io io(fs);
+			const auto gen = make(io);
+			const std::string v1 = read_file(std::string(STRATA_FIXTURES) + "/format12/manifest.bin");
+			auto f = io.open_existing(strata::index_detail::manifest_name(gen));
+			f->truncate(0);
+			f->write_at(0, v1);
+			CHECK(open_index(io, o) == verdict::unsupported);
+		}
+		// install refuses a checkpoint whose mask holds a bit this binary cannot read.
+		{
+			strata::faultfs::filesystem fs_a, fs_b;
+			strata::faultfs::io io_a(fs_a), io_b(fs_b);
+			std::uint64_t gen = 0;
+			{
+				auto a = strata::index::create(io_a, o, {});
+				CHECK(apply(a, upsert("Q1", "w")) == strata::verdict::accepted);
+				gen = a.checkpoint();
+			}
+			rewrite(fs_a, io_a, gen, [](strata::files::manifest& m) { m.mask |= bit::points; });
+			auto b = strata::index::create(io_b, o, {});
+			bool unsupported = false;
+			try {
+				b.install(io_a, gen);
+			} catch (const strata::unsupported_index&) {
+				unsupported = true;
+			}
+			CHECK(unsupported);
+		}
+	}
+
+	// --- At the index: a manifest-named unsupported segment is damage ------------------------
 	{
 		strata::faultfs::filesystem fs;
 		strata::faultfs::io io(fs);

@@ -227,6 +227,8 @@ public:
 		ix.clear_uncreated();
 		ix.m_.uuid = uuid;
 		ix.m_.key_prefix = opts.key_prefix;
+		// Every structure of the layout, keys only with a key prefix (F4, F20).
+		ix.m_.configured = format::bit::inverted | format::bit::norms | format::bit::stored | (opts.key_prefix.empty() ? 0 : format::bit::keys);
 		ix.opts_ = opts;
 		if (opts.budget) { ix.permit_ = opts.budget->open(); }
 		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
@@ -472,7 +474,7 @@ public:
 			} catch (const corrupt_segment&) {
 			}
 			try {
-				auto fresh = read_checked([&] { return load_segment(*io_, s->ref, true); }, nullptr);
+				auto fresh = read_checked([&] { return load_segment(*io_, m_, s->ref, true); }, nullptr);
 				fresh->deleted = std::move(s->deleted);
 				fresh->dead = s->dead;
 				fresh->deletes_dirty = s->deletes_dirty;
@@ -571,13 +573,9 @@ public:
 		return sum;
 	}
 
-	// The structures this index is configured with (F4, F20): every one of its layout's, keys
-	// only with a key prefix. Flushes and merges write them; the digest records them (F21).
-	std::uint32_t configured_structures() const noexcept {
-		std::uint32_t bits = format::bit::inverted | format::bit::norms | format::bit::stored;
-		if (!m_.key_prefix.empty()) { bits |= format::bit::keys; }
-		return bits;
-	}
+	// The structures this index is configured with, from the manifest (F20, F13-R28). Flushes
+	// and merges write them; the digest records them (F21).
+	std::uint32_t configured_structures() const noexcept { return m_.configured; }
 
 	// Checks every segment whole (check_segment) and the digest's invariants: one live copy
 	// per docid and per key, every docid at or below lastdocid. Throws at the first problem.
@@ -622,6 +620,7 @@ public:
 			theirs = files::decode_manifest(index_detail::read_all(*f));
 		}
 		if (theirs.generation != generation) { throw corrupt_index("install: manifest generation differs from its name"); }
+		check_readable(theirs);
 		auto got = load_files(source, theirs, true, &media_retries_);
 		// The copy, re-encoded live docs (16 bytes for their new names' fields), and the
 		// commit's metadata file and manifest.
@@ -670,6 +669,7 @@ public:
 			m_.schema_version = theirs.schema_version;
 			m_.applied = theirs.applied;
 			m_.key_prefix = theirs.key_prefix;
+			m_.configured = theirs.configured;
 			m_.pinned.clear();
 			applied_since_commit_ = 1;
 			commit_files();
@@ -1793,7 +1793,13 @@ private:
 		if (applied_since_commit_) { ++next.revision; }
 		next.segments.clear();
 		next.doc_count = next.total_length = next.live_count = next.live_length = 0;
+		next.mask = next.configured;
+		next.min_version = next.max_version = 0;
 		for (const auto& s : segs_) {
+			next.mask |= s->seg.core().structures();
+			const std::uint32_t v = s->seg.core().version();
+			next.min_version = next.min_version ? std::min(next.min_version, v) : v;
+			next.max_version = std::max(next.max_version, v);
 			next.segments.push_back(s->ref);
 			next.doc_count += s->ref.doc_count;
 			next.total_length += s->seg.template get<inverted_plugin>().total_length();
@@ -1983,6 +1989,7 @@ private:
 		m_ = read_checked([&] { return files::decode_manifest(index_detail::read_all(*io_->open_existing(index_detail::manifest_name(chosen)))); }, &media_retries_);
 		if (m_.generation != chosen) { throw corrupt_index("manifest generation differs from its name"); }
 		// Every file the manifest names must exist and agree with its entry.
+		check_readable(m_);
 		auto files_of = load_files(*io_, m_, false, &media_retries_);
 		segs_ = std::move(files_of.segments);
 		meta_ = std::move(files_of.meta);
@@ -2048,10 +2055,20 @@ private:
 			throw corrupt_index(std::string("unreadable: ") + e.what());
 		}
 	}
+	// Refuses an index this binary cannot read before any segment opens (F20): a structure
+	// bit in the manifest's mask it lacks, or segment versions outside what it reads.
+	static void check_readable(const files::manifest& m) {
+		if (const std::uint32_t lacked = m.mask & ~segment::readable) {
+			throw unsupported_index("strata: unsupported index: structure bit " + std::to_string(std::countr_zero(lacked)));
+		}
+		if (!m.segments.empty() && (m.min_version < format::min_read_version || m.max_version > format::version)) {
+			throw unsupported_index("strata: unsupported index: segment format versions " + std::to_string(m.min_version) + " to " + std::to_string(m.max_version));
+		}
+	}
 	static loaded_files load_files(kronuz::journal::IO& io, const files::manifest& m, bool whole, std::uint64_t* retries = nullptr) {
 		loaded_files out;
 		for (const auto& r : m.segments) {
-			out.segments.emplace_back(read_checked([&] { return load_segment(io, r, whole); }, retries));
+			out.segments.emplace_back(read_checked([&] { return load_segment(io, m, r, whole); }, retries));
 		}
 		if (m.meta.generation) {
 			out.meta = read_checked([&] {
@@ -2064,16 +2081,16 @@ private:
 		}
 		return out;
 	}
-	// A manifest names only segments its own binary wrote, so until the manifest records a
-	// version range and a structure mask (F20), an unsupported one is damage (F2).
-	static std::unique_ptr<open_segment> load_segment(kronuz::journal::IO& io, const files::segment_ref& r, bool whole) {
+	// The manifest's mask and version range passed check_readable, so a segment it names that
+	// this binary cannot read disagrees with its manifest: damage (F2, F20).
+	static std::unique_ptr<open_segment> load_segment(kronuz::journal::IO& io, const files::manifest& m, const files::segment_ref& r, bool whole) {
 		try {
-			return load_segment_of(io, r, whole);
+			return load_segment_of(io, m, r, whole);
 		} catch (const unsupported_segment& e) {
 			throw corrupt_segment(e.what());
 		}
 	}
-	static std::unique_ptr<open_segment> load_segment_of(kronuz::journal::IO& io, const files::segment_ref& r, bool whole) {
+	static std::unique_ptr<open_segment> load_segment_of(kronuz::journal::IO& io, const files::manifest& m, const files::segment_ref& r, bool whole) {
 		const std::string name = index_detail::segment_name(r.id);
 		std::unique_ptr<kronuz::journal::File> f;
 		try {
@@ -2091,6 +2108,11 @@ private:
 		if (format::decode_footer(view).toc_crc != r.footer_crc) { throw corrupt_index("segment differs from its manifest entry"); }
 		auto s = mapped ? std::make_unique<open_segment>(r, std::move(mapped)) : std::make_unique<open_segment>(r, std::move(bytes));
 		if (s->seg.core().doc_count() != r.doc_count) { throw corrupt_index("segment document count"); }
+		// The manifest vouches for its segments: one outside its mask or version range is damage.
+		const std::uint32_t v = s->seg.core().version();
+		if ((s->seg.core().structures() & ~m.mask) || v < m.min_version || v > m.max_version) {
+			throw corrupt_segment("segment outside its manifest's structures or versions");
+		}
 		if (whole) { s->seg.verify_all(); }
 		if (r.live.generation) {
 			const std::string lb = read_named(io, index_detail::live_name(r.id, r.live.generation), r.live.size);
