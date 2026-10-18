@@ -355,7 +355,6 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 	section_sink sink(out, region_shift, &positions_spill, memory);
 	begin_segment(sink, segment_id);
 	std::uint32_t structures = 0;
-	write_docids(sink, memory, docids);  // the core's, in the tail by rank (F5)
 	auto merge_entry = [&]<class E>(std::type_identity<E>) {
 		{
 			if (!(options.structures & E::structure)) { return; }  // not configured: none of its sections (F4)
@@ -367,6 +366,7 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 		}
 	};
 	(merge_entry(std::type_identity<Entries>{}), ...);
+	write_docids(sink, memory, docids);  // the core's, in the tail by rank (F5); after the plugins, off their peak (CR8)
 	finish_segment(sink, docids, structures);
 	return plan;
 }

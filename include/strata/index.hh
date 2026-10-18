@@ -1399,11 +1399,11 @@ private:
 	// The live copy of a key: the version map, then segments newest first.
 	std::optional<key_entry> lookup_key(std::string_view key) const {
 		if (auto it = versions_.find(std::string(key)); it != versions_.end()) { return it->second; }
+		const std::uint64_t hash = xxh64::hash(key);  // one hash, one filter probe per segment (CR7)
 		for (std::size_t i = segs_.size(); i-- > 0;) {
 			const auto& s = *segs_[i];
 			const auto& keys = s.seg.template get<keys_plugin>();
-			if (!keys.may_hold(key)) { continue; }
-			if (const auto ord = keys.find(key, live_bits{s.deleted.data()})) {
+			if (const auto ord = keys.find(key, live_bits{s.deleted.data()}, hash)) {
 				return key_entry{s.seg.core().docid(*ord), keys.version(*ord)};
 			}
 		}

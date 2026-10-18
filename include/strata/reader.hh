@@ -558,8 +558,10 @@ struct keys_plugin {
 		// (false positives possible, false negatives not).
 		bool may_hold(std::string_view key) const { return keys_.may_hold(key); }
 		// The key's ordinal, if the segment holds it and it is live.
-		std::optional<ordinal_t> find(std::string_view key, live_bits live) const {
-			const auto ord = keys_.find(key);
+		std::optional<ordinal_t> find(std::string_view key, live_bits live) const { return find(key, live, xxh64::hash(key)); }
+		// The same with the key's hash, so a lookup across segments hashes once (CR7).
+		std::optional<ordinal_t> find(std::string_view key, live_bits live, std::uint64_t hash) const {
+			const auto ord = keys_.find(key, hash);
 			if (ord && !live.live(*ord)) { return std::nullopt; }
 			return ord;
 		}
