@@ -792,7 +792,7 @@ public:
 	// full; other sections are verified per region as they are read. The file's bytes
 	// must outlive the segment; a temporary string cannot be one.
 	explicit basic_segment(std::string&&) = delete;
-	explicit basic_segment(std::string_view file) : core_(file, all_rules()), readers_(open(core_)), present_(presence(core_)) {}
+	explicit basic_segment(std::string_view file) : core_(file, all_rules()), present_(presence(core_)), readers_(open(core_)) {}
 
 	// The core's view: docids, ordinals, the document count, the table of contents.
 	const core_segment& core() const noexcept { return core_; }
@@ -856,8 +856,8 @@ private:
 	}
 
 	core_segment core_;
+	std::uint32_t present_;  // bit i: layout entry i is present; set before the readers open (L7)
 	readers readers_;
-	std::uint32_t present_;  // bit i: layout entry i is present
 };
 
 // Readers hold views of the file and pointers into heap-held state, so a segment moves
