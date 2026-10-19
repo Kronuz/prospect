@@ -857,8 +857,9 @@ struct document_12 {  // format 12's document with the inverter's text inputs
 	std::string stored;
 };
 }  // namespace detail
-// The text inputs grow the document, so doc_bytes charges more and flush points move.
-static_assert(sizeof(document) == sizeof(detail::document_12), "doc_bytes and every flush trigger depend on it");
+// doc_bytes reads it at more than one flush thread, so those flush points depend on it; at
+// one, the charge is the tuple buffer's (R30).
+static_assert(sizeof(document) == sizeof(detail::document_12), "doc_bytes at more than one flush thread depends on it");
 
 namespace detail {
 template <class E>

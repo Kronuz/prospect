@@ -392,7 +392,8 @@ copies, and see one snapshot. The disk row counts keys once.
 ## Real-time get (D13; R14)
 
 A get, by key or by docid, looks in order at: the version map (deleted keys included);
-each of the K active inversion buffers (Phase 3, D18); each frozen buffer whose flush
+the active buffer (at one flush thread the tuple buffer, read by ordinal; at more, the
+whole documents kept for D18's runs); each frozen buffer whose flush
 has not settled; the segments, newest first. A get during a background flush finds a
 document that is in neither the buffer nor a published segment. The guarantee per
 consistency mode: `linearizable` captures the commit position and waits for apply to
@@ -413,9 +414,11 @@ An operation that deletes every live document matching a query, evaluated at app
 the index state at that position, so replicas agree; the count is in the verdict. The
 test-parity inventory assigns it to Phase 4.
 
-- **Buffered documents** are not yet inverted, so apply evaluates the boolean query
-  directly against each live buffered document's terms and slot values: linear in the
-  buffer, bounded by its share. The count never depends on when a buffer flushes, and
+- **Buffered documents:** at one flush thread they are inverted on arrival into the tuple
+  buffer, so apply evaluates the boolean query against its drained runs, sorted by term,
+  and its current batch, through the buffer's live set; at more than one flush thread,
+  directly against each live buffered document's terms and slot values. Either way it is
+  linear in the buffer, bounded by its share. The count never depends on when a buffer flushes, and
   a test checks that the buffer path and the segment path match the same set after a
   flush, under T2's flush schedules.
 - **Plain boolean matching only:** no top-k, cutoffs, pruning, deadlines, or partial
