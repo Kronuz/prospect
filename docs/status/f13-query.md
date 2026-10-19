@@ -17,7 +17,7 @@
 
 ## State
 
-M16, M23, M22, and M20 committed, origin/main d058cd9 (dir-lock) merged; M3t next.
+All five items committed, origin/main d058cd9 (dir-lock) merged; the Mac A/Bs next.
 
 ## Done
 
@@ -115,9 +115,20 @@ M16, M23, M22, and M20 committed, origin/main d058cd9 (dir-lock) merged; M3t nex
     (1 - 2^-40) margin fails :621 (an equal k-th score dropped); summing a union's seeds fails
     :621; removing check()'s seed verification fails :574.
 
+- M3t (format-free), the commit after 07bf37d: in a reordered segment (the collector's current
+  segment not docid-ordered) a term with more than one skip group collects its tail, then its
+  groups by descending bound, each from a fresh iterator with the per-block skip inside, until
+  a group's bound cannot beat the threshold (perf/query-exp's E10, its union half dropped there).
+  A docid-ordered segment keeps today's path. Tests: postings_test (a permuted 20,000-document
+  segment with high-wdf documents gathered in two ranges, three terms, both presets, k 1 to
+  1,000, with and without seeds: 48 top_k and 24 search() results equal an exhaustive
+  reference, ties by docid).
+  - Revert checks: dropping the tail fails postings_test:692; stopping at 1.5x the threshold
+    fails :692 and :699; stopping at < instead of <= changes no result (it visits more).
+
 ## Next
 
-1. M3t: bound-ordered traversal for single terms in reordered segments (format-free).
+1. The Mac A/Bs (run-level, A/A first) and the joint selection's record.
 
 ## Blocked on
 

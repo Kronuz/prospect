@@ -650,6 +650,59 @@ int main() {
 		}
 	}
 
+	// --- M3t: bound-ordered traversal of a single term in a reordered segment ------------------
+	// Permuted docids (a reordering merge's output): high-wdf documents gathered into a few
+	// groups, ties by docid. top_k and search() against an exhaustive reference, both presets,
+	// with and without seeds.
+	{
+		std::mt19937_64 rng(3);
+		std::vector<std::uint64_t> ids(20000);
+		for (std::uint64_t d = 0; auto& id : ids) { id = d += 1 + rng() % 5; }
+		std::shuffle(ids.begin(), ids.end(), rng);
+		strata::segment_writer w;
+		w.permuted = true;
+		const std::vector<std::uint32_t> none;
+		for (std::uint32_t d = 0; d < 20000; ++d) {
+			std::vector<strata::posting_input> in;
+			const bool hot = (d >= 12000 && d < 12600) || (d >= 3000 && d < 3100);
+			in.push_back({"skew", hot ? 5 + std::uint32_t(rng() % 20) : 1 + std::uint32_t(rng() % 3), none});
+			if (d % 3 == 0) { in.push_back({"third", 1 + std::uint32_t(rng() % 4), none}); }
+			if (d % 2 == 0 && rng() % 4 == 0) { in.push_back({"tie", 1, none}); }  // equal scores at equal lengths
+			w.add(ids[d], in, hot ? 20 : 10 + std::uint32_t(rng() % 3));
+		}
+		const std::string bytes = w.flush({});
+		strata::segment seg(bytes);
+		CHECK(!seg.core().docid_ordered());
+		const auto& inv = seg.get<strata::inverted_plugin>();
+		std::size_t compared = 0;
+		for (const char* term : {"skew", "third", "tie"}) {
+			const auto info = *inv.term(term);
+			for (const bool xapian : {false, true}) {
+				const auto wt = xapian ? strata::weight::bm25_xapian(inv, info.df) : strata::weight::bm25(inv, info.df);
+				std::vector<strata::doc_hit> all;
+				strata::term_scorer ref(inv, info, wt);
+				for (ordinal_t d = ref.next(); d != strata::no_more_docs; d = ref.next()) { all.push_back({seg.core().docid(d), ref.score()}); }
+				std::sort(all.begin(), all.end(), [](const auto& a, const auto& b) { return a.score != b.score ? a.score > b.score : a.docid < b.docid; });
+				for (const std::size_t k : {1u, 10u, 100u, 1000u}) {
+					for (const bool seeded : {false, true}) {
+						strata::term_scorer sc(inv, info, wt);
+						const auto got = strata::top_k(seg, sc, k, nullptr, seeded ? sc.seed(k) : 0.0);
+						bool ok = got.size() == std::min(k, all.size());
+						for (std::size_t i = 0; ok && i < got.size(); ++i) { ok = seg.core().docid(got[i].ord) == all[i].docid && got[i].score == all[i].score; }
+						CHECK(ok);
+						++compared;
+					}
+					const strata::segment_snapshot one[] = {{&seg, nullptr}};
+					const auto got = strata::search(one, [&](const strata::segment& sg) { return std::make_unique<strata::term_scorer>(sg.get<strata::inverted_plugin>(), info, wt); }, k);
+					bool ok = got.size() == std::min(k, all.size());
+					for (std::size_t i = 0; ok && i < got.size(); ++i) { ok = got[i].docid == all[i].docid && got[i].score == all[i].score; }
+					CHECK(ok);
+				}
+			}
+		}
+		std::printf("  M3t: %zu reordered top-k equal the exhaustive reference\n", compared);
+	}
+
 	std::printf("postings: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }

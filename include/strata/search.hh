@@ -202,6 +202,9 @@ struct top_collector {
 	// A threshold known before collection starts (another segment's k-th score, made
 	// strictly lower so equal scores still enter); no hit at or below it enters.
 	void seed(double floor) noexcept { min_ = floor_ = floor; }
+	// Whether the current segment is reordered: its hits may arrive in any ordinal order, ties
+	// comparing docids.
+	bool reordered() const noexcept { return cur_ != none && !segs_[cur_]->core().docid_ordered(); }
 	// Room for the segments begin() will name, so collection allocates once.
 	void expect_segments(std::size_t n) { segs_.reserve(n); }
 	// The following hits are seg's; hits already kept stay (P6-2).
@@ -338,6 +341,7 @@ public:
 	// block in one loop over its decoded postings. Counting leaves this to the generic loop.
 	bool collect_top_k(top_collector& c) override {
 		if (c.counting) { return false; }
+		if (c.reordered() && it_.groups() > 1) { return collect_groups(c); }
 		for (ordinal_t d = it_.next(); d != no_more_docs; d = it_.doc()) {
 			min_ = c.min_competitive();
 			if ((d = skip_blocks(d)) == no_more_docs) { break; }
@@ -348,6 +352,36 @@ public:
 		return true;
 	}
 	void fill(ordinal_t base, ordinal_t end, std::uint64_t* bits) override { it_.fill(base, end, bits); }
+
+	// M3t, in a reordered segment, where a reordering gathers high bounds into few groups:
+	// the tail, then the groups by descending bound, each from a fresh iterator with the
+	// per-block skip inside, until a group's bound cannot beat the threshold.
+	bool collect_groups(top_collector& c) {
+		auto score_until = [&](postings_iterator& p, ordinal_t end) { p.for_each_until(end, [&](ordinal_t ord, std::uint32_t wdf) { c.collect(ord, score_of(ord, wdf)); }); };
+		const std::size_t groups = it_.groups();
+		if (it_.info().df % format::block && total_bound_ > c.min_competitive()) {
+			postings_iterator p(*seg_, it_.info());
+			if (p.advance(it_.group_last(groups - 1) + 1) != no_more_docs) { score_until(p, no_more_docs); }
+		}
+		order_.resize(groups);
+		for (std::size_t g = 0; g < groups; ++g) { order_[g] = {group_bound(g), g}; }
+		std::sort(order_.begin(), order_.end(), [](const auto& a, const auto& b) { return a.first != b.first ? a.first > b.first : a.second < b.second; });
+		for (const auto& [bound, g] : order_) {
+			if (bound <= c.min_competitive()) { break; }
+			postings_iterator p(*seg_, it_.info());
+			const ordinal_t last = it_.group_last(g);
+			for (ordinal_t d = p.advance(it_.group_first(g)); d != no_more_docs && d <= last; d = p.doc()) {
+				const std::size_t b = p.block_index_for(d);
+				const ordinal_t block_last = p.block_last(b);
+				if (block_bound(b) <= c.min_competitive()) {
+					if (p.advance(block_last + 1) == no_more_docs) { break; }
+					continue;
+				}
+				score_until(p, block_last + 1);
+			}
+		}
+		return true;
+	}
 
 	// The bound of the smallest skip entry covering [from, upto]: its block, its group,
 	// or the whole term (Lucene's MaxScoreCache); one memoized evaluation per call.
@@ -449,6 +483,7 @@ private:
 	double total_bound_ = 0, min_ = 0;
 	ordinal_t checked_until_ = no_more_docs;
 	std::vector<double> group_bounds_;
+	std::vector<std::pair<double, std::size_t>> order_;  // collect_groups' visiting order
 	std::size_t cached_group_ = std::size_t(-1);
 	double block_bounds_[32];
 
