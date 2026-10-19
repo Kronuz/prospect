@@ -663,6 +663,10 @@ int main() {
 		{
 			// A manifest entry naming another identity than its file's: damage, before any read.
 			CHECK(with([](strata::files::manifest& m) { m.segments.back().identity[15] ^= 1; }) == verdict::corrupt);
+			// A segment attribute this binary lacks (F13-R43): a required one refuses the index, a
+			// cache opens and leaves at the next commit.
+			CHECK(with([](strata::files::manifest& m) { m.segments.back().attributes = {{1, "later"}}; }) == verdict::unsupported);
+			CHECK(with([](strata::files::manifest& m) { m.segments.back().attributes = {{2, "bounds"}}; }) == verdict::opens);
 		}
 		// install refuses a checkpoint whose configured bits no flush could write (CR5).
 		{
