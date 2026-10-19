@@ -46,6 +46,7 @@
 #include "strata/budget.hh"
 #include "strata/docids.hh"
 #include "strata/reader.hh"
+#include "strata/search.hh"
 #include "strata/format.hh"
 #include "strata/keys.hh"
 #include "strata/section_io.hh"
@@ -278,6 +279,7 @@ public:
 		section_stream& positions = deferred->stream();
 		termdict::builder dict(alphabet);
 		format::term_run run;
+		seed_shortest_ = min_length();
 		term_postings tp;
 		std::string encoded_postings, term_positions;
 		std::vector<format::impact> all;  // a long list's (wdf, length) pairs
@@ -334,7 +336,8 @@ public:
 			dict.add(key, format::encode_term_info(info, run, dict.next_is_restart()));
 			if (memory) {
 				const std::uint64_t now = (tp.ords.capacity() + tp.wdfs.capacity() + tp.counts.capacity() + tp.positions.capacity()) * sizeof(std::uint32_t) +
-					all.capacity() * sizeof(format::impact) + encoded_postings.capacity() + term_positions.capacity();
+					all.capacity() * sizeof(format::impact) + encoded_postings.capacity() + term_positions.capacity() +
+					(seed_order_.capacity() + seed_counts_.capacity() + seed_heap_[0].capacity() + seed_heap_[1].capacity() + seed_heap_[2].capacity()) * sizeof(std::uint32_t);
 				if (now > scratch) {
 					memory->grow(now - scratch);
 					scratch = now;
@@ -513,7 +516,7 @@ private:
 		std::vector<format::impact> impacts;
 		std::uint64_t pos_offset = 0;    // byte offset of the position block holding first_position
 		std::uint64_t count_offset = 0;  // byte offset of the block's count block
-		bool bitset = false;             // ordinals as a bitset instead of FOR deltas
+		format::block_codec codec = format::block_codec::deltas;
 	};
 
 	// Where write_positions put each block, for the skip data.
@@ -540,19 +543,19 @@ private:
 		}
 		std::string blocks;
 		std::vector<block_meta> meta;
-		std::uint32_t deltas[format::block];
 		std::uint8_t buf[bitpack::max_encoded_bytes];
-		std::uint32_t prev = std::numeric_limits<std::uint32_t>::max();  // the first delta is ordinal + 1
+		std::uint32_t prev = std::numeric_limits<std::uint32_t>::max();  // the tail's first delta is ordinal + 1
 		std::uint64_t position = 0;
 		std::string bits;
 		for (std::size_t b = 0; b < full; b += format::block) {
 			const std::size_t start = blocks.size();
-			// A dense block is a bitset over (previous last, last] when that is smaller.
+			// A dense block is a bitset over (previous last, last] when that is smaller than FOR
+			// over its plain gaps, the boundary format 12 drew: gaps - 1 (M23) would take FOR's
+			// 17 bytes over an 18-byte bitset, which counting ORs in without decoding.
 			const ordinal_t base = b ? ords[b - 1] + 1 : 0;
 			const std::uint64_t span = std::uint64_t(ords[b + format::block - 1]) - base + 1;
-			bitpack::delta_encode(prev, ords.data() + b, deltas);
-			const std::size_t for_bytes = bitpack::encode_for(deltas, buf);
-			const bool bitset = (span + 7) / 8 < for_bytes;
+			const std::size_t for_bytes = format::encode_gaps(ords.data() + b, prev, b == 0, buf);
+			const bool bitset = (span + 7) / 8 < gaps_bytes(ords.data() + b, b ? prev : std::numeric_limits<std::uint32_t>::max());
 			if (bitset) {
 				bits.assign((span + 7) / 8, '\0');
 				for (std::size_t i = b; i < b + format::block; ++i) {
@@ -567,7 +570,7 @@ private:
 			pairs_.clear();
 			for (std::size_t i = b; i < b + format::block; ++i) { pairs_.push_back({wdfs[i], format::encode_length(lengths_[ords[i]])}); }
 			meta.push_back({ords[b + format::block - 1], blocks.size() - start, position, format::competitive(pairs_)});
-			meta.back().bitset = bitset;
+			meta.back().codec = bitset ? format::block_codec::bitset : format::block_codec::deltas;
 			if (layout) {
 				meta.back().pos_offset = layout->offset_of(position);
 				if (with_counts) { meta.back().count_offset = layout->count_offsets[b / format::block]; }
@@ -584,56 +587,61 @@ private:
 			out += tail;
 			return;
 		}
-		// Level 0, grouped by 32 blocks. Level 1 is a fixed-width array, one entry per group,
-		// so a reader locates groups without parsing: last ordinal (u32), the offset of its
-		// competitive pairs in the pairs area (u32), its level-0 and blocks offsets, and for
-		// terms with positions its first position index and position and count block
-		// offsets, each u32, or u64 when the term flags itself wide. Level-0 positional fields (present only with positions, counts only
-		// when they differ from wdf) are deltas restarting per group.
+		// Level 1 is a fixed-width array, one entry per group, so a reader locates groups
+		// without parsing; each group's record holds its advance entries, pairs, and
+		// positional deltas (format.hh, "skip data"). Offsets take u32, or u64 when the term
+		// flags itself wide.
 		const bool with_positions = layout != nullptr;
 		with_counts = with_counts && with_positions;
-		std::string level1, pairs, level0;
-		const std::size_t groups = (meta.size() + 31) / 32;
+		std::string level1, pairs, records;
+		const std::size_t groups = (meta.size() + format::skip::group_blocks - 1) / format::skip::group_blocks;
 		struct group_fields {
 			ordinal_t last;
 			std::uint32_t pairs;
-			std::uint64_t level0, blocks, first_position, pos_offset, count_offset;
+			std::uint64_t record, blocks, first_position, pos_offset, count_offset;
 		};
 		std::vector<group_fields> fields;
-		ordinal_t prev_last = 0;
+		std::uint8_t codecs = 0;
+		for (const auto& m : meta) { codecs |= std::uint8_t(m.codec); }
+		const unsigned wf = unsigned(std::bit_width(codecs));
 		std::uint64_t blocks_before = 0;
 		for (std::size_t g = 0; g < groups; ++g) {
-			std::string group;
-			const block_meta& first = meta[g * 32];
-			block_meta prev = first;
+			const std::size_t b0 = g * format::skip::group_blocks, b1 = std::min(meta.size(), b0 + format::skip::group_blocks), n = b1 - b0;
+			const ordinal_t base = g ? meta[b0 - 1].last : 0, last = meta[b1 - 1].last;
 			std::uint64_t group_bytes = 0;
+			for (std::size_t i = b0; i < b1; ++i) { group_bytes += meta[i].bytes; }
+			const unsigned wl = unsigned(std::bit_width(last - base)), wo = unsigned(std::bit_width(group_bytes - 1));
+			std::string record(format::advance_bytes(n, wl, wo, wf), '\0');
+			std::uint64_t start = 0;
+			for (std::size_t i = 0; i < n; ++i) {
+				if (i + 1 < n) { format::put_bits(record, i * wl, wl, meta[b0 + i].last - base); }
+				if (i) { format::put_bits(record, (n - 1) * wl + (i - 1) * wo, wo, start); }
+				format::put_bits(record, (n - 1) * (wl + wo) + i * wf, wf, std::uint8_t(meta[b0 + i].codec));
+				start += meta[b0 + i].bytes;
+			}
 			std::vector<format::impact> group_pairs;
-			const std::uint64_t level0_offset = level0.size(), blocks_offset = blocks_before;
-			for (std::size_t i = g * 32; i < std::min(meta.size(), g * 32 + 32); ++i) {
-				format::put_leb(group, meta[i].last - (i ? prev_last : 0));
-				format::put_leb(group, meta[i].bytes << 1 | std::uint64_t(meta[i].bitset));
-				if (with_positions) {
-					format::put_leb(group, meta[i].first_position - prev.first_position);
-					format::put_leb(group, meta[i].pos_offset - prev.pos_offset);
-					if (with_counts) { format::put_leb(group, meta[i].count_offset - prev.count_offset); }
-				}
-				format::encode_sized_impacts(group, meta[i].impacts);
-				prev_last = meta[i].last;
-				prev = meta[i];
-				group_bytes += meta[i].bytes;
+			for (std::size_t i = b0; i < b1; ++i) {
+				format::encode_sized_impacts(record, meta[i].impacts);
 				group_pairs.insert(group_pairs.end(), meta[i].impacts.begin(), meta[i].impacts.end());
 			}
-			blocks_before += group_bytes;
+			if (with_positions) {
+				for (std::size_t i = b0 + 1; i < b1; ++i) {
+					format::put_leb(record, meta[i].first_position - meta[i - 1].first_position);
+					format::put_leb(record, meta[i].pos_offset - meta[i - 1].pos_offset);
+					if (with_counts) { format::put_leb(record, meta[i].count_offset - meta[i - 1].count_offset); }
+				}
+			}
 			if (pairs.size() > std::numeric_limits<std::uint32_t>::max()) { throw std::length_error("strata: skip data too large"); }
-			fields.push_back({meta[std::min(meta.size(), g * 32 + 32) - 1].last, std::uint32_t(pairs.size()), level0_offset, blocks_offset,
-				first.first_position, first.pos_offset, first.count_offset});
+			const block_meta& first = meta[b0];
+			fields.push_back({last, std::uint32_t(pairs.size()), records.size(), blocks_before, first.first_position, first.pos_offset, first.count_offset});
 			format::encode_impacts(pairs, format::competitive(std::move(group_pairs)));
-			level0 += group;
+			records += record;
+			blocks_before += group_bytes;
 		}
 		// Offsets take 32 bits unless one of this term's needs 64.
 		bool wide = wide_skip_offsets;
 		for (const auto& f : fields) {
-			wide = wide || std::max({f.level0, f.blocks, f.first_position, f.pos_offset, f.count_offset}) > std::numeric_limits<std::uint32_t>::max();
+			wide = wide || std::max({f.record, f.blocks, f.first_position, f.pos_offset, f.count_offset}) > std::numeric_limits<std::uint32_t>::max();
 		}
 		auto put_offset = [&](std::uint64_t v) {
 			if (wide) {
@@ -645,7 +653,7 @@ private:
 		for (const auto& f : fields) {
 			format::put<std::uint32_t>(level1, f.last);
 			format::put<std::uint32_t>(level1, f.pairs);
-			put_offset(f.level0);
+			put_offset(f.record);
 			put_offset(f.blocks);
 			if (with_positions) {
 				put_offset(f.first_position);
@@ -654,19 +662,40 @@ private:
 			}
 		}
 		format::put_leb(out, groups);
-		out.push_back(char(wide));
+		out.push_back(char((wide ? format::skip::wide : 0) | wf << format::skip::codec_shift));
 		if (with_positions) {
 			format::put_leb(out, position);  // the tail's first position index and its block offset
 			format::put_leb(out, layout->offset_of(position));
 		}
+		if (with_wdf) {
+			const auto seeds = seeds_of(ords, wdfs);
+			for (std::size_t j = 0; j < 3 && format::seed_ks[j] <= ords.size(); ++j) {
+				format::put_leb(out, seeds[j].code_wdf);
+				out.push_back(char(seeds[j].code));
+				format::put_leb(out, seeds[j].exact_wdf);
+				format::put_leb(out, seeds[j].exact);
+			}
+		}
 		format::put_leb(out, pairs.size());
-		format::put_leb(out, level0.size());
+		format::put_leb(out, records.size());
 		format::put_leb(out, blocks.size());
 		out += level1;
 		out += pairs;
-		out += level0;
+		out += records;
 		out += blocks;
 		out += tail;
+	}
+
+	// The bytes bitpack's FOR or constant block would take over the block's plain gaps.
+	static std::size_t gaps_bytes(const std::uint32_t* ords, std::uint32_t prev) noexcept {
+		std::uint32_t all = 0, first = ords[0] - prev;
+		bool constant = true;
+		for (std::size_t i = 0; i < format::block; ++i) {
+			const std::uint32_t g = ords[i] - (i ? ords[i - 1] : prev);
+			all |= g;
+			constant = constant && g == first;
+		}
+		return constant ? 5 : 1 + bitpack::packed_bytes(32 - unsigned(std::countl_zero(all)));
 	}
 
 	// [count blocks bytes][count blocks][tail counts] when counts differ from wdf, then
@@ -719,6 +748,82 @@ private:
 		return out;
 	}
 
+	// F13 (M20): for each stored k, among the pairs (w, the k-th shortest length of the postings
+	// with wdf >= w), the one each preset scores highest at this segment's statistics. Postings
+	// are visited by wdf, highest first, until no lower wdf can beat every best at the
+	// segment's shortest length.
+	std::array<format::seed_pairs, 3> seeds_of(const std::vector<std::uint32_t>& ords, const std::vector<std::uint32_t>& wdfs) {
+		std::array<format::seed_pairs, 3> out{};
+		const std::size_t df = ords.size();
+		const strata::statistics st(lengths_.size(), total_length_);
+		const weight lucene = weight::bm25(st, 1), xapian = weight::bm25_xapian(st, 1);
+		std::uint32_t top = 0;
+		for (auto w : wdfs) { top = std::max(top, w); }
+		// Postings by wdf, highest first: a counting sort while wdfs are small, else a sort.
+		seed_order_.resize(df);
+		if (top <= (1u << 16)) {
+			seed_counts_.assign(std::size_t(top) + 2, 0);
+			for (auto w : wdfs) { ++seed_counts_[top - w + 1]; }
+			for (std::size_t i = 1; i < seed_counts_.size(); ++i) { seed_counts_[i] += seed_counts_[i - 1]; }
+			for (std::size_t i = 0; i < df; ++i) { seed_order_[seed_counts_[top - wdfs[i]]++] = std::uint32_t(i); }
+		} else {
+			for (std::size_t i = 0; i < df; ++i) { seed_order_[i] = std::uint32_t(i); }
+			std::stable_sort(seed_order_.begin(), seed_order_.end(), [&](std::uint32_t a, std::uint32_t b) { return wdfs[a] > wdfs[b]; });
+		}
+		const std::uint32_t shortest = seed_shortest_;
+		const std::uint8_t shortest_code = format::encode_length(shortest);
+		double best_lucene[3] = {-1, -1, -1}, best_xapian[3] = {-1, -1, -1};
+		const std::size_t ks = std::size_t(std::count_if(std::begin(format::seed_ks), std::end(format::seed_ks), [&](std::uint32_t k) { return k <= df; }));
+		for (std::size_t j = 0; j < ks; ++j) { seed_heap_[j].clear(); }
+		for (std::size_t i = 0; i < df;) {
+			const std::uint32_t w = wdfs[seed_order_[i]];
+			if (w == 0) { break; }
+			for (; i < df && wdfs[seed_order_[i]] == w; ++i) {
+				const std::uint32_t length = lengths_[ords[seed_order_[i]]];
+				for (std::size_t j = 0; j < ks; ++j) {
+					auto& h = seed_heap_[j];  // the k shortest lengths so far, longest on top
+					if (h.size() < format::seed_ks[j]) {
+						h.push_back(length);
+						std::push_heap(h.begin(), h.end());
+					} else if (length < h.front()) {
+						std::pop_heap(h.begin(), h.end());
+						h.back() = length;
+						std::push_heap(h.begin(), h.end());
+					}
+				}
+			}
+			bool full = true;
+			for (std::size_t j = 0; j < ks; ++j) {
+				auto& h = seed_heap_[j];
+				if (h.size() < format::seed_ks[j]) {
+					full = false;
+					continue;
+				}
+				const std::uint32_t l = h.front();
+				const std::uint8_t code = format::encode_length(l);
+				if (const double f = lucene.by_norm(w, code); f > best_lucene[j]) {
+					best_lucene[j] = f;
+					out[j].code_wdf = w;
+					out[j].code = code;
+				}
+				if (const double f = xapian(w, l); f > best_xapian[j]) {
+					best_xapian[j] = f;
+					out[j].exact_wdf = w;
+					out[j].exact = l;
+				}
+			}
+			if (full && i < df) {
+				const std::uint32_t next = wdfs[seed_order_[i]];
+				bool done = true;
+				for (std::size_t j = 0; j < ks; ++j) { done = done && lucene.by_norm(next, shortest_code) <= best_lucene[j] && xapian(next, shortest) <= best_xapian[j]; }
+				if (done) { break; }
+			}
+		}
+		return out;
+	}
+
+	std::vector<std::uint32_t> seed_order_, seed_counts_, seed_heap_[3];  // seeds_of's scratch
+	std::uint32_t seed_shortest_ = 0;  // the segment's shortest length, set once by finish
 	std::vector<format::impact> pairs_;  // write_postings: one block's pairs
 	detail::stable_bytes arena_{std::size_t(1) << 20};
 	std::vector<slot> table_;

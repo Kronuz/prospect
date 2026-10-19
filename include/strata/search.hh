@@ -167,6 +167,9 @@ struct scorer {
 	virtual bool matches() { return true; }
 	// Collects the k best hits itself (bulk scoring); false when the generic loop must.
 	virtual bool collect_top_k(top_collector& c) { (void)c; return false; }
+	// A strict lower bound on the k-th best score among this segment's matches, from stored
+	// threshold seeds (F13); 0 for none. Valid only where every match is live.
+	virtual double seed(std::size_t k) { (void)k; return 0.0; }
 };
 
 struct hit {
@@ -199,6 +202,9 @@ struct top_collector {
 	// A threshold known before collection starts (another segment's k-th score, made
 	// strictly lower so equal scores still enter); no hit at or below it enters.
 	void seed(double floor) noexcept { min_ = floor_ = floor; }
+	// Whether the current segment is reordered: its hits may arrive in any ordinal order, ties
+	// comparing docids.
+	bool reordered() const noexcept { return cur_ != none && !segs_[cur_]->core().docid_ordered(); }
 	// Room for the segments begin() will name, so collection allocates once.
 	void expect_segments(std::size_t n) { segs_.reserve(n); }
 	// The following hits are seg's; hits already kept stay (P6-2).
@@ -335,6 +341,7 @@ public:
 	// block in one loop over its decoded postings. Counting leaves this to the generic loop.
 	bool collect_top_k(top_collector& c) override {
 		if (c.counting) { return false; }
+		if (c.reordered() && it_.groups() > 1) { return collect_groups(c); }
 		for (ordinal_t d = it_.next(); d != no_more_docs; d = it_.doc()) {
 			min_ = c.min_competitive();
 			if ((d = skip_blocks(d)) == no_more_docs) { break; }
@@ -345,6 +352,36 @@ public:
 		return true;
 	}
 	void fill(ordinal_t base, ordinal_t end, std::uint64_t* bits) override { it_.fill(base, end, bits); }
+
+	// M3t, in a reordered segment, where a reordering gathers high bounds into few groups:
+	// the tail, then the groups by descending bound, each from a fresh iterator with the
+	// per-block skip inside, until a group's bound cannot beat the threshold.
+	bool collect_groups(top_collector& c) {
+		auto score_until = [&](postings_iterator& p, ordinal_t end) { p.for_each_until(end, [&](ordinal_t ord, std::uint32_t wdf) { c.collect(ord, score_of(ord, wdf)); }); };
+		const std::size_t groups = it_.groups();
+		if (it_.info().df % format::block && total_bound_ > c.min_competitive()) {
+			postings_iterator p(*seg_, it_.info());
+			if (p.advance(it_.group_last(groups - 1) + 1) != no_more_docs) { score_until(p, no_more_docs); }
+		}
+		order_.resize(groups);
+		for (std::size_t g = 0; g < groups; ++g) { order_[g] = {group_bound(g), g}; }
+		std::sort(order_.begin(), order_.end(), [](const auto& a, const auto& b) { return a.first != b.first ? a.first > b.first : a.second < b.second; });
+		for (const auto& [bound, g] : order_) {
+			if (bound <= c.min_competitive()) { break; }
+			postings_iterator p(*seg_, it_.info());
+			const ordinal_t last = it_.group_last(g);
+			for (ordinal_t d = p.advance(it_.group_first(g)); d != no_more_docs && d <= last; d = p.doc()) {
+				const std::size_t b = p.block_index_for(d);
+				const ordinal_t block_last = p.block_last(b);
+				if (block_bound(b) <= c.min_competitive()) {
+					if (p.advance(block_last + 1) == no_more_docs) { break; }
+					continue;
+				}
+				score_until(p, block_last + 1);
+			}
+		}
+		return true;
+	}
 
 	// The bound of the smallest skip entry covering [from, upto]: its block, its group,
 	// or the whole term (Lucene's MaxScoreCache); one memoized evaluation per call.
@@ -368,6 +405,17 @@ public:
 	}
 
 	postings_iterator& postings() noexcept { return it_; }
+
+	// The larger of the stored pairs' scores under this weight, made strictly lower by more
+	// than rounding can move a score (F13).
+	double seed(std::size_t k) override {
+		const format::seed_pairs* p = it_.seeds(k);
+		if (!p) { return 0.0; }
+		const bool lucene = weight_.kind == scheme::bm25;
+		const double by_code = lucene ? weight_.by_norm(p->code_wdf, p->code) : weight_(p->code_wdf, format::max_length_of(p->code));
+		const double exact = lucene ? weight_.by_norm(p->exact_wdf, format::encode_length(p->exact)) : weight_(p->exact_wdf, p->exact);
+		return std::max(by_code, exact) * (1.0 - 0x1p-40);
+	}
 
 	// Lucene BM25 reads the one-byte norm; Xapian BM25 reads the exact length.
 	double score_of(ordinal_t ord, std::uint32_t wdf) const {
@@ -435,6 +483,7 @@ private:
 	double total_bound_ = 0, min_ = 0;
 	ordinal_t checked_until_ = no_more_docs;
 	std::vector<double> group_bounds_;
+	std::vector<std::pair<double, std::size_t>> order_;  // collect_groups' visiting order
 	std::size_t cached_group_ = std::size_t(-1);
 	double block_bounds_[32];
 
@@ -792,6 +841,12 @@ public:
 
 	// Block-max MaxScore over windows of 4,096 ordinals (see the definition).
 	bool collect_top_k(top_collector& c) override;
+	// A match scores the sum of its clauses' non-negative scores, at least any one's (F13).
+	double seed(std::size_t k) override {
+		double s = 0.0;
+		for (const auto& c : children_) { s = std::max(s, c->seed(k)); }
+		return s;
+	}
 
 	std::unique_ptr<scorer> fresh() const override {
 		std::vector<scorer_ptr> kids(children_.size());

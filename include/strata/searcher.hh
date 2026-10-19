@@ -199,24 +199,36 @@ using scorer_builder = std::function<scorer_ptr(const segment&)>;
 
 // The k best documents across segments, best first, ties by docid; with count, also the
 // number of live matches. One collector spans the segments (P6-2), keyed by docid, so
-// each segment prunes from the first competitive hit against the k best so far.
+// each segment prunes from the first competitive hit against the k best so far, and from
+// the start above the largest threshold seed of a segment without deletes (F13).
 inline std::vector<doc_hit> search(std::span<const segment_snapshot> segs, const scorer_builder& build, std::size_t k, std::uint64_t* count = nullptr) {
 	if (count) { *count = 0; }
+	std::vector<scorer_ptr> queries(segs.size());
+	double floor = 0.0;
+	for (std::size_t i = 0; i < segs.size(); ++i) {
+		scorer_ptr& q = queries[i];
+		if (!(q = build(*segs[i].seg))) { continue; }
+		if (segs[i].any_deleted()) {
+			q = std::make_unique<live_scorer>(std::move(q), *segs[i].deleted);  // a seed may count a deleted posting
+		} else if (k) {
+			floor = std::max(floor, q->seed(k));
+		}
+	}
 	if (segs.size() == 1) {  // one segment: ordinal order is docid order, nothing spans segments
 		const auto& s = segs[0];
-		scorer_ptr q = build(*s.seg);
+		scorer_ptr& q = queries[0];
 		if (!q) { return {}; }
-		if (s.any_deleted()) { q = std::make_unique<live_scorer>(std::move(q), *s.deleted); }
 		std::vector<doc_hit> out;
-		for (const auto& h : top_k(*s.seg, *q, k, count)) { out.push_back({s.seg->core().docid(h.ord), h.score}); }
+		for (const auto& h : top_k(*s.seg, *q, k, count, floor)) { out.push_back({s.seg->core().docid(h.ord), h.score}); }
 		return out;
 	}
 	top_collector c(k, false);
 	c.expect_segments(segs.size());
-	for (const auto& s : segs) {
-		scorer_ptr q = build(*s.seg);
+	if (floor > 0) { c.seed(floor); }
+	for (std::size_t i = 0; i < segs.size(); ++i) {
+		const auto& s = segs[i];
+		scorer_ptr& q = queries[i];
 		if (!q) { continue; }
-		if (s.any_deleted()) { q = std::make_unique<live_scorer>(std::move(q), *s.deleted); }
 		// A count known from statistics leaves the collection free to prune.
 		c.counting = false;
 		if (count) {

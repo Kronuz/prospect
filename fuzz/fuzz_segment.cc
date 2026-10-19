@@ -141,7 +141,15 @@ void exercise(const strata::segment& seg) {
 		strata::postings_iterator it(seg.get<strata::inverted_plugin>(), *info);
 		strata::positions_reader pr(seg.get<strata::inverted_plugin>(), *info);
 		std::vector<std::uint32_t> got;
-		for (auto d = it.next(); d != strata::no_more_docs; d = it.next()) { pr.read(it, got); }
+		// Fence or answer (F10): every ordinal increases and stays below the count.
+		strata::ordinal_t prev = 0;
+		bool first = true;
+		for (auto d = it.next(); d != strata::no_more_docs; d = it.next()) {
+			if (d >= seg.core().doc_count() || (!first && d <= prev)) { std::abort(); }
+			prev = d;
+			first = false;
+			pr.read(it, got);
+		}
 		strata::term_scorer s(seg.get<strata::inverted_plugin>(), *info);
 		strata::top_k(seg, s, 10);
 		strata::term_scorer c(seg.get<strata::inverted_plugin>(), *info);

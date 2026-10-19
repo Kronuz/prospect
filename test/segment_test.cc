@@ -3,6 +3,7 @@
 #include "strata/reader.hh"
 #include "strata/search.hh"
 #include "strata/writer.hh"
+#include "skip_layout.hh"
 
 #include <cstdio>
 #include <cstdlib>
@@ -402,6 +403,12 @@ int main() {
 			const char* p = seg.get<strata::inverted_plugin>().postings_bytes().data() + info.postings;
 			const char* end = p + info.postings_length;
 			CHECK(strata::format::get_leb(&p, end) == 6 && *p++ == 0);  // six narrow groups
+			for (std::size_t j = 0; j < 3 && strata::format::seed_ks[j] <= info.df; ++j) {  // the threshold seeds (F13)
+				(void)strata::format::get_leb(&p, end);
+				++p;
+				(void)strata::format::get_leb(&p, end);
+				(void)strata::format::get_leb(&p, end);
+			}
 			for (int i = 0; i < 3; ++i) { (void)strata::format::get_leb(&p, end); }
 			// Level 1: 16-byte entries without positions, each starting with its last.
 			const std::size_t at = std::size_t(p - file.data()) + 4 * 16;
@@ -949,48 +956,31 @@ int main() {
 		}
 	}
 	// C13: or_bitset's checks, reached through a window count. A dense term with no wdf and
-	// no positions keeps bitset blocks whose level-0 entries are (delta, bytes, pairs). A
-	// bit flipped in block 2 fails its count; 8 bytes moved from block 2's length to block
-	// 3's keep the group's total and fail block 2's bounds.
+	// no positions keeps bitset blocks. A bit flipped in block 2 fails its count; block 3's
+	// advance offset moved back 8 bytes keeps the group's total and fails block 2's bounds.
 	{
+		auto dense = [](std::uint32_t d) {
+			std::uint32_t x = (d + 1) * 0x9e3779b9u;
+			x ^= x >> 16, x *= 0x85ebca6bu, x ^= x >> 13;
+			return x % 100 < 60;
+		};
 		strata::segment_writer w;
 		for (std::uint32_t d = 0; d < 5000; ++d) {
 			std::vector<std::uint32_t> none;
 			std::vector<strata::posting_input> in;
-			if (d % 10 != 0) { in.push_back({"dense", 0, none}); }  // 90%: bitset blocks (all would be one constant FOR block)
+			if (dense(d)) { in.push_back({"dense", 0, none}); }  // 60% with gaps to 8: bitset blocks
 			if (d % 3 == 0) { in.push_back({"m3", 0, none}); }
 			if (d % 5 == 0) { in.push_back({"m5", 0, none}); }
 			w.add(d + 1, in, 1);
 		}
 		const std::string good = w.flush({});
-		// The offsets of each block's length LEB in level 0, and of each block's bytes.
-		std::vector<std::size_t> length_at, block_at;
-		std::vector<std::uint64_t> lengths;
+		skip_test::layout lay;
 		{
 			strata::segment s(good);
-			const auto info = *s.get<strata::inverted_plugin>().term("dense");
-			const char* base = good.data();
-			const char* p = s.get<strata::inverted_plugin>().postings_bytes().data() + info.postings;
-			const char* end = p + info.postings_length;
-			const std::uint64_t groups = strata::format::get_leb(&p, end);
-			const bool wide = *p++ == 1;
-			const std::uint64_t pairs = strata::format::get_leb(&p, end), level0 = strata::format::get_leb(&p, end);
-			(void)strata::format::get_leb(&p, end);  // blocks bytes
-			p += groups * (8 + (wide ? 8 : 4) * 2) + pairs;
-			const char* level0_end = p + level0;
-			const char* blocks = level0_end;
-			while (p < level0_end) {
-				(void)strata::format::get_leb(&p, level0_end);  // last delta
-				length_at.push_back(std::size_t(p - base));
-				const std::uint64_t bytes = strata::format::get_leb(&p, level0_end);
-				CHECK(bytes & 1);  // a bitset block
-				block_at.push_back(std::size_t(blocks - base));
-				lengths.push_back(bytes >> 1);
-				blocks += bytes >> 1;
-				(void)strata::format::skip_sized_impacts(&p, level0_end);
-			}
+			lay = skip_test::parse(good, s, *s.get<strata::inverted_plugin>().term("dense"));
 		}
-		CHECK(lengths.size() >= 4 && lengths[2] < 64 && lengths[3] + 8 < 64);  // one-byte LEBs
+		CHECK(lay.blocks.size() >= 4);
+		for (const auto& b : lay.blocks) { CHECK(b.codec == unsigned(strata::format::block_codec::bitset)); }
 		auto window_count = [](const std::string& file) {
 			strata::segment s(file);
 			std::vector<strata::scorer_ptr> kids;
@@ -999,15 +989,16 @@ int main() {
 			return strata::count(any);
 		};
 		std::uint64_t any = 0;
-		for (std::uint32_t d = 0; d < 5000; ++d) { any += d % 10 != 0 || d % 3 == 0 || d % 5 == 0; }
+		for (std::uint32_t d = 0; d < 5000; ++d) { any += dense(d) || d % 3 == 0 || d % 5 == 0; }
 		CHECK(window_count(good) == any);
 		std::string flipped = good;
-		flipped[block_at[2] + 3] ^= 0x10;
+		flipped[lay.blocks[2].at + 3] ^= 0x10;
 		reseal(flipped);
 		CHECK(throws_corrupt([&] { (void)window_count(flipped); }));
 		std::string moved = good;
-		moved[length_at[2]] = char((lengths[2] - 8) << 1 | 1);
-		moved[length_at[3]] = char((lengths[3] + 8) << 1 | 1);
+		const auto& g0 = lay.groups[0];
+		const std::uint64_t start3 = lay.blocks[3].at - lay.blocks[0].at;
+		skip_test::put(moved, g0.adv, g0.bit_offset(3), g0.wo, start3 - 8);
 		reseal(moved);
 		CHECK(throws_corrupt([&] { (void)window_count(moved); }));
 	}

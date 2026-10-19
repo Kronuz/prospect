@@ -26,6 +26,7 @@
 
 #pragma once
 
+#include "bitpack.hh"
 #include "crc32c.hh"
 #include "termdict.hh"
 #include "varint.hh"
@@ -39,6 +40,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace strata {
@@ -67,7 +69,7 @@ inline constexpr char footer_magic[4] = {'S', 'E', 'N', 'D'};
 // The version written, and the oldest one read (N - 1 from format 13 on: F2). Until format
 // 13 freezes, both are a pre-freeze number, bumped with each byte change and 13 at the
 // freeze, so an index from another pre-freeze build is refused, never misread (CR11).
-inline constexpr std::uint32_t pre_freeze = 0x8000'0001;
+inline constexpr std::uint32_t pre_freeze = 0x8000'0007;
 inline constexpr std::uint32_t version = pre_freeze;
 inline constexpr std::uint32_t min_read_version = pre_freeze;
 // Bytes 0-15, frozen in every version: magic, version, CRC-32C of bytes 0-11 (F2).
@@ -420,6 +422,131 @@ inline std::uint32_t decode_length(std::uint8_t q) noexcept {
 	if (q < 24) { return q; }
 	unsigned e = (q - 24) / 8 + 1, m = 8 + (q - 24) % 8;
 	return m << e;
+}
+
+// --- skip data (F10) --------------------------------------------------------------------------
+
+// A term with skip blocks (df >= 128) is laid out as
+//   [groups][skip flags u8][with positions: tail's first position, its block offset]
+//   [pairs bytes][records bytes][blocks bytes]  (LEB128)
+//   [level 1: per group last u32, pairs offset u32, record, blocks, and with positions first
+//    position, position and count block offsets, each u32 or u64 under skip::wide]
+//   [pairs: each group's frontier][records][blocks][tail]
+// A group of up to 32 blocks has one record: its advance entries (A3), every block's pairs
+// in encode_sized_impacts' form, then with positions each later block's first position and
+// position and count block offsets as deltas from the block before it. The advance entries
+// bit-pack the lasts of all but the last block (minus the group's base, the previous
+// group's last or 0) at bit_width(last - base), the byte offsets of all but the first block
+// at bit_width(group bytes - 1), then each block's codec code at the term's codec width:
+// every width is derived from level 1 or the flags, so locating a block reads no header.
+namespace skip {
+inline constexpr std::uint8_t wide = 1;          // 64-bit level-1 offsets
+inline constexpr std::uint8_t codec_shift = 1;   // bits 1-2: codec code width, 0 to 2
+inline constexpr std::uint8_t partitioned = 8;   // reserved for F12's partitions (P1); refused
+inline constexpr std::uint8_t known = wide | 6;  // every other bit is damage
+inline constexpr std::size_t group_blocks = 32;
+}  // namespace skip
+
+// A block's ordinal codec (F10, F11).
+// Code 2 is reserved for Elias-Fano blocks (M22, F13-R45's place): not written by the default
+// writer, refused by readers until a later pre-freeze version or a structure bit enables it.
+enum class block_codec : std::uint8_t { deltas = 0, bitset = 1 };
+inline constexpr std::uint8_t max_block_codec = 1;
+
+// The advance entries' size in bytes for a group of n blocks at the given widths.
+inline constexpr std::uint64_t advance_bytes(std::uint64_t n, unsigned wl, unsigned wo, unsigned wf) noexcept {
+	return ((n - 1) * (wl + wo) + n * wf + 7) / 8;
+}
+
+// Writes v's low w bits at bit `at` of out (bits little-endian within bytes).
+inline void put_bits(std::string& out, std::uint64_t at, unsigned w, std::uint64_t v) {
+	for (unsigned i = 0; i < w; ++i, ++at) {
+		if (v >> i & 1) { out[at >> 3] = char(std::uint8_t(out[at >> 3]) | (1u << (at & 7))); }
+	}
+}
+
+// Reads w <= 32 bits at bit `at` of the size bytes at p; the caller keeps at + w within them.
+inline std::uint32_t get_bits(const char* p, std::uint64_t size, std::uint64_t at, unsigned w) noexcept {
+	const std::uint64_t byte = at >> 3;
+	std::uint64_t v = 0;
+	if (size - byte >= 8) {
+		std::memcpy(&v, p + byte, 8);
+	} else {
+		std::memcpy(&v, p + byte, std::size_t(size - byte));
+	}
+	return std::uint32_t((v >> (at & 7)) & ((std::uint64_t(1) << w) - 1));
+}
+
+// --- ordinal blocks (F11: M23) ------------------------------------------------------------------
+
+// A FOR ordinal block stores each gap minus one (M23), so its ordinals increase by
+// construction: bitpack's FOR or constant block over g[i] = o[i] - o[i - 1] - 1, o[-1] the
+// previous block's last (-1 before a term's first block). Returns the encoded bytes.
+inline std::size_t encode_gaps(const std::uint32_t* ords, std::uint32_t prev, bool first, std::uint8_t* out) noexcept {
+	std::uint32_t g[block];
+	for (std::size_t i = 0; i < block; ++i) {
+		g[i] = ords[i] - (i ? ords[i - 1] : (first ? std::uint32_t(-1) : prev)) - 1;
+	}
+	return bitpack::encode_for(g, out);
+}
+
+// Decodes a block written by encode_gaps whose ordinals lie in (base, last] (from 0 when
+// first) and end at last; returns the bytes read, or 0 when the block is malformed, carries
+// exceptions, or is inconsistent with last. A header width of at most 25 bits cannot carry
+// 128 gaps past 2^32, so its last ordinal checks the block; a wider one checks the 64-bit
+// sum of its gaps (F10).
+inline std::size_t decode_gaps(const std::uint8_t* in, std::size_t size, std::uint32_t base, std::uint32_t last, bool first, std::uint32_t* out) noexcept {
+	if (size < 1 || (in[0] & bitpack::exceptions_flag)) { return 0; }
+	const std::uint64_t span = std::uint64_t(last) - (first ? std::uint64_t(-1) : std::uint64_t(base));  // sum of the gaps
+	if (first) { base = std::uint32_t(-1); }
+	if (!first && last <= base) { return 0; }
+	if (in[0] & bitpack::constant_flag) {
+		if (in[0] != bitpack::constant_flag || size < 5) { return 0; }
+		std::uint32_t v;
+		std::memcpy(&v, in + 1, 4);
+		if ((std::uint64_t(v) + 1) * block != span) { return 0; }
+		for (std::size_t i = 0; i < block; ++i) { out[i] = base + std::uint32_t((i + 1) * (std::uint64_t(v) + 1)); }
+		return 5;
+	}
+	const unsigned bits = in[0] & 0x3f;
+	if (bits > 32 || size < 1 + bitpack::packed_bytes(bits)) { return 0; }
+	if (bits <= 25) {
+		bitpack::unpack_delta(in + 1, bits, base, out);
+		for (std::size_t i = 0; i < block; ++i) { out[i] += std::uint32_t(i + 1); }
+		if (out[block - 1] != last) { return 0; }
+	} else {
+		bitpack::unpack(in + 1, bits, out);
+		std::uint64_t sum = 0;
+		for (std::size_t i = 0; i < block; ++i) { sum += out[i]; }
+		if (sum + block != span) { return 0; }
+		for (std::size_t i = 0; i < block; ++i) { out[i] = base += out[i] + 1; }
+	}
+	return 1 + bitpack::packed_bytes(bits);
+}
+
+// --- threshold seeds (F13: M20) -------------------------------------------------------------
+
+// A term with skip blocks and wdfs stores, after its skip flags (and tail positions), for each
+// k of seed_ks up to its df, two dominance pairs: at least k of its postings have wdf >= w and
+// length <= l. The first pair stores l as an encode_length code, the second exactly:
+// [w LEB128][code u8][w LEB128][l LEB128]. A score non-decreasing in wdf and non-increasing in
+// length gives each of those k postings at least f(w, l), under any statistics.
+inline constexpr std::uint32_t seed_ks[3] = {10, 100, 1000};
+struct seed_pairs {
+	std::uint32_t code_wdf = 0;
+	std::uint8_t code = 0;
+	std::uint32_t exact_wdf = 0, exact = 0;
+};
+
+// The longest length whose encode_length is at most code.
+inline std::uint32_t max_length_of(std::uint8_t code) noexcept {
+	if (code == 255) { return 0xffffffffu; }
+	std::uint64_t lo = 0, hi = 0xffffffffull;  // the last n with encode_length(n) <= code
+	while (lo < hi) {
+		const std::uint64_t mid = lo + (hi - lo + 1) / 2;
+		if (encode_length(std::uint32_t(mid)) <= code) { lo = mid; } else { hi = mid - 1; }
+	}
+	return std::uint32_t(lo);
 }
 
 // --- term info (the termdict value) -----------------------------------------------------------
