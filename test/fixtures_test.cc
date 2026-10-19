@@ -7,8 +7,12 @@
 #include "strata/reader.hh"
 #include "strata/writer.hh"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <vector>
@@ -203,6 +207,50 @@ int main() {
 		char text[32];
 		std::snprintf(text, sizeof text, "%016llx\n", static_cast<unsigned long long>(digest));
 		pin("digest.txt", text);
+	}
+	// C17: each family's bytes change only with its pre-freeze version. pre_freeze.txt pins
+	// both versions beside a hash of the family's fixtures (the segments' .sx, the files'
+	// .bin), so a re-pin that keeps the version fails, and so does a bump left unrecorded.
+	{
+		auto family = [](const char* ext) {
+			std::vector<std::string> names;
+			for (const auto& e : std::filesystem::directory_iterator(STRATA_FIXTURES)) {
+				if (e.is_regular_file() && e.path().extension() == ext) { names.push_back(e.path().filename().string()); }
+			}
+			std::sort(names.begin(), names.end());
+			std::string all;
+			for (const auto& n : names) {
+				std::ifstream in(std::string(STRATA_FIXTURES) + "/" + n, std::ios::binary);
+				const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+				all += n + '\0' + std::to_string(bytes.size()) + '\0' + bytes;
+			}
+			return xxh64::hash(all);
+		};
+		struct row {
+			unsigned long long version = 0, hash = 0;
+		};
+		const row now[2] = {{format::pre_freeze, family(".sx")}, {files::pre_freeze, family(".bin")}};
+		const char* names[2] = {"segments", "files"};
+		const std::string path = std::string(STRATA_FIXTURES) + "/pre_freeze.txt";
+		row was[2];
+		if (std::FILE* f = std::fopen(path.c_str(), "r")) {
+			for (auto& w : was) {
+				char name[16];
+				if (std::fscanf(f, "%15s %llx %llx", name, &w.version, &w.hash) != 3) { break; }
+			}
+			std::fclose(f);
+		}
+		bool bumped = true;
+		for (int i = 0; i < 2; ++i) {
+			if (now[i].hash != was[i].hash && now[i].version == was[i].version) {
+				std::fprintf(stderr, "pre_freeze.txt: the %s fixtures changed without a pre-freeze bump (C17)\n", names[i]);
+				bumped = false;
+			}
+		}
+		CHECK(bumped);
+		char text[128];
+		std::snprintf(text, sizeof text, "segments %08llx %016llx\nfiles %08llx %016llx\n", now[0].version, now[0].hash, now[1].version, now[1].hash);
+		if (bumped) { pin("pre_freeze.txt", text); }
 	}
 	std::printf("fixtures: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
