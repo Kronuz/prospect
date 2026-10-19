@@ -1829,7 +1829,7 @@ private:
 				if (document& d = buffer_.back().doc; d.split_text) {  // the writer takes explicit tokens
 					d.split_text = false;
 					d.length = 0;
-					split_words(d.text, [&](std::size_t offset, std::size_t size) { d.tokens.push_back({std::uint32_t(offset), std::uint32_t(size), ++d.length}); });
+					text_detail::split_words(d.text, [&](std::size_t offset, std::size_t size) { d.tokens.push_back({std::uint32_t(offset), std::uint32_t(size), ++d.length}); });
 				}
 				buffer_bytes_ += doc_bytes(buffer_.back().doc);
 			}
