@@ -69,7 +69,7 @@ inline constexpr char footer_magic[4] = {'S', 'E', 'N', 'D'};
 // The version written, and the oldest one read (N - 1 from format 13 on: F2). Until format
 // 13 freezes, both are a pre-freeze number, bumped with each byte change and 13 at the
 // freeze, so an index from another pre-freeze build is refused, never misread (CR11).
-inline constexpr std::uint32_t pre_freeze = 0x8000'0004;
+inline constexpr std::uint32_t pre_freeze = 0x8000'0005;
 inline constexpr std::uint32_t version = pre_freeze;
 inline constexpr std::uint32_t min_read_version = pre_freeze;
 // Bytes 0-15, frozen in every version: magic, version, CRC-32C of bytes 0-11 (F2).
@@ -657,6 +657,31 @@ inline std::pair<std::size_t, std::uint32_t> successor(const std::uint8_t* in, s
 	return {block, 0};
 }
 }  // namespace ef
+
+// --- threshold seeds (F13: M20) -------------------------------------------------------------
+
+// A term with skip blocks and wdfs stores, after its skip flags (and tail positions), for each
+// k of seed_ks up to its df, two dominance pairs: at least k of its postings have wdf >= w and
+// length <= l. The first pair stores l as an encode_length code, the second exactly:
+// [w LEB128][code u8][w LEB128][l LEB128]. A score non-decreasing in wdf and non-increasing in
+// length gives each of those k postings at least f(w, l), under any statistics.
+inline constexpr std::uint32_t seed_ks[3] = {10, 100, 1000};
+struct seed_pairs {
+	std::uint32_t code_wdf = 0;
+	std::uint8_t code = 0;
+	std::uint32_t exact_wdf = 0, exact = 0;
+};
+
+// The longest length whose encode_length is at most code.
+inline std::uint32_t max_length_of(std::uint8_t code) noexcept {
+	if (code == 255) { return 0xffffffffu; }
+	std::uint64_t lo = 0, hi = 0xffffffffull;  // the last n with encode_length(n) <= code
+	while (lo < hi) {
+		const std::uint64_t mid = lo + (hi - lo + 1) / 2;
+		if (encode_length(std::uint32_t(mid)) <= code) { lo = mid; } else { hi = mid - 1; }
+	}
+	return std::uint32_t(lo);
+}
 
 // --- term info (the termdict value) -----------------------------------------------------------
 

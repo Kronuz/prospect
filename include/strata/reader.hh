@@ -1150,7 +1150,7 @@ public:
 		// Bytes are verified as they are first read (P15): the header here; level 1 and the
 		// pairs below; each group's advance entries when located, its record's rest when its
 		// pairs or positions are read, each block and the tail when decoded.
-		need(p_, std::min<std::uint64_t>(64, info.postings_length));
+		need(p_, std::min<std::uint64_t>(128, info.postings_length));
 		blocks_ = df_ / format::block;
 		with_positions_ = !(info.flags & format::no_positions);
 		with_counts_ = with_positions_ && !(info.flags & format::counts_are_wdf);
@@ -1165,6 +1165,16 @@ public:
 			if (with_positions_) {
 				tail_first_position_ = format::get_leb(&p_, end_);
 				tail_pos_offset_ = format::get_leb(&p_, end_);
+			}
+			if (!(info.flags & format::no_wdf)) {  // threshold seeds (F13)
+				for (; seeds_n_ < 3 && format::seed_ks[seeds_n_] <= df_; ++seeds_n_) {
+					auto& s = seeds_[seeds_n_];
+					s.code_wdf = leb32();
+					if (p_ == end_) { corrupt("threshold seeds"); }
+					s.code = std::uint8_t(*p_++);
+					s.exact_wdf = leb32();
+					s.exact = leb32();
+				}
 			}
 			// Fixed-width level 1, then the groups' pairs, records, blocks, and tail; each
 			// region is checked against the term's range here, each group when located.
@@ -1193,6 +1203,15 @@ public:
 
 	ordinal_t doc() const noexcept { return doc_; }
 	std::uint32_t wdf() const { return wdfs()[pos_]; }
+	// The stored seed pairs (F13) for the smallest stored k at or above k, or null.
+	const format::seed_pairs* seeds(std::size_t k) const noexcept {
+		for (std::size_t j = 0; j < seeds_n_; ++j) {
+			if (k <= format::seed_ks[j]) { return &seeds_[j]; }
+		}
+		return nullptr;
+	}
+	std::size_t seed_count() const noexcept { return seeds_n_; }
+	const format::seed_pairs& seed_at(std::size_t j) const noexcept { return seeds_[j]; }
 	std::uint64_t cost() const noexcept { return df_; }
 
 	ordinal_t next() {
@@ -1420,6 +1439,12 @@ private:
 		format::decode_impacts(&p, list.data() + list.size(), impacts_);
 		if (p != list.data() + list.size()) { corrupt("impacts length"); }
 		return impacts_;
+	}
+
+	std::uint32_t leb32() {
+		const std::uint64_t v = format::get_leb(&p_, end_);
+		if (v > 0xffffffffu) { corrupt("threshold seeds"); }
+		return std::uint32_t(v);
 	}
 
 	// A group located through level 1: its fields checked against its neighbors and the
@@ -1778,6 +1803,8 @@ private:
 	const char* level1_ = nullptr;  // fixed-width group entries
 	std::size_t groups_n_ = 0, entry_size_ = 0, offset_width_ = 4;
 	unsigned codec_width_ = 0;  // bits of each block's codec code
+	format::seed_pairs seeds_[3];
+	std::size_t seeds_n_ = 0;
 	std::string_view pairs_;    // the groups' competitive pairs
 	std::uint64_t records_bytes_ = 0;
 	group cur_;

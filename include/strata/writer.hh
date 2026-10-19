@@ -46,6 +46,7 @@
 #include "strata/budget.hh"
 #include "strata/docids.hh"
 #include "strata/reader.hh"
+#include "strata/search.hh"
 #include "strata/format.hh"
 #include "strata/keys.hh"
 #include "strata/section_io.hh"
@@ -334,7 +335,8 @@ public:
 			dict.add(key, format::encode_term_info(info, run, dict.next_is_restart()));
 			if (memory) {
 				const std::uint64_t now = (tp.ords.capacity() + tp.wdfs.capacity() + tp.counts.capacity() + tp.positions.capacity()) * sizeof(std::uint32_t) +
-					all.capacity() * sizeof(format::impact) + encoded_postings.capacity() + term_positions.capacity();
+					all.capacity() * sizeof(format::impact) + encoded_postings.capacity() + term_positions.capacity() +
+					(seed_order_.capacity() + seed_counts_.capacity() + seed_heap_[0].capacity() + seed_heap_[1].capacity() + seed_heap_[2].capacity()) * sizeof(std::uint32_t);
 				if (now > scratch) {
 					memory->grow(now - scratch);
 					scratch = now;
@@ -667,6 +669,15 @@ private:
 			format::put_leb(out, position);  // the tail's first position index and its block offset
 			format::put_leb(out, layout->offset_of(position));
 		}
+		if (with_wdf) {
+			const auto seeds = seeds_of(ords, wdfs);
+			for (std::size_t j = 0; j < 3 && format::seed_ks[j] <= ords.size(); ++j) {
+				format::put_leb(out, seeds[j].code_wdf);
+				out.push_back(char(seeds[j].code));
+				format::put_leb(out, seeds[j].exact_wdf);
+				format::put_leb(out, seeds[j].exact);
+			}
+		}
 		format::put_leb(out, pairs.size());
 		format::put_leb(out, records.size());
 		format::put_leb(out, blocks.size());
@@ -727,6 +738,81 @@ private:
 		return out;
 	}
 
+	// F13 (M20): for each stored k, among the pairs (w, the k-th shortest length of the postings
+	// with wdf >= w), the one each preset scores highest at this segment's statistics. Postings
+	// are visited by wdf, highest first, until no lower wdf can beat every best at the
+	// segment's shortest length.
+	std::array<format::seed_pairs, 3> seeds_of(const std::vector<std::uint32_t>& ords, const std::vector<std::uint32_t>& wdfs) {
+		std::array<format::seed_pairs, 3> out{};
+		const std::size_t df = ords.size();
+		const strata::statistics st(lengths_.size(), total_length_);
+		const weight lucene = weight::bm25(st, 1), xapian = weight::bm25_xapian(st, 1);
+		std::uint32_t top = 0;
+		for (auto w : wdfs) { top = std::max(top, w); }
+		// Postings by wdf, highest first: a counting sort while wdfs are small, else a sort.
+		seed_order_.resize(df);
+		if (top <= (1u << 16)) {
+			seed_counts_.assign(std::size_t(top) + 2, 0);
+			for (auto w : wdfs) { ++seed_counts_[top - w + 1]; }
+			for (std::size_t i = 1; i < seed_counts_.size(); ++i) { seed_counts_[i] += seed_counts_[i - 1]; }
+			for (std::size_t i = 0; i < df; ++i) { seed_order_[seed_counts_[top - wdfs[i]]++] = std::uint32_t(i); }
+		} else {
+			for (std::size_t i = 0; i < df; ++i) { seed_order_[i] = std::uint32_t(i); }
+			std::stable_sort(seed_order_.begin(), seed_order_.end(), [&](std::uint32_t a, std::uint32_t b) { return wdfs[a] > wdfs[b]; });
+		}
+		const std::uint32_t shortest = min_length();
+		const std::uint8_t shortest_code = format::encode_length(shortest);
+		double best_lucene[3] = {-1, -1, -1}, best_xapian[3] = {-1, -1, -1};
+		const std::size_t ks = std::size_t(std::count_if(std::begin(format::seed_ks), std::end(format::seed_ks), [&](std::uint32_t k) { return k <= df; }));
+		for (std::size_t j = 0; j < ks; ++j) { seed_heap_[j].clear(); }
+		for (std::size_t i = 0; i < df;) {
+			const std::uint32_t w = wdfs[seed_order_[i]];
+			if (w == 0) { break; }
+			for (; i < df && wdfs[seed_order_[i]] == w; ++i) {
+				const std::uint32_t length = lengths_[ords[seed_order_[i]]];
+				for (std::size_t j = 0; j < ks; ++j) {
+					auto& h = seed_heap_[j];  // the k shortest lengths so far, longest on top
+					if (h.size() < format::seed_ks[j]) {
+						h.push_back(length);
+						std::push_heap(h.begin(), h.end());
+					} else if (length < h.front()) {
+						std::pop_heap(h.begin(), h.end());
+						h.back() = length;
+						std::push_heap(h.begin(), h.end());
+					}
+				}
+			}
+			bool full = true;
+			for (std::size_t j = 0; j < ks; ++j) {
+				auto& h = seed_heap_[j];
+				if (h.size() < format::seed_ks[j]) {
+					full = false;
+					continue;
+				}
+				const std::uint32_t l = h.front();
+				const std::uint8_t code = format::encode_length(l);
+				if (const double f = lucene.by_norm(w, code); f > best_lucene[j]) {
+					best_lucene[j] = f;
+					out[j].code_wdf = w;
+					out[j].code = code;
+				}
+				if (const double f = xapian(w, l); f > best_xapian[j]) {
+					best_xapian[j] = f;
+					out[j].exact_wdf = w;
+					out[j].exact = l;
+				}
+			}
+			if (full && i < df) {
+				const std::uint32_t next = wdfs[seed_order_[i]];
+				bool done = true;
+				for (std::size_t j = 0; j < ks; ++j) { done = done && lucene.by_norm(next, shortest_code) <= best_lucene[j] && xapian(next, shortest) <= best_xapian[j]; }
+				if (done) { break; }
+			}
+		}
+		return out;
+	}
+
+	std::vector<std::uint32_t> seed_order_, seed_counts_, seed_heap_[3];  // seeds_of's scratch
 	std::vector<format::impact> pairs_;  // write_postings: one block's pairs
 	detail::stable_bytes arena_{std::size_t(1) << 20};
 	std::vector<slot> table_;

@@ -17,7 +17,7 @@
 
 ## State
 
-M16, M23, and M22 committed; M20 next; origin/main d058cd9 (dir-lock) to merge.
+M16, M23, M22, and M20 committed, origin/main d058cd9 (dir-lock) merged; M3t next.
 
 ## Done
 
@@ -87,9 +87,37 @@ M16, M23, and M22 committed; M20 next; origin/main d058cd9 (dir-lock) to merge.
   - Revert checks: the entry's code check fails postings_test:300; decode's increase check fails
     :340 and :496; probe_ready's count fails :482; successor's bound fails :504.
 
+- The merge of origin/main d058cd9 (phase4/dir-lock: files::pre_freeze 0x80000005), 7d91c9f:
+  pre_freeze.txt keeps both families' rows (segments from this branch, files from main); ctest
+  39/39.
+- M20 (F13 at two pairs per k), the commit after 7d91c9f: a term with skip blocks and wdfs
+  stores, after its skip flags, for each k of 10, 100, 1,000 up to its df, two dominance pairs
+  (at least k postings with wdf >= w and length <= l): the one bm25 scores highest at the
+  segment's statistics with l as a code, and the one bm25_xapian scores highest with l exact,
+  [w][code u8][w][l] in LEB128, 2 to 4 bytes a pair; these are E4b's seeds. The writer finds
+  them in one pass over the postings by wdf, highest first (a counting sort), keeping the k
+  shortest lengths per k in a heap, and stops once no lower wdf can beat either best at the
+  segment's shortest length. A scorer's `seed(k)` is the larger pair's score under its own
+  weight for the smallest stored k at or above k, times (1 - 2^-40) so equal scores still
+  enter; a union's is its clauses' largest. `search()` builds every segment's scorer first and
+  seeds the collector, or top_k's floor for one segment, with the largest seed of the segments
+  without deletes (a segment with deletes is wrapped by live_scorer, which forwards none);
+  engine_query's segment-file path does the same. check() verifies each pair against its
+  postings. `format::pre_freeze` 0x80000005; fixtures, the T8 hash, the prefix CRC re-pinned;
+  digest.txt unchanged; segment_test's level-1 probe skips the seeds. Tests: postings_test (the
+  stored pairs score exactly the brute-force best over every w for both presets, each dominates
+  its k postings; check() refuses a pair no posting reaches; 240 searches over one segment,
+  three, and three with deletes, terms and unions, k 1 to 1,000, both presets, equal an
+  exhaustive reference to the bit; a segment whose seed comes from deleted postings still
+  returns its 10 live hits); fuzz_postings compares seeded and unseeded top-k under both presets
+  and runs check() on the damaged copy (4 min, 864 runs under a concurrent ctest, no finding).
+  - Revert checks: taking the seed before the live wrapper fails postings_test:648; dropping the
+    (1 - 2^-40) margin fails :621 (an equal k-th score dropped); summing a union's seeds fails
+    :621; removing check()'s seed verification fails :574.
+
 ## Next
 
-1. M20: seeds, two stored pairs per k.
+1. M3t: bound-ordered traversal for single terms in reordered segments (format-free).
 
 ## Blocked on
 

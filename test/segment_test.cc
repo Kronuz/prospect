@@ -403,6 +403,12 @@ int main() {
 			const char* p = seg.get<strata::inverted_plugin>().postings_bytes().data() + info.postings;
 			const char* end = p + info.postings_length;
 			CHECK(strata::format::get_leb(&p, end) == 6 && *p++ == 0);  // six narrow groups
+			for (std::size_t j = 0; j < 3 && strata::format::seed_ks[j] <= info.df; ++j) {  // the threshold seeds (F13)
+				(void)strata::format::get_leb(&p, end);
+				++p;
+				(void)strata::format::get_leb(&p, end);
+				(void)strata::format::get_leb(&p, end);
+			}
 			for (int i = 0; i < 3; ++i) { (void)strata::format::get_leb(&p, end); }
 			// Level 1: 16-byte entries without positions, each starting with its last.
 			const std::size_t at = std::size_t(p - file.data()) + 4 * 16;

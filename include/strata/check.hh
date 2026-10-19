@@ -5,6 +5,7 @@
 #include "strata/reader.hh"
 
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 namespace strata {
@@ -35,9 +36,21 @@ inline void check_segment(const segment& seg, const std::vector<std::uint64_t>* 
 		++r.terms;
 		postings_iterator it(inverted, info);
 		positions_reader pr(inverted, info);
+		std::vector<std::pair<std::uint32_t, std::uint32_t>> postings;  // (wdf, length), for the seeds
 		for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
 			++r.postings;
 			r.positions += pr.read(it).size();
+			if (it.seed_count()) { postings.emplace_back(it.wdf(), inverted.length(o)); }
+		}
+		// Each threshold seed pair dominates at least its k postings (F13).
+		for (std::size_t j = 0; j < it.seed_count(); ++j) {
+			const auto& p = it.seed_at(j);
+			std::uint32_t by_code = 0, exact = 0;
+			for (const auto& [wdf, length] : postings) {
+				by_code += wdf >= p.code_wdf && format::encode_length(length) <= p.code;
+				exact += wdf >= p.exact_wdf && length <= p.exact;
+			}
+			if (by_code < format::seed_ks[j] || exact < format::seed_ks[j]) { corrupt("threshold seed"); }
 		}
 		return true;
 	});

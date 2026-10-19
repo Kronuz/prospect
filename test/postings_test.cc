@@ -3,6 +3,8 @@
 // pairs; and corrupt entries, which fence or answer with ordinals in order and in range.
 #include "strata/reader.hh"
 #include "strata/search.hh"
+#include "strata/searcher.hh"
+#include "strata/check.hh"
 #include "strata/writer.hh"
 #include "skip_layout.hh"
 
@@ -40,7 +42,7 @@ struct corpus {
 // Terms of several shapes: dense at 60% (bitset blocks), with and without wdf, every third,
 // sparse, clustered runs (Elias-Fano blocks), boolean, irregular gaps with runs, and counts
 // that differ from wdf; lengths 1 to 300.
-corpus build(std::uint32_t docs, std::uint64_t seed, bool wide = false) {
+corpus build(std::uint32_t docs, std::uint64_t seed, bool wide = false, std::uint64_t first_docid = 1) {
 	std::mt19937_64 rng(seed);
 	corpus c;
 	strata::segment_writer w;
@@ -72,7 +74,7 @@ corpus build(std::uint32_t docs, std::uint64_t seed, bool wide = false) {
 			add("counts", 3 * n, n);
 		}
 		c.lengths.push_back(length);
-		w.add(d + 1, in, length);
+		w.add(first_docid + d, in, length);
 	}
 	c.bytes = w.flush({});
 	return c;
@@ -504,6 +506,148 @@ int main() {
 		dup[126] = 1279;  // bucket 159 at 3 low bits, as the last (1273), with a larger low part
 		CHECK(f::ef::encode(dup, 0, true, bad) == n && f::ef::probe_ready(bad, 0, 1273, true));
 		CHECK(f::ef::successor(bad, 0, 1273, true, 1273).first == f::block);
+	}
+
+	// --- F13 (M20): threshold seeds -----------------------------------------------------------
+	{
+		// The stored pairs are the best dominance pairs for each preset at the segment's own
+		// statistics (E4b's seeds), and each dominates its k postings.
+		const corpus c = build(20000, 20);
+		strata::segment s(c.bytes);
+		const auto& inv = s.get<strata::inverted_plugin>();
+		const strata::statistics st(inv);
+		for (const auto& [term, ps] : c.terms) {
+			const auto info = *inv.term(term);
+			strata::postings_iterator it(inv, info);
+			const bool stored = ps.size() >= f::block && !(info.flags & f::no_wdf);
+			CHECK(it.seed_count() == (stored ? std::size_t(std::count_if(std::begin(f::seed_ks), std::end(f::seed_ks), [&](std::uint32_t k) { return k <= ps.size(); })) : 0));
+			const auto lucene = strata::weight::bm25(st, info.df), xapian = strata::weight::bm25_xapian(st, info.df);
+			for (std::size_t j = 0; j < it.seed_count(); ++j) {
+				const std::size_t k = f::seed_ks[j];
+				double best_l = 0, best_x = 0;  // over every w: the k-th shortest length among wdf >= w
+				for (const auto& p : ps) {
+					std::vector<std::uint32_t> lens;
+					for (const auto& q : ps) {
+						if (q.wdf >= p.wdf) { lens.push_back(c.lengths[q.ord]); }
+					}
+					if (lens.size() < k) { continue; }
+					std::nth_element(lens.begin(), lens.begin() + std::ptrdiff_t(k - 1), lens.end());
+					best_l = std::max(best_l, lucene.by_norm(p.wdf, f::encode_length(lens[k - 1])));
+					best_x = std::max(best_x, xapian(p.wdf, lens[k - 1]));
+				}
+				const auto& pair = it.seed_at(j);
+				CHECK(lucene.by_norm(pair.code_wdf, pair.code) == best_l);
+				CHECK(xapian(pair.exact_wdf, pair.exact) == best_x);
+				std::size_t by_code = 0, exact = 0;
+				for (const auto& p : ps) {
+					by_code += p.wdf >= pair.code_wdf && f::encode_length(c.lengths[p.ord]) <= pair.code;
+					exact += p.wdf >= pair.exact_wdf && c.lengths[p.ord] <= pair.exact;
+				}
+				CHECK(by_code >= k && exact >= k);
+			}
+		}
+		strata::check_report r;
+		strata::check_segment(s, nullptr, r);
+		CHECK(r.terms == c.terms.size());
+		// check() refuses a seed that claims more than its postings hold.
+		{
+			std::string file = c.bytes;
+			const strata::segment copy(file);
+			const auto info = *copy.get<strata::inverted_plugin>().term("mid");
+			const auto l = skip_test::parse(file, copy, info);
+			const char* p = file.data() + l.seeds_at;
+			(void)f::get_leb(&p, file.data() + file.size());
+			file[std::size_t(p - file.data())] = char(255);  // the first pair's code: every length
+			const char* q = file.data() + l.seeds_at;
+			const std::uint64_t w = f::get_leb(&q, file.data() + file.size());
+			CHECK(w < 0x7f);
+			file[l.seeds_at] = char(0x7f);  // and a wdf no posting reaches
+			reseal(file);
+			strata::segment bad(file);
+			strata::check_report r2;
+			bool refused = false;
+			try {
+				strata::check_segment(bad, nullptr, r2);
+			} catch (const strata::corrupt_segment&) {
+				refused = true;
+			}
+			CHECK(refused);
+		}
+
+		// Searches with seeds equal an exhaustive reference: terms and unions, k = 1, 10, 50,
+		// 100, 1,000, both presets, one segment, three, and three with deletes (seeds off).
+		const corpus parts[3] = {build(6000, 31, false, 1), build(6000, 32, false, 100000), build(6000, 33, false, 200000)};
+		std::vector<strata::segment> segs;
+		for (const auto& p : parts) { segs.emplace_back(p.bytes); }
+		std::vector<std::uint64_t> deleted((6000 + 63) / 64);
+		for (std::size_t d = 0; d < 6000; d += 3) { deleted[d / 64] |= std::uint64_t(1) << (d % 64); }
+		using query = std::vector<std::string>;
+		const std::vector<query> queries = {{"dense"}, {"mid"}, {"sparse"}, {"counts"}, {"clustered"}, {"mid", "sparse"}, {"dense", "counts", "gaps"}, {"bool", "mid"}};
+		std::size_t seeded = 0, compared = 0;
+		for (const int shape : {1, 3, 4}) {  // segments, the fourth: three with deletes in the second
+			std::vector<strata::segment_snapshot> snap;
+			for (int i = 0; i < std::min(shape, 3); ++i) { snap.push_back({&segs[std::size_t(i)], shape == 4 && i == 1 ? &deleted : nullptr}); }
+			strata::term_table table(snap);
+			for (const auto scheme : {strata::scheme::bm25, strata::scheme::bm25_xapian}) {
+				for (const auto& q : queries) {
+					auto build_q = [&](const strata::segment& seg) -> strata::scorer_ptr {
+						std::vector<strata::scorer_ptr> kids;
+						for (const auto& t : q) {
+							const auto* info = table.info(seg, t);
+							if (!info) { continue; }
+							const auto w = scheme == strata::scheme::bm25 ? strata::weight::bm25(table.stats(), table.df(t)) : strata::weight::bm25_xapian(table.stats(), table.df(t));
+							kids.push_back(std::make_unique<strata::term_scorer>(seg.get<strata::inverted_plugin>(), *info, w));
+						}
+						if (kids.empty()) { return nullptr; }
+						if (kids.size() == 1) { return std::move(kids[0]); }
+						return std::make_unique<strata::disjunction_scorer>(std::move(kids));
+					};
+					for (const std::size_t k : {1u, 10u, 50u, 100u, 1000u}) {
+						std::vector<strata::doc_hit> want;
+						for (const auto& sn : snap) {
+							auto sc = build_q(*sn.seg);
+							if (!sc) { continue; }
+							if (sn.deleted == nullptr) { seeded += sc->seed(k) > 0; }
+							for (ordinal_t d = sc->next(); d != strata::no_more_docs; d = sc->next()) {
+								if (sn.deleted && ((*sn.deleted)[d / 64] >> (d % 64) & 1)) { continue; }
+								want.push_back({sn.seg->core().docid(d), sc->score()});
+							}
+						}
+						std::sort(want.begin(), want.end(), [](const auto& a, const auto& b) { return a.score != b.score ? a.score > b.score : a.docid < b.docid; });
+						want.resize(std::min(want.size(), k));
+						const auto got = strata::search(snap, build_q, k);
+						bool ok = got.size() == want.size();
+						for (std::size_t i = 0; ok && i < got.size(); ++i) { ok = got[i].docid == want[i].docid && got[i].score == want[i].score; }
+						CHECK(ok);
+						++compared;
+					}
+				}
+			}
+		}
+		std::printf("  seeds: %zu searches equal the exhaustive reference, %zu seeded scorers\n", compared, seeded);
+		CHECK(seeded > 50);
+
+		// Seeds are off in a segment with deletes: here the k-th best stored pair belongs to
+		// deleted postings, so a seeded floor would drop every live hit.
+		{
+			strata::segment_writer w;
+			const std::vector<std::uint32_t> none;
+			for (std::uint32_t d = 0; d < 400; ++d) {
+				std::vector<strata::posting_input> in{{"hot", d < 40 ? 50u : 1u, none}};
+				w.add(d + 1, in, d < 40 ? 2 : 200);
+			}
+			const std::string bytes = w.flush({});
+			strata::segment hot(bytes);
+			std::vector<std::uint64_t> gone((400 + 63) / 64);
+			for (std::size_t d = 0; d < 40; ++d) { gone[d / 64] |= std::uint64_t(1) << (d % 64); }
+			const strata::segment_snapshot one[] = {{&hot, &gone}};
+			auto b = [&](const strata::segment& seg) -> strata::scorer_ptr { return std::make_unique<strata::term_scorer>(seg.get<strata::inverted_plugin>(), *seg.get<strata::inverted_plugin>().term("hot")); };
+			strata::term_scorer probe(hot.get<strata::inverted_plugin>(), *hot.get<strata::inverted_plugin>().term("hot"));
+			CHECK(probe.seed(10) > strata::weight::bm25(hot.get<strata::inverted_plugin>(), 400)(1, 200));  // the seed comes from the deleted postings
+			const auto got = strata::search(one, b, 10);
+			CHECK(got.size() == 10);
+			for (const auto& h : got) { CHECK(h.docid > 40); }
+		}
 	}
 
 	std::printf("postings: %s\n", failures ? "FAILED" : "ok");

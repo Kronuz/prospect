@@ -26,6 +26,7 @@ struct block {
 };
 struct layout {
 	std::size_t flags_at = 0;  // the skip flags byte's file offset
+	std::size_t seeds_at = 0;  // the threshold seeds' file offset
 	std::vector<group> groups;
 	std::vector<block> blocks;
 };
@@ -44,6 +45,13 @@ inline layout parse(std::string_view file, const strata::segment& s, const strat
 	const std::size_t w = flags & f::skip::wide ? 8 : 4;
 	const unsigned wf = flags >> f::skip::codec_shift & 3;
 	if (positions) {
+		(void)f::get_leb(&p, end);
+		(void)f::get_leb(&p, end);
+	}
+	out.seeds_at = std::size_t(p - base);
+	for (std::size_t j = 0; j < 3 && !(info.flags & f::no_wdf) && f::seed_ks[j] <= info.df; ++j) {
+		(void)f::get_leb(&p, end);
+		++p;
 		(void)f::get_leb(&p, end);
 		(void)f::get_leb(&p, end);
 	}

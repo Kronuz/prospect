@@ -167,6 +167,9 @@ struct scorer {
 	virtual bool matches() { return true; }
 	// Collects the k best hits itself (bulk scoring); false when the generic loop must.
 	virtual bool collect_top_k(top_collector& c) { (void)c; return false; }
+	// A strict lower bound on the k-th best score among this segment's matches, from stored
+	// threshold seeds (F13); 0 for none. Valid only where every match is live.
+	virtual double seed(std::size_t k) { (void)k; return 0.0; }
 };
 
 struct hit {
@@ -368,6 +371,17 @@ public:
 	}
 
 	postings_iterator& postings() noexcept { return it_; }
+
+	// The larger of the stored pairs' scores under this weight, made strictly lower by more
+	// than rounding can move a score (F13).
+	double seed(std::size_t k) override {
+		const format::seed_pairs* p = it_.seeds(k);
+		if (!p) { return 0.0; }
+		const bool lucene = weight_.kind == scheme::bm25;
+		const double by_code = lucene ? weight_.by_norm(p->code_wdf, p->code) : weight_(p->code_wdf, format::max_length_of(p->code));
+		const double exact = lucene ? weight_.by_norm(p->exact_wdf, format::encode_length(p->exact)) : weight_(p->exact_wdf, p->exact);
+		return std::max(by_code, exact) * (1.0 - 0x1p-40);
+	}
 
 	// Lucene BM25 reads the one-byte norm; Xapian BM25 reads the exact length.
 	double score_of(ordinal_t ord, std::uint32_t wdf) const {
@@ -792,6 +806,12 @@ public:
 
 	// Block-max MaxScore over windows of 4,096 ordinals (see the definition).
 	bool collect_top_k(top_collector& c) override;
+	// A match scores the sum of its clauses' non-negative scores, at least any one's (F13).
+	double seed(std::size_t k) override {
+		double s = 0.0;
+		for (const auto& c : children_) { s = std::max(s, c->seed(k)); }
+		return s;
+	}
 
 	std::unique_ptr<scorer> fresh() const override {
 		std::vector<scorer_ptr> kids(children_.size());

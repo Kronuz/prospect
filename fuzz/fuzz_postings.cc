@@ -5,6 +5,7 @@
 // below the document count, advance() at or past its target. Inputs are bounded: at most
 // 6,000 documents and 64 flips. Aborts on a wrong answer, so a finding is a crash.
 #include "strata/reader.hh"
+#include "strata/check.hh"
 #include "strata/search.hh"
 #include "strata/writer.hh"
 
@@ -183,6 +184,18 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 				}
 			}
 			if (i != terms[k].size()) { fail("round trip length"); }
+			// Seeded top-k equals unseeded under both presets (F13).
+			const auto& inv = s.get<strata::inverted_plugin>();
+			for (const auto& w : {strata::weight::bm25(inv, info->df), strata::weight::bm25_xapian(inv, info->df)}) {
+				for (const std::size_t top : {10u, 100u, 1000u}) {
+					strata::term_scorer a(inv, *info, w), b(inv, *info, w);
+					const double floor = a.seed(top);
+					const auto x = strata::top_k(s, a, top, nullptr, floor), y = strata::top_k(s, b, top);
+					bool same = x.size() == y.size();
+					for (std::size_t h = 0; same && h < x.size(); ++h) { same = x[h].ord == y[h].ord && x[h].score == y[h].score; }
+					if (!same) { fail("a seeded top-k differs"); }
+				}
+			}
 			walk(s, *info);
 		}
 	}
@@ -199,6 +212,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 	try {
 		strata::segment s(file);
 		walk(s, *info);
+		strata::check_report r;
+		strata::check_segment(s, nullptr, r);  // seeds, among the rest
 	} catch (const strata::corrupt_segment&) {
 	}
 	return 0;
