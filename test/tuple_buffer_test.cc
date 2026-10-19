@@ -73,7 +73,7 @@ std::string reference(const std::vector<doc>& docs, const std::vector<std::size_
 	for (std::size_t i : order) {
 		const doc& d = docs[i];
 		const auto in = d.inputs();
-		w.add(d.docid, in, d.text, d.tokens, d.length, d.stored, d.version, d.key);
+		strata::detail::writer_access::add_text(w, d.docid, in, d.text, d.tokens, d.length, d.stored, d.version, d.key);
 	}
 	return w.flush({1, 2, 3});
 }
