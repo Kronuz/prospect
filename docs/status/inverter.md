@@ -10,25 +10,34 @@
   `/Users/kronuz/code/Kronuz/strata-wt/inverter-on-layers`, from `origin/phase4/layers-refactor`
   at `ac2c3e2`, carrying `perf/inverter` at `35498e2` (kept untouched at
   `/Users/kronuz/code/Kronuz/strata-wt/inverter`) as a squash, redone on layers' plugins.
-- State: rebased onto layers with the architect's R23 and R24 applied (layers-design.md,
-  "2. The inverter's public API"). Verification below under "Rebase onto layers".
+- State: landed on main (`2ec8c36` to `5b7787e`). The follow-ups from the architect's re-check
+  on main (R26 to R33, C11) and the code review of main (`docs/reviews/inverter-main.md`, CR14
+  to CR20) are on `phase4/inverter-followups`, ledger `docs/status/inverter-followups.md`.
+  Main's `2ec8c36` and `1e2d89b` do not build: a bisect over main skips them (R26, CR19).
 - Rebase onto layers (R23, R24):
   - Public additions, the whole list: `document::text`, `document::tokens`,
-    `document::split_text` (now `inverted_plugin::part`'s, beside `terms` and `length`), and
-    `text_token` (beside `term_entry` in `reader.hh`). Also `index::options::max_run_bytes`,
-    a test hook kept from CR12. Nothing else the branch adds is public.
-  - Internal: `detail::tuple_buffer` (its preconditions stated at the type and asserted in
-    debug builds: non-empty unique terms, non-empty in-bounds tokens, increasing positions,
-    no token equal to a terms entry), `detail::chunked_spill` (`section_io.hh`),
-    `text_detail::{split_words, count_words, word_counts, spaces}` (`reader.hh`), and
-    `detail::writer_access`, the only way to `segment_writer`'s text add, per-document add,
-    and `flush_from` (private members).
+    `document::split_text` (`inverted_plugin::part`'s, beside `terms` and `length`), and
+    `text_token` (beside `term_entry` in `reader.hh`). Two public types changed behavior:
+    `flush_charge` counts what it is told without a budget (`held()`), and `section_stream`
+    gathers 64 KiB before writing and cannot be copied. The run cap is not an option
+    (`index_options::max_run_bytes` left on `phase4/inverter-followups`, R28.1, CR14).
+  - Internal: `detail::tuple_buffer` (its six preconditions stated at the type and, on
+    `phase4/inverter-followups`, all asserted in debug builds: non-empty unique terms,
+    non-empty in-bounds tokens, increasing positions in tokens and in each terms entry, no
+    token equal to a terms entry), `detail::chunked_spill` (`section_io.hh`),
+    `text_detail::{split_words, count_words, word_counts, spaces}` (`reader.hh`),
+    `inverted_plugin::valid_words` and `inverted_builder::add_text` (private on the
+    follow-up branch, R28.2-3), and `detail::writer_access`, the only way to
+    `segment_writer`'s text add, per-document add, and `flush_from` (private members).
   - `inverted_plugin::validate` takes the token and word checks (key prefix from
     `vc.key_prefix`), `bytes` the text and tokens, `disk_estimate` the tokens and words. R23's
     recommendation taken: with `split_text`, a nonzero `length` is refused (test added).
-  - R24.3: the `sizeof(document)` pin moves with the part (a string, a vector, a bool), so
-    `doc_bytes` charges more per document and budget-triggered flush points move; the
-    byte-identical claim holds at equal flush points only.
+  - R24.3, as R30 corrected it: budget-triggered flush points moved for three reasons. At
+    one flush thread the charge is the tuple buffer's allocations, by chunk; in both
+    configurations the version map charges its two tables' capacity; and at more than one
+    flush thread the text inputs grow `sizeof(document)` (by 56 bytes on libc++, 64 on
+    libstdc++), which `doc_bytes` reads. Only the third is the pin's. The byte-identical
+    claim holds at equal flush points only.
   - R24.4 deviations, for the L5 amendment before 7c: the tuple buffer is fed in arrival
     order at buffer time and gets the output order and live set only at flush; it holds
     each document's stored record, key, and version (`stored`'s, `keys`', and the core's).
@@ -40,8 +49,6 @@
     manifests and meta byte-identical to `ref-base-20k` and `ref-base-100k` (one segment
     each, so equal flush points); CI run 39189683111 green on linux-x86_64-clang,
     linux-x86_64-gcc, linux-arm64-gcc, macos-arm64, freebsd-x86_64 when recorded.
-- Next: the code reviewer's review of the rebase; the L5 amendment (R24.4) before 7c.
-  Blocked on: nothing.
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - CR1 (`0da5a05`): `sort_run` keeps tied runs on an explicit stack instead of recursing
@@ -152,11 +159,8 @@
     (3.228-4.418) at 1,888 MB against 3,247; on macOS 2.707x at 100,000 (2.660-2.851). 4.5x
     is 1.35x away at 100,000 and 1.30x at 1M on the gate VM. THP through glibc's tunable: 1.064x (0.859-1.126) with
     compaction stalls and +22% RSS, not pursued.
-- Doing: nothing (paused). The review cut was `b5f375c`; with E26 reverted the reviewer
-  reviews `b5f375c` minus E26 (told to the lead).
-- Next:
-  0. The code reviewer re-checks CR1 and CR2 and finishes the remaining passes; land when
-     CI run 39160732494 is green on all jobs.
+- Doing: nothing; the branch landed on main.
+- Open levers after the landing (from the kept series, for the lead):
   1. Format 13's copy-merge items 1 to 3 (a stored list base, tail-coded blocks anywhere, the
      same for positions; `docs/design/format-13.md` on `phase4/format13`, "Proposed: F13
      candidates from research/indexing") are this item's largest remaining lever. Phase
@@ -171,22 +175,14 @@
   3. `termdict::builder::add` is about 1.5% of the gate VM's samples (161 ns a term in the
      research note); a change there is in the termdict library, not here.
   4. The buffer's memory across flushes (below): a few percent at 5M.
-- Blocked on:
-  - Lead / architect: `document::split_text` (E31) is an additive public field of
-    `document`; it needs the architect's review before it lands (layers' L10 puts it in
-    the inverted plugin's part, beside `text` and `tokens`).
-  - Lead / architect (D17): reusing a flushed buffer's pages. Measured: keeping freed memory
-    cuts minor faults 27% at a 600 MB budget (several flushes), nothing at one flush; a fault
-    costs about 5 µs on the quiet gate VM, so at 5M (1.39M faults, 50 s of system time) it is
-    worth a few percent. Keeping capacity breaks D17's accounting as built (`buffered_bytes()`
-    is the buffer's charge, so kept capacity reads as a full buffer); a pool owned by the
-    budget, charged as idle and handed to whichever buffer grows next, keeps the bound for
-    many indexes. Not built: it changes what D17 counts.
-  - Host: the Mac's data volume was 99% full (16 GiB free) at 03:30; writes recovered after
-    the small-indexes fixtures finished. Small-indexes' strict holds came every 10 to 20
-    minutes through the night, and an unheld `research_workloads tiny` (pid 268527) ran at
-    100% of a gate-VM core from about 01:28 until the lead killed it; quiet A/B windows were
-    short.
+- Open with the lead and the architect (D17): reusing a flushed buffer's pages. Measured:
+  keeping freed memory cuts minor faults 27% at a 600 MB budget (several flushes), nothing at
+  one flush; a fault costs about 5 µs on the quiet gate VM, so at 5M (1.39M faults, 50 s of
+  system time) it is worth a few percent. Keeping capacity breaks D17's accounting as built
+  (`buffered_bytes()` is the buffer's charge, so kept capacity reads as a full buffer); a pool
+  owned by the budget, charged as idle and handed to whichever buffer grows next, keeps the
+  bound for many indexes. Not built: it changes what D17 counts. (`split_text`'s review is
+  settled: R23 put it in `inverted_plugin::part`.)
 - Coordination: perf/indexing-gap merges this branch after each kept item (lead,
   2026-10-18): this branch owns `tuple_buffer.hh` and the one-thread flush, perf/indexing-gap
   the parallel flush and the assembly; boundary changes go under "Interface with
@@ -195,7 +191,10 @@
   E2 moves inversion to stage 2 at one thread; K inversion buffers on threads (D18) are the
   indexing gap's. `phase4/layers-refactor` rewrites `writer.hh` and `index.hh`; these
   changes rebase onto it by the lead.
-- Process: E4's build and tests (21:35-21:47) overlapped `perf/indexing-gap`'s strict hold
+- Process: the Mac's data volume was 99% full (16 GiB free) at 03:30 on 2026-10-18; writes
+  recovered after the small-indexes fixtures finished. Small-indexes' strict holds came every
+  10 to 20 minutes through that night, and an unheld `research_workloads tiny` (pid 268527)
+  ran at 100% of a gate-VM core from about 01:28 until the lead killed it. E4's build and tests (21:35-21:47) overlapped `perf/indexing-gap`'s strict hold
   `ig-e2`; its eight-thread A/B from that window may need a rerun (the lead decides).
   Every step now runs behind `.scratch/gate.sh`. A second slip on 2026-10-18 at about 03:12:
   a command ran `tuple_buffer_test` and `index_test` (old builds, about 15 s on one core at
@@ -217,10 +216,15 @@
   At `09aa9b2`: ctest 34 of 34 (macOS, Release); segments, manifests and meta byte-identical
   to `ref-base-20k` and `ref-base-100k`; CI run 39181650955 green on the six non-sanitizer
   jobs, asan-ubsan and tsan still running when recorded.
-- Next: the code reviewer's re-check of CR11 to CR13. Blocked on: nothing.
-- Last verified: 2026-10-18, CR10's commit: ctest 34 of 34 on macOS (Apple clang, Release);
-  at `c8b65c6`, segments, manifests and meta byte-identical to `ref-base-20k` and
-  `ref-base-100k`.
+  The code review of main (`inverter-main.md`) closed CR11 to CR13; its CR14 to CR20 are
+  on `phase4/inverter-followups`.
+- Next: none on this branch; the follow-ups' ledger carries the work. The L5 amendment
+  (R24.4, widened by R31) is due before 7c's builder commits or D16's code. Blocked on:
+  nothing.
+- Last verified: 2026-10-18, `888d03c` (main's code at `5b7787e`): ctest 35 of 35 on macOS
+  (Apple clang, Release); segments, manifests and meta byte-identical to `ref-base-20k` and
+  `ref-base-100k`; CI runs 39192342645 (`5b7787e`) and 39194785687 (`734949e`) green on all
+  eight jobs.
 - Previously verified: 2026-10-18, `c6bf4d9` (the kept series): ctest 34 of 34 on macOS (Apple
   clang, Release, `-march=native -g -fno-omit-frame-pointer`), byte-identical segments at
   20,000 and 100,000 documents on macOS and the gate VM (clang 18); CI run 39125555615 green

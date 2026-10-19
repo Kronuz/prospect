@@ -5,7 +5,8 @@
   on `review-main-inverter`) folds in when it lands.
 - Branch / worktree: `phase4/inverter-followups` at
   `/Users/kronuz/code/Kronuz/strata-wt/inverter-followups`, from `origin/main` at `2b598dd`.
-- State: implementing; one commit per fix, each built and tested before it is committed.
+- State: every follow-up committed and pushed; each commit built and tested before it was
+  committed. CI validates the head (each earlier push's run was cancelled by the next push).
 - Known bisect gap on main (R26): `2ec8c36` and `1e2d89b` do not build (`index.hh:1832`,
   "use of undeclared identifier 'split_words'"; at `2ec8c36` also `tuple_buffer_test.cc:76`).
   Main's history stays; a bisect over main marks both `git bisect skip`. `888d03c` builds.
@@ -97,9 +98,20 @@
     compared with `segment_writer`'s bytes. ctest 35 of 35 (Release); `tuple_buffer_test`
     and `index_test` pass with asserts on, and `tuple_buffer_test` under ASan+UBSan
     (Homebrew clang, -O1, no reports; it also covers CR18's 65th page); bytes identical to
-    main's at 20k and 100k.
+    main's at 20k and 100k (`e9d6f65`).
+  - R30 and R31, text: `layers.md` L10 shows the part's three text inputs, says the buffer
+    at one flush thread is the tuple buffer (no `document` kept) and at more the whole
+    documents, gives `doc_bytes` as the charge at more than one flush thread only, replaces
+    "the sums keep every segment unchanged" with R30's three causes of moved flush points
+    (byte identity at equal flush points), and has buffered reads go through the tuple
+    buffer at one flush thread. Phase 4's D13 and D16 read the active buffer the same way.
+    `reader.hh`'s pin says it bears on `doc_bytes` at more than one flush thread.
+  - CR20 and R28.4: main's `docs/status/inverter.md` has one State, Doing, Next, and Last
+    verified, all current, one public list (with `flush_charge`'s and `section_stream`'s
+    changed behavior), and R24.3's line naming R30's three causes.
 - Next:
-  1. Text: L10 and D16 with the code (R30, R31).
+  1. CI green on all eight jobs at the branch's head; then the architect's re-check and the
+     code reviewer's of this branch.
 - Code review of main (`docs/reviews/inverter-main.md`, APPROVE WITH CONDITIONS), folded
   in here, one commit each: CR14 is R28.1 (`37ee946`: the option is gone, so there is no
   public cap to refuse or clamp); CR18; CR16 (the lead's ruling: widen the split-text cap
