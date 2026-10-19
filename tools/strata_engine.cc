@@ -127,6 +127,8 @@ int index(const std::string& dir) {
 	const char* merge = std::getenv("STRATA_AUTO_MERGE");
 	o.auto_merge = !merge || std::string_view(merge) != "0";
 	if (const char* threads = std::getenv("STRATA_THREADS")) { o.flush_threads = std::max<std::size_t>(1, std::strtoull(threads, nullptr, 10)); }
+	// STRATA_IDENTITY_SEED: segment ids from a fixed base, so runs compare byte for byte.
+	if (const char* seed = std::getenv("STRATA_IDENTITY_SEED")) { o.identity_seed = std::strtoull(seed, nullptr, 10); }
 	const std::array<char, 16> uuid{'s', 't', 'r', 'a', 't', 'a', '-', 'b', 'e', 'n', 'c', 'h'};
 	auto ix = strata::index::create(io, o, uuid);
 	// The batch's operations are reused, so their strings and vectors keep their capacity.
