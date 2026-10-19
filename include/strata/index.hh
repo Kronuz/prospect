@@ -18,7 +18,6 @@
 #include "strata/writer.hh"
 
 #include "completion/io.h"
-#include "completion/io.h"
 #include "hashes.hh"
 
 #include <algorithm>
