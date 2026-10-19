@@ -42,6 +42,7 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -57,21 +58,14 @@ namespace strata {
 
 namespace tuple_detail {
 
-// Appended to in place and read in order; chunks never move, so growth copies nothing.
-// clear() keeps the chunks for the next fill.
+// Appended to in place and read in order. The first chunk starts at 8 entries and doubles
+// to a whole chunk, copied as it grows; later chunks never move. clear() keeps the chunks.
 template <class T, unsigned Shift = 12>
 class chunked {
 public:
 	static constexpr std::size_t chunk = std::size_t(1) << Shift;
 	void push_back(const T& v, flush_charge* memory) {
-		if (left_ == 0) {
-			if (size_ >> Shift == chunks_.size()) {
-				chunks_.push_back(std::unique_ptr<T[]>(new T[chunk]));  // uninitialized: every slot is written before it is read
-				if (memory) { memory->grow(chunk * sizeof(T)); }
-			}
-			at_ = chunks_[size_ >> Shift].get();
-			left_ = chunk;
-		}
+		if (left_ == 0) { more(memory); }
 		*at_++ = v;
 		--left_;
 		++size_;
@@ -82,10 +76,39 @@ public:
 	void clear() noexcept { size_ = 0, left_ = 0, at_ = nullptr; }
 
 private:
+	void more(flush_charge* memory) {
+		if (size_ < chunk) {
+			if (first_ == size_) {  // the first chunk grows; uninitialized: every slot is written before it is read
+				const std::size_t grown = std::min(chunk, std::max<std::size_t>(8, 2 * first_));
+				std::unique_ptr<T[]> bigger(new T[grown]);
+				if (size_) { std::copy(chunks_[0].get(), chunks_[0].get() + size_, bigger.get()); }
+				if (chunks_.empty()) { chunks_.emplace_back(); }
+				chunks_[0] = std::move(bigger);
+				if (memory) { memory->grow((grown - first_) * sizeof(T)); }
+				first_ = grown;
+			}
+			at_ = chunks_[0].get() + size_;
+			left_ = first_ - size_;
+			return;
+		}
+		if (size_ >> Shift == chunks_.size()) {
+			chunks_.push_back(std::unique_ptr<T[]>(new T[chunk]));
+			if (memory) { memory->grow(chunk * sizeof(T)); }
+		}
+		at_ = chunks_[size_ >> Shift].get();
+		left_ = chunk;
+	}
 	std::vector<std::unique_ptr<T[]>> chunks_;
 	T* at_ = nullptr;  // the next slot in the current chunk
 	std::size_t size_ = 0, left_ = 0;
+	std::size_t first_ = 0;  // the first chunk's entries
 };
+
+// The k-th of a series of allocations that starts at `first` bytes and doubles to `most`;
+// the shift is capped, so any k is defined.
+inline std::size_t doubled(std::size_t first, std::size_t k, std::size_t most) noexcept {
+	return std::min(most, first << std::min<std::size_t>(k, std::size_t(std::countl_zero(first))));
+}
 
 // Bytes appended in pieces that never move; a piece is addressed by its 64-bit offset.
 // Pages start at 4 KiB and double to 1 MiB, so a small buffer allocates little.
@@ -94,7 +117,7 @@ public:
 	static constexpr unsigned shift = 20;  // offsets: page << 20 | offset; a piece never spans two pages
 	std::uint64_t append(std::size_t n, flush_charge* memory) {
 		if (pages_.empty() || fill_ + n > size_) {
-			size_ = std::max(std::min(std::size_t(1) << shift, std::size_t(4096) << pages_.size()), n);  // a larger piece takes a page of its own
+			size_ = std::max(doubled(4096, pages_.size(), std::size_t(1) << shift), n);  // a larger piece takes a page of its own
 			pages_.push_back(std::unique_ptr<char[]>(new char[size_]));
 			if (memory) { memory->grow(size_); }
 			fill_ = 0;
@@ -164,12 +187,17 @@ public:
 	flush_charge* memory = nullptr;
 	// Every hash is masked with it: tests narrow it to make terms collide.
 	std::uint64_t hash_mask = ~std::uint64_t(0);
+	// A token at or past this offset of its text takes a side entry (tuple offsets are 32
+	// bits); tests lower it.
+	std::uint64_t tuple_offsets = std::uint64_t(1) << 32;
 	// Tuples grouped into a run at a time: about 20 MiB of them by default, so a bucket's
 	// share (1/256) stays in L2.
 	std::size_t batch_tuples = std::size_t(1) << 20;
-	// A run's bytes at most (32-bit entry offsets, marks): a batch drains into runs cut between
-	// terms, early when one entry could pass it; an entry past it takes a run alone. Tests lower it.
-	std::uint64_t max_run_bytes = std::numeric_limits<std::uint32_t>::max();
+	// A run's bytes at most, run_cap or less: a batch's run is cut between terms at it, so a run
+	// of more than one entry keeps its 32-bit marks; an entry past it takes a run alone (64-bit
+	// lengths). Tests lower it.
+	static constexpr std::uint64_t run_cap = std::numeric_limits<std::uint32_t>::max();
+	std::uint64_t max_run_bytes = run_cap;
 	// Any one entry's bytes at most, for `tuples` terms and tokens with `given` positions and
 	// the longest term `longest` (encode_entry: its term, 46, 20 a tuple, 5 a given position).
 	static constexpr std::uint64_t entry_bound(std::uint64_t tuples, std::uint64_t given, std::uint64_t longest) noexcept {
@@ -187,13 +215,13 @@ public:
 		});
 	}
 	// A document whose tokens are its text's words (split_words) at positions 1, 2, ..., its
-	// length their count; the text is split where it was copied.
+	// length their count; the text is split where it was copied. Stage 1 checked the words
+	// (text_detail::splittable).
 	ordinal_t add_split(std::uint64_t docid, std::span<const posting_input> terms, std::string_view text, std::string_view stored, std::uint64_t version,
 		std::string_view key) {
-		if (text.size() > std::numeric_limits<std::uint32_t>::max()) { throw std::invalid_argument("strata: text too large to split"); }
 		return add_with(docid, terms, text, stored, version, key, text.size(), [&](auto&& token, std::string_view copy) {
 			std::uint32_t position = 0;
-			text_detail::split_words(copy, [&](std::size_t offset, std::size_t size) { token(std::uint32_t(offset), std::uint32_t(size), ++position); });
+			text_detail::split_words(copy, [&](std::size_t offset, std::size_t size) { token(offset, std::uint32_t(size), ++position); });
 			return position;
 		});
 	}
@@ -221,16 +249,25 @@ private:
 #ifndef NDEBUG
 		std::optional<std::uint32_t> prev_position;
 		auto is_term = [&](std::string_view t) { return std::any_of(terms.begin(), terms.end(), [&](const posting_input& in) { return in.term == t; }); };
+		{
+			std::vector<std::string_view> sorted;  // the terms, to find repeats
+			for (const auto& in : terms) {
+				assert(std::adjacent_find(in.positions.begin(), in.positions.end(), std::greater_equal<>()) == in.positions.end());
+				sorted.push_back(in.term);
+			}
+			std::sort(sorted.begin(), sorted.end());
+			assert(std::adjacent_find(sorted.begin(), sorted.end()) == sorted.end());
+		}
 #endif
-		auto token = [&](std::uint32_t offset, std::uint32_t size, std::uint32_t position) {
+		auto token = [&](std::uint64_t offset, std::uint32_t size, std::uint32_t position) {
 			const char* p = base + offset;
-			assert(size != 0 && std::uint64_t(offset) + size <= text.size() && (!prev_position || position > *prev_position) && !is_term({p, size}));
+			assert(size != 0 && offset + size <= text.size() && (!prev_position || position > *prev_position) && !is_term({p, size}));
 #ifndef NDEBUG
 			prev_position = position;
 #endif
 			const std::uint64_t h = tuple_detail::hash(p, size) & hash_mask;
-			if (size < long_term && position < (std::uint32_t(1) << 24)) {
-				push(tuple(h, ord, offset, position << 8 | size));
+			if (size < long_term && position < (std::uint32_t(1) << 24) && offset < tuple_offsets) {
+				push(tuple(h, ord, std::uint32_t(offset), position << 8 | size));
 			} else {
 				side_.push_back({p, size, 1, 1, positions_.size(), false}, memory);
 				positions_.push_back(position, memory);
@@ -270,7 +307,8 @@ private:
 	}
 
 	// Drains first when one entry of the batch could pass max_run_bytes with this document in
-	// it (entry_bound), so only one document's entry can, and it takes a run alone (drain).
+	// it (entry_bound), so an entry past the cap holds one document's postings; the cut alone
+	// keeps every run correct.
 	void reserve_entry(std::uint64_t tuples, std::uint64_t given_positions, std::uint64_t longest) {
 		if (entry_bound(batched_ + tuples, entry_positions_ + given_positions, std::max(entry_term_, longest)) > max_run_bytes) {
 			drain();  // also clears entry_term_ left by documents without tuples
@@ -434,7 +472,9 @@ public:
 		std::vector<tuple> copy;
 		std::vector<group> groups;
 		group_scratch sc;
-		for (const auto& bucket : buckets_) {
+		auto bucket_at = [&](std::size_t b) -> const std::vector<tuple>& { return buckets_ ? (*buckets_)[b] : flat_; };
+		for (std::size_t b = 0; b < (buckets_ ? 256u : 1u); ++b) {
+			const std::vector<tuple>& bucket = bucket_at(b);
 			copy.assign(bucket.begin(), bucket.end());
 			groups.clear();
 			group_run(copy.data(), copy.size(), groups, sc);
@@ -460,6 +500,7 @@ public:
 	}
 
 private:
+	friend struct tuple_buffer_test_access;  // tests decode synthetic entries
 	static constexpr std::uint32_t long_term = 255;  // the length field's escape: `off` names a side entry
 	static constexpr std::size_t max_side = std::size_t(1) << 32;  // `off` indexes side entries
 
@@ -651,16 +692,35 @@ private:
 		return std::string_view(texts_[t.ord - batch_first_] + t.off, t.len());
 	}
 
-	// A tuple into its hash's bucket; buckets grow by half.
+	// A tuple into one bucket until a batch holds a bucket's share (batch_tuples / 256), then
+	// into its hash's bucket of 256, which stay; buckets grow by half.
 	void push(const tuple& t) {
-		std::vector<tuple>& v = buckets_[t.hash_hi >> 24];
+		if (!buckets_) {
+			if (flat_.size() < batch_tuples / 256) {
+				push_to(flat_, t);
+				++batched_;
+				return;
+			}
+			spread();
+		}
+		push_to((*buckets_)[t.hash_hi >> 24], t);
+		++batched_;
+	}
+	void push_to(std::vector<tuple>& v, const tuple& t) {
 		if (v.size() == v.capacity()) {
 			const std::size_t before = v.capacity();
 			v.reserve(std::max<std::size_t>(16, before + before / 2));
 			if (memory) { memory->grow((v.capacity() - before) * sizeof(tuple)); }
 		}
 		v.push_back(t);
-		++batched_;
+	}
+	// The 256 buckets, the one bucket's tuples moved in, in order, and its memory freed.
+	void spread() {
+		buckets_ = std::make_unique<std::array<std::vector<tuple>, 256>>();
+		if (memory) { memory->grow(sizeof(*buckets_)); }
+		for (const tuple& t : flat_) { push_to((*buckets_)[t.hash_hi >> 24], t); }
+		if (memory) { memory->shrink(flat_.capacity() * sizeof(tuple)); }
+		std::vector<tuple>().swap(flat_);
 	}
 
 	// Room for n bytes in the batch's text arena, and a zeroed word after them for hash's
@@ -668,7 +728,7 @@ private:
 	char* room(std::size_t n) {
 		while (arena_at_ < arena_.size() && arena_fill_ + n + 8 > arena_sizes_[arena_at_]) { ++arena_at_, arena_fill_ = 0; }
 		if (arena_at_ == arena_.size()) {
-			const std::size_t size = std::max<std::size_t>(std::min(arena_chunk, std::size_t(4096) << arena_.size()), n + 8);  // 4 KiB doubling
+			const std::size_t size = std::max<std::size_t>(tuple_detail::doubled(256, arena_.size(), arena_chunk), n + 8);  // 256 B doubling
 			arena_.push_back(std::unique_ptr<char[]>(new char[size]));
 			arena_sizes_.push_back(size);
 			arena_fill_ = 0;
@@ -691,18 +751,37 @@ private:
 		}
 	}
 
+	// drain()'s scratch, kept from batch to batch.
+	void charge_scratch() {
+		if (!memory) { return; }
+		const std::uint64_t now = groups_.capacity() * sizeof(group) + scratch_.hashes.capacity() * 8 +
+			(scratch_.ids.capacity() + scratch_.tids.capacity() + scratch_.counts.capacity() + order_.capacity()) * 4 +
+			scratch_.sorted.capacity() * sizeof(tuple) + (keys_scratch_.capacity() + radix_scratch_.capacity()) * sizeof(chunk_key) +
+			sort_todo_.capacity() * sizeof(key_run) + entry_at_.capacity() * sizeof(entry_ref) + key_groups_.capacity() * 8 + placed_.capacity() * 8;
+		if (now > scratch_charged_) {
+			memory->grow(now - scratch_charged_);
+			scratch_charged_ = now;
+		}
+	}
+
 	// The batch as a run: each bucket grouped, the groups sorted by term, one entry each in
 	// one log piece; then the batch's tuples, text, and side entries reset, memory kept.
 	void drain() {
+		assert(max_run_bytes <= run_cap);
 		if (batched_) {
 			groups_.clear();
 			encoded_.size = 0;
 			entry_at_.clear();
 			key_groups_.clear();
-			for (unsigned b = 0; b < 256; ++b) {
+			auto group_bucket = [&](std::vector<tuple>& v) {
 				const std::size_t first = groups_.size();
-				group_run(buckets_[b].data(), buckets_[b].size(), groups_, scratch_);
+				group_run(v.data(), v.size(), groups_, scratch_);
 				for (std::size_t i = first; i < groups_.size(); ++i) { encode_entry(std::uint32_t(i)); }  // its tuples still in cache
+			};
+			if (buckets_) {
+				for (auto& v : *buckets_) { group_bucket(v); }
+			} else {
+				group_bucket(flat_);
 			}
 			sort_groups(groups_);
 			// The encoded entries into the run in term order, marks and keys placed as they land.
@@ -735,7 +814,10 @@ private:
 				keys_[ord].bytes = placed[g] + entry_at_[g].term_at;
 				keys_[ord].size = std::uint32_t(groups_[g].term.size());
 			}
-			for (auto& b : buckets_) { b.clear(); }
+			if (buckets_) {
+				for (auto& b : *buckets_) { b.clear(); }
+			}
+			flat_.clear();
 		}
 		batched_ = 0;
 		entry_term_ = 0, entry_positions_ = 0;
@@ -746,6 +828,7 @@ private:
 		batch_keys_.clear();
 		batch_first_ = ordinal_t(docids_.size());
 		charge_columns();
+		charge_scratch();
 	}
 
 	// Bytes that grow by half and keep their capacity, never zero-filled.
@@ -1080,8 +1163,9 @@ private:
 	static constexpr std::size_t arena_chunk = std::size_t(4) << 20;
 
 	// The batch: tuples by bucket, the documents' text, and side entries.
-	std::array<std::vector<tuple>, 256> buckets_;  // by the hash's top byte, each in arrival order
-	std::size_t batched_ = 0;                      // tuples in the buckets
+	std::vector<tuple> flat_;  // one bucket, in arrival order, until the 256 exist
+	std::unique_ptr<std::array<std::vector<tuple>, 256>> buckets_;  // by the hash's top byte, each in arrival order
+	std::size_t batched_ = 0;  // tuples in the buckets
 	std::uint64_t entry_term_ = 0, entry_positions_ = 0;  // the batch's longest term and given positions
 	tuple_detail::chunked<side_entry, 7> side_;
 	tuple_detail::chunked<std::uint32_t, 8> positions_;  // side entries' positions
@@ -1114,7 +1198,7 @@ private:
 	std::deque<std::string> extra_keys_;  // keys that were not among their documents' terms
 	std::string stored_;
 	std::vector<std::uint64_t> stored_ends_;
-	std::uint64_t columns_charged_ = 0;
+	std::uint64_t columns_charged_ = 0, scratch_charged_ = 0;
 };
 }  // namespace detail
 

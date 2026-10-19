@@ -11,6 +11,13 @@
 #include <random>
 #include <set>
 
+namespace strata {
+// Test hooks no public option offers: a lower run cap (CR12, R28).
+struct index_test_access {
+	static void max_run_bytes(index& ix, std::uint64_t n) { ix.max_run_bytes_ = n; }
+};
+}  // namespace strata
+
 static int failures = 0;
 #define CHECK(cond) \
 	do { \
@@ -2145,17 +2152,17 @@ int main() {
 			put(io, strata::index_detail::manifest_name(p->a + 5), std::string(fs.view(name)));
 		}, "manifest generation differs from its name");
 	}
-	// Documents whose entries pass a small run cap, split or tokenized, are taken (each such
-	// entry takes a run alone, CR12); the writer then takes more and commits them all.
+	// Documents whose entries pass a small run cap, split or tokenized, are taken: 70,000
+	// occurrences of one word encode to about 70 KB, past the 64 KiB cap, so each such entry
+	// takes a run alone (CR12, CR17); the writer then takes more and commits them all.
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		auto opts = keyed;
-		opts.max_run_bytes = 64 << 10;
-		auto ix = strata::index::create(io, opts, uuid);
+		auto ix = strata::index::create(io, keyed, uuid);
+		strata::index_test_access::max_run_bytes(ix, 64 << 10);
 		CHECK(ix.apply(tx({add("Qa", "a")}), {}).result == verdict::accepted);
 		std::string text;
-		for (int i = 0; i < 4000; ++i) { text += "w "; }
+		for (int i = 0; i < 70000; ++i) { text += "w "; }
 		operation big;
 		big.doc.terms.push_back({"Qbig", 0, {}});
 		big.doc.text = text;
@@ -2163,8 +2170,8 @@ int main() {
 		CHECK(ix.apply(tx({big}), {}).result == verdict::accepted);
 		big.doc.terms[0].term = "Qbig2";
 		big.doc.split_text = false;
-		for (std::uint32_t i = 0; i < 4000; ++i) { big.doc.tokens.push_back({2 * i, 1, i + 1}); }
-		big.doc.length = 4000;
+		for (std::uint32_t i = 0; i < 70000; ++i) { big.doc.tokens.push_back({2 * i, 1, i + 1}); }
+		big.doc.length = 70000;
 		CHECK(ix.apply(tx({big}), {}).result == verdict::accepted);
 		big.doc.terms[0].term = "Qbig3";
 		big.doc.tokens.resize(1000);

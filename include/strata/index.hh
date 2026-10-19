@@ -18,6 +18,7 @@
 #include "strata/writer.hh"
 
 #include "completion/io.h"
+#include "hashes.hh"
 
 #include <algorithm>
 #include <atomic>
@@ -194,22 +195,6 @@ inline void write_all(kronuz::journal::File& f, std::string_view bytes) {
 	}
 }
 
-// A key's bytes through a multiply and an xorshift per word, the last word zero-padded.
-inline std::uint64_t key_hash(std::string_view s) noexcept {
-	constexpr std::uint64_t P = 0x9E3779B97F4A7C15ull;
-	std::uint64_t h = std::uint64_t(s.size()) * P, w;
-	std::size_t i = 0;
-	for (; i + 8 <= s.size(); i += 8) {
-		std::memcpy(&w, s.data() + i, 8);
-		h = (h ^ w) * P;
-		h ^= h >> 29;
-	}
-	w = 0;
-	if (i < s.size()) { std::memcpy(&w, s.data() + i, s.size() - i); }
-	h = (h ^ w) * P;
-	return h ^ (h >> 32);
-}
-
 // 32-bit values by 64-bit hash in one array, at most half full, probed linearly; entries may
 // share a hash, so lookups take a test of the value. Removal shifts the entries after it
 // back, so there are no tombstones.
@@ -319,8 +304,6 @@ struct index_options {
 	// one segment per run. Files, ids, and accounting stay on the owner thread.
 	std::size_t flush_threads = 1;
 	std::size_t flush_min_docs = 4096;  // per run: smaller buffers flush as one segment
-	// A buffered run's bytes at most (tuple_buffer::max_run_bytes); tests lower it.
-	std::uint64_t max_run_bytes = std::numeric_limits<std::uint32_t>::max();
 	// Obsolete data files leave in steps: truncated from the end `reclaim_step` bytes at a
 	// time, then removed, so freeing a large file never stalls one call. Each commit
 	// reclaims about `reclaim_slice` bytes, reclaim() the rest, and admission drains them
@@ -725,7 +708,12 @@ public:
 			if (!b.key.empty() && !keys.insert(b.key).second) { throw std::logic_error("strata: digest: key invariant"); }
 			for (const auto& t : b.doc.terms) { posting_record(b.docid, t.term, t.wdf, t.positions); }
 			std::map<std::string_view, std::vector<std::uint32_t>> by_term;  // the tokens' postings
-			for (const auto& tk : b.doc.tokens) { by_term[std::string_view(b.doc.text).substr(tk.offset, tk.size)].push_back(tk.position); }
+			const std::string_view text = b.doc.text;
+			if (b.doc.split_text) {
+				std::uint32_t position = 0;
+				text_detail::split_words(text, [&](std::size_t offset, std::size_t size) { by_term[text.substr(offset, size)].push_back(++position); });
+			}
+			for (const auto& tk : b.doc.tokens) { by_term[text.substr(tk.offset, tk.size)].push_back(tk.position); }
 			for (const auto& [term, positions] : by_term) { posting_record(b.docid, term, std::uint32_t(positions.size()), positions); }
 		}
 		rec.push_back('L');
@@ -957,7 +945,10 @@ private:
 		std::vector<std::uint64_t> dead;  // bit per ordinal: replaced or deleted while buffered
 		std::uint64_t dead_count = 0, prev_docid = 0;
 		bool ordered = true;  // docids increase with ordinals
-		active_buffer() { buf.memory = &held; }
+		active_buffer() {
+			buf.memory = &held;
+			held.grow(sizeof(active_buffer));  // the object too (C11)
+		}
 		bool is_dead(ordinal_t o) const { return o >> 6 < dead.size() && (dead[o >> 6] >> (o & 63) & 1); }
 		void set_dead(ordinal_t o, bool on) {
 			if (o >> 6 >= dead.size()) { dead.resize((o >> 6) + 1); }
@@ -1676,7 +1667,7 @@ private:
 		set_key_slot(key, index);
 	}
 	void set_key_slot(std::string_view key, std::optional<std::uint32_t> index) {
-		const std::uint64_t h = index_detail::key_hash(key);
+		const std::uint64_t h = ::wordwise::hash(key.data(), key.size());
 		auto same = [&](std::uint32_t v) { return v < buffer_size() && buffered_key(v) == key; };
 		std::uint32_t* v = key_slots_.find(h, same);
 		if (index) {
@@ -1691,7 +1682,7 @@ private:
 	}
 	// The buffer index of a key's live copy in the buffer, if any.
 	std::optional<std::uint32_t> key_slot(std::string_view key) const {
-		const std::uint32_t* v = key_slots_.find(index_detail::key_hash(key), [&](std::uint32_t i) { return i < buffer_size() && buffered_key(i) == key; });
+		const std::uint32_t* v = key_slots_.find(::wordwise::hash(key.data(), key.size()), [&](std::uint32_t i) { return i < buffer_size() && buffered_key(i) == key; });
 		return v ? std::optional<std::uint32_t>(*v) : std::nullopt;
 	}
 	void set_buffered_docid(std::uint64_t docid, std::uint32_t index) {
@@ -1708,17 +1699,9 @@ private:
 		m_.last_docid = docid;
 	}
 
-	// The key term of a document: its one term with the index's key prefix.
+	// The key term of a document: its one term with the index's key prefix, a view into it.
 	validate_context context() const { return {m_.key_prefix}; }
-	std::optional<std::string> key_of(const document& d, bool& valid) const { return keys_plugin::key_of(context(), d, valid); }
-
-	// The document's key term itself (key_of found exactly one).
-	std::string_view key_term(const document& d) const {
-		for (const auto& t : d.terms) {
-			if (t.term.starts_with(m_.key_prefix)) { return t.term; }
-		}
-		return {};
-	}
+	std::optional<std::string_view> key_of(const document& d, bool& valid) const { return keys_plugin::key_of(context(), d, valid); }
 
 	// Validation that can reject runs here, before anything changes (design D10).
 	bool valid(const document& d) const { return d.valid(context()); }
@@ -1759,14 +1742,14 @@ private:
 			}
 			const bool writes = o.type == operation::add || o.type == operation::replace_key || o.type == operation::replace_docid;
 			bool key_valid = true;
-			std::optional<std::string> doc_key;
+			std::optional<std::string_view> doc_key;  // into the operation, which outlives stage 2
 			if (writes) {
 				if (!valid(o.doc)) { return reject(verdict::invalid); }
 				doc_key = key_of(o.doc, key_valid);
 				if (!key_valid) { return reject(verdict::invalid); }
 			}
 			// The key the operation addresses and its live copy.
-			std::optional<std::string> key;
+			std::optional<std::string_view> key;
 			if (o.type == operation::replace_key || o.type == operation::delete_key) {
 				if (m_.key_prefix.empty() || !o.key.starts_with(m_.key_prefix)) { return reject(verdict::invalid); }
 				key = o.key;
@@ -1823,14 +1806,10 @@ private:
 			bump_last_docid(docid);
 			set_buffered_docid(docid, std::uint32_t(buffer_size()));
 			if (inverting()) {
-				pending_docs_.push_back({docid, version, key ? key_term(o.doc) : std::string_view(), &o.doc});
+				pending_docs_.push_back({docid, version, key.value_or(std::string_view()), &o.doc});
 			} else {
-				buffer_.push_back({docid, version, key.value_or(std::string()), o.doc});
-				if (document& d = buffer_.back().doc; d.split_text) {  // the writer takes explicit tokens
-					d.split_text = false;
-					d.length = 0;
-					text_detail::split_words(d.text, [&](std::size_t offset, std::size_t size) { d.tokens.push_back({std::uint32_t(offset), std::uint32_t(size), ++d.length}); });
-				}
+				buffer_.push_back({docid, version, std::string(key.value_or(std::string_view())), o.doc});
+				if (document& d = buffer_.back().doc; d.split_text) { d.length = std::uint32_t(text_detail::count_words(d.text).words); }  // split at flush
 				buffer_bytes_ += doc_bytes(buffer_.back().doc);
 			}
 			undo_.push_back({undo_step::buffer_push});
@@ -1884,7 +1863,7 @@ private:
 		try {
 			if (!active_) {
 				active_ = std::make_unique<active_buffer>();
-				active_->buf.max_run_bytes = opts_.max_run_bytes;
+				active_->buf.max_run_bytes = max_run_bytes_;
 			}
 			auto& a = *active_;
 			for (const pending_doc& p : pending_docs_) {
@@ -2026,7 +2005,11 @@ private:
 							const buffered* b = docs[i];
 							in.clear();
 							for (const auto& t : b->doc.terms) { in.push_back({t.term, t.wdf, t.positions}); }
-							detail::writer_access::add_text(w, b->docid, in, b->doc.text, b->doc.tokens, b->doc.length, b->doc.stored, b->version, b->key);
+							if (b->doc.split_text) {
+								detail::writer_access::add_split(w, b->docid, in, b->doc.text, b->doc.length, b->doc.stored, b->version, b->key);
+							} else {
+								detail::writer_access::add_text(w, b->docid, in, b->doc.text, b->doc.tokens, b->doc.length, b->doc.stored, b->version, b->key);
+							}
 						}
 						std::array<std::uint8_t, 16> header{};
 						std::memcpy(header.data(), &ids[k], 8);
@@ -2461,6 +2444,7 @@ private:
 	std::unique_ptr<active_buffer> active_;
 	std::vector<pending_doc> pending_docs_;  // the transaction's documents, inverted once it is accepted
 	std::vector<posting_input> terms_in_;  // inversion's scratch
+	std::uint64_t max_run_bytes_ = detail::tuple_buffer::run_cap;  // a run's bytes at most; tests lower it (index_test_access)
 	index_detail::hash_slots buffer_docids_;  // docid -> buffer index (ordinal in active_), the docid as its hash
 	index_detail::hash_slots key_slots_;      // the version map: a key -> its live copy's buffer index, its bytes read from the buffer
 	std::map<std::string, std::string> meta_;
