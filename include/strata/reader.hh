@@ -160,6 +160,18 @@ inline word_counts count_words(std::string_view text) noexcept {
 	}
 	return c;
 }
+
+// Whether a text splits into words that fit format 12: at most 2^32 - 1 of them (32-bit
+// positions and lengths), none over the term limit. Only a text past 2^32 - 1 bytes can
+// break either, so only such a text is read.
+inline bool splittable(std::string_view text, std::uint64_t max_word) noexcept {
+	constexpr std::uint64_t most = std::numeric_limits<std::uint32_t>::max();
+	if (text.size() <= most) { return true; }
+	std::uint64_t words = 0;
+	bool ok = true;
+	split_words(text, [&](std::size_t, std::size_t size) { ok = ok && ++words <= most && size <= max_word; });
+	return ok;
+}
 }  // namespace text_detail
 
 template <class... Entries>
@@ -360,29 +372,6 @@ struct inverted_plugin {
 			n += w.bytes + 16 * w.words;
 		}
 		return n;
-	}
-	// validate()'s token checks for a document split at spaces: no tokens and no length
-	// given, no word begins with the key prefix (one memchr when the prefix's first byte is
-	// not in the text), and none equals one of its terms.
-	static bool valid_words(std::string_view prefix, const part& p, const std::vector<std::string_view>& terms, const std::array<std::uint64_t, 4>& firsts,
-		bool any_firsts) {
-		const std::string_view text = p.text;
-		if (!p.tokens.empty() || p.length != 0 || text.size() > std::numeric_limits<std::uint32_t>::max()) { return false; }
-		if (!prefix.empty()) {
-			for (const char* at = text.data(); (at = static_cast<const char*>(std::memchr(at, prefix[0], std::size_t(text.data() + text.size() - at))));) {
-				const std::size_t i = std::size_t(at - text.data());
-				const bool word_start = i == 0 || text[i - 1] == ' ';
-				if (word_start && text.substr(i, text.find(' ', i) - i).starts_with(prefix)) { return false; }
-				++at;
-			}
-		}
-		if (!any_firsts) { return true; }
-		bool ok = true;
-		text_detail::split_words(text, [&](std::size_t offset, std::size_t size) {
-			const std::uint8_t first = std::uint8_t(text[offset]);
-			if (ok && (firsts[first >> 6] >> (first & 63) & 1) && std::binary_search(terms.begin(), terms.end(), text.substr(offset, size))) { ok = false; }
-		});
-		return ok;
 	}
 	// The bytes of its statistics at the head of term_index (F7).
 	static constexpr std::size_t statistics_size = 20;
@@ -649,16 +638,42 @@ struct inverted_plugin {
 		for (auto q : positions) { rec.u32(q); }
 		emit(rec.data());
 	}
+
+private:
+	// validate()'s token checks for a document split at spaces: no tokens and no length
+	// given, no word begins with the key prefix (one memchr when the prefix's first byte is
+	// not in the text), and none equals one of its terms.
+	static bool valid_words(std::string_view prefix, const part& p, const std::vector<std::string_view>& terms, const std::array<std::uint64_t, 4>& firsts,
+		bool any_firsts) {
+		const std::string_view text = p.text;
+		if (!p.tokens.empty() || p.length != 0 || !text_detail::splittable(text, format::max_term_bytes)) { return false; }
+		if (!prefix.empty()) {
+			for (const char* at = text.data(); (at = static_cast<const char*>(std::memchr(at, prefix[0], std::size_t(text.data() + text.size() - at))));) {
+				const std::size_t i = std::size_t(at - text.data());
+				const bool word_start = i == 0 || text[i - 1] == ' ';
+				if (word_start && text.substr(i, text.find(' ', i) - i).starts_with(prefix)) { return false; }
+				++at;
+			}
+		}
+		if (!any_firsts) { return true; }
+		bool ok = true;
+		text_detail::split_words(text, [&](std::size_t offset, std::size_t size) {
+			const std::uint8_t first = std::uint8_t(text[offset]);
+			if (ok && (firsts[first >> 6] >> (first & 63) & 1) && std::binary_search(terms.begin(), terms.end(), text.substr(offset, size))) { ok = false; }
+		});
+		return ok;
+	}
 };
 
 // The document's key in its own dictionary (F8), and versions (F9).
 struct keys_plugin {
 	static constexpr std::string_view id = "keys";
 
-	// A document's key is the core's field (L10), held exactly as given. A keyless index
-	// (no key prefix) refuses a document that carries one (F13-R39); with a prefix, a key
-	// that lacks it or passes the terms' limit is invalid (F13-R25 item 2, CR12).
-	static std::optional<std::string> key_of(const validate_context& vc, const core_part& d, bool& valid) {
+	// A document's key is the core's field (L10), held exactly as given, a view into the
+	// part. A keyless index (no key prefix) refuses a document that carries one (F13-R39);
+	// with a prefix, a key that lacks it or passes the terms' limit is invalid (F13-R25
+	// item 2, CR12).
+	static std::optional<std::string_view> key_of(const validate_context& vc, const core_part& d, bool& valid) {
 		valid = true;
 		if (d.key.empty()) { return std::nullopt; }
 		if (vc.key_prefix.empty() || d.key.size() > format::max_term_bytes) {
@@ -967,8 +982,9 @@ struct document_fields {  // the document's fields, with the inverter's text inp
 	std::string stored;
 };
 }  // namespace detail
-// The text inputs grow the document, so doc_bytes charges more and flush points move.
-static_assert(sizeof(document) == sizeof(detail::document_fields), "doc_bytes and every flush trigger depend on it");
+// doc_bytes reads it at more than one flush thread, so those flush points depend on it; at
+// one, the charge is the tuple buffer's (R30).
+static_assert(sizeof(document) == sizeof(detail::document_fields), "doc_bytes at more than one flush thread depends on it");
 
 namespace detail {
 template <class E>
