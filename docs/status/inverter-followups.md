@@ -62,7 +62,20 @@
     the buffer is main's: 20 bytes a token, the inverter's design, about 6 KB a corpus
     document. ctest 35 of 35 (Release); `tuple_buffer_test`, `index_test`,
     `multisegment_test`, `segment_test` pass with asserts on; bytes identical to main's at
-    20k and 100k.
+    20k and 100k (`7bca610`).
+  - CR16, the lead's ruling, the split-text cap widened: a split text is refused only when it
+    has more than 2^32 - 1 words or a word over the term limit (`text_detail::splittable`,
+    which reads only a text past 2^32 - 1 bytes), not past 2^32 - 1 bytes (2^31 words).
+    Mechanism: a word at or past byte 2^32 of its text takes a side entry (a 64-bit
+    address) since tuple offsets are 32 bits (`tuple_buffer::tuple_offsets`, a test hook).
+    At more than one flush thread a split document stays split in the buffer (its length
+    counted at stage 2) and the writer splits it at flush (`writer_access::add_split`,
+    `inverted_builder::add_text_with`), so no 32-bit `text_token` offset is built; this also
+    removes R29's stage-2 rewrite into tokens. limits.md gains the row, at the largest.
+    `tuple_buffer_test`: split text with the tuple offset lowered to 0, 16, and 2^32, and
+    the multi-thread split add, give explicit tokens' bytes. ctest 35 of 35 (Release); the
+    four inverter tests pass with asserts on; bytes identical to main's at 20k and 100k.
+    Not reached by a test: a text past 4 GiB (it needs tens of GB resident).
 - Next:
   1. Text: L10 and D16 with the code (R30, R31).
 - Code review of main (`docs/reviews/inverter-main.md`, APPROVE WITH CONDITIONS), folded
@@ -74,5 +87,8 @@
   exceeds what the host can allocate fences the writer, and fences again on every replay
   from `applied_position()`, since on one host the condition never clears. Options the
   review names: a stage-1 refusal by `part_bytes` against a ceiling in replicated state, or
-  a row stating that memory bounds a standalone document. Not decided here.
+  a row stating that memory bounds a standalone document. Not decided here. The same class
+  holds one more edge: a lone document whose side entries (terms, plus words past position
+  2^24 or byte 2^32) pass 2^32 would wrap the buffer's 32-bit side index; it needs more than
+  2^24 terms beside 2^32 - 1 words, hundreds of GB resident.
 - Blocked on: nothing.

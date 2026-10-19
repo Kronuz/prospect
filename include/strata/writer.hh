@@ -330,6 +330,20 @@ private:
 	// Terms, each once with its wdf and positions, and the text's tokens in order, each
 	// adding one to its term's wdf; a term is in one of the two. Positions increase.
 	void add_text(ordinal_t ord, std::span<const posting_input> terms, std::string_view text, std::span<const text_token> tokens) {
+		add_text_with(ord, terms, [&](auto&& token) {
+			for (const auto& tk : tokens) { token(text.substr(tk.offset, tk.size), tk.position); }
+		});
+	}
+	// The same with the text's words as its tokens, at positions 1, 2, ...
+	void add_split(ordinal_t ord, std::span<const posting_input> terms, std::string_view text) {
+		add_text_with(ord, terms, [&](auto&& token) {
+			std::uint32_t position = 0;
+			text_detail::split_words(text, [&](std::size_t offset, std::size_t size) { token(text.substr(offset, size), ++position); });
+		});
+	}
+	// tokens(token) calls token(term, position) for each token, in order.
+	template <class Tokens>
+	void add_text_with(ordinal_t ord, std::span<const posting_input> terms, Tokens&& tokens) {
 		for (const auto& in : terms) {
 			term_buffer& t = buffer_for(in.term);
 			if (t.df && t.last == ord) { throw std::invalid_argument("strata: term repeated within a document"); }
@@ -339,16 +353,16 @@ private:
 			t.open_prev = closed;
 		}
 		touched_.clear();
-		for (const auto& tk : tokens) {
-			term_buffer& t = buffer_for(text.substr(tk.offset, tk.size));
+		tokens([&](std::string_view term, std::uint32_t position) {
+			term_buffer& t = buffer_for(term);
 			if (!t.df || t.last != ord) {
 				open_posting(t, ord);
 				touched_.push_back(&t);
-			} else if (t.open_prev == closed || tk.position <= t.open_prev) {
+			} else if (t.open_prev == closed || position <= t.open_prev) {
 				throw std::invalid_argument("strata: term repeated within a document");
 			}
-			add_position(t, tk.position);
-		}
+			add_position(t, position);
+		});
 		for (term_buffer* t : touched_) { close_posting(*t, t->open_count, t->open_count); }
 	}
 	struct term_buffer {
@@ -870,6 +884,12 @@ private:
 		inverted_.add_text(ord, terms, text, tokens);
 		return ord;
 	}
+	ordinal_t add_split(std::uint64_t docid, std::span<const posting_input> terms, std::string_view text, std::uint32_t length, std::string_view stored,
+		std::uint64_t version, std::string_view key) {
+		const ordinal_t ord = begin_document(docid, length, stored, version, key);
+		inverted_.add_split(ord, terms, text);
+		return ord;
+	}
 	template <class Next>
 	void flush_from(const std::array<std::uint8_t, 16>& segment_id, output& out, spill& positions_spill, std::string_view alphabet, Next&& next) {
 		write(segment_id, out, [&](section_sink& s) { inverted_.finish(s, positions_spill, alphabet, next); });
@@ -919,12 +939,16 @@ private:
 };
 
 namespace detail {
-// The inverter's ways into a segment_writer: a document as terms and text tokens (the
-// multi-thread flush), per-document data alone, and terms from the tuple buffer.
+// The inverter's ways into a segment_writer: a document as terms and text tokens or split
+// text (the multi-thread flush), per-document data alone, and terms from the tuple buffer.
 struct writer_access {
 	static ordinal_t add_text(segment_writer& w, std::uint64_t docid, std::span<const posting_input> terms, std::string_view text,
 		std::span<const text_token> tokens, std::uint32_t length, std::string_view stored = {}, std::uint64_t version = 0, std::string_view key = {}) {
 		return w.add_text(docid, terms, text, tokens, length, stored, version, key);
+	}
+	static ordinal_t add_split(segment_writer& w, std::uint64_t docid, std::span<const posting_input> terms, std::string_view text, std::uint32_t length,
+		std::string_view stored, std::uint64_t version, std::string_view key) {
+		return w.add_split(docid, terms, text, length, stored, version, key);
 	}
 	static ordinal_t add_document(segment_writer& w, std::uint64_t docid, std::uint32_t length, std::string_view stored, std::uint64_t version, std::string_view key) {
 		return w.begin_document(docid, length, stored, version, key);

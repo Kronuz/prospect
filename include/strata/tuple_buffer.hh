@@ -187,6 +187,9 @@ public:
 	flush_charge* memory = nullptr;
 	// Every hash is masked with it: tests narrow it to make terms collide.
 	std::uint64_t hash_mask = ~std::uint64_t(0);
+	// A token at or past this offset of its text takes a side entry (tuple offsets are 32
+	// bits); tests lower it.
+	std::uint64_t tuple_offsets = std::uint64_t(1) << 32;
 	// Tuples grouped into a run at a time: about 20 MiB of them by default, so a bucket's
 	// share (1/256) stays in L2.
 	std::size_t batch_tuples = std::size_t(1) << 20;
@@ -212,13 +215,13 @@ public:
 		});
 	}
 	// A document whose tokens are its text's words (split_words) at positions 1, 2, ..., its
-	// length their count; the text is split where it was copied.
+	// length their count; the text is split where it was copied. Stage 1 checked the words
+	// (text_detail::splittable).
 	ordinal_t add_split(std::uint64_t docid, std::span<const posting_input> terms, std::string_view text, std::string_view stored, std::uint64_t version,
 		std::string_view key) {
-		if (text.size() > std::numeric_limits<std::uint32_t>::max()) { throw std::invalid_argument("strata: text too large to split"); }
 		return add_with(docid, terms, text, stored, version, key, text.size(), [&](auto&& token, std::string_view copy) {
 			std::uint32_t position = 0;
-			text_detail::split_words(copy, [&](std::size_t offset, std::size_t size) { token(std::uint32_t(offset), std::uint32_t(size), ++position); });
+			text_detail::split_words(copy, [&](std::size_t offset, std::size_t size) { token(offset, std::uint32_t(size), ++position); });
 			return position;
 		});
 	}
@@ -256,15 +259,15 @@ private:
 			assert(std::adjacent_find(sorted.begin(), sorted.end()) == sorted.end());
 		}
 #endif
-		auto token = [&](std::uint32_t offset, std::uint32_t size, std::uint32_t position) {
+		auto token = [&](std::uint64_t offset, std::uint32_t size, std::uint32_t position) {
 			const char* p = base + offset;
-			assert(size != 0 && std::uint64_t(offset) + size <= text.size() && (!prev_position || position > *prev_position) && !is_term({p, size}));
+			assert(size != 0 && offset + size <= text.size() && (!prev_position || position > *prev_position) && !is_term({p, size}));
 #ifndef NDEBUG
 			prev_position = position;
 #endif
 			const std::uint64_t h = tuple_detail::hash(p, size) & hash_mask;
-			if (size < long_term && position < (std::uint32_t(1) << 24)) {
-				push(tuple(h, ord, offset, position << 8 | size));
+			if (size < long_term && position < (std::uint32_t(1) << 24) && offset < tuple_offsets) {
+				push(tuple(h, ord, std::uint32_t(offset), position << 8 | size));
 			} else {
 				side_.push_back({p, size, 1, 1, positions_.size(), false}, memory);
 				positions_.push_back(position, memory);

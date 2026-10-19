@@ -385,6 +385,36 @@ int main() {
 		}
 		CHECK(words.size() >= 256 && tuples(docs, {}, ~std::uint64_t(0)) == reference(docs, {0, 1, 2}));
 	}
+	// Split text whose far words take side entries (CR16: tuple offsets are 32 bits, so a text
+	// past 4 GiB keeps its words; here the offset is lowered to 16), and the multi-thread
+	// writer's split add: both the bytes of explicit tokens.
+	{
+		std::vector<doc> docs(3);
+		std::vector<std::string> texts = {"a bb a ccc  dd a", " x y z x y z x y z x y z x", std::string(40, 'q') + " q " + std::string(40, 'q')};
+		strata::segment_writer split;
+		for (std::size_t i = 0; i < docs.size(); ++i) {
+			doc& d = docs[i];
+			d.docid = 1 + i;
+			d.text = texts[i];
+			d.key = "Q" + std::to_string(i);
+			d.terms.push_back({d.key, 0, {}});
+			strata::text_detail::split_words(d.text, [&](std::size_t o, std::size_t n) { d.tokens.push_back({std::uint32_t(o), std::uint32_t(n), ++d.length}); });
+			const auto in = d.inputs();
+			strata::detail::writer_access::add_split(split, d.docid, in, d.text, d.length, d.stored, d.version, d.key);
+		}
+		const std::string expected = reference(docs, {0, 1, 2});
+		CHECK(split.flush({1, 2, 3}) == expected);
+		for (std::uint64_t far : {std::uint64_t(0), std::uint64_t(16), std::uint64_t(1) << 32}) {
+			strata::detail::tuple_buffer b;
+			b.tuple_offsets = far;
+			for (const doc& d : docs) {
+				const auto in = d.inputs();
+				b.add_split(d.docid, in, d.text, d.stored, d.version, d.key);
+			}
+			CHECK(flushed(b) == expected);
+		}
+		CHECK(strata::text_detail::splittable("a b c", 1) && strata::text_detail::splittable(std::string(70000, 'w'), 10));
+	}
 	// Page and chunk sizes past the 64th allocation: the doubling's shift is capped, so
 	// UBSan sees no shift of 64 or more (CR18); a log of 70 pieces over 1 MiB, a page each.
 	{

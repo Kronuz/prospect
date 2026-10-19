@@ -708,7 +708,12 @@ public:
 			if (!b.key.empty() && !keys.insert(b.key).second) { throw std::logic_error("strata: digest: key invariant"); }
 			for (const auto& t : b.doc.terms) { posting_record(b.docid, t.term, t.wdf, t.positions); }
 			std::map<std::string_view, std::vector<std::uint32_t>> by_term;  // the tokens' postings
-			for (const auto& tk : b.doc.tokens) { by_term[std::string_view(b.doc.text).substr(tk.offset, tk.size)].push_back(tk.position); }
+			const std::string_view text = b.doc.text;
+			if (b.doc.split_text) {
+				std::uint32_t position = 0;
+				text_detail::split_words(text, [&](std::size_t offset, std::size_t size) { by_term[text.substr(offset, size)].push_back(++position); });
+			}
+			for (const auto& tk : b.doc.tokens) { by_term[text.substr(tk.offset, tk.size)].push_back(tk.position); }
 			for (const auto& [term, positions] : by_term) { posting_record(b.docid, term, std::uint32_t(positions.size()), positions); }
 		}
 		rec.push_back('L');
@@ -1804,11 +1809,7 @@ private:
 				pending_docs_.push_back({docid, version, key.value_or(std::string_view()), &o.doc});
 			} else {
 				buffer_.push_back({docid, version, std::string(key.value_or(std::string_view())), o.doc});
-				if (document& d = buffer_.back().doc; d.split_text) {  // the writer takes explicit tokens
-					d.split_text = false;
-					d.length = 0;
-					text_detail::split_words(d.text, [&](std::size_t offset, std::size_t size) { d.tokens.push_back({std::uint32_t(offset), std::uint32_t(size), ++d.length}); });
-				}
+				if (document& d = buffer_.back().doc; d.split_text) { d.length = std::uint32_t(text_detail::count_words(d.text).words); }  // split at flush
 				buffer_bytes_ += doc_bytes(buffer_.back().doc);
 			}
 			undo_.push_back({undo_step::buffer_push});
@@ -2004,7 +2005,11 @@ private:
 							const buffered* b = docs[i];
 							in.clear();
 							for (const auto& t : b->doc.terms) { in.push_back({t.term, t.wdf, t.positions}); }
-							detail::writer_access::add_text(w, b->docid, in, b->doc.text, b->doc.tokens, b->doc.length, b->doc.stored, b->version, b->key);
+							if (b->doc.split_text) {
+								detail::writer_access::add_split(w, b->docid, in, b->doc.text, b->doc.length, b->doc.stored, b->version, b->key);
+							} else {
+								detail::writer_access::add_text(w, b->docid, in, b->doc.text, b->doc.tokens, b->doc.length, b->doc.stored, b->version, b->key);
+							}
 						}
 						std::array<std::uint8_t, 16> header{};
 						std::memcpy(header.data(), &ids[k], 8);

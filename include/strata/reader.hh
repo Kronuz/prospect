@@ -135,6 +135,18 @@ inline word_counts count_words(std::string_view text) noexcept {
 	}
 	return c;
 }
+
+// Whether a text splits into words that fit format 12: at most 2^32 - 1 of them (32-bit
+// positions and lengths), none over the term limit. Only a text past 2^32 - 1 bytes can
+// break either, so only such a text is read.
+inline bool splittable(std::string_view text, std::uint64_t max_word) noexcept {
+	constexpr std::uint64_t most = std::numeric_limits<std::uint32_t>::max();
+	if (text.size() <= most) { return true; }
+	std::uint64_t words = 0;
+	bool ok = true;
+	split_words(text, [&](std::size_t, std::size_t size) { ok = ok && ++words <= most && size <= max_word; });
+	return ok;
+}
 }  // namespace text_detail
 
 template <class... Entries>
@@ -541,7 +553,7 @@ private:
 	static bool valid_words(std::string_view prefix, const part& p, const std::vector<std::string_view>& terms, const std::array<std::uint64_t, 4>& firsts,
 		bool any_firsts) {
 		const std::string_view text = p.text;
-		if (!p.tokens.empty() || p.length != 0 || text.size() > std::numeric_limits<std::uint32_t>::max()) { return false; }
+		if (!p.tokens.empty() || p.length != 0 || !text_detail::splittable(text, format::max_term_bytes)) { return false; }
 		if (!prefix.empty()) {
 			for (const char* at = text.data(); (at = static_cast<const char*>(std::memchr(at, prefix[0], std::size_t(text.data() + text.size() - at))));) {
 				const std::size_t i = std::size_t(at - text.data());
