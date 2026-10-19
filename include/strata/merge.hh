@@ -168,7 +168,7 @@ inline built keys_plugin::merge(const merge_context& m, std::span<const reader* 
 		const merge_ref& src = m.order[i];
 		doc_fields f{m.docids[i], in[src.source]->version(src.ord), {}};
 		if (auto k = m.keys[src.source].find(src.ord); k != m.keys[src.source].end()) { f.key = k->second; }
-		b.add(f);
+		b.add(f, true);  // a view into the merge's key map
 	}
 	b.finish(sink);
 	return {format::bit::keys};

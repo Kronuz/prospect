@@ -1056,8 +1056,8 @@ int main() {
 			CHECK(!refused(good10));
 			std::vector<std::string> names;
 			for (std::uint32_t d = 0; d < 10; ++d) { names.push_back("Q" + std::to_string(d)); }
-			std::vector<std::pair<std::string_view, strata::ordinal_t>> e;
-			for (std::uint32_t d = 0; d < 10; ++d) { e.push_back({names[d], d == 1 ? 0 : d}); }
+			std::vector<strata::keys::entry> e;
+			for (std::uint32_t d = 0; d < 10; ++d) { e.push_back({names[d].data(), std::uint32_t(names[d].size()), d == 1 ? 0 : d}); }
 			const auto twice = strata::keys::encode(e);
 			CHECK(refused(with_section(with_section(good10, section::keys, twice.keys), section::key_index, twice.index)));
 			// key_index rebuilt with another maximum, or a filter over other keys.

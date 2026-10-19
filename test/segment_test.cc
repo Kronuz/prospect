@@ -1067,6 +1067,7 @@ int main() {
 		std::mt19937_64 r(37);
 		const char* words[] = {"a", "b", "c", "d", "e", "rare", "the", "of"};
 		strata::segment_writer grouped, mixed;
+		std::vector<std::string> keys(3000);  // writer_access borrows each key until the flush
 		for (std::uint32_t d = 0; d < 3000; ++d) {
 			std::string text;
 			std::vector<strata::text_token> tokens;
@@ -1081,7 +1082,8 @@ int main() {
 				text += w;
 				by_term[w].push_back(pos);
 			}
-			const std::string key = "Q" + std::to_string(d), tag = "T" + std::to_string(d % 5);
+			const std::string& key = keys[d] = "Q" + std::to_string(d);
+			const std::string tag = "T" + std::to_string(d % 5);
 			by_term[key];
 			by_term[tag] = {1000};
 			std::vector<strata::posting_input> in, terms = {{key, 0, {}}, {tag, 1, by_term[tag]}};

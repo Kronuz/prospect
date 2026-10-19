@@ -139,6 +139,27 @@ inline void charge_to(flush_charge* memory, std::uint64_t now, std::uint64_t& ch
 		charged = now;
 	}
 }
+// Bytes copied into chunks of at least `chunk` bytes that never move, so views into them
+// stay valid; each chunk is charged as it is allocated.
+class stable_bytes {
+public:
+	explicit stable_bytes(std::size_t chunk) noexcept : chunk_(chunk) {}
+	std::string_view copy(std::string_view s, flush_charge* memory) {
+		if (chunks_.empty() || chunks_.back().size() + s.size() > chunks_.back().capacity()) {
+			chunks_.emplace_back();
+			chunks_.back().reserve(std::max(chunk_, s.size()));
+			if (memory) { memory->grow(chunks_.back().capacity()); }
+		}
+		std::string& c = chunks_.back();
+		const char* at = c.data() + c.size();
+		c.append(s);
+		return {at, s.size()};
+	}
+
+private:
+	std::deque<std::string> chunks_;
+	std::size_t chunk_;
+};
 }  // namespace detail
 
 // Terms, postings, positions, lengths, and norms: the inverted plugin's builder
@@ -449,15 +470,7 @@ private:
 			if (sl.hash == h && sl.length == term.size() && std::memcmp(sl.key, term.data(), term.size()) == 0) { return buffers_[sl.buffer]; }
 		}
 		refuse_key(term);
-		// Term bytes live in stable arena chunks so slots can point at them.
-		if (arena_.empty() || arena_.back().size() + term.size() > arena_.back().capacity()) {
-			arena_.emplace_back();
-			arena_.back().reserve(std::max<std::size_t>(1 << 20, term.size()));
-			if (memory) { memory->grow(arena_.back().capacity()); }
-		}
-		std::string& chunk = arena_.back();
-		const char* at = chunk.data() + chunk.size();
-		chunk.append(term);
+		const char* at = arena_.copy(term, memory).data();  // slots point into it
 		if ((buffers_.size() + 1) * 2 > table_.size()) { grow(); }
 		insert({h, at, std::uint32_t(term.size()), std::uint32_t(buffers_.size())});
 		if (memory) { memory->grow(sizeof(term_buffer)); }
@@ -707,7 +720,7 @@ private:
 	}
 
 	std::vector<format::impact> pairs_;  // write_postings: one block's pairs
-	std::deque<std::string> arena_;
+	detail::stable_bytes arena_{std::size_t(1) << 20};
 	std::vector<slot> table_;
 	std::deque<term_buffer> buffers_;
 	std::vector<term_buffer*> touched_;  // add_tokens: the document's open postings
@@ -723,24 +736,28 @@ class keys_builder {
 public:
 	flush_charge* memory = nullptr;
 
-	void add(const doc_fields& f) {
+	// A borrowed key is held as a view, so its bytes must outlive finish() (the flush's
+	// buffer, the merge's key map); any other is copied once into the builder's own chunks.
+	void add(const doc_fields& f, bool borrowed) {
 		// A version belongs to a key (F9, F13-R9).
 		if (f.key.empty() && f.version != 0) { throw std::invalid_argument("strata: a version without a key"); }
 		if (!f.key.empty()) {
-			key_bytes_ += f.key.size();
-			keys_.push_back({std::string(f.key), ordinal_t(versions_.size())});
+			if (f.key.size() > format::max_term_bytes) { throw std::invalid_argument("strata: key longer than the term limit"); }
+			const std::string_view k = borrowed ? f.key : owned_.copy(f.key, memory);
+			keys_.push_back({k.data(), std::uint32_t(k.size()), ordinal_t(versions_.size())});
 		}
 		versions_.push_back(f.version);
-		detail::charge_to(memory, versions_.capacity() * sizeof(std::uint64_t) + keys_.capacity() * sizeof(keys_[0]) + key_bytes_, charged_);
+		detail::charge_to(memory, versions_.capacity() * sizeof(std::uint64_t) + keys_.capacity() * sizeof(keys::entry), charged_);
 	}
+	// The entries are sorted in place, so a second flush writes the same bytes.
 	void finish(section_sink& sink) {
-		std::vector<std::pair<std::string_view, ordinal_t>> entries;
-		entries.reserve(keys_.size());
-		for (const auto& [k, o] : keys_) { entries.push_back({k, o}); }
-		auto sections = keys::encode(std::move(entries));
-		detail::append_built(sink, memory, format::section::keys, sections.keys);
+		keys::sections sections = keys::encode(keys_, memory);
+		const std::uint64_t built = sections.keys.capacity() + sections.index.capacity();
+		if (memory) { memory->grow(built); }
+		sink.write(format::section::keys, sections.keys);
 		detail::append_built(sink, memory, format::section::versions, encode_versions());
-		detail::append_built(sink, memory, format::section::key_index, sections.index);
+		sink.write(format::section::key_index, sections.index);
+		if (memory) { memory->shrink(built); }
 	}
 
 private:
@@ -772,8 +789,9 @@ private:
 	}
 
 	std::vector<std::uint64_t> versions_;
-	std::vector<std::pair<std::string, ordinal_t>> keys_;
-	std::uint64_t key_bytes_ = 0, charged_ = 0;
+	std::vector<keys::entry> keys_;
+	detail::stable_bytes owned_{std::size_t(64) << 10};  // the keys not borrowed
+	std::uint64_t charged_ = 0;
 };
 
 // Stored records: the stored plugin's builder.
@@ -857,7 +875,7 @@ public:
 	ordinal_t add(std::uint64_t docid, std::span<const posting_input> terms, std::uint32_t length, std::string_view stored = {},
 		std::uint64_t version = 0, std::string_view key = {}) {
 		if (!terms.empty() && !(structures & format::bit::inverted)) { throw std::invalid_argument("strata: terms in a segment without inverted"); }
-		const ordinal_t ord = begin_document(docid, length, stored, version, key);
+		const ordinal_t ord = begin_document(docid, length, stored, version, key, false);
 		inverted_.add_terms(ord, terms);
 		return ord;
 	}
@@ -869,7 +887,7 @@ public:
 	ordinal_t add_tokens(std::uint64_t docid, std::span<const token> tokens, std::uint32_t length, std::string_view stored = {},
 		std::uint64_t version = 0, std::string_view key = {}) {
 		if (!tokens.empty() && !(structures & format::bit::inverted)) { throw std::invalid_argument("strata: terms in a segment without inverted"); }
-		const ordinal_t ord = begin_document(docid, length, stored, version, key);
+		const ordinal_t ord = begin_document(docid, length, stored, version, key, false);
 		inverted_.add_tokens(ord, tokens);
 		return ord;
 	}
@@ -896,13 +914,13 @@ private:
 	// The inverter's entry points (detail::writer_access).
 	ordinal_t add_text(std::uint64_t docid, std::span<const posting_input> terms, std::string_view text, std::span<const text_token> tokens, std::uint32_t length,
 		std::string_view stored, std::uint64_t version, std::string_view key) {
-		const ordinal_t ord = begin_document(docid, length, stored, version, key);
+		const ordinal_t ord = begin_document(docid, length, stored, version, key, true);
 		inverted_.add_text(ord, terms, text, tokens);
 		return ord;
 	}
 	ordinal_t add_split(std::uint64_t docid, std::span<const posting_input> terms, std::string_view text, std::uint32_t length, std::string_view stored,
 		std::uint64_t version, std::string_view key) {
-		const ordinal_t ord = begin_document(docid, length, stored, version, key);
+		const ordinal_t ord = begin_document(docid, length, stored, version, key, true);
 		inverted_.add_split(ord, terms, text);
 		return ord;
 	}
@@ -920,8 +938,9 @@ private:
 		stored_.cancel = cancel;
 	}
 
-	// The per-document data; returns the document's ordinal.
-	ordinal_t begin_document(std::uint64_t docid, std::uint32_t length, std::string_view stored, std::uint64_t version, std::string_view key) {
+	// The per-document data; returns the document's ordinal. A borrowed key's bytes outlive
+	// the flush (keys_builder::add).
+	ordinal_t begin_document(std::uint64_t docid, std::uint32_t length, std::string_view stored, std::uint64_t version, std::string_view key, bool borrowed) {
 		sync();
 		// Ordinals are 32-bit and the largest value means no more documents.
 		if (inverted_.doc_count() >= std::size_t(no_more_docs) - 1) { throw std::length_error("strata: segment document limit"); }
@@ -932,7 +951,7 @@ private:
 		// Only configured builders collect: a keyless or record-less segment holds no versions
 		// or record ends it never writes (CR8). A version belongs to a key (F9).
 		if (structures & format::bit::keys) {
-			keys_.add({docid, version, key});
+			keys_.add({docid, version, key}, borrowed);
 		} else if (version != 0) {
 			throw std::invalid_argument("strata: a version without a key");
 		}
@@ -972,6 +991,7 @@ private:
 namespace detail {
 // The inverter's ways into a segment_writer: a document as terms and text tokens or split
 // text (the multi-thread flush), per-document data alone, and terms from the tuple buffer.
+// Each key is borrowed: its bytes must outlive the writer's flush.
 struct writer_access {
 	static ordinal_t add_text(segment_writer& w, std::uint64_t docid, std::span<const posting_input> terms, std::string_view text,
 		std::span<const text_token> tokens, std::uint32_t length, std::string_view stored = {}, std::uint64_t version = 0, std::string_view key = {}) {
@@ -982,7 +1002,7 @@ struct writer_access {
 		return w.add_split(docid, terms, text, length, stored, version, key);
 	}
 	static ordinal_t add_document(segment_writer& w, std::uint64_t docid, std::uint32_t length, std::string_view stored, std::uint64_t version, std::string_view key) {
-		return w.begin_document(docid, length, stored, version, key);
+		return w.begin_document(docid, length, stored, version, key, true);
 	}
 	template <class Next>
 	static void flush_from(segment_writer& w, const std::array<std::uint8_t, 16>& segment_id, output& out, spill& positions, std::string_view alphabet, Next&& next) {
