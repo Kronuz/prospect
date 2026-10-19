@@ -188,7 +188,7 @@ using segment = basic_segment<search_layout>;
 // state that every regions-checked section shares.
 class core_segment {
 public:
-	core_segment(std::string_view file, std::uint32_t readable) : file_(file) {
+	core_segment(std::string_view file, format::structure_bits readable) : file_(file) {
 		version_ = format::read_version(file);
 		footer_ = format::decode_footer(file);
 		format::classify_structures(footer_.structures, readable);  // before the table (F13-R35)
@@ -225,7 +225,7 @@ public:
 	}
 
 	// The structure bits the core reads (F4): none until index_sort's reader (F18).
-	static constexpr std::uint32_t reads = 0;
+	static constexpr format::structure_bits reads = 0;
 
 	// The handle for a section, or an empty one when the segment lacks it.
 	section_handle section(format::section kind) const {
@@ -244,7 +244,7 @@ public:
 	std::uint64_t doc_count() const noexcept { return doc_count_; }
 	std::uint32_t version() const noexcept { return version_; }
 	// The footer's structure bits (F4).
-	std::uint32_t structures() const noexcept { return footer_.structures; }
+	format::structure_bits structures() const noexcept { return footer_.structures; }
 	std::string_view stats() const noexcept { return stats_; }
 	const std::vector<format::section_entry>& sections() const noexcept { return sections_; }
 	std::uint64_t min_docid() const noexcept { return footer_.min_docid; }
@@ -388,8 +388,8 @@ struct inverted_plugin {
 	static constexpr std::size_t statistics_size = 20;
 	// Its sections are F3's rows owned by it; its bits are F4's (L4).
 	static constexpr format::owner owner = format::owner::inverted;
-	static constexpr std::uint32_t structure = format::bit::inverted;
-	static constexpr std::uint32_t structures = format::bit::inverted | format::bit::norms;
+	static constexpr format::structure_bits structure = format::bit::inverted;
+	static constexpr format::structure_bits structures = format::bit::inverted | format::bit::norms;
 
 	class reader {
 	public:
@@ -669,8 +669,8 @@ struct keys_plugin {
 		return d.key;
 	}
 	static constexpr format::owner owner = format::owner::keys;
-	static constexpr std::uint32_t structure = format::bit::keys;
-	static constexpr std::uint32_t structures = format::bit::keys;
+	static constexpr format::structure_bits structure = format::bit::keys;
+	static constexpr format::structure_bits structures = format::bit::keys;
 
 	// Keys are this plugin's own section, so its reader needs no other (L3).
 	using depends_on = type_list<>;
@@ -772,8 +772,8 @@ struct stored_plugin {
 	static std::uint64_t bytes(const part& p) { return p.stored.size(); }
 	static std::uint64_t disk_estimate(const part& p) { return p.stored.size() + p.stored.size() / 16; }
 	static constexpr format::owner owner = format::owner::stored;
-	static constexpr std::uint32_t structure = format::bit::stored;
-	static constexpr std::uint32_t structures = format::bit::stored;
+	static constexpr format::structure_bits structure = format::bit::stored;
+	static constexpr format::structure_bits structures = format::bit::stored;
 
 	class reader {
 	public:
@@ -977,18 +977,18 @@ struct reader_of {
 };
 // The structure bits a layout entry reads, and its own bit.
 template <class E>
-constexpr std::uint32_t structures_of() {
+constexpr format::structure_bits structures_of() {
 	return E::structures;
 }
 template <class E>
-constexpr std::uint32_t structure_of() {
+constexpr format::structure_bits structure_of() {
 	return E::structure;
 }
 // No two plugins of a layout share an owner, so none claims another's kinds (F3), and no
 // two read one bit (F4).
 template <class... Entries>
 consteval bool owners_distinct() {
-	std::uint32_t bits = core_segment::reads;
+	format::structure_bits bits = core_segment::reads;
 	bool ok = true;
 	(..., [&] {
 		ok = ok && !(bits & structures_of<Entries>());
@@ -1031,7 +1031,7 @@ class basic_segment<layout<Entries...>> {
 
 public:
 	// The bits this layout reads (F4; layers R16): the core's and each entry's.
-	static constexpr std::uint32_t readable = (core_segment::reads | ... | detail::structures_of<Entries>());
+	static constexpr format::structure_bits readable = (core_segment::reads | ... | detail::structures_of<Entries>());
 
 	// Verifies the footer, the table of contents, the header, and the pinned sections in
 	// full; other sections are verified per region as they are read. The file's bytes

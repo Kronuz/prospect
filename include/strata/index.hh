@@ -669,7 +669,7 @@ public:
 			rec.bytes(key);
 			emit(rec.data());
 		};
-		const std::uint32_t configured = configured_structures();
+		const format::structure_bits configured = configured_structures();
 		for (const auto& sp : segs_) {
 			const auto& s = *sp;
 			auto live = [&](ordinal_t o) { return !((s.deleted[o >> 6] >> (o & 63)) & 1); };
@@ -719,7 +719,7 @@ public:
 
 	// The structures this index is configured with, from the manifest (F20, F13-R28). Flushes
 	// and merges write them; the digest records them (F21).
-	std::uint32_t configured_structures() const noexcept { return m_.configured; }
+	format::structure_bits configured_structures() const noexcept { return m_.configured; }
 
 	// Checks every segment whole (check_segment) and the digest's invariants: one live copy
 	// per docid and per key, every docid at or below lastdocid. Throws at the first problem.
@@ -1062,7 +1062,7 @@ private:
 		std::uint64_t memory_wait;
 		std::string key_prefix;
 		strata::reorder::settings reorder;
-		std::uint32_t structures;  // the index's configured bits (F4)
+		format::structure_bits structures;  // the index's configured bits (F4)
 	};
 
 	// A merge's writes to one file, at increasing offsets: before each chunk an executor
@@ -2383,7 +2383,7 @@ private:
 	// bit in the manifest's mask it lacks, or segment versions outside what it reads; then
 	// configured bits no flush could write, as damage.
 	static void check_readable(const files::manifest& m) {
-		if (const std::uint32_t lacked = m.mask & ~segment::readable) {
+		if (const format::structure_bits lacked = m.mask & ~segment::readable) {
 			throw unsupported_index("strata: unsupported index: structure bit " + std::to_string(std::countr_zero(lacked)));
 		}
 		if (!m.segments.empty() && (m.min_version < format::min_read_version || m.max_version > format::version)) {
@@ -2391,8 +2391,8 @@ private:
 		}
 		// Configured bits a flush can write (CR5): each bit's owner set (F4), and keys set
 		// exactly when the index has a key prefix (F8).
-		for (std::uint32_t b = m.configured; b; b &= b - 1) {
-			const std::uint32_t owner = format::requires_of(b & -b);
+		for (format::structure_bits b = m.configured; b; b &= b - 1) {
+			const format::structure_bits owner = format::requires_of(b & -b);
 			if (owner && !(m.configured & owner)) { throw corrupt_index("configured structure bit " + std::to_string(std::countr_zero(b)) + " without its owner"); }
 		}
 		if (m.key_prefix.empty() == bool(m.configured & format::bit::keys)) { throw corrupt_index("the key prefix and the configured keys bit disagree"); }

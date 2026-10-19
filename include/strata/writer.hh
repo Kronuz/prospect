@@ -113,7 +113,7 @@ inline void begin_segment(section_sink& sink, const std::array<std::uint8_t, 16>
 inline void write_docids(section_sink& sink, flush_charge* memory, std::span<const std::uint64_t> docids) {
 	append_built(sink, memory, format::section::docids, docids::encode(docids, memory));
 }
-inline void finish_segment(section_sink& sink, std::span<const std::uint64_t> docids, std::uint32_t structures) {
+inline void finish_segment(section_sink& sink, std::span<const std::uint64_t> docids, format::structure_bits structures) {
 	std::string stats;
 	format::put<std::uint64_t>(stats, docids.size());
 	sink.write(format::section::stats, stats);
@@ -833,7 +833,7 @@ public:
 	std::string key_prefix;
 	// The structures the segment holds, set from the index's configuration, never from its
 	// documents (F4).
-	std::uint32_t structures = format::bit::inverted | format::bit::norms | format::bit::keys | format::bit::stored;
+	format::structure_bits structures = format::bit::inverted | format::bit::norms | format::bit::keys | format::bit::stored;
 
 	// Adds a document and returns its ordinal. Docids strictly increase, so ordinal order
 	// is docid order. `length` is the document length used by weighting (Xapian: the sum

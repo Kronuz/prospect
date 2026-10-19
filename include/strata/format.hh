@@ -121,16 +121,18 @@ enum class section : std::uint16_t {
 };
 inline constexpr std::uint16_t section_kinds = 23;
 
-// Structure bits of the footer's structures word (F4).
+// Structure bits of the footer's structures word (F4): bits 0 to 31 in its first u32, 32 to
+// 63 in the second (F13-R40), classified alike; no format-13 binary reads one past bit 15.
+using structure_bits = std::uint64_t;
 namespace bit {
-inline constexpr std::uint32_t inverted = 1, norms = 2, keys = 4, stored = 8, values = 16, points = 32, term_lists = 64, index_sort = 128,
+inline constexpr structure_bits inverted = 1, norms = 2, keys = 4, stored = 8, values = 16, points = 32, term_lists = 64, index_sort = 128,
 	pair_summaries = 256, stored_dictionary = 512, stored_holes = 1024, quantized_impacts = 2048, key_hash = 4096, stored_spans = 8192,
 	postings_runs = 16384, compact = 32768;
 }  // namespace bit
 
 // The bit a structure's bit requires (F4): a sub-structure its owner's, index_sort values;
 // 0 for none.
-inline constexpr std::uint32_t requires_of(std::uint32_t b) noexcept {
+inline constexpr structure_bits requires_of(structure_bits b) noexcept {
 	switch (b) {
 	case bit::norms: case bit::pair_summaries: case bit::quantized_impacts: case bit::postings_runs: return bit::inverted;
 	case bit::stored_dictionary: case bit::stored_holes: case bit::stored_spans: return bit::stored;
@@ -153,7 +155,7 @@ struct kind_rule {
 	section kind;
 	const char* name;
 	owner owned_by;
-	std::uint32_t needs;  // the structure bit that requires it; 0: mandatory
+	structure_bits needs;  // the structure bit that requires it; 0: mandatory
 	check verify;
 	std::uint8_t rank;
 };
@@ -294,7 +296,7 @@ struct footer {
 	std::uint32_t doc_count = 0;
 	std::uint64_t min_docid = 0;
 	std::uint64_t max_docid = 0;
-	std::uint32_t structures = 0;  // F4's bits
+	structure_bits structures = 0;  // F4's bits, 0 to 63
 };
 
 inline constexpr std::uint64_t align_up(std::uint64_t n) noexcept { return (n + section_alignment - 1) / section_alignment * section_alignment; }
@@ -307,8 +309,7 @@ inline std::string encode_footer(const footer& f) {
 	put<std::uint32_t>(out, f.doc_count);
 	put<std::uint64_t>(out, f.min_docid);
 	put<std::uint64_t>(out, f.max_docid);
-	put<std::uint32_t>(out, f.structures);
-	put<std::uint32_t>(out, 0);  // reserved
+	put<std::uint64_t>(out, f.structures);  // bits 0 to 31, then 32 to 63 (F13-R40)
 	put<std::uint32_t>(out, hashes::crc32c(out.data(), out.size()));
 	out.append(footer_magic, 4);
 	return out;
@@ -322,8 +323,7 @@ inline footer decode_footer(std::string_view file) {
 	if (std::memcmp(p + 52, footer_magic, 4) != 0) { corrupt("footer magic"); }
 	if (hashes::crc32c(p, 48) != get<std::uint32_t>(p + 48)) { corrupt("footer checksum"); }
 	footer f{get<std::uint64_t>(p), get<std::uint64_t>(p + 8), get<std::uint32_t>(p + 16), get<std::uint32_t>(p + 20),
-		get<std::uint64_t>(p + 24), get<std::uint64_t>(p + 32), get<std::uint32_t>(p + 40)};
-	if (get<std::uint32_t>(p + 44) != 0) { corrupt("footer reserved"); }
+		get<std::uint64_t>(p + 24), get<std::uint64_t>(p + 32), get<std::uint64_t>(p + 40)};
 	const std::uint64_t body = file.size() - footer_size;
 	if (f.toc_offset > body || f.toc_length > body - f.toc_offset || f.toc_offset + f.toc_length != body) { corrupt("table of contents bounds"); }
 	return f;
@@ -379,18 +379,18 @@ inline std::vector<section_entry> decode_toc(std::string_view file, const footer
 // the table is decoded, since a later release's structure may add kinds or change the
 // table (F23 rules 3 and 5): a bit without the bit it requires is corruption; a set bit
 // this binary lacks is unsupported.
-inline void classify_structures(std::uint32_t structures, std::uint32_t readable) {
-	for (std::uint32_t b = 1; b; b <<= 1) {
+inline void classify_structures(structure_bits structures, structure_bits readable) {
+	for (structure_bits b = 1; b; b <<= 1) {
 		if ((structures & b) && requires_of(b) && !(structures & requires_of(b))) { corrupt("structure without its owner"); }
 	}
-	if (const std::uint32_t lacked = structures & ~readable) {
+	if (const structure_bits lacked = structures & ~readable) {
 		throw unsupported_segment("structure bit " + std::to_string(std::countr_zero(lacked)));
 	}
 }
 
 // In a segment whose bits this binary reads: each kind present exactly when its bit is
 // set, mandatory kinds always (F4).
-inline void check_presence(const std::vector<section_entry>& entries, std::uint32_t structures) {
+inline void check_presence(const std::vector<section_entry>& entries, structure_bits structures) {
 	bool seen[section_kinds] = {};
 	for (const auto& e : entries) { seen[std::uint16_t(e.kind)] = true; }
 	for (const auto& r : kinds) {
@@ -400,7 +400,7 @@ inline void check_presence(const std::vector<section_entry>& entries, std::uint3
 	}
 }
 
-inline void check_structures(const std::vector<section_entry>& entries, std::uint32_t structures, std::uint32_t readable) {
+inline void check_structures(const std::vector<section_entry>& entries, structure_bits structures, structure_bits readable) {
 	classify_structures(structures, readable);
 	check_presence(entries, structures);
 }

@@ -61,7 +61,7 @@ outcome open(const std::string& file) {
 }
 
 // A segment holding `structures`, keyed when they include keys.
-std::string profile_segment(std::uint32_t structures, std::uint32_t first = 1) {
+std::string profile_segment(std::uint64_t structures, std::uint32_t first = 1) {
 	strata::segment_writer w;
 	w.structures = structures;
 	const bool inverted = structures & strata::format::bit::inverted, stored = structures & strata::format::bit::stored;
@@ -139,7 +139,7 @@ std::string relayout(const std::string& file, const std::function<void(entries&)
 // A later release's segment (F23): `file`'s sections with `extra` inserted before the first
 // section of kind `before` (at the end without one), laid out canonically, `structures` in
 // the footer, every checksum good; `toc` replaces the table's encoding.
-std::string later_release(const std::string& file, std::optional<std::pair<section, std::string>> extra, std::optional<section> before, std::uint32_t structures,
+std::string later_release(const std::string& file, std::optional<std::pair<section, std::string>> extra, std::optional<section> before, std::uint64_t structures,
 	const std::function<std::string(const entries&)>& toc = {}) {
 	auto f = strata::format::decode_footer(file);
 	auto old = strata::format::decode_toc(file, f);
@@ -311,7 +311,7 @@ int main() {
 		// Large enough that whole pages lie between the header page and the tail at any page
 		// size the CI hosts use (16 KiB on macOS arm64). Every profile an index can write,
 		// norms absent included (F13-R36).
-		auto big = [](std::uint32_t structures) {
+		auto big = [](std::uint64_t structures) {
 			strata::segment_writer w;
 			w.structures = structures;
 			std::mt19937_64 r(5);
@@ -416,12 +416,16 @@ int main() {
 	// --- F6: reserved words ----------------------------------------------------------------
 	CHECK(open(relayout(good, [](entries&) {}, [](strata::format::footer& f) { (void)f; })) == outcome::opens);
 	{
-		std::string file = good;
-		const std::size_t at = file.size() - strata::format::footer_size;
-		file[at + 44] = 1;
-		const std::uint32_t crc = hashes::crc32c(file.data() + at, 48);
-		std::memcpy(file.data() + at + 48, &crc, 4);
-		CHECK(open(file) == outcome::corrupt);
+		// The footer's second structures word holds bits 32 to 63 (F13-R40): each byte of it
+		// set and resealed is a structure this binary lacks, unsupported, never damage.
+		for (int byte = 44; byte < 48; ++byte) {
+			std::string file = good;
+			const std::size_t at = file.size() - strata::format::footer_size;
+			file[at + byte] = 1;
+			const std::uint32_t crc = hashes::crc32c(file.data() + at, 48);
+			std::memcpy(file.data() + at + 48, &crc, 4);
+			CHECK(open(file) == outcome::unsupported);
+		}
 	}
 	{
 		std::string file = good;
@@ -432,13 +436,13 @@ int main() {
 
 	// --- F4: structure bits --------------------------------------------------------------
 	{
-		const auto with_bits = [&](std::uint32_t structures) {
+		const auto with_bits = [&](std::uint64_t structures) {
 			return open(relayout(good, [](entries&) {}, [&](strata::format::footer& f) { f.structures = structures; }));
 		};
-		const std::uint32_t built = bit::inverted | bit::norms | bit::keys | bit::stored;
+		const std::uint64_t built = bit::inverted | bit::norms | bit::keys | bit::stored;
 		// A built structure's bit cleared: its sections present without it, or norms without
 		// inverted: damage.
-		for (std::uint32_t b : {bit::inverted, bit::norms, bit::keys, bit::stored}) { CHECK(with_bits(built & ~b) == outcome::corrupt); }
+		for (std::uint64_t b : {bit::inverted, bit::norms, bit::keys, bit::stored}) { CHECK(with_bits(built & ~b) == outcome::corrupt); }
 		// index_sort without values: damage.
 		CHECK(with_bits(built | bit::index_sort) == outcome::corrupt);
 		// A sub-structure without its owner's bit: damage, whatever the binary reads.
@@ -447,8 +451,8 @@ int main() {
 		CHECK(with_bits(bit::keys | bit::stored | bit::postings_runs) == outcome::corrupt);  // bit 14 without inverted (F13-R32)
 		// Every other bit, defined, reserved, or unlisted: one this binary lacks, so
 		// unsupported (F4; F13-R30), and never read past.
-		for (unsigned b = 0; b < 32; ++b) {
-			const std::uint32_t v = std::uint32_t(1) << b;
+		for (unsigned b = 0; b < 64; ++b) {  // bits 32 to 63 too (F13-R40)
+			const std::uint64_t v = std::uint64_t(1) << b;
 			if (built & v || v == bit::index_sort) { continue; }
 			const auto got = with_bits(built | v);
 			if (got != outcome::unsupported) { std::fprintf(stderr, "bit %u: %s\n", b, name(got)); }
@@ -565,6 +569,8 @@ int main() {
 		// A mask bit this binary cannot read: unsupported, before any segment opens.
 		CHECK(with([](strata::files::manifest& m) { m.mask |= bit::values; }) == verdict::unsupported);
 		CHECK(with([](strata::files::manifest& m) { m.mask |= bit::compact; }) == verdict::unsupported);
+		CHECK(with([](strata::files::manifest& m) { m.mask |= std::uint64_t(1) << 40; }) == verdict::unsupported);  // bits 32 to 63 (F13-R40)
+		CHECK(with([](strata::files::manifest& m) { m.mask |= std::uint64_t(1) << 63; }) == verdict::unsupported);
 		// A highest segment version above this binary's: unsupported.
 		CHECK(with([](strata::files::manifest& m) { m.max_version = strata::format::version + 1; }) == verdict::unsupported);
 		// An index an earlier pre-freeze build wrote, segments at 13: unsupported (CR11).
@@ -727,7 +733,7 @@ int main() {
 		// The writer takes structures from its configuration and refuses what they cannot
 		// hold, and a nonzero version without a key anywhere (F9, F13-R9).
 		{
-			auto refuses = [](std::uint32_t structures, bool terms, bool record, std::uint64_t version = 0, std::string key = {}) {
+			auto refuses = [](std::uint64_t structures, bool terms, bool record, std::uint64_t version = 0, std::string key = {}) {
 				strata::segment_writer w;
 				w.structures = structures;
 				std::vector<strata::posting_input> in;

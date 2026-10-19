@@ -28,8 +28,8 @@ static_assert(strata::section_plugin<strata::inverted_plugin> && strata::section
 struct stub_keys {
 	static constexpr std::string_view id = "keys";
 	static constexpr strata::format::owner owner = strata::format::owner::keys;
-	static constexpr std::uint32_t structure = strata::format::bit::keys;
-	static constexpr std::uint32_t structures = strata::format::bit::keys;
+	static constexpr std::uint64_t structure = strata::format::bit::keys;
+	static constexpr std::uint64_t structures = strata::format::bit::keys;
 	struct reader {
 		explicit reader(const strata::open_context&) {}
 		void verify_all() const {}
@@ -39,7 +39,7 @@ struct stub_keys {
 static_assert(strata::section_plugin<stub_keys>);
 // A plugin's own bit must be one of its bits, and exactly one bit.
 struct stub_two_bits : stub_keys {
-	static constexpr std::uint32_t structure = strata::format::bit::keys | strata::format::bit::stored;
+	static constexpr std::uint64_t structure = strata::format::bit::keys | strata::format::bit::stored;
 };
 static_assert(!strata::section_plugin<stub_two_bits>);
 using document_layout = strata::layout<stub_keys, strata::stored_plugin>;
