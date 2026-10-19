@@ -132,3 +132,10 @@
   2^24 or byte 2^32) pass 2^32 would wrap the buffer's 32-bit side index; it needs more than
   2^24 terms beside 2^32 - 1 words, hundreds of GB resident.
 - Blocked on: nothing.
+- Lead's rulings on the review (docs/reviews/inverter-followups.md, APPROVE WITH CONDITIONS, 2026-10-19):
+  - IF1 (the 32-bit side index; predates this branch, about 300 GB for one document): a stage-1
+    entry cap plus a limits row, before any gate run past 4 GiB; not a landing blocker.
+  - IF2 (flush points move at small budgets because C11 now charges drain scratch and CR16 drops
+    token charges): accepted, since charging what is held is correct; recorded here and in
+    docs/perf when the flush rows are next measured.
+  - IF3-IF8: follow-ups after landing.
