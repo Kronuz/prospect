@@ -385,6 +385,20 @@ int main() {
 		}
 		CHECK(words.size() >= 256 && tuples(docs, {}, ~std::uint64_t(0)) == reference(docs, {0, 1, 2}));
 	}
+	// Page and chunk sizes past the 64th allocation: the doubling's shift is capped, so
+	// UBSan sees no shift of 64 or more (CR18); a log of 70 pieces over 1 MiB, a page each.
+	{
+		using strata::tuple_detail::doubled;
+		CHECK(doubled(4096, 0, 1 << 20) == 4096 && doubled(4096, 8, 1 << 20) == (1 << 20) && doubled(4096, 9, 1 << 20) == (1 << 20));
+		for (std::size_t k : {63, 64, 65, 100, 1000}) { CHECK(doubled(4096, k, std::size_t(4) << 20) == (std::size_t(4) << 20)); }
+		strata::tuple_detail::byte_log log;
+		std::uint64_t last = 0;
+		for (unsigned i = 0; i < 70; ++i) {
+			last = log.append((std::size_t(1) << 20) + 1, nullptr);
+			log.at(last)[0] = char(i);
+		}
+		CHECK(last >> strata::tuple_detail::byte_log::shift == 69 && log.at(last)[0] == char(69));
+	}
 	std::puts(failures ? "tuple_buffer: FAILED" : "tuple_buffer: ok");
 	return failures ? 1 : 0;
 }

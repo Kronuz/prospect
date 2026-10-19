@@ -88,6 +88,12 @@ private:
 	std::size_t size_ = 0, left_ = 0;
 };
 
+// The k-th of a series of allocations that starts at `first` bytes and doubles to `most`;
+// the shift is capped, so any k is defined.
+inline std::size_t doubled(std::size_t first, std::size_t k, std::size_t most) noexcept {
+	return std::min(most, first << std::min<std::size_t>(k, std::size_t(std::countl_zero(first))));
+}
+
 // Bytes appended in pieces that never move; a piece is addressed by its 64-bit offset.
 // Pages start at 4 KiB and double to 1 MiB, so a small buffer allocates little.
 class byte_log {
@@ -95,7 +101,7 @@ public:
 	static constexpr unsigned shift = 20;  // offsets: page << 20 | offset; a piece never spans two pages
 	std::uint64_t append(std::size_t n, flush_charge* memory) {
 		if (pages_.empty() || fill_ + n > size_) {
-			size_ = std::max(std::min(std::size_t(1) << shift, std::size_t(4096) << pages_.size()), n);  // a larger piece takes a page of its own
+			size_ = std::max(doubled(4096, pages_.size(), std::size_t(1) << shift), n);  // a larger piece takes a page of its own
 			pages_.push_back(std::unique_ptr<char[]>(new char[size_]));
 			if (memory) { memory->grow(size_); }
 			fill_ = 0;
@@ -680,7 +686,7 @@ private:
 	char* room(std::size_t n) {
 		while (arena_at_ < arena_.size() && arena_fill_ + n + 8 > arena_sizes_[arena_at_]) { ++arena_at_, arena_fill_ = 0; }
 		if (arena_at_ == arena_.size()) {
-			const std::size_t size = std::max<std::size_t>(std::min(arena_chunk, std::size_t(4096) << arena_.size()), n + 8);  // 4 KiB doubling
+			const std::size_t size = std::max<std::size_t>(tuple_detail::doubled(4096, arena_.size(), arena_chunk), n + 8);  // 4 KiB doubling
 			arena_.push_back(std::unique_ptr<char[]>(new char[size]));
 			arena_sizes_.push_back(size);
 			arena_fill_ = 0;

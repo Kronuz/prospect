@@ -31,8 +31,24 @@
     (`std::optional<std::string_view>`; the operation outlives stage 2), and the core's
     `key_term` is deleted, so format 12's key rule lives in `key_of` alone. The version map
     hashes keys with the hashes library's `wordwise::hash`; `index_detail::key_hash` is
-    deleted. ctest 35 of 35; bytes identical to main's at 20k and 100k.
+    deleted. ctest 35 of 35; bytes identical to main's at 20k and 100k (`5db24ad`).
+  - CR18, undefined shifts: the byte log's pages and the arena's chunks take their sizes from
+    one helper, `tuple_detail::doubled(first, k, most)`, whose shift is capped by the first
+    size's leading zeros, so the 65th page or chunk no longer shifts by 64.
+    `tuple_buffer_test` checks the helper at k = 63 to 1,000 and appends 70 pieces of
+    1 MiB + 1 to a `byte_log` (a page each, past the 64th). ctest 35 of 35 (Release); bytes
+    identical to main's at 20k and 100k.
 - Next:
   1. C11: the tuple buffer's floor, measured before and after.
   2. Text: L10 and D16 with the code (R30, R31).
+- Code review of main (`docs/reviews/inverter-main.md`, APPROVE WITH CONDITIONS), folded
+  in here, one commit each: CR14 is R28.1 (`37ee946`: the option is gone, so there is no
+  public cap to refuse or clamp); CR18; CR16 (the lead's ruling: widen the split-text cap
+  to Tantivy's and Xapian's 2^32 - 1 words, and list it); CR15; CR17; CR20 (main's
+  `inverter.md` to one current state); CR19 is R26 (the bisect gap above).
+- For the architect (the review's design question, D10 and D17): a document whose buffer
+  exceeds what the host can allocate fences the writer, and fences again on every replay
+  from `applied_position()`, since on one host the condition never clears. Options the
+  review names: a stage-1 refusal by `part_bytes` against a ceiling in replicated state, or
+  a row stating that memory bounds a standalone document. Not decided here.
 - Blocked on: nothing.
