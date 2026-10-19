@@ -722,6 +722,17 @@ struct keys_plugin {
 		std::string_view min_key() const noexcept { return keys_.min(); }
 		std::string_view max_key() const noexcept { return keys_.max(); }
 		keys::reader::cursor cursor() const { return keys::reader::cursor(keys_); }
+		// Calls f(key, ord) for every key in order through the cursor's checks (order, count),
+		// refusing an ordinal named twice: the walk of check(), merges, and the digest (MR2, CR3).
+		template <class F>
+		void each_key(F&& f) const {
+			std::vector<bool> named(keys_.size() ? doc_count_ : 0);
+			for (auto c = cursor(); c.next();) {
+				if (named[c.ordinal()]) { corrupt("an ordinal named by two keys"); }
+				named[c.ordinal()] = true;
+				f(c.key(), c.ordinal());
+			}
+		}
 
 	private:
 		// versions: [min u64][width u8][packed bits]; exactly the bits doc_count needs, and no

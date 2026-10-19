@@ -674,11 +674,8 @@ public:
 			const auto& s = *sp;
 			auto live = [&](ordinal_t o) { return !((s.deleted[o >> 6] >> (o & 63)) & 1); };
 			const core_segment& core = s.seg.core();
-			std::vector<std::string> key_of(core.doc_count());  // from the keys reader's scan (L3)
-			s.seg.template get<keys_plugin>().scan("", [&](std::string_view key, ordinal_t o) {
-				key_of[o] = key;
-				return true;
-			});
+			std::vector<std::string> key_of(core.doc_count());  // walked through the keys reader's checks (L3, MR2)
+			s.seg.template get<keys_plugin>().each_key([&](std::string_view key, ordinal_t o) { key_of[o] = key; });
 			for (ordinal_t o = 0; o < core.doc_count(); ++o) {
 				if (live(o)) { document_record(core.docid(o), s.seg.template get<keys_plugin>().version(o), key_of[o]); }
 			}

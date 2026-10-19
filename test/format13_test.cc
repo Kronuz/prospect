@@ -13,6 +13,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -989,6 +990,68 @@ int main() {
 			CHECK(refused(with_section(good10, section::key_index, reindex(&q8, false))));   // max below the last key
 			CHECK(refused(with_section(good10, section::key_index, reindex(&q99, false))));  // max above it
 			CHECK(refused(with_section(good10, section::key_index, reindex(nullptr, true))));
+			// MR1's M1: one keys byte changed so a key repeats the one before, every key still in
+			// range and filter and every ordinal distinct; only the cursor's order test refuses it.
+			// MR2: a merge of it is damage too, never std::invalid_argument.
+			const std::string kb(strata::segment(good10).core().section(section::keys).bytes);
+			std::string repeat;
+			for (std::size_t i = 0; i < kb.size() && repeat.empty(); ++i) {
+				for (int x : {1, 2, 3}) {
+					std::string k = kb;
+					k[i] = char(k[i] ^ x);
+					const std::string file = with_section(good10, section::keys, k);
+					try {
+						strata::segment sg(file);
+						std::vector<std::string> got;
+						std::vector<strata::ordinal_t> ords;
+						sg.get<strata::keys_plugin>().scan("", [&](std::string_view key, strata::ordinal_t o) {
+							got.push_back(std::string(key));
+							ords.push_back(o);
+							return true;
+						});
+						std::sort(ords.begin(), ords.end());
+						const bool known = std::all_of(got.begin(), got.end(), [&](const std::string& g) { return std::find(names.begin(), names.end(), g) != names.end(); });
+						if (got.size() == 10 && known && std::is_sorted(got.begin(), got.end()) && std::adjacent_find(got.begin(), got.end()) != got.end() &&
+							std::adjacent_find(ords.begin(), ords.end()) == ords.end()) {
+							repeat = file;
+							break;
+						}
+					} catch (const std::exception&) {
+					}
+				}
+			}
+			auto merge_refused = [](const std::string& file) {
+				strata::segment sg(file);
+				const std::vector<strata::merge_source> src{{&sg, nullptr}};
+				std::string out;
+				strata::string_output so(out);
+				strata::string_spill spill;
+				strata::merge_options mo;
+				mo.key_prefix = "Q";
+				try {
+					(void)strata::merge_segments(src, {}, so, spill, mo);
+				} catch (const strata::corrupt_segment&) {
+					return true;
+				}
+				return false;
+			};
+			CHECK(!repeat.empty() && refused(repeat) && merge_refused(repeat));
+			// CR3: a merge refuses two keys naming one ordinal as damage, never keeping the last.
+			CHECK(merge_refused(with_section(with_section(good10, section::keys, twice.keys), section::key_index, twice.index)));
+			// MR1's M3: nine keys of ten documents, key_index's count raised to 10.
+			{
+				strata::segment_writer w9;
+				for (std::uint32_t d = 0; d < 10; ++d) {
+					std::vector<strata::posting_input> in{{"w", 1, {}}};
+					w9.add(d + 1, in, 1, {}, 0, d == 9 ? std::string() : "Q" + std::to_string(d));
+				}
+				const std::string good9 = w9.flush({});
+				CHECK(!refused(good9));
+				std::string ix9(strata::segment(good9).core().section(section::key_index).bytes);
+				CHECK(!ix9.empty() && ix9[0] == 9);
+				ix9[0] = 10;  // one LEB byte either way
+				CHECK(refused(with_section(good9, section::key_index, ix9)));
+			}
 		}
 		// The merge's backstop refuses a key-prefixed term too, never drops it (F13-R10; CR6, M33).
 		{

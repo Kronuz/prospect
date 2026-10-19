@@ -267,17 +267,16 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 	check();
 	merge_plan plan;
 	plan.ordinals.resize(sources.size());
-	// Each live document's key, if any, from the keys reader's scan from the empty key (L3).
+	// Each live document's key, if any, walked through the keys reader's checks (L3, MR2).
 	std::vector<key_map> keys(sources.size());
 	if constexpr (keyed) {
 		for (std::size_t s = 0; s < sources.size(); ++s) {
 			const segment_type& seg = *sources[s].seg;
-			seg.template get<keys_plugin>().scan("", [&](std::string_view key, ordinal_t o) {
+			seg.template get<keys_plugin>().each_key([&](std::string_view key, ordinal_t o) {
 				if (sources[s].live(o)) {
-					keys[s][o] = std::string(key);
+					keys[s].emplace(o, key);
 					charge(64 + key.size());  // a map node and its key
 				}
-				return true;
 			});
 		}
 	}

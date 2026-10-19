@@ -49,14 +49,13 @@ inline void check_segment(const segment& seg, const std::vector<std::uint64_t>* 
 	std::vector<bool> keyed(seg.core().doc_count());
 	std::string first, last;
 	std::uint64_t walked = 0;  // this segment's keys
-	for (auto c = keys.cursor(); c.next();) {
-		if (keyed[c.ordinal()]) { corrupt("an ordinal named by two keys"); }
-		keyed[c.ordinal()] = true;
+	keys.each_key([&](std::string_view key, ordinal_t o) {
+		keyed[o] = true;
 		++r.keys;
-		if (!walked++) { first = c.key(); }
-		last = c.key();
-		if (!keys.may_hold(c.key())) { corrupt("a key its range or filter misses"); }
-	}
+		if (!walked++) { first = key; }
+		last = key;
+		if (!keys.may_hold(key)) { corrupt("a key its range or filter misses"); }
+	});
 	if (keys.key_count() && (keys.min_key() != first || keys.max_key() != last)) { corrupt("key range"); }
 	for (ordinal_t o = 0; o < seg.core().doc_count(); ++o) {
 		if (!keyed[o] && seg.get<keys_plugin>().version(o) != 0) { corrupt("a version without a key"); }
