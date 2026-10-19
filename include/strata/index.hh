@@ -18,6 +18,7 @@
 #include "strata/writer.hh"
 
 #include "completion/io.h"
+#include "hashes.hh"
 
 #include <algorithm>
 #include <atomic>
@@ -192,22 +193,6 @@ inline void write_all(kronuz::journal::File& f, std::string_view bytes) {
 		if (n == 0) { throw std::system_error(EIO, std::generic_category(), "write made no progress"); }
 		at += n;
 	}
-}
-
-// A key's bytes through a multiply and an xorshift per word, the last word zero-padded.
-inline std::uint64_t key_hash(std::string_view s) noexcept {
-	constexpr std::uint64_t P = 0x9E3779B97F4A7C15ull;
-	std::uint64_t h = std::uint64_t(s.size()) * P, w;
-	std::size_t i = 0;
-	for (; i + 8 <= s.size(); i += 8) {
-		std::memcpy(&w, s.data() + i, 8);
-		h = (h ^ w) * P;
-		h ^= h >> 29;
-	}
-	w = 0;
-	if (i < s.size()) { std::memcpy(&w, s.data() + i, s.size() - i); }
-	h = (h ^ w) * P;
-	return h ^ (h >> 32);
 }
 
 // 32-bit values by 64-bit hash in one array, at most half full, probed linearly; entries may
@@ -1674,7 +1659,7 @@ private:
 		set_key_slot(key, index);
 	}
 	void set_key_slot(std::string_view key, std::optional<std::uint32_t> index) {
-		const std::uint64_t h = index_detail::key_hash(key);
+		const std::uint64_t h = ::wordwise::hash(key.data(), key.size());
 		auto same = [&](std::uint32_t v) { return v < buffer_size() && buffered_key(v) == key; };
 		std::uint32_t* v = key_slots_.find(h, same);
 		if (index) {
@@ -1689,7 +1674,7 @@ private:
 	}
 	// The buffer index of a key's live copy in the buffer, if any.
 	std::optional<std::uint32_t> key_slot(std::string_view key) const {
-		const std::uint32_t* v = key_slots_.find(index_detail::key_hash(key), [&](std::uint32_t i) { return i < buffer_size() && buffered_key(i) == key; });
+		const std::uint32_t* v = key_slots_.find(::wordwise::hash(key.data(), key.size()), [&](std::uint32_t i) { return i < buffer_size() && buffered_key(i) == key; });
 		return v ? std::optional<std::uint32_t>(*v) : std::nullopt;
 	}
 	void set_buffered_docid(std::uint64_t docid, std::uint32_t index) {
@@ -1706,17 +1691,9 @@ private:
 		m_.last_docid = docid;
 	}
 
-	// The key term of a document: its one term with the index's key prefix.
+	// The key term of a document: its one term with the index's key prefix, a view into it.
 	validate_context context() const { return {m_.key_prefix}; }
-	std::optional<std::string> key_of(const document& d, bool& valid) const { return keys_plugin::key_of(context(), d, valid); }
-
-	// The document's key term itself (key_of found exactly one).
-	std::string_view key_term(const document& d) const {
-		for (const auto& t : d.terms) {
-			if (t.term.starts_with(m_.key_prefix)) { return t.term; }
-		}
-		return {};
-	}
+	std::optional<std::string_view> key_of(const document& d, bool& valid) const { return keys_plugin::key_of(context(), d, valid); }
 
 	// Validation that can reject runs here, before anything changes (design D10).
 	bool valid(const document& d) const { return d.valid(context()); }
@@ -1757,14 +1734,14 @@ private:
 			}
 			const bool writes = o.type == operation::add || o.type == operation::replace_key || o.type == operation::replace_docid;
 			bool key_valid = true;
-			std::optional<std::string> doc_key;
+			std::optional<std::string_view> doc_key;  // into the operation, which outlives stage 2
 			if (writes) {
 				if (!valid(o.doc)) { return reject(verdict::invalid); }
 				doc_key = key_of(o.doc, key_valid);
 				if (!key_valid) { return reject(verdict::invalid); }
 			}
 			// The key the operation addresses and its live copy.
-			std::optional<std::string> key;
+			std::optional<std::string_view> key;
 			if (o.type == operation::replace_key || o.type == operation::delete_key) {
 				if (m_.key_prefix.empty() || !o.key.starts_with(m_.key_prefix)) { return reject(verdict::invalid); }
 				key = o.key;
@@ -1821,9 +1798,9 @@ private:
 			bump_last_docid(docid);
 			set_buffered_docid(docid, std::uint32_t(buffer_size()));
 			if (inverting()) {
-				pending_docs_.push_back({docid, version, key ? key_term(o.doc) : std::string_view(), &o.doc});
+				pending_docs_.push_back({docid, version, key.value_or(std::string_view()), &o.doc});
 			} else {
-				buffer_.push_back({docid, version, key.value_or(std::string()), o.doc});
+				buffer_.push_back({docid, version, std::string(key.value_or(std::string_view())), o.doc});
 				if (document& d = buffer_.back().doc; d.split_text) {  // the writer takes explicit tokens
 					d.split_text = false;
 					d.length = 0;

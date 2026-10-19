@@ -25,10 +25,14 @@
     the positions assert). `inverted_plugin::valid_words` is private; `inverted_builder::
     add_text` is private, reached only by `segment_writer` (itself through `writer_access`).
     ctest 35 of 35 (Release); `tuple_buffer_test`, `segment_test`, `index_test`, and
-    `multisegment_test` pass with asserts on (-O1); bytes identical to main's at 20k, 100k.
+    `multisegment_test` pass with asserts on (-O1); bytes identical to main's at 20k, 100k
+    (`4b15eeb`).
+  - R29 and R32.1, duplication: `keys_plugin::key_of` returns a view into the part
+    (`std::optional<std::string_view>`; the operation outlives stage 2), and the core's
+    `key_term` is deleted, so format 12's key rule lives in `key_of` alone. The version map
+    hashes keys with the hashes library's `wordwise::hash`; `index_detail::key_hash` is
+    deleted. ctest 35 of 35; bytes identical to main's at 20k and 100k.
 - Next:
-  1. Duplication: `key_term` through `keys_plugin::key_of` (R29); `key_hash` through
-     `wordwise::hash` (R32.1).
-  2. C11: the tuple buffer's floor, measured before and after.
-  3. Text: L10 and D16 with the code (R30, R31).
+  1. C11: the tuple buffer's floor, measured before and after.
+  2. Text: L10 and D16 with the code (R30, R31).
 - Blocked on: nothing.

@@ -565,12 +565,12 @@ struct keys_plugin {
 	static constexpr std::string_view id = "keys";
 
 	// Format 12: a document's key is its one term with the index's key prefix (none
-	// without a prefix); `valid` turns false when it has two.
-	static std::optional<std::string> key_of(const validate_context& vc, const inverted_plugin::part& d, bool& valid) {
+	// without a prefix), a view into the part; `valid` turns false when it has two.
+	static std::optional<std::string_view> key_of(const validate_context& vc, const inverted_plugin::part& d, bool& valid) {
 		valid = true;
 		const std::string_view prefix = vc.key_prefix;
 		if (prefix.empty()) { return std::nullopt; }
-		std::optional<std::string> key;
+		std::optional<std::string_view> key;
 		for (const auto& t : d.terms) {
 			if (t.term.starts_with(prefix)) {
 				if (key) { valid = false; }
