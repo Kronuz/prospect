@@ -36,6 +36,12 @@
     `flush_from` into `inverted_builder::finish`). Closes at 7c's builder commits.
   - R24.5: the multi-thread text path (`writer_access::add_text`) stays for the lead's
     later change; the two word hashes are left for the rebase's code review.
+  - Verified at `888d03c`: ctest 35 of 35 (macOS, Apple clang, Release); segments,
+    manifests and meta byte-identical to `ref-base-20k` and `ref-base-100k` (one segment
+    each, so equal flush points); CI run 39189683111 green on linux-x86_64-clang,
+    linux-x86_64-gcc, linux-arm64-gcc, macos-arm64, freebsd-x86_64 when recorded.
+- Next: the code reviewer's review of the rebase; the L5 amendment (R24.4) before 7c.
+  Blocked on: nothing.
 - Done criteria (set by the lead; contributors tick, never edit): none set yet.
 - Done:
   - CR1 (`0da5a05`): `sort_run` keeps tied runs on an explicit stack instead of recursing
