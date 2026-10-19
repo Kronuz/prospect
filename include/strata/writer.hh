@@ -279,6 +279,7 @@ public:
 		section_stream& positions = deferred->stream();
 		termdict::builder dict(alphabet);
 		format::term_run run;
+		seed_shortest_ = min_length();
 		term_postings tp;
 		std::string encoded_postings, term_positions;
 		std::vector<format::impact> all;  // a long list's (wdf, length) pairs
@@ -760,7 +761,7 @@ private:
 			for (std::size_t i = 0; i < df; ++i) { seed_order_[i] = std::uint32_t(i); }
 			std::stable_sort(seed_order_.begin(), seed_order_.end(), [&](std::uint32_t a, std::uint32_t b) { return wdfs[a] > wdfs[b]; });
 		}
-		const std::uint32_t shortest = min_length();
+		const std::uint32_t shortest = seed_shortest_;
 		const std::uint8_t shortest_code = format::encode_length(shortest);
 		double best_lucene[3] = {-1, -1, -1}, best_xapian[3] = {-1, -1, -1};
 		const std::size_t ks = std::size_t(std::count_if(std::begin(format::seed_ks), std::end(format::seed_ks), [&](std::uint32_t k) { return k <= df; }));
@@ -813,6 +814,7 @@ private:
 	}
 
 	std::vector<std::uint32_t> seed_order_, seed_counts_, seed_heap_[3];  // seeds_of's scratch
+	std::uint32_t seed_shortest_ = 0;  // the segment's shortest length, set once by finish
 	std::vector<format::impact> pairs_;  // write_postings: one block's pairs
 	detail::stable_bytes arena_{std::size_t(1) << 20};
 	std::vector<slot> table_;
