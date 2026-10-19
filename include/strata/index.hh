@@ -325,7 +325,7 @@ struct index_options {
 	std::optional<std::uint64_t> identity_seed;
 	// A directory on a filesystem not known local (a network or FUSE mount), or one whose
 	// lock is unsupported: `warn` opens it and reports it (basic_index::filesystem_warning);
-	// `refuse` refuses with errc::not_supported, but never a FUSE mount (F20, the owner's ruling).
+	// `refuse` refuses with errc::not_supported, except a FUSE mount's type (F20).
 	enum class nonlocal_policy { warn, refuse };
 	nonlocal_policy nonlocal = nonlocal_policy::warn;
 };
@@ -2300,14 +2300,14 @@ private:
 		std::optional<kronuz::journal::FilesystemClass> fs;
 		if (auto* posix = dynamic_cast<kronuz::journal::PosixIO*>(io_)) { fs = posix->directory_filesystem(); }
 		const bool fuse = fs && (fs->name.starts_with("fuse") || fs->name.starts_with("macfuse") || fs->name.starts_with("osxfuse"));
-		const bool strict = opts.nonlocal == options::nonlocal_policy::refuse && !fuse;
-		if (fs && !fs->local && strict) {
+		const bool refuse = opts.nonlocal == options::nonlocal_policy::refuse;
+		if (fs && !fs->local && refuse && !fuse) {
 			throw std::system_error(std::make_error_code(std::errc::not_supported), "strata: " + fs->name + " is not a known-local filesystem");
 		}
 		try {
 			lock_ = io_->acquire_directory_owner();
 		} catch (const std::system_error& e) {
-			if (e.code() != std::errc::not_supported || strict) { throw; }
+			if (e.code() != std::errc::not_supported || refuse) { throw; }  // unlocked: refuse's to stop
 			fs_warning_ = strata::filesystem_warning{fs ? fs->name : std::string(), fs && fs->local, false};
 			return;
 		}

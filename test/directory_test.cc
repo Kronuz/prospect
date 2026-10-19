@@ -311,9 +311,10 @@ int main(int argc, char** argv) {
 	}
 #ifdef KRONUZ_COMPLETION_STATFS
 	// T7: a filesystem not known local. warn opens and creates, locked, and reports it; refuse
-	// refuses with not_supported naming the type and writes nothing, except FUSE, never refused
-	// (the lead's call), still reported. With the lock unsupported as well, warn and FUSE
-	// proceed unlocked. A failed statfs refuses with its own error.
+	// refuses with not_supported naming the type and writes nothing, except FUSE's type, never
+	// refused (the lead's call), still reported. With the lock unsupported as well, warn
+	// proceeds unlocked and refuse refuses, FUSE included. A failed statfs refuses with its own
+	// error.
 	{
 #if defined(__linux__)
 		static const fake_fs cases[] = {{"nfs", false, 0x6969}, {"smb2", false, 0xFE534D42}, {"cifs", false, 0xFF534D42}, {"fuse", true, 0x65735546},
@@ -341,7 +342,7 @@ int main(int argc, char** argv) {
 					io_for(io);
 					std::string what;
 					const int e = error_of([&] { CHECK(warned(index::create(io, policy(refuse), uuid_a))); }, &what);
-					if (c.fuse) {
+					if (c.fuse && !unsupported) {
 						CHECK(e == 0);  // the index is created; warn's create is the others' case
 					} else {
 						CHECK(e == int(std::errc::not_supported) && what.find(c.expect) != std::string::npos);
@@ -354,7 +355,7 @@ int main(int argc, char** argv) {
 				io_for(io);
 				std::string what;
 				const int e = error_of([&] { CHECK(warned(index::open(io, policy(refuse)))); }, &what);
-				CHECK(c.fuse ? e == 0 : e == int(std::errc::not_supported) && what.find(c.expect) != std::string::npos);
+				CHECK(c.fuse && !unsupported ? e == 0 : e == int(std::errc::not_supported) && what.find(c.expect) != std::string::npos);
 				CHECK(listing(dir) == made);
 				CHECK(error_of([&] { CHECK(warned(index::open(io, policy(warn)))); }) == 0);
 				CHECK(listing(dir) == made);
