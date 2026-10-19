@@ -85,8 +85,51 @@ Reading: time within 1.03 by the median at both sizes, with wide intervals at 1M
 shared host. Peak RSS at 1M is higher in format 13 in five of six pairs (A 642 to 830 MiB, B 699
 to 821 MiB); not explained here. Candidates are the flush's `keys_builder`, which holds each key
 as a `std::string` with its ordinal (about 40 bytes a key) where format 12 held an 8-byte hash,
-and the merge's key map; both are charged to the budget, so this is peak RSS, not a budget
-overrun. It is T10's to measure on the gate VM.
+and the merge's key map. It is T10's to measure on the gate VM.
+
+Correction (FM4, docs/reviews/format-13-merge.md): this note said both were charged to the
+budget. At `4df9451` they were not, in full: the merge's key map and `keys_builder`'s adds were
+charged, but `finish()`'s second copy of the entries, its hashes, and the fuse filter's build
+were not, about 80 MiB of the 1M-key peak in the reviewer's heap probe. The next section's
+commit charges them.
+
+## FM4: each key held once, the keys path charged
+
+`7298fd3` (on the merge with main, `e3222eb`): `keys_builder` holds 16-byte views into the
+flush's buffer or the merge's key map instead of `std::string` pairs, `keys::encode` sorts them
+in place instead of copying them, and the hashes, the fuse filter's build (a stated bound), and
+the encoded sections are charged while held. Segments are byte-identical to `e3222eb`'s at 20,000
+documents in six configurations (`STRATA_IDENTITY_SEED`; one and two threads, deletes, a 32 MiB
+share).
+
+The reviewer's heap probe, rebuilt as `format13/.scratch/fm4/keys_peak_probe.cc` (A: `e3222eb`'s
+headers; B: `-DFM4_AFTER` on `7298fd3`'s), the keys path of a merge over n keys after its key map
+(58.3 MiB of heap at 1M, charged 68.7), in MiB over that base:
+
+| n | Builder after adds, A heap / charged | B heap / charged | Peak through `finish`, A heap / charged | B heap / charged |
+|---:|---|---|---|---|
+| 100,000 | 5.0 / 5.8 | 3.0 / 3.0 | 13.9 / 6.7 | 9.6 / 10.7 |
+| 1,000,000 | 40.0 / 47.6 | 24.0 / 24.0 | 132.2 / 56.0 | 85.8 / 93.6 |
+
+"Charged" is the budget's peak draw. B's peak is 46.4 MiB lower at 1M, and its charge now
+covers the heap it holds; A left 76 MiB of its peak uncharged.
+
+Indexing at 1M, the developer's A/B (`index_ab.sh`, `/usr/bin/time -l`) with A = `e3222eb` and
+B = `7298fd3`, both Release, one thread, default budget and auto merges (6 segments on both
+sides); 12 pairs, sides alternating, under light holds on this host (another agent's light hold,
+`qexp-e2-m1`, ran through the first six); the median of paired B/A ratios, 95% bootstrap over
+pairs:
+
+| Measure | A median (range) | B median (range) | B/A |
+|---|---|---|---|
+| Peak RSS, MiB | 858.6 (716.0 to 924.3) | 841.1 (741.0 to 913.4) | 0.992 [0.893, 1.056] |
+| Wall, s | 30.9 (27.0 to 37.8) | 30.1 (28.4 to 35.9) | 0.977 [0.909, 1.048] |
+
+Reading: no change in peak RSS is measurable here. Each side's runs spread over about 200 MiB,
+and the keys path's saving at this size is at most the probe's 46 MiB for one merge of 1M keys;
+this run's largest merges hold fewer. Process peak RSS on macOS also counts the mapped segment
+pages a merge reads. The heap probe is the evidence for FM4; peak RSS stays T10's on the gate VM.
+Raw files: `format13/.scratch/fm4/` (`ab1m/`, `ab1m-2/`, `ab1m.summary`, `keys_peak_probe.out`).
 
 ## Not run
 
