@@ -1215,6 +1215,33 @@ int main() {
 		CHECK(d.part_bytes() == bytes + 1000 && d.disk_estimate() >= disk + 1000);
 	}
 
+	// CR8's fourth item: a segment without keys or stored collects nothing for them, about
+	// 16 bytes a document less held, and still refuses a version without a key.
+	{
+		auto held = [](std::uint64_t structures) {
+			strata::flush_charge charge(nullptr);
+			strata::segment_writer w;
+			w.structures = structures;
+			w.memory = &charge;
+			for (std::uint32_t d = 0; d < 20000; ++d) {
+				std::vector<strata::posting_input> in{{"w", 1, {}}};
+				w.add(d + 1, in, 1);
+			}
+			return charge.held();
+		};
+		const std::uint64_t all = held(bit::inverted | bit::norms | bit::keys | bit::stored), bare = held(bit::inverted | bit::norms);
+		CHECK(all >= bare + 16 * 20000);
+		strata::segment_writer w;
+		w.structures = bit::inverted | bit::norms;
+		std::vector<strata::posting_input> in{{"w", 1, {}}};
+		bool refused = false;
+		try {
+			w.add(1, in, 1, {}, 5);
+		} catch (const std::invalid_argument&) {
+			refused = true;
+		}
+		CHECK(refused);
+	}
 	std::printf("format13: %s\n", failures ? "FAILED" : "ok");
 	return failures ? 1 : 0;
 }

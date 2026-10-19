@@ -909,8 +909,14 @@ private:
 		if (stored.size() > format::max_stored_record) { throw std::invalid_argument("strata: stored record too large"); }
 		if (!stored.empty() && !(structures & format::bit::stored)) { throw std::invalid_argument("strata: a stored record in a segment without stored"); }
 		if (!key.empty() && !(structures & format::bit::keys)) { throw std::invalid_argument("strata: a key in a segment without keys"); }
-		keys_.add({docid, version, key});
-		stored_.add(stored);
+		// Only configured builders collect: a keyless or record-less segment holds no versions
+		// or record ends it never writes (CR8). A version belongs to a key (F9).
+		if (structures & format::bit::keys) {
+			keys_.add({docid, version, key});
+		} else if (version != 0) {
+			throw std::invalid_argument("strata: a version without a key");
+		}
+		if (structures & format::bit::stored) { stored_.add(stored); }
 		const ordinal_t ord = inverted_.begin(length);
 		docids_.push_back(docid);
 		detail::charge_to(memory, docids_.capacity() * sizeof(std::uint64_t), charged_);
