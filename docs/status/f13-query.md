@@ -17,7 +17,7 @@
 
 ## State
 
-All five items committed, origin/main d058cd9 (dir-lock) merged; the Mac A/Bs next.
+All five items built and pushed, origin/main d058cd9 merged; the Mac measurements done (`docs/perf/format13-query-items.md`). M16, M23, M20, and M3t pass on this host with no loss; M22 closes the postings row by projection but fails D14's guard (intersections, phrases, negations, counted unions 1.09 to 1.42 against main), which blocks on a decision that is not mine (below).
 
 ## Done
 
@@ -126,14 +126,55 @@ All five items committed, origin/main d058cd9 (dir-lock) merged; the Mac A/Bs ne
   - Revert checks: dropping the tail fails postings_test:692; stopping at 1.5x the threshold
     fails :692 and :699; stopping at < instead of <= changes no result (it visits more).
 
+- M20's writer fix, dd55eb6: seeds_of read min_length() per term, a scan of every length; a 1M
+  docid merge took 115 s against 71 to 79 s. finish() takes it once.
+- M22's decoder, 492b549 (after the per-item A/Bs put every loss on M22): a load reads the first
+  ordinal from the first high bit and low part; the first advance into a block probes, a second
+  decodes the block and searches it; the decode places a byte of high bits at a time from a
+  table; probe_ready goes (the successor answers only inside the span, the decode checks the
+  rest). Base against this build took intersection `TOP_10` from 1.614 to 1.131 and the decode
+  alone took `COUNT` union 0.902 against the build before it. Test: postings_test refuses a first
+  high bit past the span (revert: :513 fails).
+- Measurements (`docs/perf/format13-query-items.md`, 2026-10-19, this Mac, light holds): bytes
+  per item at 100k and 1M (1M reordered postings: M16 −0.72 MB, M23 −0.08, M22 −19.75, M20 +0.49;
+  the kept set −10.5%); per-item run-level A/Bs; the kept set against main on 1M reordered and
+  merged, both presets; dump identical to main's and verify 0 mismatches on both 1M indexes;
+  indexing within a second at 100k. Phase times: 100k indexes for five binaries 55 s; 1M indexes
+  about 5 min per binary (index 35 to 38 s, docid merge 71 to 115 s, reordering merge 184 to
+  214 s); identity and verify 3 min; run-level sessions 99 to 122 s per phase at six runs, 31 to
+  40 s at four runs of three commands; the 5 fuzz runs 3 to 5 min each.
+
 ## Next
 
-1. The Mac A/Bs (run-level, A/A first) and the joint selection's record.
+1. The lead's gate VM confirmation: the 5M bytes, identity, verify, and the run-level sessions
+   (commands in `docs/perf/format13-query-items.md`, "Gate VM confirmation"); parity against the
+   Xapian oracle there.
+2. M22's ruling (below), then either A4@128 (if M22 stays and the 5M bytes confirm), a cheaper
+   Elias-Fano rule, or M22's removal with its bump.
 
 ## Blocked on
 
-Nothing.
+1. M22 (for the lead, the architect, and the owner): chosen per block by size, Elias-Fano is the
+   smallest codec for about a tenth of the postings' bytes at 1M, which closes the postings row
+   by projection (845.6 MB to about 757 MB at 5M, against keyed `-bp`'s 833.7), but every path
+   that decodes whole blocks then decodes Elias-Fano, and the kept set loses 1.09 to 1.42 on
+   intersections, phrases, negations, and counted unions against main even after 492b549. E6's
+   evidence was a probe per block on 50 terms, not the decode or the share by size. Options,
+   each a format decision: (a) keep it and spend effort on a faster decode (SIMD select, as
+   PISA's partitioned Elias-Fano does), measured before the freeze; (b) choose Elias-Fano only
+   when it saves a stated share of the FOR block's bytes (still a function of the block alone,
+   F13-R8 item 6), trading bytes for time on a measured curve; (c) drop M22 (its decoder and
+   code 2), which leaves the postings row about 10.5 MB over and A3@128 standing. Recommendation:
+   (b) measured at two or three thresholds on the gate VM, since it keeps the row's bytes where
+   blocks are sparse and FOR's speed where they are not; this branch builds nothing further for
+   M22 until the ruling.
+2. A4@128 against A3@128: paid for by projection only with M22 (the joint selection, F13-R8);
+   the lead's call after the 5M bytes.
 
 ## Last verified
 
-2026-10-19: ctest 36/36 at 026ee10 (macOS x86_64, Apple clang, RelWithDebInfo, quiet exit 0).
+2026-10-19 (macOS x86_64, Apple clang, RelWithDebInfo, quiet exit 0 or 2 with nice): ctest 39/39
+at 492b549 (38/38 at each item's commit before the merge, 39 with main's new test after it);
+fuzz_postings' corpus (779 inputs) replays in about a second; libFuzzer (Homebrew clang 23,
+ASan+UBSan) ran 3 to 5 minutes per item with no finding. CI: pushed at 492b549 and this commit;
+no run was waited on (the lead watches CI).
