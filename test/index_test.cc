@@ -103,6 +103,8 @@ public:
 	}
 	bool fired() const { return left_ == 0; }
 	std::unique_ptr<kronuz::journal::OwnerLock> acquire_owner(bool create) override { return inner_->acquire_owner(create); }
+	std::unique_ptr<kronuz::journal::OwnerLock> acquire_directory_owner() override { return inner_->acquire_directory_owner(); }
+	kronuz::journal::FilesystemClass directory_filesystem() const override { return inner_->directory_filesystem(); }
 	std::unique_ptr<kronuz::journal::File> open_existing(std::string_view name) override {
 		if (left_ && name == name_ && --left_ == 0) {
 			if (--times_ > 0) { left_ = 1; }  // the next open of it fails too
@@ -1721,9 +1723,9 @@ int main() {
 			CHECK(now.size() == 3 || now == before);
 			ix.reclaim();
 			ix.commit();
-			std::set<std::string> named{"owner.lock"};
+			std::set<std::string> named;
 			for (const auto& f : fs.list()) {
-				if (f.starts_with("manifest-") || f == "owner.lock") { named.insert(f); }
+				if (f.starts_with("manifest-")) { named.insert(f); }
 			}
 			std::size_t data = 0;
 			for (const auto& f : fs.list()) { data += !named.count(f); }

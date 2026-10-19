@@ -322,6 +322,21 @@ struct index_options {
 	// The seed of the segments' identities (F13-R41); none: a random one per open. Tests that
 	// compare two indexes' files give both the same seed.
 	std::optional<std::uint64_t> identity_seed;
+	// A directory on a filesystem not known local (a network or FUSE mount), or one whose
+	// lock is unsupported: `warn` opens it and reports it (basic_index::filesystem_warning);
+	// `refuse` refuses with errc::not_supported, except a FUSE mount's type (F20). The
+	// filesystem is IO::directory_filesystem's: an IO that does not classify is not local,
+	// so a wrapper must forward it for `refuse` to see the real filesystem.
+	enum class nonlocal_policy { warn, refuse };
+	nonlocal_policy nonlocal = nonlocal_policy::warn;
+};
+
+// Why an index's directory lock may not exclude every other writer: its filesystem is not
+// known local, so the lock excludes local writers only, or it could not be locked at all.
+struct filesystem_warning {
+	std::string filesystem;
+	bool local = false;
+	bool locked = false;  // false: two writers are not excluded
 };
 
 // An index of a layout's segments (layers.md L2); `index` is the search layout's.
@@ -336,25 +351,12 @@ public:
 
 	// Creates an empty index and commits its first manifest, in an empty directory or over
 	// what an interrupted create left (removed first); any other strata file is refused.
+	// The owner lock is the directory's own (D2, lock_directory): busy is EWOULDBLOCK, and
+	// a refusal writes nothing. The directory's entry in its parent is the host's
+	// to make durable; one parent sync can cover many creates (SI-R21).
 	static basic_index create(kronuz::journal::IO& io, const options& opts, const std::array<char, 16>& uuid) {
-		basic_index ix(io);
-		try {
-			ix.lock_ = io.acquire_owner(true);
-		} catch (const std::system_error& e) {
-			if (e.code().value() != EEXIST) { throw; }
-			ix.lock_ = io.acquire_owner(false);
-		}
-		ix.clear_uncreated();
-		ix.m_.uuid = uuid;
-		ix.m_.key_prefix = opts.key_prefix;
-		// Every structure the index's layout reads, keys only with a key prefix (F4, F20).
-		ix.m_.configured = segment::readable & ~(opts.key_prefix.empty() ? format::bit::keys : 0);
-		ix.opts_ = opts;
-		ix.seed_identities();
-		if (opts.budget) { ix.permit_ = opts.budget->open(); }
-		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
-		ix.start_merges();
-		ix.commit();
+		basic_index ix = create_deferred(io, opts, uuid);
+		ix.commit();  // generation 1 (D3-C)
 		return ix;
 	}
 
@@ -362,17 +364,7 @@ public:
 	// closed when a file it names is missing or differs, then deletes orphans.
 	static basic_index open(kronuz::journal::IO& io, const options& opts = {}, std::optional<std::uint64_t> to = std::nullopt) {
 		basic_index ix(io);
-		try {
-			ix.lock_ = io.acquire_owner(false);
-		} catch (const std::system_error& e) {
-			// No owner lock: a create lost before its first file survived, or not an index.
-			if (e.code().value() != ENOENT) { throw; }
-			std::vector<std::string> names;
-			auto cursor = io.scan_directory();
-			while (auto n = cursor->next()) { names.push_back(*n); }
-			if (uncreated(names)) { throw index_not_created("strata: no index was committed here"); }
-			throw corrupt_index("no owner lock");
-		}
+		ix.lock_directory(opts);
 		ix.opts_ = opts;
 		ix.seed_identities();
 		if (opts.budget) { ix.permit_ = opts.budget->open(); }
@@ -572,6 +564,11 @@ public:
 	// retention round, which then removed nothing; retention resumes once it reads or the
 	// pin is released. A host reports it: a damaged pinned checkpoint stops reclamation.
 	std::optional<std::uint64_t> retention_blocked() const noexcept { return retention_blocked_; }
+
+	// Set when the directory's lock may not exclude every other writer: under `warn`, a
+	// filesystem not known local, its classification failed, or its lock unsupported; under
+	// `refuse`, a FUSE mount (never refused by its type). A host reports it.
+	const std::optional<strata::filesystem_warning>& filesystem_warning() const noexcept { return fs_warning_; }
 
 	// Reads that failed or failed their checks once and passed when read again.
 	std::uint64_t media_retries() const noexcept { return media_retries_; }
@@ -2271,6 +2268,24 @@ private:
 
 	// --- recovery ---------------------------------------------------------------------------
 
+	// A create that writes nothing until its first commit (D3-C): the directory lock, an
+	// interrupted create's residue cleared, the state of an empty index in memory.
+	static basic_index create_deferred(kronuz::journal::IO& io, const options& opts, const std::array<char, 16>& uuid) {
+		basic_index ix(io);
+		ix.lock_directory(opts);
+		ix.clear_uncreated();
+		ix.m_.uuid = uuid;
+		ix.m_.key_prefix = opts.key_prefix;
+		// Every structure the index's layout reads, keys only with a key prefix (F4, F20).
+		ix.m_.configured = segment::readable & ~(opts.key_prefix.empty() ? format::bit::keys : 0);
+		ix.opts_ = opts;
+		ix.seed_identities();
+		if (opts.budget) { ix.permit_ = opts.budget->open(); }
+		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
+		ix.start_merges();
+		return ix;
+	}
+
 	// Whether names are only what an interrupted create leaves: the first metadata file and
 	// the first manifest's temporary.
 	static bool uncreated(const std::vector<std::string>& names) {
@@ -2280,8 +2295,35 @@ private:
 		}
 		return true;
 	}
+	// The owner lock is the directory's own (D2), writing nothing. Busy (EWOULDBLOCK) and
+	// other lock errors refuse as they are. A filesystem not known local (an IO that does not
+	// classify is not), or a lock it does not support, warns or refuses as options::nonlocal
+	// says. A failed classification warns as an unknown filesystem, or refuses under refuse.
+	void lock_directory(const options& opts) {
+		const bool refuse = opts.nonlocal == options::nonlocal_policy::refuse;
+		kronuz::journal::FilesystemClass fs;
+		try {
+			fs = io_->directory_filesystem();
+		} catch (const std::system_error& e) {
+			if (refuse) { throw std::system_error(e.code(), std::string("strata: the directory's filesystem is unknown: ") + e.what()); }
+			fs = {false, std::string("unknown (") + e.what() + ")"};
+		}
+		const bool fuse = fs.name.starts_with("fuse") || fs.name.starts_with("macfuse") || fs.name.starts_with("osxfuse");
+		if (!fs.local && refuse && !fuse) {
+			throw std::system_error(std::make_error_code(std::errc::not_supported), "strata: " + fs.name + " is not a known-local filesystem");
+		}
+		try {
+			lock_ = io_->acquire_directory_owner();
+		} catch (const std::system_error& e) {
+			if (e.code() != std::errc::not_supported || refuse) { throw; }  // unlocked: refuse's to stop
+			fs_warning_ = strata::filesystem_warning{fs.name, fs.local, false};
+			return;
+		}
+		if (!fs.local) { fs_warning_ = strata::filesystem_warning{fs.name, false, true}; }
+	}
+
 	// Removes an interrupted create's files, durably, under the owner lock; throws when the
-	// directory holds a committed index or a segment.
+	// directory holds a committed index or a segment. Syncs only when it removed something.
 	void clear_uncreated() {
 		std::vector<std::string> names;
 		{
@@ -2289,10 +2331,14 @@ private:
 			while (auto n = cursor->next()) { names.push_back(*n); }
 		}
 		if (!uncreated(names)) { throw std::system_error(std::make_error_code(std::errc::file_exists), "strata: the directory holds an index"); }
+		bool removed = false;
 		for (const auto& n : names) {
-			if (index_detail::parse_name(n)) { io_->remove(n); }
+			if (index_detail::parse_name(n)) {
+				io_->remove(n);
+				removed = true;
+			}
 		}
-		sync_dir();
+		if (removed) { sync_dir(); }
 	}
 
 	void recover(std::optional<std::uint64_t> to) {
@@ -2511,6 +2557,7 @@ private:
 	bool sync_owed_ = false;  // manifests removed since the last directory sync
 	std::uint64_t media_retries_ = 0;
 	std::optional<std::uint64_t> retention_blocked_;
+	std::optional<strata::filesystem_warning> fs_warning_;
 	std::uint64_t on_disk_ = 0, reserved_ = 0;
 	std::uint64_t unlinked_ = 0;  // removed, awaiting a directory sync to be freed
 	std::uint64_t truncated_ = 0;  // truncated in this reclaim step, awaiting the file's sync
