@@ -53,6 +53,9 @@ struct merge_input {
 	bool live(ordinal_t o) const { return !deleted || !(((*deleted)[o >> 6] >> (o & 63)) & 1); }
 };
 
+// A source's live documents' keys, by ordinal (format 12 collects them with `scan`).
+using key_map = std::unordered_map<ordinal_t, std::string>;
+
 // What the core hands every plugin's merge (L6): the output's documents in output order.
 struct merge_context {
 	std::uint32_t version = format::version;  // the format being written
@@ -60,7 +63,8 @@ struct merge_context {
 	std::uint32_t doc_count = 0;              // documents in the output
 	std::span<const merge_input> inputs;
 	std::span<const merge_ref> order;         // [new ordinal] = its source
-	std::span<const doc_fields> fields;       // [new ordinal] = docid, version, key
+	std::span<const std::uint64_t> docids;    // [new ordinal] = its docid
+	std::span<const key_map> keys;            // format 12: [input] each live document's key
 	bool docid_order = true;                  // false when the output is reordered (P1)
 	const task::cancel_token* cancel = nullptr;
 	flush_charge* memory = nullptr;           // the merge's working memory, when budgeted
@@ -153,11 +157,16 @@ inline built inverted_plugin::merge(const merge_context& m, std::span<const read
 	return {1, b.legacy_stats()};
 }
 
-// Rebuilt from the core's fields: each new ordinal's version and key.
-inline built keys_plugin::merge(const merge_context& m, std::span<const reader* const>, section_sink& sink) {
+// Rebuilt per new ordinal: its docid, its input's version, and its key.
+inline built keys_plugin::merge(const merge_context& m, std::span<const reader* const> in, section_sink& sink) {
 	keys_builder b;
 	b.memory = m.memory;
-	for (const auto& f : m.fields) { b.add(f); }
+	for (std::size_t i = 0; i < m.order.size(); ++i) {
+		const merge_ref& src = m.order[i];
+		doc_fields f{m.docids[i], in[src.source]->version(src.ord), {}};
+		if (auto k = m.keys[src.source].find(src.ord); k != m.keys[src.source].end()) { f.key = k->second; }
+		b.add(f);
+	}
 	b.finish(sink);
 	return {1, {}};
 }
@@ -256,7 +265,7 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 	merge_plan plan;
 	plan.ordinals.resize(sources.size());
 	// Each live document's key, if any, from the keys reader (L3).
-	std::vector<std::unordered_map<ordinal_t, std::string>> keys(sources.size());
+	std::vector<key_map> keys(sources.size());
 	if constexpr (keyed) {
 		if (!key_prefix.empty()) {
 			for (std::size_t s = 0; s < sources.size(); ++s) {
@@ -274,15 +283,14 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 	// Documents in docid order.
 	struct doc {
 		std::uint64_t docid;
-		std::size_t source;
-		ordinal_t ord;
+		merge_ref ref;
 	};
 	std::vector<doc> docs;
 	for (std::size_t s = 0; s < sources.size(); ++s) {
 		const segment_type& seg = *sources[s].seg;
 		plan.ordinals[s].assign(seg.core().doc_count(), no_more_docs);
 		for (ordinal_t o = 0; o < seg.core().doc_count(); ++o) {
-			if (sources[s].live(o)) { docs.push_back({seg.core().docid(o), s, o}); }
+			if (sources[s].live(o)) { docs.push_back({seg.core().docid(o), {std::uint32_t(s), o}}); }
 		}
 		charge(plan.ordinals[s].capacity() * sizeof(ordinal_t));
 	}
@@ -305,31 +313,24 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 				throw std::invalid_argument("strata: merge order must name every live document once");
 			}
 			plan.ordinals[r.source][r.ord] = 0;  // seen; numbered below
-			docs.push_back({sources[r.source].seg->core().docid(r.ord), r.source, r.ord});
+			docs.push_back({sources[r.source].seg->core().docid(r.ord), r});
 		}
 	}
 	// Ordinals are 32-bit and the largest value means no more documents.
 	if (docs.size() > std::size_t(no_more_docs) - 1) { throw std::length_error("strata: segment document limit"); }
 	const bool docid_order = order.empty() && !keep_source_order;
-	// The output in output order: its sources, docids, and per-document fields.
+	// The output in output order: its sources and docids (with `docs`, main's 32 bytes a document).
 	std::vector<merge_ref> refs;
 	std::vector<std::uint64_t> docids;
-	std::vector<doc_fields> fields;
-	refs.reserve(docs.size()), docids.reserve(docs.size()), fields.reserve(docs.size());
-	charge(refs.capacity() * sizeof(merge_ref) + docids.capacity() * sizeof(std::uint64_t) + fields.capacity() * sizeof(doc_fields));
+	refs.reserve(docs.size()), docids.reserve(docs.size());
+	charge(refs.capacity() * sizeof(merge_ref) + docids.capacity() * sizeof(std::uint64_t));
 	for (std::size_t i = 0; i < docs.size(); ++i) {
 		check();
 		const auto& d = docs[i];
 		if (d.docid == 0) { throw std::invalid_argument("strata: docids must increase within a segment"); }
-		plan.ordinals[d.source][d.ord] = ordinal_t(i);
-		refs.push_back({std::uint32_t(d.source), d.ord});
+		plan.ordinals[d.ref.source][d.ref.ord] = ordinal_t(i);
+		refs.push_back(d.ref);
 		docids.push_back(d.docid);
-		doc_fields f{d.docid, 0, {}};
-		if constexpr (keyed) {
-			f.version = sources[d.source].seg->template get<keys_plugin>().version(d.ord);
-			if (auto k = keys[d.source].find(d.ord); k != keys[d.source].end()) { f.key = k->second; }
-		}
-		fields.push_back(f);
 	}
 	plan.doc_count = docs.size();
 	std::vector<doc>().swap(docs);
@@ -342,7 +343,8 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 	m.doc_count = std::uint32_t(refs.size());
 	m.inputs = inputs;
 	m.order = refs;
-	m.fields = fields;
+	m.docids = docids;
+	m.keys = keys;
 	m.docid_order = docid_order;
 	m.cancel = cancel;
 	m.memory = memory;
