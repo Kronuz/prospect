@@ -17,13 +17,39 @@
 
 ## State
 
-Starting: baseline built and tested on 026ee10 (build 112 s, ctest 36/36 in 86 s).
+M16 committed; M23 next.
 
 ## Done
 
+- M16 (F10 at A3@128), the commit after cd98766: each group's level 0 becomes one record of
+  advance entries bit-packed at widths level 1 implies (lasts of all but the last block, offsets
+  of all but the first, each block's codec code at the term's width from the skip flags), then
+  the blocks' pairs, then the later blocks' positional deltas. The reader locates a block by a
+  search over the entries it reads (the found block ends at or after the target, its
+  predecessor before it), with no group decode; each block's entry is checked when decoded
+  (last above the previous and at most the group's, bytes inside the group's, a kept codec).
+  Skip flags: bit 0 wide, bits 1-2 the codec width, bit 3 reserved for F12's partitions (P1,
+  F13-R45's place) and refused, the rest refused. `format::pre_freeze` 0x80000002 (C17);
+  fixtures, pre_freeze.txt, the T8 hash, and format13_test's prefix CRC re-pinned; digest.txt
+  unchanged. Tests: postings_test (new: every read path of seven term shapes against a model,
+  both offset widths; damaged entries, flags, and every advance-entry bit flipped fence or
+  answer in order; a bitset block made consistent with a last past the document count),
+  segment_test's C13 case on the new layout. fuzz_postings (new: round trip, then flips inside
+  a term's postings, aborting on any ordinal out of order or range; corpus of 600 from 5 min,
+  17,204 runs, no finding) and fuzz_segment's walk now aborts on such an ordinal.
+  - Deviations from F10's text, for the architect: the pairs and positional deltas are found
+    after the advance entries (their start from the entries' derived size) instead of by
+    level-1 offsets of their own, so level 1 keeps format 12's size; the codec field is inside
+    A3 at a per-term width (0, 1, or 2 bits) instead of a separate per-block field.
+  - Revert checks (.scratch/revert/mutate.py, each mutant built and run): removing the entry's
+    check against its group's last fails postings_test:358 (the consistent bitset case);
+    removing the flags check fails postings_test:292. The other entry checks (last above the
+    previous, offsets ordered and inside the group, the codec width) are defense in depth: with
+    any one removed every damaged case still fences through the block decoders' own checks.
+
 ## Next
 
-1. M16 (F10's split at A3@128).
+1. M23: gap - 1 with the header-width check.
 
 ## Blocked on
 

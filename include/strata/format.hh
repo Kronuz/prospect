@@ -67,7 +67,7 @@ inline constexpr char footer_magic[4] = {'S', 'E', 'N', 'D'};
 // The version written, and the oldest one read (N - 1 from format 13 on: F2). Until format
 // 13 freezes, both are a pre-freeze number, bumped with each byte change and 13 at the
 // freeze, so an index from another pre-freeze build is refused, never misread (CR11).
-inline constexpr std::uint32_t pre_freeze = 0x8000'0001;
+inline constexpr std::uint32_t pre_freeze = 0x8000'0002;
 inline constexpr std::uint32_t version = pre_freeze;
 inline constexpr std::uint32_t min_read_version = pre_freeze;
 // Bytes 0-15, frozen in every version: magic, version, CRC-32C of bytes 0-11 (F2).
@@ -420,6 +420,57 @@ inline std::uint32_t decode_length(std::uint8_t q) noexcept {
 	if (q < 24) { return q; }
 	unsigned e = (q - 24) / 8 + 1, m = 8 + (q - 24) % 8;
 	return m << e;
+}
+
+// --- skip data (F10) --------------------------------------------------------------------------
+
+// A term with skip blocks (df >= 128) is laid out as
+//   [groups][skip flags u8][with positions: tail's first position, its block offset]
+//   [pairs bytes][records bytes][blocks bytes]  (LEB128)
+//   [level 1: per group last u32, pairs offset u32, record, blocks, and with positions first
+//    position, position and count block offsets, each u32 or u64 under skip::wide]
+//   [pairs: each group's frontier][records][blocks][tail]
+// A group of up to 32 blocks has one record: its advance entries (A3), every block's pairs
+// in encode_sized_impacts' form, then with positions each later block's first position and
+// position and count block offsets as deltas from the block before it. The advance entries
+// bit-pack the lasts of all but the last block (minus the group's base, the previous
+// group's last or 0) at bit_width(last - base), the byte offsets of all but the first block
+// at bit_width(group bytes - 1), then each block's codec code at the term's codec width:
+// every width is derived from level 1 or the flags, so locating a block reads no header.
+namespace skip {
+inline constexpr std::uint8_t wide = 1;          // 64-bit level-1 offsets
+inline constexpr std::uint8_t codec_shift = 1;   // bits 1-2: codec code width, 0 to 2
+inline constexpr std::uint8_t partitioned = 8;   // reserved for F12's partitions (P1); refused
+inline constexpr std::uint8_t known = wide | 6;  // every other bit is damage
+inline constexpr std::size_t group_blocks = 32;
+}  // namespace skip
+
+// A block's ordinal codec (F10, F11).
+enum class block_codec : std::uint8_t { deltas = 0, bitset = 1 };
+inline constexpr std::uint8_t max_block_codec = 1;
+
+// The advance entries' size in bytes for a group of n blocks at the given widths.
+inline constexpr std::uint64_t advance_bytes(std::uint64_t n, unsigned wl, unsigned wo, unsigned wf) noexcept {
+	return ((n - 1) * (wl + wo) + n * wf + 7) / 8;
+}
+
+// Writes v's low w bits at bit `at` of out (bits little-endian within bytes).
+inline void put_bits(std::string& out, std::uint64_t at, unsigned w, std::uint64_t v) {
+	for (unsigned i = 0; i < w; ++i, ++at) {
+		if (v >> i & 1) { out[at >> 3] = char(std::uint8_t(out[at >> 3]) | (1u << (at & 7))); }
+	}
+}
+
+// Reads w <= 32 bits at bit `at` of the size bytes at p; the caller keeps at + w within them.
+inline std::uint32_t get_bits(const char* p, std::uint64_t size, std::uint64_t at, unsigned w) noexcept {
+	const std::uint64_t byte = at >> 3;
+	std::uint64_t v = 0;
+	if (size - byte >= 8) {
+		std::memcpy(&v, p + byte, 8);
+	} else {
+		std::memcpy(&v, p + byte, std::size_t(size - byte));
+	}
+	return std::uint32_t((v >> (at & 7)) & ((std::uint64_t(1) << w) - 1));
 }
 
 // --- term info (the termdict value) -----------------------------------------------------------
