@@ -17,12 +17,11 @@
 
 ## State
 
-The lead's ruling on M22 applied: no share threshold cleared every row, so M22 is out of the
-writer with code 2 reserved (03c79cc); the kept set is M16 at A3@128, M23, M20, and M3t, with
-M16's sequential entry reads made cheaper (a2b08d7); A3@128 stands. The kept set still loses one
-row class on the reordered index, counted unions of more than three terms (1.06 to 1.07), not yet
-attributed between M16 and M23 (Next 1). The F10 deviations are listed
-below for the architect's freeze-readiness review.
+The kept set (M16 at A3@128, M23, M20, M3t; M22 out with code 2 reserved) loses no row against
+main in four run-level sessions at 1M (reordered and merged, both presets), 21 to 38 winning rows
+each, after the last loss was attributed to M23's bitset boundary and fixed (6d2e642). The code-2
+reservation is load-bearing (063fafa). A3@128 stands. Waiting on the gate VM confirmation and the
+architect's review of the F10 list.
 
 ## Done
 
@@ -205,7 +204,11 @@ below for the architect's freeze-readiness review.
    stores encode_length of the exact length (rounded down) and means "every one of the k postings
    has a code at most this", read under bm25_xapian as the longest length with that code, where
    F13 says the code is rounded up.
-9. M22: block code 2 reserved and refused, no Elias-Fano writer or reader in format 13's default.
+9. M22: block code 2 reserved and refused (through the skip flags' codec width), no Elias-Fano
+   writer or reader in format 13's default.
+10. The bitset boundary (F11's per-block choice "by size alone"): a block is a bitset when that is
+   smaller than FOR over its plain gaps, not than the FOR block actually stored (gaps − 1), so
+   format 12's boundary holds; still a function of the block alone.
 
 - The kept set at a2b08d7 against main, four run-level sessions (`docs/perf/format13-query-items.md`):
   wins 31 to 35 per session (frequent terms 0.65 to 0.85, union `TOP_k` 0.87 to 0.94,
@@ -214,14 +217,36 @@ below for the architect's freeze-readiness review.
   `bm25`. Phase times 91 to 121 s; 20 min with the first, failed attempt (the dir lock refuses a
   symlinked index directory, so B's phase read nothing; rerun on the real directories).
 
+- The lead's follow-up (2026-10-19):
+  1. The last loss attributed: COUNT-only sessions of 12 runs, each item with a2b08d7's memo
+     (M16 and M23 rebuilt at 88f23ee and b9a30d4 with it in `.scratch/wt-m16memo`, `wt-m23memo`):
+     M16 1.034 [0.996–1.073], M23 1.063 [1.022–1.106], M20 and M3t 1.010 on `COUNT`
+     union:num_tokens_>3. M23's codec choice: gaps − 1 made dense blocks of gaps 1 and 2 FOR (17
+     bytes) instead of bitsets (18), which counting ORs in without decoding. 6d2e642 keeps format
+     12's boundary (bitset when smaller than FOR over the plain gaps; FOR still stores gaps − 1):
+     0.923 [0.879–0.970] against the build before, +17 KB at 1M reordered. `format::pre_freeze`
+     0x80000007; fixtures, the T8 hash, the prefix CRC re-pinned; digest.txt unchanged. Test:
+     postings_test's 90%-dense term keeps bitset blocks (the old rule fails it). The kept set
+     against main then loses no row in four sessions (21, 33, 38, 38 wins).
+  2. The code-2 reservation made load-bearing, 063fafa: postings_test rewrites by hand a term's
+     skip flags to a codec width of 2 and one FOR block's code to 2 (the other codes kept, room in
+     the entries' last byte so no other byte moves); the reader refuses it. Removing the width
+     check fails postings_test (the block decodes as FOR); the entry's code check was dead
+     (unreachable at width 1) and went.
+  3. The symlinked index directory: completion's PosixIO constructor (`posix.h:381` at 20a1498)
+     opens the index root with `O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW`; the final
+     component was a symlink, and macOS reports ENOTDIR (Linux would report ELOOP). Ancestor
+     symlinks are followed. It predates the directory lock (main at 026ee10 with completion
+     5251cf9 refuses the same way, `posix.h:330`); the lock is taken after the IO opens. Not
+     changed (the lead's ruling).
+  Phase times: two memo builds 144 s; three COUNT sessions 2 min; the boundary build and 1M
+  indexes 6 min; the boundary session and four kept-set sessions 16 min; ctest 39/39.
+
 ## Next
 
-1. The remaining loss, counted unions of more than three terms on the reordered index (6 to 7%):
-   a per-item `COUNT` rerun at more runs (M16 read 1.067, M23 1.082, both "neither" at four runs),
-   then a fix in the item it lands on; the guard is not met until it clears.
-2. The lead's gate VM confirmation: the 5M bytes, identity, verify, and the run-level sessions
+1. The lead's gate VM confirmation: the 5M bytes, identity, verify, and the run-level sessions
    (commands in `docs/perf/format13-query-items.md`), parity against the Xapian oracle there.
-3. The architect's freeze-readiness review of the F10 deviations above.
+2. The architect's freeze-readiness review of the F10 deviations above.
 
 ## Blocked on
 

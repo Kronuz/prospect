@@ -177,6 +177,45 @@ reordered postings (M16 −0.72, M23 −0.08, M20 +0.49), about −1.4 MB at 5M 
 row stays about 10.5 MB over keyed `-bp`'s `.doc`, A4@128's +4.4 MB is not paid for, and **A3@128
 stands** (step 4 of the ruling; no A4@128 build was needed).
 
+## The last loss, attributed and fixed (the lead's follow-up, 2026-10-19)
+
+`COUNT`-only sessions of 12 runs on the 1M reordered index (`bm25`), each item with a2b08d7's
+entry memo applied (M16 and M23 rebuilt at their commits with it): M16 against main, `COUNT`
+union:num_tokens_>3 1.034 [0.996–1.073]; M23 against M16, 1.063 [1.022–1.106] (A/A to 1.028); M20
+and M3t against M23, 1.010. The row lands on M23, and on its codec choice rather than its decode:
+gaps − 1 make a block of gaps 1 and 2 FOR at width 1 (17 bytes), smaller than its 18-byte bitset,
+so dense blocks left the bitsets that counting ORs in without decoding. 6d2e642 draws the bitset
+boundary where format 12 did (a bitset when it is smaller than FOR over the plain gaps; FOR blocks
+still store gaps − 1): `COUNT` union:num_tokens_>3 0.923 [0.879–0.970] against the build before
+(a win), for +16,942 bytes of the 1M reordered postings (190,481,064) and +9,903 merged
+(218,385,678).
+
+**The kept set at 6d2e642 against main** (`base`, six runs, every command; phases 93 to 126 s):
+
+| Session | Wins / losses | term:frequent `TOP_10` | union `TOP_10` | union `TOP_1000` | intersection `TOP_10` | `COUNT` union:num_tokens_>3 |
+|---|---|---|---|---|---|---|
+| Reordered `bm25` | 33 / 0 | 0.623 win | 0.875 win | 0.884 win | 0.948 | 0.937 win |
+| Reordered `bm25_xapian` | 38 / 0 | 0.632 win | 0.878 win | 0.901 win | 0.962 win | 0.964 win |
+| Merged `bm25` | 21 / 0 | 0.786 win | 0.947 | 0.915 | 0.998 | 0.989 |
+| Merged `bm25_xapian` | 38 / 0 | 0.727 win | 0.898 win | 0.914 win | 0.956 win | 0.968 win |
+
+No row loses in any session. The highest rows are phrases at 1.008 to 1.047, all "neither".
+
+## A symlinked index directory (for the lead's ruling)
+
+Benching an index through a symlink (`noef2-reordered -> noef-reordered`) aborted with
+`std::system_error: open journal directory: Not a directory`. The refusal is completion's
+`kronuz::journal::PosixIO` constructor (`include/completion/posix.h:381` at the pinned 20a1498):
+`::open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)` on the index root, refused
+because the path's **final component** is a symlink; macOS reports `ENOTDIR` for `O_DIRECTORY |
+O_NOFOLLOW` on a symlink (Linux reports `ELOOP`). Symlinks in ancestors are followed: the same
+index opened through `anc/link/m20-reordered`, with `anc/link -> ../100000`, works. It is not the
+directory lock: main's binary before the lock landed (026ee10, completion 5251cf9) refuses the
+same way, the call is at `posix.h:330` there, and the lock (`acquire_directory_owner`,
+`index.hh:2316`) runs only after the IO opened. The constructor's comment states the policy:
+"final-component symlinks and directories writable by other users are rejected here". Nothing
+was changed.
+
 ## Gate VM confirmation (the lead's)
 
 The 5M bytes and the run-level guard on the gate VM, as perf/query-exp ran its sessions (one
