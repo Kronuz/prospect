@@ -45,6 +45,7 @@
 #include "hashes.hh"
 #include "strata/budget.hh"
 #include "strata/docids.hh"
+#include "strata/reader.hh"
 #include "strata/format.hh"
 #include "strata/section_io.hh"
 #include "task.hh"
@@ -181,6 +182,30 @@ public:
 		}
 		for (term_buffer* t : touched_) { close_posting(*t, t->open_count, t->open_count); }
 	}
+	// Terms, each once with its wdf and positions, and the text's tokens in order, each
+	// adding one to its term's wdf; a term is in one of the two. Positions increase.
+	void add_text(ordinal_t ord, std::span<const posting_input> terms, std::string_view text, std::span<const text_token> tokens) {
+		for (const auto& in : terms) {
+			term_buffer& t = buffer_for(in.term);
+			if (t.df && t.last == ord) { throw std::invalid_argument("strata: term repeated within a document"); }
+			open_posting(t, ord);
+			for (auto p : in.positions) { add_position(t, p); }
+			close_posting(t, in.wdf, std::uint32_t(in.positions.size()));
+			t.open_prev = closed;
+		}
+		touched_.clear();
+		for (const auto& tk : tokens) {
+			term_buffer& t = buffer_for(text.substr(tk.offset, tk.size));
+			if (!t.df || t.last != ord) {
+				open_posting(t, ord);
+				touched_.push_back(&t);
+			} else if (t.open_prev == closed || tk.position <= t.open_prev) {
+				throw std::invalid_argument("strata: term repeated within a document");
+			}
+			add_position(t, tk.position);
+		}
+		for (term_buffer* t : touched_) { close_posting(*t, t->open_count, t->open_count); }
+	}
 
 	std::size_t doc_count() const noexcept { return lengths_.size(); }
 	std::uint64_t total_length() const noexcept { return total_length_; }
@@ -253,6 +278,7 @@ public:
 		format::term_run run;
 		term_postings tp;
 		std::string encoded_postings, term_positions;
+		std::vector<format::impact> all;  // a long list's (wdf, length) pairs
 		std::string last_key;
 		bool first_term = true;
 		std::uint64_t scratch = 0;  // the per-term buffers' charged capacity
@@ -277,10 +303,11 @@ public:
 			if (!t.any_positions) { info.flags |= format::no_positions; }
 			if (t.counts_are_wdf) { info.flags |= format::counts_are_wdf; }
 
-			std::vector<format::impact> all;
-			all.reserve(ords.size());
-			for (std::size_t i = 0; i < ords.size(); ++i) { all.push_back({wdfs[i], format::encode_length(lengths_[ords[i]])}); }
-			info.impacts = format::competitive(all);
+			if (df >= format::block) {  // the term info stores whole-list pairs only with skip blocks
+				all.clear();
+				for (std::size_t i = 0; i < ords.size(); ++i) { all.push_back({wdfs[i], format::encode_length(lengths_[ords[i]])}); }
+				info.impacts = format::competitive(all);
+			}
 
 			positions_layout layout;
 			if (t.any_positions) {
@@ -332,6 +359,7 @@ private:
 		std::uint64_t cf = 0;
 		bool all_zero_wdf = true, any_positions = false, counts_are_wdf = true;
 	};
+	static constexpr std::uint32_t closed = ~std::uint32_t(0);  // open_prev once a terms entry closed it
 
 	// A term's posting in document ord: opened, given its positions in order, then closed
 	// with its wdf and position count.
@@ -463,6 +491,14 @@ private:
 	void write_postings(std::string& out, const std::vector<std::uint32_t>& ords, const std::vector<std::uint32_t>& wdfs, bool with_wdf,
 		const std::vector<std::uint32_t>& counts, const positions_layout* layout, bool with_counts) {
 		const std::size_t full = ords.size() / format::block * format::block;
+		if (full == 0) {  // a tail alone: deltas from ordinal + 1, then wdfs
+			std::uint32_t prev = std::numeric_limits<std::uint32_t>::max();
+			for (auto o : ords) { format::put_leb(out, o - prev), prev = o; }
+			if (with_wdf) {
+				for (auto w : wdfs) { format::put_leb(out, w); }
+			}
+			return;
+		}
 		std::string blocks;
 		std::vector<block_meta> meta;
 		std::uint32_t deltas[format::block];
@@ -489,9 +525,9 @@ private:
 				blocks.append(reinterpret_cast<char*>(buf), for_bytes);
 			}
 			if (with_wdf) { blocks.append(reinterpret_cast<char*>(buf), bitpack::encode_pfor(wdfs.data() + b, buf)); }
-			std::vector<format::impact> pairs;
-			for (std::size_t i = b; i < b + format::block; ++i) { pairs.push_back({wdfs[i], format::encode_length(lengths_[ords[i]])}); }
-			meta.push_back({ords[b + format::block - 1], blocks.size() - start, position, format::competitive(std::move(pairs))});
+			pairs_.clear();
+			for (std::size_t i = b; i < b + format::block; ++i) { pairs_.push_back({wdfs[i], format::encode_length(lengths_[ords[i]])}); }
+			meta.push_back({ords[b + format::block - 1], blocks.size() - start, position, format::competitive(pairs_)});
 			meta.back().bitset = bitset;
 			if (layout) {
 				meta.back().pos_offset = layout->offset_of(position);
@@ -644,6 +680,7 @@ private:
 		return out;
 	}
 
+	std::vector<format::impact> pairs_;  // write_postings: one block's pairs
 	std::deque<std::string> arena_;
 	std::vector<slot> table_;
 	std::deque<term_buffer> buffers_;
@@ -763,6 +800,10 @@ private:
 	std::uint64_t charged_ = 0;
 };
 
+namespace detail {
+struct writer_access;
+}
+
 // The in-memory segment: per-document fields and docids in the core, terms, keys, and
 // stored records in the plugins' builders; one sequential pass writes the file.
 class segment_writer {
@@ -821,6 +862,19 @@ public:
 	}
 
 private:
+	friend struct detail::writer_access;
+	// The inverter's entry points (detail::writer_access).
+	ordinal_t add_text(std::uint64_t docid, std::span<const posting_input> terms, std::string_view text, std::span<const text_token> tokens, std::uint32_t length,
+		std::string_view stored, std::uint64_t version, std::string_view key) {
+		const ordinal_t ord = begin_document(docid, length, stored, version, key);
+		inverted_.add_text(ord, terms, text, tokens);
+		return ord;
+	}
+	template <class Next>
+	void flush_from(const std::array<std::uint8_t, 16>& segment_id, output& out, spill& positions_spill, std::string_view alphabet, Next&& next) {
+		write(segment_id, out, [&](section_sink& s) { inverted_.finish(s, positions_spill, alphabet, next); });
+	}
+
 	// Builders read the writer's settings as they are when each call starts.
 	void sync() noexcept {
 		inverted_.memory = keys_.memory = stored_.memory = memory;
@@ -863,5 +917,23 @@ private:
 	std::vector<std::uint64_t> docids_;
 	std::uint64_t charged_ = 0;  // the docids column's charged capacity
 };
+
+namespace detail {
+// The inverter's ways into a segment_writer: a document as terms and text tokens (the
+// multi-thread flush), per-document data alone, and terms from the tuple buffer.
+struct writer_access {
+	static ordinal_t add_text(segment_writer& w, std::uint64_t docid, std::span<const posting_input> terms, std::string_view text,
+		std::span<const text_token> tokens, std::uint32_t length, std::string_view stored = {}, std::uint64_t version = 0, std::string_view key = {}) {
+		return w.add_text(docid, terms, text, tokens, length, stored, version, key);
+	}
+	static ordinal_t add_document(segment_writer& w, std::uint64_t docid, std::uint32_t length, std::string_view stored, std::uint64_t version, std::string_view key) {
+		return w.begin_document(docid, length, stored, version, key);
+	}
+	template <class Next>
+	static void flush_from(segment_writer& w, const std::array<std::uint8_t, 16>& segment_id, output& out, spill& positions, std::string_view alphabet, Next&& next) {
+		w.flush_from(segment_id, out, positions, alphabet, std::forward<Next>(next));
+	}
+};
+}  // namespace detail
 
 }  // namespace strata

@@ -990,6 +990,46 @@ int main() {
 		}
 		CHECK(grouped.flush({}) == streamed.flush({}));
 	}
+	// A document as terms and text tokens gives the same segment as its terms grouped: same
+	// bytes; a token repeating a terms entry, or a position, throws.
+	{
+		std::mt19937_64 r(37);
+		const char* words[] = {"a", "b", "c", "d", "e", "rare", "the", "of"};
+		strata::segment_writer grouped, mixed;
+		for (std::uint32_t d = 0; d < 3000; ++d) {
+			std::string text;
+			std::vector<strata::text_token> tokens;
+			std::map<std::string, std::vector<std::uint32_t>> by_term;
+			std::uint32_t pos = 0;
+			const std::uint32_t n = 1 + std::uint32_t(r() % 40);
+			for (std::uint32_t i = 0; i < n; ++i) {
+				const std::string w = words[r() % std::size(words)];
+				pos += 1 + std::uint32_t(r() % 2);
+				text += ' ';
+				tokens.push_back({std::uint32_t(text.size()), std::uint32_t(w.size()), pos});
+				text += w;
+				by_term[w].push_back(pos);
+			}
+			const std::string key = "Q" + std::to_string(d), tag = "T" + std::to_string(d % 5);
+			by_term[key];
+			by_term[tag] = {1000};
+			std::vector<strata::posting_input> in, terms = {{key, 0, {}}, {tag, 1, by_term[tag]}};
+			for (const auto& [term, positions] : by_term) {
+				in.push_back({term, term == key ? 0u : std::uint32_t(positions.size()), positions});
+			}
+			const std::string stored(d % 7, 's');
+			grouped.add(d + 1, in, n, stored, d + 1, key);
+			strata::detail::writer_access::add_text(mixed, d + 1, terms, text, tokens, n, stored, d + 1, key);
+		}
+		CHECK(grouped.flush({}) == mixed.flush({}));
+		strata::segment_writer w;
+		const std::string text = " a b a";
+		const std::vector<strata::text_token> repeat_entry = {{1, 1, 1}};
+		const std::vector<strata::posting_input> a = {{"a", 1, {}}};
+		CHECK(throws_invalid([&] { strata::detail::writer_access::add_text(w, 1, a, text, repeat_entry, 1); }));
+		const std::vector<strata::text_token> repeat_position = {{1, 1, 2}, {5, 1, 2}};
+		CHECK(throws_invalid([&] { strata::detail::writer_access::add_text(w, 2, {}, text, repeat_position, 2); }));
+	}
 	// Term infos in restart runs: random terms (singles, positionless, gaps, skip blocks)
 	// decode the same read in order or from their run's start, as find_run reads them.
 	{

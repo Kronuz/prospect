@@ -72,6 +72,70 @@ struct term_entry {
 	std::uint32_t wdf = 1;
 	std::vector<std::uint32_t> positions;
 };
+// A token of a document's text: the term at [offset, offset + size) of the text, at a position.
+struct text_token {
+	std::uint32_t offset = 0, size = 0, position = 0;
+};
+
+namespace text_detail {
+// The high bit of each byte of w that is a space, exactly.
+inline std::uint64_t spaces(std::uint64_t w) noexcept {
+	constexpr std::uint64_t ones = 0x0101010101010101ull, low7 = 0x7F7F7F7F7F7F7F7Full;
+	const std::uint64_t x = w ^ (ones * ' ');
+	return ~(((x & low7) + low7) | x | low7);
+}
+
+// Calls f(offset, size) for each word of text, a maximal run of bytes other than ' ', in
+// order, 8 bytes at a time.
+template <class F>
+inline void split_words(std::string_view text, F&& f) {
+	std::size_t start = 0;  // where the current word starts
+	auto end = [&](std::size_t j) {
+		if (j > start) { f(start, j - start); }
+		start = j + 1;
+	};
+	std::size_t at = 0;
+	if constexpr (std::endian::native == std::endian::little) {
+		for (; at + 8 <= text.size(); at += 8) {
+			std::uint64_t w;
+			std::memcpy(&w, text.data() + at, 8);
+			for (std::uint64_t m = spaces(w); m; m &= m - 1) { end(at + std::size_t(std::countr_zero(m)) / 8); }
+		}
+	}
+	for (; at < text.size(); ++at) {
+		if (text[at] == ' ') { end(at); }
+	}
+	end(text.size());
+}
+
+// The number of words in text and their bytes, without splitting it.
+struct word_counts {
+	std::uint64_t words = 0, bytes = 0;
+};
+inline word_counts count_words(std::string_view text) noexcept {
+	word_counts c;
+	bool in_word = false;  // the byte before
+	std::size_t at = 0;
+	if constexpr (std::endian::native == std::endian::little) {
+		for (; at + 8 <= text.size(); at += 8) {
+			std::uint64_t w;
+			std::memcpy(&w, text.data() + at, 8);
+			const std::uint64_t letters = ~spaces(w) & 0x8080808080808080ull;
+			const std::uint64_t before = letters << 8 | (in_word ? 0x80u : 0u);  // each byte's previous byte, in words
+			c.words += std::uint64_t(std::popcount(letters & ~before));
+			c.bytes += std::uint64_t(std::popcount(letters));
+			in_word = letters >> 63;
+		}
+	}
+	for (; at < text.size(); ++at) {
+		const bool letter = text[at] != ' ';
+		c.words += letter && !in_word;
+		c.bytes += letter;
+		in_word = letter;
+	}
+	return c;
+}
+}  // namespace text_detail
 
 template <class... Entries>
 struct layout {};
@@ -209,35 +273,99 @@ struct open_context {
 struct inverted_plugin {
 	static constexpr std::string_view id = "inverted";
 
-	// What a document carries for it (L10).
+	// What a document carries for it (L10). `tokens` index `text` in order, positions
+	// strictly increasing; each adds one to its term's wdf and its position to the term's
+	// positions. A term is in `terms` or among the tokens, not both, and the key is in
+	// `terms`. With `split_text`, `tokens` is empty, `length` is 0, and the text's words
+	// (maximal runs of bytes other than ' ') are its tokens at positions 1, 2, ...; the
+	// index counts them as its length.
 	struct part {
 		std::vector<term_entry> terms;
 		std::uint32_t length = 0;
+		std::string text;
+		std::vector<text_token> tokens;
+		bool split_text = false;
 	};
-	// Stage-1 checks (D10): terms non-empty, within the term limit, unique, positions increasing.
-	static bool validate(const validate_context&, const part& p) {
-		std::vector<std::string_view> seen;
-		seen.reserve(p.terms.size());
+	// Stage-1 checks (D10): terms non-empty, within the term limit, unique, positions
+	// increasing; tokens in bounds and increasing, none with the key prefix or equal to a term.
+	static bool validate(const validate_context& vc, const part& p) {
+		thread_local std::vector<std::string_view> terms;  // sorted, to find repeats
+		terms.clear();
+		std::array<std::uint64_t, 4> firsts{};  // first bytes of the terms a token could equal
+		const std::string_view prefix = vc.key_prefix;
 		for (const auto& t : p.terms) {
 			if (t.term.empty() || t.term.size() > format::max_term_bytes) { return false; }
-			seen.push_back(t.term);
 			for (std::size_t i = 1; i < t.positions.size(); ++i) {
 				if (t.positions[i] <= t.positions[i - 1]) { return false; }
 			}
+			terms.push_back(t.term);
+			if (prefix.empty() || !t.term.starts_with(prefix)) { firsts[std::uint8_t(t.term[0]) >> 6] |= std::uint64_t(1) << (std::uint8_t(t.term[0]) & 63); }
 		}
-		std::sort(seen.begin(), seen.end());
-		return std::adjacent_find(seen.begin(), seen.end()) == seen.end();
+		if (terms.size() > 1) {
+			std::sort(terms.begin(), terms.end());
+			if (std::adjacent_find(terms.begin(), terms.end()) != terms.end()) { return false; }
+		}
+		const bool any_firsts = (firsts[0] | firsts[1] | firsts[2] | firsts[3]) != 0;
+		const std::string_view text = p.text;
+		if (p.split_text) { return valid_words(prefix, p, terms, firsts, any_firsts); }
+		const std::uint64_t n = text.size();
+		// Bounds, sizes, and order folded into one flag per token, no branch; the prefix and
+		// the terms entries need a token's first byte, so they read it once in bounds.
+		bool ok = true;
+		std::uint64_t prev = 0;
+		for (std::size_t i = 0; i < p.tokens.size(); ++i) {
+			const text_token& tk = p.tokens[i];
+			ok &= tk.size != 0 && std::uint64_t(tk.offset) + tk.size <= n && (i == 0 || tk.position > prev);
+			prev = tk.position;
+		}
+		if (!ok) { return false; }
+		if (prefix.empty() && !any_firsts) { return true; }
+		const char p0 = prefix.empty() ? 0 : prefix[0];
+		for (const text_token& tk : p.tokens) {
+			const std::uint8_t first = std::uint8_t(text[tk.offset]);
+			if (!prefix.empty() && char(first) == p0 && text.substr(tk.offset, tk.size).starts_with(prefix)) { return false; }
+			if (any_firsts && (firsts[first >> 6] >> (first & 63) & 1) && std::binary_search(terms.begin(), terms.end(), text.substr(tk.offset, tk.size))) { return false; }
+		}
+		return true;
 	}
 	// Buffer memory and an overestimate of disk bytes.
 	static std::uint64_t bytes(const part& p) {
-		std::uint64_t n = 0;
+		std::uint64_t n = p.text.size() + sizeof(text_token) * p.tokens.size();
 		for (const auto& t : p.terms) { n += sizeof(term_entry) + t.term.size() + 4 * t.positions.size(); }
 		return n;
 	}
 	static std::uint64_t disk_estimate(const part& p) {
 		std::uint64_t n = 0;
 		for (const auto& t : p.terms) { n += t.term.size() + 12 + 4 * t.positions.size(); }
+		for (const auto& tk : p.tokens) { n += tk.size + 16; }  // as a term of its own
+		if (p.split_text) {
+			const text_detail::word_counts w = text_detail::count_words(p.text);
+			n += w.bytes + 16 * w.words;
+		}
 		return n;
+	}
+	// validate()'s token checks for a document split at spaces: no tokens and no length
+	// given, no word begins with the key prefix (one memchr when the prefix's first byte is
+	// not in the text), and none equals one of its terms.
+	static bool valid_words(std::string_view prefix, const part& p, const std::vector<std::string_view>& terms, const std::array<std::uint64_t, 4>& firsts,
+		bool any_firsts) {
+		const std::string_view text = p.text;
+		if (!p.tokens.empty() || p.length != 0 || text.size() > std::numeric_limits<std::uint32_t>::max()) { return false; }
+		if (!prefix.empty()) {
+			for (const char* at = text.data(); (at = static_cast<const char*>(std::memchr(at, prefix[0], std::size_t(text.data() + text.size() - at))));) {
+				const std::size_t i = std::size_t(at - text.data());
+				const bool word_start = i == 0 || text[i - 1] == ' ';
+				if (word_start && text.substr(i, text.find(' ', i) - i).starts_with(prefix)) { return false; }
+				++at;
+			}
+		}
+		if (!any_firsts) { return true; }
+		bool ok = true;
+		text_detail::split_words(text, [&](std::size_t offset, std::size_t size) {
+			const std::uint8_t first = std::uint8_t(text[offset]);
+			if (ok && (firsts[first >> 6] >> (first & 63) & 1) && std::binary_search(terms.begin(), terms.end(), text.substr(offset, size))) { ok = false; }
+		});
+		return ok;
 	}
 	static constexpr section_rule rules[] = {
 		{format::section::terms, section_rule::regions, section_rule::with_plugin},
@@ -706,12 +834,16 @@ private:
 };
 using document = basic_document<search_layout_12>;
 namespace detail {
-struct document_12 {  // format 12's document, before the parts
+struct document_12 {  // format 12's document with the inverter's text inputs
 	std::vector<term_entry> terms;
 	std::uint32_t length = 0;
+	std::string text;
+	std::vector<text_token> tokens;
+	bool split_text = false;
 	std::string stored;
 };
 }  // namespace detail
+// The text inputs grow the document, so doc_bytes charges more and flush points move.
 static_assert(sizeof(document) == sizeof(detail::document_12), "doc_bytes and every flush trigger depend on it");
 
 namespace detail {
