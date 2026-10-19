@@ -449,6 +449,7 @@ int main() {
 		CHECK(with_bits(bit::norms | bit::keys | bit::stored) == outcome::corrupt);
 		CHECK(with_bits((built & ~bit::stored) | bit::stored_spans) == outcome::corrupt);
 		CHECK(with_bits(bit::keys | bit::stored | bit::postings_runs) == outcome::corrupt);  // bit 14 without inverted (F13-R32)
+		CHECK(with_bits((built & ~bit::keys) | bit::version_clocks) == outcome::corrupt);  // bit 16 without keys (durability D12)
 		// Every other bit, defined, reserved, or unlisted: one this binary lacks, so
 		// unsupported (F4; F13-R30), and never read past.
 		for (unsigned b = 0; b < 64; ++b) {  // bits 32 to 63 too (F13-R40)
@@ -466,7 +467,7 @@ int main() {
 		CHECK(open(later_release(good, std::pair{section::pair_summaries, opaque}, section::keys, built | bit::pair_summaries)) == outcome::unsupported);
 		CHECK(open(later_release(good, std::pair{section::key_hash, opaque}, section::stored, built | bit::key_hash)) == outcome::unsupported);
 		CHECK(open(later_release(good, std::pair{section::points, opaque}, section::docids, built | bit::points)) == outcome::unsupported);
-		CHECK(open(later_release(good, std::pair{section(23), opaque}, std::nullopt, built | (1u << 16))) == outcome::unsupported);
+		CHECK(open(later_release(good, std::pair{section(23), opaque}, std::nullopt, built | (1u << 17))) == outcome::unsupported);  // an unlisted bit
 		CHECK(open(later_release(good, std::nullopt, std::nullopt, built | bit::compact, [](const entries& es) {
 			std::string t;  // offsets implied, lengths as LEB128: a form this binary cannot parse
 			strata::format::put<std::uint32_t>(t, std::uint32_t(es.size()));
