@@ -86,7 +86,18 @@
     arena panics. The mechanism cell and the two `tuple_buffer.hh` comments say what the
     early drain does now: it keeps an over-cap entry to one document's postings, while the
     cut alone keeps runs correct. Comments and docs only; the headers compile
-    (`-fsyntax-only` of `tuple_buffer_test.cc` and `strata_engine.cc`).
+    (`-fsyntax-only` of `tuple_buffer_test.cc` and `strata_engine.cc`) (`807dff9`).
+  - CR17, tests: `index_test`'s CR12 block gives a split and a tokenized document 70,000
+    occurrences of one word (about 70 KB an entry, past its 64 KiB cap), so each takes a run
+    alone; MU2 (the lone run back to a throw) now fails `index_test` (abort, exit 134).
+    `tuple_buffer_test` round-trips LEB128 at 2^32 - 1, 2^32, 2^32 + 1, 2^35, and 2^64 - 1,
+    and decodes, through the buffer's own `view()` (`tuple_buffer_test_access`), an entry
+    header with section lengths of 2^32, 2^32 + 1, 2^32 - 1, and 2^34 in a reserved 32 GiB
+    range; MU3 (32-bit `entry_view::lengths`) fails both checks. Its CR12 block is also
+    compared with `segment_writer`'s bytes. ctest 35 of 35 (Release); `tuple_buffer_test`
+    and `index_test` pass with asserts on, and `tuple_buffer_test` under ASan+UBSan
+    (Homebrew clang, -O1, no reports; it also covers CR18's 65th page); bytes identical to
+    main's at 20k and 100k.
 - Next:
   1. Text: L10 and D16 with the code (R30, R31).
 - Code review of main (`docs/reviews/inverter-main.md`, APPROVE WITH CONDITIONS), folded

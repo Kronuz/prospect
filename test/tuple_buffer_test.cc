@@ -11,9 +11,20 @@
 #include <limits>
 #include <numeric>
 #include <pthread.h>
+#include <sys/mman.h>
 #include <random>
 #include <string>
 #include <vector>
+
+namespace strata::detail {
+// A run entry's header decoded by the buffer's own view().
+struct tuple_buffer_test_access {
+	static std::array<std::uint64_t, 5> view(const char* p) {
+		const auto v = tuple_buffer::view(p);
+		return {v.lengths[0], v.lengths[1], v.lengths[2], v.lengths[3], std::uint64_t(v.end - v.data)};
+	}
+};
+}  // namespace strata::detail
 
 static int failures = 0;
 #define CHECK(cond) \
@@ -358,6 +369,15 @@ int main() {
 			x->add(5, k, "", {}, 0, "", 1, "");
 		}
 		CHECK(b.doc_count() == 5 && flushed(b) == flushed(given));
+		strata::segment_writer w;  // and segment_writer's bytes, an encoder the buffer does not share
+		w.add(1, k, 0, "", 1, "");
+		w.add(2, long_term, 0, "", 1, "");
+		w.add(3, many, 0, "", 1, "");
+		const std::string split = "a " + big;
+		const std::vector<strata::text_token> words = {{0, 1, 1}, {2, 5000, 2}};
+		strata::detail::writer_access::add_text(w, 4, k, split, words, 2, "", 1, "");
+		w.add(5, k, 0, "", 1, "");
+		CHECK(flushed(b) == w.flush({1, 2, 3}));
 	}
 	// The radix path (256 terms or more a batch) on terms of 7 to 10 bytes from {a, b} that
 	// share 8-byte prefixes: wrong without its length-class pass or its ties' re-sort (CR10).
@@ -414,6 +434,34 @@ int main() {
 			CHECK(flushed(b) == expected);
 		}
 		CHECK(strata::text_detail::splittable("a b c", 1) && strata::text_detail::splittable(std::string(70000, 'w'), 10));
+	}
+	// Section lengths past 32 bits (CR12, CR17): LEB128 round-trips at 2^32 and around it, and
+	// view() decodes an entry header with 64-bit lengths, its end within a reserved range.
+	{
+		for (std::uint64_t v : {std::uint64_t(0xFFFFFFFF), std::uint64_t(1) << 32, (std::uint64_t(1) << 32) + 1, std::uint64_t(1) << 35, ~std::uint64_t(0)}) {
+			char buf[10];
+			char* w = buf;
+			strata::tuple_detail::put_leb(w, v);
+			const char* rd = buf;
+			CHECK(strata::tuple_detail::get_leb(rd) == v && rd == w);
+		}
+		const std::size_t reserved = std::size_t(1) << 35;
+		void* at = ::mmap(nullptr, reserved, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+		CHECK(at != MAP_FAILED);
+		if (at != MAP_FAILED && ::mprotect(at, 4096, PROT_READ | PROT_WRITE) == 0) {
+			char* const base = static_cast<char*>(at);
+			char* w = base;
+			const std::uint64_t lengths[4] = {std::uint64_t(1) << 32, (std::uint64_t(1) << 32) + 1, 0xFFFFFFFF, std::uint64_t(1) << 34};
+			strata::tuple_detail::put_leb(w, 1);  // the term's size, then the term
+			*w++ = 'x';
+			for (int i = 0; i < 3; ++i) { strata::tuple_detail::put_leb(w, 1); }  // postings, positions, cf
+			*w++ = char(2);
+			for (std::uint64_t l : lengths) { strata::tuple_detail::put_leb(w, l); }
+			const auto got = strata::detail::tuple_buffer_test_access::view(base);
+			CHECK(got[0] == lengths[0] && got[1] == lengths[1] && got[2] == lengths[2] && got[3] == lengths[3]);
+			CHECK(got[4] == lengths[0] + lengths[1] + lengths[2] + lengths[3]);
+		}
+		if (at != MAP_FAILED) { ::munmap(at, reserved); }
 	}
 	// Page and chunk sizes past the 64th allocation: the doubling's shift is capped, so
 	// UBSan sees no shift of 64 or more (CR18); a log of 70 pieces over 1 MiB, a page each.

@@ -500,6 +500,7 @@ public:
 	}
 
 private:
+	friend struct tuple_buffer_test_access;  // tests decode synthetic entries
 	static constexpr std::uint32_t long_term = 255;  // the length field's escape: `off` names a side entry
 	static constexpr std::size_t max_side = std::size_t(1) << 32;  // `off` indexes side entries
 
