@@ -105,13 +105,19 @@
     "the sums keep every segment unchanged" with R30's three causes of moved flush points
     (byte identity at equal flush points), and has buffered reads go through the tuple
     buffer at one flush thread. Phase 4's D13 and D16 read the active buffer the same way.
-    `reader.hh`'s pin says it bears on `doc_bytes` at more than one flush thread.
+    `reader.hh`'s pin says it bears on `doc_bytes` at more than one flush thread (`d195eba`).
   - CR20 and R28.4: main's `docs/status/inverter.md` has one State, Doing, Next, and Last
     verified, all current, one public list (with `flush_charge`'s and `section_stream`'s
-    changed behavior), and R24.3's line naming R30's three causes.
+    changed behavior), and R24.3's line naming R30's three causes (`8cf61a2`).
+- CI: run 39211275577 at `8cf61a2` green on the six fast jobs (linux-x86_64-clang,
+  linux-x86_64-gcc, linux-arm64-gcc, macos-x86_64, macos-arm64, freebsd-x86_64); this
+  ledger commit's push starts the run whose asan-ubsan and tsan jobs gate landing (same code).
 - Next:
-  1. CI green on all eight jobs at the branch's head; then the architect's re-check and the
-     code reviewer's of this branch.
+  1. The sanitizer jobs green at the head; then the architect's re-check (R26 to R33, C11)
+     and the code reviewer's (CR14 to CR20) of this branch.
+  2. C11's many-index rows (a writing index at one flush thread with 1, 10, and 100 buffered
+     documents) are the lead's to measure on the gate VM and FreeBSD; the macOS counts above
+     are heap counts, not timings.
 - Code review of main (`docs/reviews/inverter-main.md`, APPROVE WITH CONDITIONS), folded
   in here, one commit each: CR14 is R28.1 (`37ee946`: the option is gone, so there is no
   public cap to refuse or clamp); CR18; CR16 (the lead's ruling: widen the split-text cap
