@@ -329,6 +329,13 @@ struct index_options {
 	// so a wrapper must forward it for `refuse` to see the real filesystem.
 	enum class nonlocal_policy { warn, refuse };
 	nonlocal_policy nonlocal = nonlocal_policy::warn;
+	// A directory the IO admitted though another user owns it or group or others can write it
+	// (PosixIOOptions::allow_shared_directory): `warn` proceeds and reports it
+	// (basic_index::directory_trust_warning); `refuse` refuses with errc::permission_denied.
+	// A symlinked root is neither and proceeds silently. IO::directory_trust is the source: an
+	// IO that does not inspect its directory is not trusted, so a wrapper must forward it.
+	enum class trust_policy { warn, refuse };
+	trust_policy directory_trust = trust_policy::warn;
 };
 
 // Why an index's directory lock may not exclude every other writer: its filesystem is not
@@ -337,6 +344,14 @@ struct filesystem_warning {
 	std::string filesystem;
 	bool local = false;
 	bool locked = false;  // false: two writers are not excluded
+};
+
+// Why an index's directory may be written by someone else: another user owns it, group or
+// others can write it, or the IO did not say (`known` false, the flags then unset).
+struct directory_trust_warning {
+	bool known = true;
+	bool foreign_owner = false;
+	bool shared_writable = false;
 };
 
 // An index of a layout's segments (layers.md L2); `index` is the search layout's.
@@ -569,6 +584,9 @@ public:
 	// filesystem not known local, its classification failed, or its lock unsupported; under
 	// `refuse`, a FUSE mount (never refused by its type). A host reports it.
 	const std::optional<strata::filesystem_warning>& filesystem_warning() const noexcept { return fs_warning_; }
+	// Set when the directory is not trusted and options::directory_trust is warn (a symlinked root
+	// alone sets nothing); read as filesystem_warning is.
+	const std::optional<strata::directory_trust_warning>& directory_trust_warning() const noexcept { return trust_warning_; }
 
 	// Reads that failed or failed their checks once and passed when read again.
 	std::uint64_t media_retries() const noexcept { return media_retries_; }
@@ -2295,11 +2313,25 @@ private:
 		}
 		return true;
 	}
+	// A directory the IO admitted though another user owns it or others can write it warns or
+	// refuses as options::directory_trust says; an IO that does not say is not trusted. Before
+	// the lock, so a refusal writes nothing.
+	void check_directory_trust(const options& opts) {
+		const auto trust = io_->directory_trust();
+		if (trust.trusted()) { return; }
+		if (opts.directory_trust == options::trust_policy::refuse) {
+			throw std::system_error(std::make_error_code(std::errc::permission_denied),
+				!trust.known ? "strata: the directory's ownership and mode are unknown"
+				: trust.foreign_owner ? "strata: the directory is owned by another user" : "strata: the directory is writable by group or others");
+		}
+		trust_warning_ = strata::directory_trust_warning{trust.known, trust.foreign_owner, trust.shared_writable};
+	}
 	// The owner lock is the directory's own (D2), writing nothing. Busy (EWOULDBLOCK) and
 	// other lock errors refuse as they are. A filesystem not known local (an IO that does not
 	// classify is not), or a lock it does not support, warns or refuses as options::nonlocal
 	// says. A failed classification warns as an unknown filesystem, or refuses under refuse.
 	void lock_directory(const options& opts) {
+		check_directory_trust(opts);
 		const bool refuse = opts.nonlocal == options::nonlocal_policy::refuse;
 		kronuz::journal::FilesystemClass fs;
 		try {
@@ -2558,6 +2590,7 @@ private:
 	std::uint64_t media_retries_ = 0;
 	std::optional<std::uint64_t> retention_blocked_;
 	std::optional<strata::filesystem_warning> fs_warning_;
+	std::optional<strata::directory_trust_warning> trust_warning_;
 	std::uint64_t on_disk_ = 0, reserved_ = 0;
 	std::uint64_t unlinked_ = 0;  // removed, awaiting a directory sync to be freed
 	std::uint64_t truncated_ = 0;  // truncated in this reclaim step, awaiting the file's sync

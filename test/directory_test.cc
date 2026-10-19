@@ -138,6 +138,9 @@ public:
 	kronuz::journal::FilesystemClass directory_filesystem() const override {
 		return classify_ ? inner_->directory_filesystem() : kronuz::journal::IO::directory_filesystem();
 	}
+	kronuz::journal::DirectoryTrust directory_trust() const override {
+		return classify_ ? inner_->directory_trust() : kronuz::journal::IO::directory_trust();
+	}
 	std::unique_ptr<kronuz::journal::File> open_existing(std::string_view name) override { return inner_->open_existing(name); }
 	std::unique_ptr<kronuz::journal::File> create_exclusive(std::string_view name) override { return inner_->create_exclusive(name); }
 	void replace(std::string_view source, std::string_view destination) override { inner_->replace(source, destination); }
@@ -197,6 +200,16 @@ static index::options policy(index::options::nonlocal_policy p) {
 }
 static constexpr auto warn = index::options::nonlocal_policy::warn;
 static constexpr auto refuse = index::options::nonlocal_policy::refuse;
+
+static index::options trust_policy(index::options::trust_policy p) {
+	auto o = keyed();
+	o.directory_trust = p;
+	return o;
+}
+static constexpr auto trust_warn = index::options::trust_policy::warn;
+static constexpr auto trust_refuse = index::options::trust_policy::refuse;
+// What a host that wants to warn constructs its PosixIO with.
+static constexpr kronuz::journal::PosixIOOptions admit_all{true, true};
 
 int main(int argc, char** argv) {
 	if (argc == 5 && std::string(argv[1]) == "opener") { return opener(argv[2], argv[3], std::atoi(argv[4])); }
@@ -479,6 +492,130 @@ int main(int argc, char** argv) {
 		CHECK(error_of([&] { auto ix = index::open(forwarding, policy(refuse)); }) == int(std::errc::not_supported));
 		auto ix = index::open(forwarding, policy(warn));
 		CHECK(ix.filesystem_warning() && ix.filesystem_warning()->filesystem == "nfs");
+	}
+
+	// Directory trust (F20): a symlinked root proceeds silently; a directory another user owns
+	// or group or others can write proceeds with directory_trust_warning() under warn and
+	// refuses with permission_denied, nothing written, under refuse. The PosixIO defaults still
+	// refuse every case before strata sees it.
+	{
+		const fs::path base = fs::absolute(root) / "trust";
+		fresh(base);
+		const fs::path target = base / "target", link = base / "link";
+		struct shape { const char* name; fs::perms mode; };
+		const shape shapes[] = {{"private", fs::perms::owner_all},
+			{"group-writable", fs::perms::owner_all | fs::perms::group_write},
+			{"other-writable", fs::perms::owner_all | fs::perms::others_write},
+			{"group- and other-writable", fs::perms::owner_all | fs::perms::group_write | fs::perms::others_write}};
+		for (const bool symlinked : {false, true}) {
+			for (const auto& shape : shapes) {
+				const bool shared = shape.mode != fs::perms::owner_all;
+				fresh(target);
+				fs::permissions(target, shape.mode, fs::perm_options::replace);
+				fs::remove(link);
+				if (symlinked) { fs::create_directory_symlink(target, link); }
+				const fs::path dir = symlinked ? link : target;
+				// The library's defaults refuse a symlinked root and a shared one.
+				CHECK((error_of([&] { kronuz::journal::PosixIO io(dir); }) != 0) == (symlinked || shared));
+				if (symlinked) { CHECK(error_of([&] { kronuz::journal::PosixIO io(dir, 0600, {false, true}); }) != 0); }
+				if (shared) { CHECK(error_of([&] { kronuz::journal::PosixIO io(dir, 0600, {true, false}); }) != 0); }
+				auto warned = [&](const strata::index& ix) {
+					const auto& w = ix.directory_trust_warning();
+					return w && w->known && !w->foreign_owner && w->shared_writable;
+				};
+				// warn: create, then open, proceed; only a shared mode is reported.
+				{
+					kronuz::journal::PosixIO io(dir, 0600, admit_all);
+					CHECK(io.directory_trust().symlinked_root == symlinked && io.directory_trust().shared_writable == shared);
+					auto ix = index::create(io, trust_policy(trust_warn), uuid_a);
+					CHECK(shared ? warned(ix) : !ix.directory_trust_warning());
+					CHECK(!ix.filesystem_warning());
+					ix.apply(one_doc("Qa"), {});
+					ix.commit();
+				}
+				CHECK(!listing(target).empty());  // the index landed in the symlink's target
+				{
+					kronuz::journal::PosixIO io(dir, 0600, admit_all);
+					auto ix = index::open(io, keyed());  // warn is the default
+					CHECK(shared ? warned(ix) : !ix.directory_trust_warning());
+					CHECK(!ix.filesystem_warning());
+					CHECK(index::options{}.directory_trust == trust_warn);
+				}
+				// refuse: a shared directory refuses before anything is written; the rest opens.
+				const auto made = listing(target);
+				{
+					kronuz::journal::PosixIO io(dir, 0600, admit_all);
+					std::string what;
+					const int e = error_of([&] { auto ix = index::open(io, trust_policy(trust_refuse)); }, &what);
+					if (shared) {
+						CHECK(e == int(std::errc::permission_denied) && what.find("group or others") != std::string::npos);
+					} else {
+						CHECK(e == 0);
+					}
+					CHECK(listing(target) == made);
+					fresh(target);
+					fs::permissions(target, shape.mode, fs::perm_options::replace);
+					kronuz::journal::PosixIO empty(dir, 0600, admit_all);
+					CHECK(error_of([&] { auto ix = index::create(empty, trust_policy(trust_refuse), uuid_a); }) == (shared ? int(std::errc::permission_denied) : 0));
+					CHECK(shared ? listing(target).empty() : !listing(target).empty());
+				}
+			}
+		}
+		fs::remove(link);
+
+		// A foreign owner, which an ordinary user cannot make on disk, and an IO that does not
+		// say, through faultfs and the wrappers: warn reports it, refuse refuses.
+		{
+			faultfs::filesystem f;
+			faultfs::io io(f);
+			{
+				auto ix = index::create(io, trust_policy(trust_refuse), uuid_a);  // owned and private: trusted
+				CHECK(!ix.directory_trust_warning());
+			}
+			const kronuz::journal::DirectoryTrust owned_elsewhere{true, false, true, false};
+			f.set_trust(owned_elsewhere);
+			{
+				auto ix = index::open(io, trust_policy(trust_warn));
+				CHECK(ix.directory_trust_warning() && ix.directory_trust_warning()->known && ix.directory_trust_warning()->foreign_owner);
+			}
+			wrapper_io forwarding(io, true);
+			{
+				auto ix = index::open(forwarding, trust_policy(trust_warn));
+				CHECK(ix.directory_trust_warning() && ix.directory_trust_warning()->foreign_owner && !ix.directory_trust_warning()->shared_writable);
+			}
+			const auto before = f.mutations();
+			std::string what;
+			CHECK(error_of([&] { auto ix = index::open(io, trust_policy(trust_refuse)); }, &what) == int(std::errc::permission_denied));
+			CHECK(what.find("another user") != std::string::npos);
+			CHECK(error_of([&] { auto ix = index::open(forwarding, trust_policy(trust_refuse)); }) == int(std::errc::permission_denied));
+			CHECK(f.mutations() == before);
+			// Both facts at once, and with the filesystem warning independent of the trust one.
+			f.set_trust({true, false, true, true});
+			f.classify({false, "nfs"});
+			{
+				auto ix = index::open(forwarding, trust_policy(trust_warn));
+				CHECK(ix.directory_trust_warning() && ix.directory_trust_warning()->foreign_owner && ix.directory_trust_warning()->shared_writable);
+				CHECK(ix.filesystem_warning() && ix.filesystem_warning()->filesystem == "nfs");
+			}
+			// A symlinked root alone sets nothing, and an index created there proceeds under refuse.
+			f.set_trust({true, true, false, false});
+			f.classify({true, "faultfs"});
+			auto quiet = index::open(forwarding, trust_policy(trust_refuse));
+			CHECK(!quiet.directory_trust_warning() && !quiet.filesystem_warning());
+		}
+		// A wrapper that does not forward leaves the base default: unknown, so not trusted.
+		{
+			faultfs::filesystem f;
+			faultfs::io io(f);
+			{ auto ix = index::create(io, keyed(), uuid_a); }
+			wrapper_io bare(io, false);
+			std::string what;
+			CHECK(error_of([&] { auto ix = index::open(bare, trust_policy(trust_refuse)); }, &what) == int(std::errc::permission_denied));
+			CHECK(what.find("unknown") != std::string::npos);
+			auto ix = index::open(bare, trust_policy(trust_warn));
+			CHECK(ix.directory_trust_warning() && !ix.directory_trust_warning()->known);
+		}
+		fs::remove_all(base);
 	}
 
 	if (!disk_only) {  // faultfs: the first filesystem's run covers it

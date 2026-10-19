@@ -20,7 +20,7 @@ int main(int argc, char** argv) {
 		std::cerr << "usage: keybench DIR ROUNDS [PREFIX] < keys\n";
 		return 2;
 	}
-	kronuz::journal::PosixIO io(argv[1]);
+	kronuz::journal::PosixIO io(argv[1], 0600, {true, true});
 	strata::index::options o;
 	o.key_prefix = argc > 3 ? argv[3] : "Q";
 	o.auto_merge = false;

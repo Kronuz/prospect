@@ -102,6 +102,15 @@ void fill_document(strata::document& d, std::string_view key, std::string_view i
 	d.stored.assign(id);
 }
 
+// The tools proceed through a symlinked root and onto a shared directory, as a host that warns
+// rather than refuses would, and say so on stderr.
+static constexpr kronuz::journal::PosixIOOptions host_io{true, true};
+template <class Index> static void warn_trust(const Index& ix) {
+	if (const auto& w = ix.directory_trust_warning()) {
+		std::cerr << "warning: the directory is " << (w->foreign_owner ? "owned by another user" : "writable by group or others") << '\n';
+	}
+}
+
 // Phase 3's index: each document upserted by its key ("Q" + id, Xapiand's key prefix),
 // the buffer flushing past STRATA_BUFFER_MB (default 256) on STRATA_THREADS inversion
 // threads (default 1, D18) and merging by the tiered policy (STRATA_AUTO_MERGE=0 turns
@@ -111,7 +120,7 @@ int index(const std::string& dir) {
 	std::ios::sync_with_stdio(false);
 	std::filesystem::create_directories(dir);
 	std::filesystem::permissions(dir, std::filesystem::perms::group_write | std::filesystem::perms::others_write, std::filesystem::perm_options::remove);
-	kronuz::journal::PosixIO io(dir);
+	kronuz::journal::PosixIO io(dir, 0600, host_io);
 	strata::index::options o;
 	o.key_prefix = "Q";
 	const char* mb = std::getenv("STRATA_BUFFER_MB");
@@ -131,6 +140,7 @@ int index(const std::string& dir) {
 	if (const char* seed = std::getenv("STRATA_IDENTITY_SEED")) { o.identity_seed = std::strtoull(seed, nullptr, 10); }
 	const std::array<char, 16> uuid{'s', 't', 'r', 'a', 't', 'a', '-', 'b', 'e', 'n', 'c', 'h'};
 	auto ix = strata::index::create(io, o, uuid);
+	warn_trust(ix);
 	// The batch's operations are reused, so their strings and vectors keep their capacity.
 	strata::transaction t;
 	std::size_t batched = 0;
@@ -184,12 +194,13 @@ int index(const std::string& dir) {
 // reorders (the default); STRATA_REORDER=0 keeps docid order, and STRATA_REORDER_THREADS
 // bisects on that many threads.
 int merge(const std::string& dir) {
-	kronuz::journal::PosixIO io(dir);
+	kronuz::journal::PosixIO io(dir, 0600, host_io);
 	strata::index::options o;
 	o.key_prefix = "Q";
 	if (const char* r = std::getenv("STRATA_REORDER"); r && std::string_view(r) == "0") { o.reordering = strata::index::options::reorder_mode::off; }
 	if (const char* t = std::getenv("STRATA_REORDER_THREADS")) { o.reorder_settings.bisection.threads = std::uint32_t(std::max(1L, std::strtol(t, nullptr, 10))); }
 	auto ix = strata::index::open(io, o);
+	warn_trust(ix);
 	const auto start = std::chrono::steady_clock::now();
 	ix.force_merge(1);
 	ix.commit();
@@ -209,10 +220,11 @@ int serve(const std::string& dir) {
 	std::string line;
 	std::cout.setf(std::ios::unitbuf);
 	if (!std::filesystem::exists(dir + "/segment.sx")) {  // an index of segments (Phase 3)
-		kronuz::journal::PosixIO io(dir);
+		kronuz::journal::PosixIO io(dir, 0600, host_io);
 		strata::index::options o;
 		o.key_prefix = "Q";
 		auto ix = strata::index::open(io, o);
+		warn_trust(ix);
 		std::vector<strata::segment_snapshot> segs;
 		for (const auto& v : ix.segments()) { segs.push_back({v.seg, v.deleted, v.dead}); }
 		for (LineReader in; in.next(line);) {
@@ -408,10 +420,11 @@ std::string query_of(const std::string& line) {
 // against the pruned multi-segment search at k = 10, 100, and 1000 and its count. Ties at
 // a score may resolve to any of the tied documents.
 int verify_index(const std::string& dir) {
-	kronuz::journal::PosixIO io(dir);
+	kronuz::journal::PosixIO io(dir, 0600, host_io);
 	strata::index::options o;
 	o.key_prefix = "Q";
 	auto ix = strata::index::open(io, o);
+	warn_trust(ix);
 	std::vector<strata::segment_snapshot> segs;
 	for (const auto& v : ix.segments()) { segs.push_back({v.seg, v.deleted, v.dead}); }
 	std::span<const strata::segment_snapshot> view(segs);
@@ -468,10 +481,11 @@ int verify_index(const std::string& dir) {
 // scores (%a), with the live count: two indexes of the same documents print the same lines
 // whatever their segments' order (reordering.md D5, the scale check).
 int dump(const std::string& dir) {
-	kronuz::journal::PosixIO io(dir);
+	kronuz::journal::PosixIO io(dir, 0600, host_io);
 	strata::index::options o;
 	o.key_prefix = "Q";
 	auto ix = strata::index::open(io, o);
+	warn_trust(ix);
 	std::vector<strata::segment_snapshot> segs;
 	for (const auto& v : ix.segments()) { segs.push_back({v.seg, v.deleted, v.dead}); }
 	LineReader in;
@@ -571,10 +585,11 @@ int bench_queries(int runs, Answer&& answer) {
 // form time alike.
 int bench(const std::string& dir, std::string_view command, int runs, strata::scheme scheme) {
 	if (!std::filesystem::exists(dir + "/segment.sx")) {
-		kronuz::journal::PosixIO io(dir);
+		kronuz::journal::PosixIO io(dir, 0600, host_io);
 		strata::index::options o;
 		o.key_prefix = "Q";
 		auto ix = strata::index::open(io, o);
+		warn_trust(ix);
 		std::vector<strata::segment_snapshot> segs;
 		for (const auto& v : ix.segments()) { segs.push_back({v.seg, v.deleted, v.dead}); }
 		std::cerr << "bench: " << segs.size() << " segments\n";
@@ -628,12 +643,13 @@ int churn(const std::string& dir) {
 	std::filesystem::create_directories(dir);
 	// PosixIO refuses a directory others can write; a umask of 002 leaves group write on.
 	std::filesystem::permissions(dir, std::filesystem::perms::group_write | std::filesystem::perms::others_write, std::filesystem::perm_options::remove);
-	kronuz::journal::PosixIO io(dir);
+	kronuz::journal::PosixIO io(dir, 0600, host_io);
 	strata::index::options o;
 	o.key_prefix = "Q";
 	o.auto_merge = true;
 	const std::array<char, 16> uuid{'s', 't', 'r', 'a', 't', 'a', '-', 's', 'o', 'a', 'k'};
 	auto ix = strata::index::create(io, o, uuid);
+	warn_trust(ix);
 	using clock = std::chrono::steady_clock;
 	auto us = [](clock::time_point t) { return std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - t).count(); };
 	strata::transaction t;
