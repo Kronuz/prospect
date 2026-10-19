@@ -75,7 +75,18 @@
     `tuple_buffer_test`: split text with the tuple offset lowered to 0, 16, and 2^32, and
     the multi-thread split add, give explicit tokens' bytes. ctest 35 of 35 (Release); the
     four inverter tests pass with asserts on; bytes identical to main's at 20k and 100k.
-    Not reached by a test: a text past 4 GiB (it needs tens of GB resident).
+    Not reached by a test: a text past 4 GiB (it needs tens of GB resident) (`2518aae`).
+  - CR15, text: limits.md's Term bytes row drops the buffer's 2^32 - 67 clause (CR12 removed
+    that refusal). The run row's Lucene cell, read from Lucene 10.4.0's source: the 1,945 MB
+    hard limit is checked after each document and only marks a flush
+    (`DocumentsWriterFlushControl.java:237-241`); a document past about 2 GiB of int-addressed
+    pool (`Math.addExact`, `ByteBlockPool.java:199`, `IntBlockPool.java:157`) aborts the
+    thread's buffer and closes the writer (`IndexingChain.java:1319-1321`,
+    `DocumentsWriterPerThread.java:556-566`). The Tantivy cell adds that a document past the
+    arena panics. The mechanism cell and the two `tuple_buffer.hh` comments say what the
+    early drain does now: it keeps an over-cap entry to one document's postings, while the
+    cut alone keeps runs correct. Comments and docs only; the headers compile
+    (`-fsyntax-only` of `tuple_buffer_test.cc` and `strata_engine.cc`).
 - Next:
   1. Text: L10 and D16 with the code (R30, R31).
 - Code review of main (`docs/reviews/inverter-main.md`, APPROVE WITH CONDITIONS), folded

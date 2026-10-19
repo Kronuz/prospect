@@ -193,9 +193,9 @@ public:
 	// Tuples grouped into a run at a time: about 20 MiB of them by default, so a bucket's
 	// share (1/256) stays in L2.
 	std::size_t batch_tuples = std::size_t(1) << 20;
-	// A run's bytes at most, run_cap or less (32-bit entry offsets, marks): a batch drains into
-	// runs cut between terms, early when one entry could pass it; an entry past it takes a run
-	// alone. Tests lower it.
+	// A run's bytes at most, run_cap or less: a batch's run is cut between terms at it, so a run
+	// of more than one entry keeps its 32-bit marks; an entry past it takes a run alone (64-bit
+	// lengths). Tests lower it.
 	static constexpr std::uint64_t run_cap = std::numeric_limits<std::uint32_t>::max();
 	std::uint64_t max_run_bytes = run_cap;
 	// Any one entry's bytes at most, for `tuples` terms and tokens with `given` positions and
@@ -307,7 +307,8 @@ private:
 	}
 
 	// Drains first when one entry of the batch could pass max_run_bytes with this document in
-	// it (entry_bound), so only one document's entry can, and it takes a run alone (drain).
+	// it (entry_bound), so an entry past the cap holds one document's postings; the cut alone
+	// keeps every run correct.
 	void reserve_entry(std::uint64_t tuples, std::uint64_t given_positions, std::uint64_t longest) {
 		if (entry_bound(batched_ + tuples, entry_positions_ + given_positions, std::max(entry_term_, longest)) > max_run_bytes) {
 			drain();  // also clears entry_term_ left by documents without tuples
