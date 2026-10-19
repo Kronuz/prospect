@@ -1516,7 +1516,7 @@ private:
 		return codec_width_ ? format::get_bits(gr.adv, gr.adv_bytes, (gr.n - 1) * (gr.wl + gr.wo) + i * codec_width_, codec_width_) : 0;
 	}
 	// Block b's entry, checked (F10): its last above the previous block's and at most its
-	// group's, its bytes inside the group's, its codec one the format keeps.
+	// group's, its bytes inside the group's.
 	// The last block checked is kept: a walk reads its successor's base and start from it.
 	block_ref block_at(std::size_t b) {
 		if (b == checked_b_) { return checked_; }
@@ -1527,7 +1527,8 @@ private:
 		const std::uint64_t group_bytes = gr.blocks_end - gr.blocks_begin, start = next ? checked_.offset + checked_.bytes - gr.blocks_begin : entry_offset(gr, i),
 							end = i + 1 < gr.n ? entry_offset(gr, i + 1) : group_bytes;
 		const unsigned code = entry_codec(gr, i);
-		if (last > gr.last || (b && last <= base) || start >= end || end > group_bytes || code > format::max_block_codec) { corrupt("advance entry"); }
+		// The codec width the skip flags allow keeps every code a kept one.
+		if (last > gr.last || (b && last <= base) || start >= end || end > group_bytes) { corrupt("advance entry"); }
 		checked_ = {ordinal_t(last), b ? ordinal_t(base) : std::numeric_limits<ordinal_t>::max(), gr.blocks_begin + start, end - start, format::block_codec(code)};
 		checked_b_ = b;
 		return checked_;

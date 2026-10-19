@@ -369,6 +369,64 @@ int main() {
 		CHECK(!bad);
 	}
 
+	// --- F11 (M22's place): codec code 2 is reserved and refused ------------------------------
+	// A term with a FOR block and room in its advance entries' last byte, rewritten by hand to a
+	// codec width of 2 with that block's code 2 (Elias-Fano's) and the others' codes kept: every
+	// other byte is as written, so only the width check stands between it and a FOR decode.
+	{
+		strata::segment_writer w;
+		const std::vector<std::uint32_t> none;
+		std::mt19937_64 rng(2);
+		std::vector<std::string> names;
+		for (std::uint32_t t = 0; t < 24; ++t) { names.push_back("t" + std::to_string(t)); }
+		for (std::uint32_t d = 0; d < 20000; ++d) {
+			std::vector<strata::posting_input> in;
+			for (std::uint32_t t = 0; t < 24; ++t) {  // term t within the first 1,000 + 250t documents
+				if (d < 1000 + 250 * t && rng() % (5 + t % 4) == 0) { in.push_back({names[t], 1, none}); }
+			}
+			w.add(d + 1, in, 1 + d % 50);
+		}
+		std::string file = w.flush({});
+		strata::segment s0(file);
+		const auto& inv0 = s0.get<strata::inverted_plugin>();
+		std::string term;
+		skip_test::layout l;
+		std::size_t target = 0;
+		for (std::uint32_t t = 0; t < 24 && term.empty(); ++t) {
+			const auto info = inv0.term(names[t]);
+			if (!info || info->df < f::block) { continue; }
+			const auto cand = skip_test::parse(file, s0, *info);
+			const auto& g = cand.groups[0];
+			if (g.wf > 1 || f::advance_bytes(g.n, g.wl, g.wo, 2) != f::advance_bytes(g.n, g.wl, g.wo, g.wf)) { continue; }
+			for (std::size_t i = 0; i < g.n && term.empty(); ++i) {
+				if (cand.blocks[i].codec == unsigned(f::block_codec::deltas)) {
+					term = names[t];
+					l = cand;
+					target = i;
+				}
+			}
+		}
+		CHECK(!term.empty());
+		if (!term.empty()) {
+			const auto& g = l.groups[0];
+			file[l.flags_at] = char((std::uint8_t(file[l.flags_at]) & ~6) | 2 << f::skip::codec_shift);
+			for (std::size_t i = 0; i < g.n; ++i) {
+				skip_test::put(file, g.adv, (g.n - 1) * (g.wl + g.wo) + 2 * i, 2, i == target ? 2 : l.blocks[i].codec);
+			}
+			reseal(file);
+			strata::segment s(file);
+			const auto info = *s.get<strata::inverted_plugin>().term(term);
+			bool fenced = false;
+			try {
+				strata::postings_iterator it(s.get<strata::inverted_plugin>(), info);
+				while (it.next() != strata::no_more_docs) {}
+			} catch (const strata::corrupt_segment&) {
+				fenced = true;
+			}
+			CHECK(fenced);  // a format-13 reader without M22 refuses code 2 as damage
+		}
+	}
+
 	// --- F11 (M23): gaps - 1, checked by the header width or a 64-bit sum ---------------------
 	{
 		std::mt19937_64 rng(23);
