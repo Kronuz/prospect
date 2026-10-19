@@ -319,8 +319,6 @@ struct index_options {
 	// one segment per run. Files, ids, and accounting stay on the owner thread.
 	std::size_t flush_threads = 1;
 	std::size_t flush_min_docs = 4096;  // per run: smaller buffers flush as one segment
-	// A buffered run's bytes at most (tuple_buffer::max_run_bytes); tests lower it.
-	std::uint64_t max_run_bytes = std::numeric_limits<std::uint32_t>::max();
 	// Obsolete data files leave in steps: truncated from the end `reclaim_step` bytes at a
 	// time, then removed, so freeing a large file never stalls one call. Each commit
 	// reclaims about `reclaim_slice` bytes, reclaim() the rest, and admission drains them
@@ -1884,7 +1882,7 @@ private:
 		try {
 			if (!active_) {
 				active_ = std::make_unique<active_buffer>();
-				active_->buf.max_run_bytes = opts_.max_run_bytes;
+				active_->buf.max_run_bytes = max_run_bytes_;
 			}
 			auto& a = *active_;
 			for (const pending_doc& p : pending_docs_) {
@@ -2461,6 +2459,7 @@ private:
 	std::unique_ptr<active_buffer> active_;
 	std::vector<pending_doc> pending_docs_;  // the transaction's documents, inverted once it is accepted
 	std::vector<posting_input> terms_in_;  // inversion's scratch
+	std::uint64_t max_run_bytes_ = detail::tuple_buffer::run_cap;  // a run's bytes at most; tests lower it (index_test_access)
 	index_detail::hash_slots buffer_docids_;  // docid -> buffer index (ordinal in active_), the docid as its hash
 	index_detail::hash_slots key_slots_;      // the version map: a key -> its live copy's buffer index, its bytes read from the buffer
 	std::map<std::string, std::string> meta_;

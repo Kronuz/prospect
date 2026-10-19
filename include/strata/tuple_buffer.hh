@@ -167,9 +167,11 @@ public:
 	// Tuples grouped into a run at a time: about 20 MiB of them by default, so a bucket's
 	// share (1/256) stays in L2.
 	std::size_t batch_tuples = std::size_t(1) << 20;
-	// A run's bytes at most (32-bit entry offsets, marks): a batch drains into runs cut between
-	// terms, early when one entry could pass it; an entry past it takes a run alone. Tests lower it.
-	std::uint64_t max_run_bytes = std::numeric_limits<std::uint32_t>::max();
+	// A run's bytes at most, run_cap or less (32-bit entry offsets, marks): a batch drains into
+	// runs cut between terms, early when one entry could pass it; an entry past it takes a run
+	// alone. Tests lower it.
+	static constexpr std::uint64_t run_cap = std::numeric_limits<std::uint32_t>::max();
+	std::uint64_t max_run_bytes = run_cap;
 	// Any one entry's bytes at most, for `tuples` terms and tokens with `given` positions and
 	// the longest term `longest` (encode_entry: its term, 46, 20 a tuple, 5 a given position).
 	static constexpr std::uint64_t entry_bound(std::uint64_t tuples, std::uint64_t given, std::uint64_t longest) noexcept {
@@ -694,6 +696,7 @@ private:
 	// The batch as a run: each bucket grouped, the groups sorted by term, one entry each in
 	// one log piece; then the batch's tuples, text, and side entries reset, memory kept.
 	void drain() {
+		assert(max_run_bytes <= run_cap);
 		if (batched_) {
 			groups_.clear();
 			encoded_.size = 0;

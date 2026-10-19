@@ -11,6 +11,13 @@
 #include <random>
 #include <set>
 
+namespace strata {
+// Test hooks no public option offers: a lower run cap (CR12, R28).
+struct index_test_access {
+	static void max_run_bytes(index& ix, std::uint64_t n) { ix.max_run_bytes_ = n; }
+};
+}  // namespace strata
+
 static int failures = 0;
 #define CHECK(cond) \
 	do { \
@@ -2150,9 +2157,8 @@ int main() {
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		auto opts = keyed;
-		opts.max_run_bytes = 64 << 10;
-		auto ix = strata::index::create(io, opts, uuid);
+		auto ix = strata::index::create(io, keyed, uuid);
+		strata::index_test_access::max_run_bytes(ix, 64 << 10);
 		CHECK(ix.apply(tx({add("Qa", "a")}), {}).result == verdict::accepted);
 		std::string text;
 		for (int i = 0; i < 4000; ++i) { text += "w "; }
