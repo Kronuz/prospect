@@ -940,7 +940,10 @@ private:
 		std::vector<std::uint64_t> dead;  // bit per ordinal: replaced or deleted while buffered
 		std::uint64_t dead_count = 0, prev_docid = 0;
 		bool ordered = true;  // docids increase with ordinals
-		active_buffer() { buf.memory = &held; }
+		active_buffer() {
+			buf.memory = &held;
+			held.grow(sizeof(active_buffer));  // the object too (C11)
+		}
 		bool is_dead(ordinal_t o) const { return o >> 6 < dead.size() && (dead[o >> 6] >> (o & 63) & 1); }
 		void set_dead(ordinal_t o, bool on) {
 			if (o >> 6 >= dead.size()) { dead.resize((o >> 6) + 1); }

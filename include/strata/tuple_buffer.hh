@@ -58,21 +58,14 @@ namespace strata {
 
 namespace tuple_detail {
 
-// Appended to in place and read in order; chunks never move, so growth copies nothing.
-// clear() keeps the chunks for the next fill.
+// Appended to in place and read in order. The first chunk starts at 8 entries and doubles
+// to a whole chunk, copied as it grows; later chunks never move. clear() keeps the chunks.
 template <class T, unsigned Shift = 12>
 class chunked {
 public:
 	static constexpr std::size_t chunk = std::size_t(1) << Shift;
 	void push_back(const T& v, flush_charge* memory) {
-		if (left_ == 0) {
-			if (size_ >> Shift == chunks_.size()) {
-				chunks_.push_back(std::unique_ptr<T[]>(new T[chunk]));  // uninitialized: every slot is written before it is read
-				if (memory) { memory->grow(chunk * sizeof(T)); }
-			}
-			at_ = chunks_[size_ >> Shift].get();
-			left_ = chunk;
-		}
+		if (left_ == 0) { more(memory); }
 		*at_++ = v;
 		--left_;
 		++size_;
@@ -83,9 +76,32 @@ public:
 	void clear() noexcept { size_ = 0, left_ = 0, at_ = nullptr; }
 
 private:
+	void more(flush_charge* memory) {
+		if (size_ < chunk) {
+			if (first_ == size_) {  // the first chunk grows; uninitialized: every slot is written before it is read
+				const std::size_t grown = std::min(chunk, std::max<std::size_t>(8, 2 * first_));
+				std::unique_ptr<T[]> bigger(new T[grown]);
+				if (size_) { std::copy(chunks_[0].get(), chunks_[0].get() + size_, bigger.get()); }
+				if (chunks_.empty()) { chunks_.emplace_back(); }
+				chunks_[0] = std::move(bigger);
+				if (memory) { memory->grow((grown - first_) * sizeof(T)); }
+				first_ = grown;
+			}
+			at_ = chunks_[0].get() + size_;
+			left_ = first_ - size_;
+			return;
+		}
+		if (size_ >> Shift == chunks_.size()) {
+			chunks_.push_back(std::unique_ptr<T[]>(new T[chunk]));
+			if (memory) { memory->grow(chunk * sizeof(T)); }
+		}
+		at_ = chunks_[size_ >> Shift].get();
+		left_ = chunk;
+	}
 	std::vector<std::unique_ptr<T[]>> chunks_;
 	T* at_ = nullptr;  // the next slot in the current chunk
 	std::size_t size_ = 0, left_ = 0;
+	std::size_t first_ = 0;  // the first chunk's entries
 };
 
 // The k-th of a series of allocations that starts at `first` bytes and doubles to `most`;
@@ -452,7 +468,9 @@ public:
 		std::vector<tuple> copy;
 		std::vector<group> groups;
 		group_scratch sc;
-		for (const auto& bucket : buckets_) {
+		auto bucket_at = [&](std::size_t b) -> const std::vector<tuple>& { return buckets_ ? (*buckets_)[b] : flat_; };
+		for (std::size_t b = 0; b < (buckets_ ? 256u : 1u); ++b) {
+			const std::vector<tuple>& bucket = bucket_at(b);
 			copy.assign(bucket.begin(), bucket.end());
 			groups.clear();
 			group_run(copy.data(), copy.size(), groups, sc);
@@ -669,16 +687,35 @@ private:
 		return std::string_view(texts_[t.ord - batch_first_] + t.off, t.len());
 	}
 
-	// A tuple into its hash's bucket; buckets grow by half.
+	// A tuple into one bucket until a batch holds a bucket's share (batch_tuples / 256), then
+	// into its hash's bucket of 256, which stay; buckets grow by half.
 	void push(const tuple& t) {
-		std::vector<tuple>& v = buckets_[t.hash_hi >> 24];
+		if (!buckets_) {
+			if (flat_.size() < batch_tuples / 256) {
+				push_to(flat_, t);
+				++batched_;
+				return;
+			}
+			spread();
+		}
+		push_to((*buckets_)[t.hash_hi >> 24], t);
+		++batched_;
+	}
+	void push_to(std::vector<tuple>& v, const tuple& t) {
 		if (v.size() == v.capacity()) {
 			const std::size_t before = v.capacity();
 			v.reserve(std::max<std::size_t>(16, before + before / 2));
 			if (memory) { memory->grow((v.capacity() - before) * sizeof(tuple)); }
 		}
 		v.push_back(t);
-		++batched_;
+	}
+	// The 256 buckets, the one bucket's tuples moved in, in order, and its memory freed.
+	void spread() {
+		buckets_ = std::make_unique<std::array<std::vector<tuple>, 256>>();
+		if (memory) { memory->grow(sizeof(*buckets_)); }
+		for (const tuple& t : flat_) { push_to((*buckets_)[t.hash_hi >> 24], t); }
+		if (memory) { memory->shrink(flat_.capacity() * sizeof(tuple)); }
+		std::vector<tuple>().swap(flat_);
 	}
 
 	// Room for n bytes in the batch's text arena, and a zeroed word after them for hash's
@@ -686,7 +723,7 @@ private:
 	char* room(std::size_t n) {
 		while (arena_at_ < arena_.size() && arena_fill_ + n + 8 > arena_sizes_[arena_at_]) { ++arena_at_, arena_fill_ = 0; }
 		if (arena_at_ == arena_.size()) {
-			const std::size_t size = std::max<std::size_t>(tuple_detail::doubled(4096, arena_.size(), arena_chunk), n + 8);  // 4 KiB doubling
+			const std::size_t size = std::max<std::size_t>(tuple_detail::doubled(256, arena_.size(), arena_chunk), n + 8);  // 256 B doubling
 			arena_.push_back(std::unique_ptr<char[]>(new char[size]));
 			arena_sizes_.push_back(size);
 			arena_fill_ = 0;
@@ -709,6 +746,19 @@ private:
 		}
 	}
 
+	// drain()'s scratch, kept from batch to batch.
+	void charge_scratch() {
+		if (!memory) { return; }
+		const std::uint64_t now = groups_.capacity() * sizeof(group) + scratch_.hashes.capacity() * 8 +
+			(scratch_.ids.capacity() + scratch_.tids.capacity() + scratch_.counts.capacity() + order_.capacity()) * 4 +
+			scratch_.sorted.capacity() * sizeof(tuple) + (keys_scratch_.capacity() + radix_scratch_.capacity()) * sizeof(chunk_key) +
+			sort_todo_.capacity() * sizeof(key_run) + entry_at_.capacity() * sizeof(entry_ref) + key_groups_.capacity() * 8 + placed_.capacity() * 8;
+		if (now > scratch_charged_) {
+			memory->grow(now - scratch_charged_);
+			scratch_charged_ = now;
+		}
+	}
+
 	// The batch as a run: each bucket grouped, the groups sorted by term, one entry each in
 	// one log piece; then the batch's tuples, text, and side entries reset, memory kept.
 	void drain() {
@@ -718,10 +768,15 @@ private:
 			encoded_.size = 0;
 			entry_at_.clear();
 			key_groups_.clear();
-			for (unsigned b = 0; b < 256; ++b) {
+			auto group_bucket = [&](std::vector<tuple>& v) {
 				const std::size_t first = groups_.size();
-				group_run(buckets_[b].data(), buckets_[b].size(), groups_, scratch_);
+				group_run(v.data(), v.size(), groups_, scratch_);
 				for (std::size_t i = first; i < groups_.size(); ++i) { encode_entry(std::uint32_t(i)); }  // its tuples still in cache
+			};
+			if (buckets_) {
+				for (auto& v : *buckets_) { group_bucket(v); }
+			} else {
+				group_bucket(flat_);
 			}
 			sort_groups(groups_);
 			// The encoded entries into the run in term order, marks and keys placed as they land.
@@ -754,7 +809,10 @@ private:
 				keys_[ord].bytes = placed[g] + entry_at_[g].term_at;
 				keys_[ord].size = std::uint32_t(groups_[g].term.size());
 			}
-			for (auto& b : buckets_) { b.clear(); }
+			if (buckets_) {
+				for (auto& b : *buckets_) { b.clear(); }
+			}
+			flat_.clear();
 		}
 		batched_ = 0;
 		entry_term_ = 0, entry_positions_ = 0;
@@ -765,6 +823,7 @@ private:
 		batch_keys_.clear();
 		batch_first_ = ordinal_t(docids_.size());
 		charge_columns();
+		charge_scratch();
 	}
 
 	// Bytes that grow by half and keep their capacity, never zero-filled.
@@ -1099,8 +1158,9 @@ private:
 	static constexpr std::size_t arena_chunk = std::size_t(4) << 20;
 
 	// The batch: tuples by bucket, the documents' text, and side entries.
-	std::array<std::vector<tuple>, 256> buckets_;  // by the hash's top byte, each in arrival order
-	std::size_t batched_ = 0;                      // tuples in the buckets
+	std::vector<tuple> flat_;  // one bucket, in arrival order, until the 256 exist
+	std::unique_ptr<std::array<std::vector<tuple>, 256>> buckets_;  // by the hash's top byte, each in arrival order
+	std::size_t batched_ = 0;  // tuples in the buckets
 	std::uint64_t entry_term_ = 0, entry_positions_ = 0;  // the batch's longest term and given positions
 	tuple_detail::chunked<side_entry, 7> side_;
 	tuple_detail::chunked<std::uint32_t, 8> positions_;  // side entries' positions
@@ -1133,7 +1193,7 @@ private:
 	std::deque<std::string> extra_keys_;  // keys that were not among their documents' terms
 	std::string stored_;
 	std::vector<std::uint64_t> stored_ends_;
-	std::uint64_t columns_charged_ = 0;
+	std::uint64_t columns_charged_ = 0, scratch_charged_ = 0;
 };
 }  // namespace detail
 
