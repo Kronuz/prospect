@@ -176,5 +176,8 @@ All five items built and pushed, origin/main d058cd9 merged; the Mac measurement
 2026-10-19 (macOS x86_64, Apple clang, RelWithDebInfo, quiet exit 0 or 2 with nice): ctest 39/39
 at 492b549 (38/38 at each item's commit before the merge, 39 with main's new test after it);
 fuzz_postings' corpus (779 inputs) replays in about a second; libFuzzer (Homebrew clang 23,
-ASan+UBSan) ran 3 to 5 minutes per item with no finding. CI: pushed at 492b549 and this commit;
-no run was waited on (the lead watches CI).
+ASan+UBSan) ran 3 to 5 minutes per item with no finding. CI when I stopped: all eight jobs green at
+88f23ee (run 39290533385), b9a30d4 (39294672554), 7d91c9f (39298621393), 32e4286 (39304695065),
+and dd55eb6 (39309573818); 07bf37d's run cancelled by the next push (its tree is in 32e4286's);
+c21ae56 pushed with 7d91c9f, no run of its own; 492b549 (39314776121) in progress and 006b7a2 and
+this commit pushed, not waited on.
