@@ -668,6 +668,45 @@ int main() {
 			// cache opens and leaves at the next commit.
 			CHECK(with([](strata::files::manifest& m) { m.segments.back().attributes = {{1, "later"}}; }) == verdict::unsupported);
 			CHECK(with([](strata::files::manifest& m) { m.segments.back().attributes = {{2, "bounds"}}; }) == verdict::opens);
+			// An index attribute this binary lacks (F13-R51): the same rule at the index level.
+			CHECK(with([](strata::files::manifest& m) { m.attributes = {{1, "later"}}; }) == verdict::unsupported);
+			CHECK(with([](strata::files::manifest& m) { m.attributes = {{2, "tier"}}; }) == verdict::opens);
+			CHECK(with([](strata::files::manifest& m) { m.attributes = {{4, ""}, {2, ""}}; }) == verdict::corrupt);
+		}
+		// install: a checkpoint with a required index attribute this binary lacks is unsupported;
+		// one with a cache installs, and the target keeps its own index state (F13-R51).
+		for (const std::uint64_t tag : {std::uint64_t(3), std::uint64_t(2)}) {
+			strata::faultfs::filesystem fs_a, fs_b;
+			strata::faultfs::io io_a(fs_a), io_b(fs_b);
+			std::uint64_t gen = 0;
+			{
+				auto a = strata::index::create(io_a, o, {});
+				CHECK(apply(a, upsert("Q1", "w")) == strata::verdict::accepted);
+				gen = a.checkpoint();
+			}
+			rewrite(fs_a, io_a, gen, [&](strata::files::manifest& m) { m.attributes = {{tag, "replica"}}; });
+			auto b = strata::index::create(io_b, o, {});
+			bool unsupported = false;
+			try {
+				b.install(io_a, gen);
+			} catch (const strata::unsupported_index&) {
+				unsupported = true;
+			}
+			CHECK(unsupported == (tag & 1));
+			CHECK(b.manifest().attributes.empty());
+		}
+		// A cache index attribute leaves at the next commit by a binary without it.
+		{
+			strata::faultfs::filesystem fs;
+			strata::faultfs::io io(fs);
+			const auto gen = make(io);
+			rewrite(fs, io, gen, [](strata::files::manifest& m) { m.attributes = {{2, "tier"}}; });
+			auto ix = strata::index::open(io, o);
+			CHECK(apply(ix, upsert("Q9", "z")) == strata::verdict::accepted);
+			ix.commit();
+			CHECK(ix.manifest().generation > gen && ix.manifest().attributes.empty());
+			const std::string raw(fs.view(strata::index_detail::manifest_name(ix.manifest().generation)));
+			CHECK(raw.find("tier") == std::string::npos);
 		}
 		// install refuses a checkpoint whose configured bits no flush could write (CR5).
 		{
