@@ -45,7 +45,7 @@ using model = std::map<std::string, model_doc>;
 
 static document make_doc(const std::string& key, const model_doc& m) {
 	document d;
-	d.terms.push_back({key, 0, {}});
+	d.key = key;
 	std::uint32_t pos = 0;
 	for (const auto& w : m.words) {
 		d.terms.push_back({w, 1, {++pos}});

@@ -50,6 +50,12 @@ struct corrupt_segment : std::runtime_error {
 	explicit corrupt_segment(const char* what) : std::runtime_error(std::string("strata: corrupt segment: ") + what) {}
 };
 
+// Raised for a segment this binary cannot read: another format version, or a structure it
+// lacks (format-13.md F2, F4). Not damage, so it never fences a segment by itself.
+struct unsupported_segment : std::runtime_error {
+	explicit unsupported_segment(const std::string& what) : std::runtime_error("strata: unsupported segment: " + what) {}
+};
+
 // Throws corrupt_segment, out of line and cold, so the decoders that check keep no throw
 // path inline.
 [[noreturn, gnu::cold, gnu::noinline]] inline void corrupt(const char* what) { throw corrupt_segment(what); }
@@ -58,9 +64,16 @@ namespace format {
 
 inline constexpr char header_magic[8] = {'S', 'T', 'R', 'S', 'E', 'G', '0', '1'};
 inline constexpr char footer_magic[4] = {'S', 'E', 'N', 'D'};
-inline constexpr std::uint32_t version = 12;
-inline constexpr std::size_t header_size = 32;
-inline constexpr std::size_t footer_size = 48;
+// The version written, and the oldest one read (N - 1 from format 13 on: F2). Until format
+// 13 freezes, both are a pre-freeze number, bumped with each byte change and 13 at the
+// freeze, so an index from another pre-freeze build is refused, never misread (CR11).
+inline constexpr std::uint32_t pre_freeze = 0x8000'0001;
+inline constexpr std::uint32_t version = pre_freeze;
+inline constexpr std::uint32_t min_read_version = pre_freeze;
+// Bytes 0-15, frozen in every version: magic, version, CRC-32C of bytes 0-11 (F2).
+inline constexpr std::size_t prefix_size = 16;
+inline constexpr std::size_t header_size = 36;
+inline constexpr std::size_t footer_size = 56;
 // Each section is verified per region of 2^region_shift bytes, recorded in its table of
 // contents entry (4 KiB by default: docs/perf/p15-region-size.md).
 inline constexpr std::uint8_t default_region_shift = 12;
@@ -76,9 +89,11 @@ inline constexpr std::uint64_t max_stored_record = 64ull << 20;
 // 32,766 and Tantivy's 65,530 bytes.
 inline constexpr std::size_t max_term_bytes = termdict::max_key_bytes;
 inline constexpr std::uint64_t max_stored_frame = stored_block_size + max_stored_record + 64;
-inline constexpr std::size_t section_alignment = 64;
+// Sections start at multiples of 8: every fixed-width read is a memcpy (F5).
+inline constexpr std::size_t section_alignment = 8;
 inline constexpr std::size_t block = 128;
 
+// Section kinds (F3). Ids are stable; a later format adds kinds and never renumbers.
 enum class section : std::uint16_t {
 	header = 0,
 	terms = 1,
@@ -91,8 +106,97 @@ enum class section : std::uint16_t {
 	stats = 8,
 	norms = 9,  // one encode_length byte per document, for Lucene-compatible scoring
 	versions = 10,   // one version per ordinal, bit-packed from the segment's minimum
-	pk_filter = 11,  // the key terms' range and a binary fuse filter over their hashes
+	pk_filter = 11,  // retired: format 12's key filter; corruption wherever it appears
+	keys = 12,       // key blocks: key -> ordinal (keys.hh, F8)
+	key_index = 13,  // count, range, filter, and the key blocks' index (keys.hh, F8)
+	values = 14,
+	points = 15,
+	term_lists = 16,
+	index_sort = 17,
+	pair_summaries = 18,
+	stored_dictionary = 19,
+	stored_holes = 20,
+	quantized_impacts = 21,
+	key_hash = 22,
 };
+inline constexpr std::uint16_t section_kinds = 23;
+
+// Structure bits of the footer's structures word (F4).
+namespace bit {
+inline constexpr std::uint32_t inverted = 1, norms = 2, keys = 4, stored = 8, values = 16, points = 32, term_lists = 64, index_sort = 128,
+	pair_summaries = 256, stored_dictionary = 512, stored_holes = 1024, quantized_impacts = 2048, key_hash = 4096, stored_spans = 8192,
+	postings_runs = 16384, compact = 32768;
+}  // namespace bit
+
+// The bit a structure's bit requires (F4): a sub-structure its owner's, index_sort values;
+// 0 for none.
+inline constexpr std::uint32_t requires_of(std::uint32_t b) noexcept {
+	switch (b) {
+	case bit::norms: case bit::pair_summaries: case bit::quantized_impacts: case bit::postings_runs: return bit::inverted;
+	case bit::stored_dictionary: case bit::stored_holes: case bit::stored_spans: return bit::stored;
+	case bit::key_hash: return bit::keys;
+	case bit::index_sort: return bit::values;
+	default: return 0;
+	}
+}
+
+// Who owns a section kind (F3): the core or one plugin.
+enum class owner : std::uint8_t { core, inverted, keys, stored, values, points, term_lists };
+// How a section is verified (L7): whole at open, per region on first read, or whole on
+// its first use.
+enum class check : std::uint8_t { pinned, regions, first_use };
+inline constexpr std::uint8_t unranked = 0xff;  // a reserved kind: its release fixes the rank
+
+// One row of F3's table per kind: the only copy of a kind's owner, presence, class, and
+// rank in file order.
+struct kind_rule {
+	section kind;
+	const char* name;
+	owner owned_by;
+	std::uint32_t needs;  // the structure bit that requires it; 0: mandatory
+	check verify;
+	std::uint8_t rank;
+};
+inline constexpr kind_rule kinds[section_kinds] = {
+	{section::header, "header", owner::core, 0, check::pinned, 0},
+	{section::terms, "terms", owner::inverted, bit::inverted, check::regions, 3},
+	{section::term_index, "term_index", owner::inverted, bit::inverted, check::pinned, 13},
+	{section::postings, "postings", owner::inverted, bit::inverted, check::regions, 1},
+	{section::positions, "positions", owner::inverted, bit::inverted, check::regions, 2},
+	{section::lengths, "lengths", owner::inverted, bit::inverted, check::first_use, 4},
+	{section::stored, "stored", owner::stored, bit::stored, check::regions, 6},
+	{section::docids, "docids", owner::core, 0, check::pinned, 9},
+	{section::stats, "stats", owner::core, 0, check::pinned, 10},
+	{section::norms, "norms", owner::inverted, bit::norms, check::pinned, 12},
+	{section::versions, "versions", owner::keys, bit::keys, check::pinned, 14},
+	{section::pk_filter, "pk_filter", owner::core, 0, check::pinned, unranked},  // retired
+	{section::keys, "keys", owner::keys, bit::keys, check::regions, 5},
+	{section::key_index, "key_index", owner::keys, bit::keys, check::pinned, 15},
+	{section::values, "values", owner::values, bit::values, check::regions, unranked},
+	{section::points, "points", owner::points, bit::points, check::regions, unranked},
+	{section::term_lists, "term_lists", owner::term_lists, bit::term_lists, check::regions, unranked},
+	{section::index_sort, "index_sort", owner::core, bit::index_sort, check::pinned, unranked},
+	{section::pair_summaries, "pair_summaries", owner::inverted, bit::pair_summaries, check::regions, unranked},
+	{section::stored_dictionary, "stored_dictionary", owner::stored, bit::stored_dictionary, check::regions, unranked},
+	{section::stored_holes, "stored_holes", owner::stored, bit::stored_holes, check::regions, unranked},
+	{section::quantized_impacts, "quantized_impacts", owner::inverted, bit::quantized_impacts, check::regions, unranked},
+	{section::key_hash, "key_hash", owner::keys, bit::key_hash, check::regions, unranked},
+};
+static_assert([] {
+	for (std::uint16_t k = 0; k < section_kinds; ++k) {
+		if (std::uint16_t(kinds[k].kind) != k) { return false; }
+	}
+	return true;
+}(), "F3's table is indexed by kind");
+
+// The kind's row, or null outside the table.
+inline constexpr const kind_rule* rule_of(section kind) noexcept {
+	return std::uint16_t(kind) < section_kinds ? &kinds[std::uint16_t(kind)] : nullptr;
+}
+inline constexpr const char* name_of(section kind) noexcept {
+	const kind_rule* r = rule_of(kind);
+	return r ? r->name : "unknown";
+}
 
 // --- little-endian fixed-width fields ---------------------------------------------------------
 
@@ -125,6 +229,20 @@ inline std::uint64_t get_leb(const char** p, const char* end) {
 
 // --- header, table of contents, footer --------------------------------------------------------
 
+// The segment's version by the frozen prefix (F2): a good CRC gives the version, which
+// must be one this binary reads; a format-12 file (version below 13, bytes 12-15 zero) is
+// unsupported; anything else is damage.
+inline std::uint32_t read_version(std::string_view file) {
+	if (file.size() < prefix_size || std::memcmp(file.data(), header_magic, 8) != 0) { corrupt("header magic"); }
+	const std::uint32_t v = get<std::uint32_t>(file.data() + 8);
+	if (hashes::crc32c(file.data(), 12) == get<std::uint32_t>(file.data() + 12)) {
+		if (v < min_read_version || v > version) { throw unsupported_segment("format version " + std::to_string(v)); }
+		return v;
+	}
+	if (v < 13 && get<std::uint32_t>(file.data() + 12) == 0) { throw unsupported_segment("format version " + std::to_string(v)); }
+	corrupt("header prefix checksum");
+}
+
 struct section_entry {
 	section kind;
 	std::uint64_t offset = 0;
@@ -135,9 +253,11 @@ struct section_entry {
 	std::uint64_t region_size() const noexcept { return std::uint64_t(1) << region_shift; }
 };
 
+// [magic][version u32][CRC-32C of bytes 0-11][flags u32 = 0][segment id] (F6).
 inline std::string encode_header(const std::array<std::uint8_t, 16>& segment_id) {
 	std::string h(header_magic, 8);
 	put<std::uint32_t>(h, version);
+	put<std::uint32_t>(h, hashes::crc32c(h.data(), h.size()));
 	put<std::uint32_t>(h, 0);
 	h.append(reinterpret_cast<const char*>(segment_id.data()), 16);
 	return h;
@@ -174,7 +294,10 @@ struct footer {
 	std::uint32_t doc_count = 0;
 	std::uint64_t min_docid = 0;
 	std::uint64_t max_docid = 0;
+	std::uint32_t structures = 0;  // F4's bits
 };
+
+inline constexpr std::uint64_t align_up(std::uint64_t n) noexcept { return (n + section_alignment - 1) / section_alignment * section_alignment; }
 
 inline std::string encode_footer(const footer& f) {
 	std::string out;
@@ -184,25 +307,31 @@ inline std::string encode_footer(const footer& f) {
 	put<std::uint32_t>(out, f.doc_count);
 	put<std::uint64_t>(out, f.min_docid);
 	put<std::uint64_t>(out, f.max_docid);
+	put<std::uint32_t>(out, f.structures);
+	put<std::uint32_t>(out, 0);  // reserved
 	put<std::uint32_t>(out, hashes::crc32c(out.data(), out.size()));
 	out.append(footer_magic, 4);
 	return out;
 }
 
+// The footer of a version-13 file (read_version first); the table must end at it, at the
+// aligned end of the last section (F5).
 inline footer decode_footer(std::string_view file) {
 	if (file.size() < header_size + footer_size) { corrupt("file too small"); }
 	const char* p = file.data() + file.size() - footer_size;
-	if (std::memcmp(p + 44, footer_magic, 4) != 0) { corrupt("footer magic"); }
-	if (hashes::crc32c(p, 40) != get<std::uint32_t>(p + 40)) { corrupt("footer checksum"); }
+	if (std::memcmp(p + 52, footer_magic, 4) != 0) { corrupt("footer magic"); }
+	if (hashes::crc32c(p, 48) != get<std::uint32_t>(p + 48)) { corrupt("footer checksum"); }
 	footer f{get<std::uint64_t>(p), get<std::uint64_t>(p + 8), get<std::uint32_t>(p + 16), get<std::uint32_t>(p + 20),
-		get<std::uint64_t>(p + 24), get<std::uint64_t>(p + 32)};
+		get<std::uint64_t>(p + 24), get<std::uint64_t>(p + 32), get<std::uint32_t>(p + 40)};
+	if (get<std::uint32_t>(p + 44) != 0) { corrupt("footer reserved"); }
 	const std::uint64_t body = file.size() - footer_size;
 	if (f.toc_offset > body || f.toc_length > body - f.toc_offset || f.toc_offset + f.toc_length != body) { corrupt("table of contents bounds"); }
 	return f;
 }
 
-// Parses and checks the table of contents: its CRC, entry bounds, and every section's
-// placement inside the file before the table of contents.
+// Parses and checks the table of contents: its CRC, entry bounds, every kind in F3's
+// table, and the canonical layout (F5): the header at 0, then each entry in rank order at
+// the previous one's aligned end, and the table at the last one's aligned end.
 inline std::vector<section_entry> decode_toc(std::string_view file, const footer& f) {
 	std::string_view t = file.substr(f.toc_offset, f.toc_length);
 	if (hashes::crc32c(t.data(), t.size()) != f.toc_crc) { corrupt("table of contents checksum"); }
@@ -216,10 +345,12 @@ inline std::vector<section_entry> decode_toc(std::string_view file, const footer
 	p += 4;
 	if (n > 64) { corrupt("section count"); }
 	std::vector<section_entry> entries;
+	std::uint64_t at = 0;
 	for (std::uint32_t i = 0; i < n; ++i) {
 		need(24);
 		section_entry e;
 		e.kind = section(get<std::uint16_t>(p));
+		if (!rule_of(e.kind)) { corrupt("unknown section kind"); }
 		const std::uint16_t shift = get<std::uint16_t>(p + 2);
 		if (shift < min_region_shift || shift > max_region_shift) { corrupt("region size"); }
 		e.region_shift = std::uint8_t(shift);
@@ -228,6 +359,9 @@ inline std::vector<section_entry> decode_toc(std::string_view file, const footer
 		e.crc = get<std::uint32_t>(p + 20);
 		p += 24;
 		if (e.offset > f.toc_offset || e.length > f.toc_offset - e.offset) { corrupt("section bounds"); }
+		if (i == 0 ? (e.kind != section::header || e.offset != 0 || e.length != header_size) : e.offset != align_up(at)) { corrupt("section placement"); }
+		if (i > 0 && rule_of(entries.back().kind)->rank >= rule_of(e.kind)->rank) { corrupt("section order"); }
+		at = e.offset + e.length;
 		const std::size_t regions = std::size_t((e.length + e.region_size() - 1) >> e.region_shift);
 		need(regions * 4);
 		e.region_crcs.reserve(regions);
@@ -236,19 +370,39 @@ inline std::vector<section_entry> decode_toc(std::string_view file, const footer
 		entries.push_back(std::move(e));
 	}
 	if (p != end) { corrupt("table of contents trailing bytes"); }
-	// Each kind at most once; sections never overlap.
-	std::vector<const section_entry*> sorted;
-	for (const auto& e : entries) {
-		for (const auto* o : sorted) {
-			if (o->kind == e.kind) { corrupt("duplicate section"); }
-		}
-		sorted.push_back(&e);
-	}
-	std::sort(sorted.begin(), sorted.end(), [](const auto* a, const auto* b) { return a->offset < b->offset; });
-	for (std::size_t i = 1; i < sorted.size(); ++i) {
-		if (sorted[i - 1]->offset + sorted[i - 1]->length > sorted[i]->offset) { corrupt("overlapping sections"); }
-	}
+	if (entries.empty()) { corrupt("section placement"); }
+	if (f.toc_offset != align_up(at)) { corrupt("table of contents placement"); }
 	return entries;
+}
+
+// Classifies the footer's structures word against the bits this binary reads (F4), before
+// the table is decoded, since a later release's structure may add kinds or change the
+// table (F23 rules 3 and 5): a bit without the bit it requires is corruption; a set bit
+// this binary lacks is unsupported.
+inline void classify_structures(std::uint32_t structures, std::uint32_t readable) {
+	for (std::uint32_t b = 1; b; b <<= 1) {
+		if ((structures & b) && requires_of(b) && !(structures & requires_of(b))) { corrupt("structure without its owner"); }
+	}
+	if (const std::uint32_t lacked = structures & ~readable) {
+		throw unsupported_segment("structure bit " + std::to_string(std::countr_zero(lacked)));
+	}
+}
+
+// In a segment whose bits this binary reads: each kind present exactly when its bit is
+// set, mandatory kinds always (F4).
+inline void check_presence(const std::vector<section_entry>& entries, std::uint32_t structures) {
+	bool seen[section_kinds] = {};
+	for (const auto& e : entries) { seen[std::uint16_t(e.kind)] = true; }
+	for (const auto& r : kinds) {
+		const bool wanted = r.needs == 0 || (structures & r.needs);
+		if (seen[std::uint16_t(r.kind)] && (!wanted || r.rank == unranked)) { corrupt("section without its structure"); }
+		if (wanted && r.rank != unranked && !seen[std::uint16_t(r.kind)]) { corrupt("missing section"); }
+	}
+}
+
+inline void check_structures(const std::vector<section_entry>& entries, std::uint32_t structures, std::uint32_t readable) {
+	classify_structures(structures, readable);
+	check_presence(entries, structures);
 }
 
 // --- document lengths in skip data ------------------------------------------------------------

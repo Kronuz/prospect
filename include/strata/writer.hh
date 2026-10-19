@@ -47,6 +47,7 @@
 #include "strata/docids.hh"
 #include "strata/reader.hh"
 #include "strata/format.hh"
+#include "strata/keys.hh"
 #include "strata/section_io.hh"
 #include "task.hh"
 #include "termdict.hh"
@@ -103,20 +104,20 @@ inline void append_built(section_sink& sink, flush_charge* memory, format::secti
 	sink.write(kind, bytes);
 	if (memory) { memory->shrink(bytes.capacity()); }
 }
-// The core's sections that frame a segment (L2): the header first; docids where the
-// layout puts them; stats (the count, then the length provider's fields), the table of
-// contents, and the footer last.
+// The core's sections that frame a segment (F5): the header first; docids and stats (the
+// document count, F7) held for the tail; then the table of contents and the footer, which
+// records the structures built (F4).
 inline void begin_segment(section_sink& sink, const std::array<std::uint8_t, 16>& segment_id) {
 	sink.write(format::section::header, format::encode_header(segment_id));
 }
 inline void write_docids(section_sink& sink, flush_charge* memory, std::span<const std::uint64_t> docids) {
 	append_built(sink, memory, format::section::docids, docids::encode(docids, memory));
 }
-inline void finish_segment(section_sink& sink, std::span<const std::uint64_t> docids, std::string_view legacy_stats) {
+inline void finish_segment(section_sink& sink, std::span<const std::uint64_t> docids, std::uint32_t structures) {
 	std::string stats;
 	format::put<std::uint64_t>(stats, docids.size());
-	stats += legacy_stats;
 	sink.write(format::section::stats, stats);
+	sink.finish();
 	counting_output& o = sink.out();
 	o.align(format::section_alignment);
 	format::footer f;
@@ -127,6 +128,7 @@ inline void finish_segment(section_sink& sink, std::span<const std::uint64_t> do
 	f.doc_count = std::uint32_t(docids.size());
 	f.min_docid = docids.empty() ? 0 : *std::min_element(docids.begin(), docids.end());
 	f.max_docid = docids.empty() ? 0 : *std::max_element(docids.begin(), docids.end());
+	f.structures = structures;
 	o.write(toc_bytes);
 	o.write(format::encode_footer(f));
 }
@@ -140,11 +142,15 @@ inline void charge_to(flush_charge* memory, std::uint64_t now, std::uint64_t& ch
 }  // namespace detail
 
 // Terms, postings, positions, lengths, and norms: the inverted plugin's builder
-// (layers.md L5). Its sections go to the sink in format 12's order.
+// (layers.md L5). Its sections go to the sink in rank order (F5).
 class inverted_builder {
 public:
 	bool wide_skip_offsets = false;  // 64-bit skip offsets even where 32 bits fit
 	flush_charge* memory = nullptr;
+	// The index's key prefix: a term with it is refused, never dropped (F8's backstop to
+	// stage 1); empty for none.
+	std::string_view key_prefix;
+	bool norms = true;  // whether the norms sub-structure is built (F4)
 
 	struct token {
 		std::string_view term;
@@ -212,9 +218,9 @@ public:
 	std::uint32_t min_length() const noexcept { return lengths_.empty() ? 0 : *std::min_element(lengths_.begin(), lengths_.end()); }
 	std::uint32_t max_length() const noexcept { return lengths_.empty() ? 0 : *std::max_element(lengths_.begin(), lengths_.end()); }
 	std::uint32_t max_positions() const noexcept { return max_positions_; }
-	// Format 12's fields of `stats` after the count: total, minimum, and maximum length, and
-	// the most positions of a term in a document (L9).
-	std::string legacy_stats() const {
+	// The statistics that lead term_index (F7, L9): total, minimum, and maximum length, and
+	// the most positions of a term in a document; 20 bytes.
+	std::string statistics() const {
 		std::string out;
 		format::put<std::uint64_t>(out, total_length());
 		format::put<std::uint32_t>(out, min_length());
@@ -286,6 +292,7 @@ public:
 			const std::string_view key = *got;
 			if (!first_term && key <= std::string_view(last_key)) { throw std::invalid_argument("strata: terms must increase"); }
 			first_term = false;
+			refuse_key(key);
 			last_key.assign(key);
 			const auto& t = tp;
 			const auto& ords = tp.ords;
@@ -343,11 +350,12 @@ public:
 		auto tables = dict.finish();
 		if (memory) { memory->grow(tables.blocks.capacity() + tables.index.capacity()); }
 		sink.write(format::section::terms, tables.blocks);
-		sink.write(format::section::term_index, tables.index);
+		sink.write(format::section::term_index, statistics() + tables.index);
 		detail::append_built(sink, memory, format::section::lengths, pack_u32(lengths_));
-		std::string norms(lengths_.size(), '\0');
-		for (std::size_t i = 0; i < lengths_.size(); ++i) { norms[i] = char(format::encode_length(lengths_[i])); }
-		detail::append_built(sink, memory, format::section::norms, norms);
+		if (!norms) { return; }
+		std::string bytes(lengths_.size(), '\0');
+		for (std::size_t i = 0; i < lengths_.size(); ++i) { bytes[i] = char(format::encode_length(lengths_[i])); }
+		detail::append_built(sink, memory, format::section::norms, bytes);
 	}
 
 private:
@@ -411,6 +419,9 @@ private:
 		std::uint32_t buffer = 0;
 	};
 
+	void refuse_key(std::string_view term) const {
+		if (!key_prefix.empty() && term.starts_with(key_prefix)) { throw std::invalid_argument("strata: a term with the key prefix (F8)"); }
+	}
 	term_buffer& buffer_for(std::string_view term) {
 		if (table_.empty()) {
 			table_.resize(1 << 16);
@@ -423,6 +434,7 @@ private:
 			if (!sl.key) { break; }
 			if (sl.hash == h && sl.length == term.size() && std::memcmp(sl.key, term.data(), term.size()) == 0) { return buffers_[sl.buffer]; }
 		}
+		refuse_key(term);
 		// Term bytes live in stable arena chunks so slots can point at them.
 		if (arena_.empty() || arena_.back().size() + term.size() > arena_.back().capacity()) {
 			arena_.emplace_back();
@@ -691,36 +703,45 @@ private:
 	std::uint64_t charged_ = 0;  // the lengths column's charged capacity
 };
 
-// Versions and the key filter: the keys plugin's builder in format 12.
+// Keys and versions: the keys plugin's builder (F8, F9). keys streams with the plugins'
+// sections; key_index and versions go to the tail.
 class keys_builder {
 public:
 	flush_charge* memory = nullptr;
 
 	void add(const doc_fields& f) {
-		versions_.push_back(f.version);
+		// A version belongs to a key (F9, F13-R9).
+		if (f.key.empty() && f.version != 0) { throw std::invalid_argument("strata: a version without a key"); }
 		if (!f.key.empty()) {
-			key_hashes_.push_back(xxh64::hash(f.key));
-			if (keys_min_.empty() && keys_max_.empty()) {
-				keys_min_ = keys_max_ = f.key;
-			} else {
-				if (f.key < keys_min_) { keys_min_ = f.key; }
-				if (f.key > keys_max_) { keys_max_ = f.key; }
-			}
+			key_bytes_ += f.key.size();
+			keys_.push_back({std::string(f.key), ordinal_t(versions_.size())});
 		}
-		detail::charge_to(memory, (versions_.capacity() + key_hashes_.capacity()) * sizeof(std::uint64_t), charged_);
+		versions_.push_back(f.version);
+		detail::charge_to(memory, versions_.capacity() * sizeof(std::uint64_t) + keys_.capacity() * sizeof(keys_[0]) + key_bytes_, charged_);
 	}
 	void finish(section_sink& sink) {
+		std::vector<std::pair<std::string_view, ordinal_t>> entries;
+		entries.reserve(keys_.size());
+		for (const auto& [k, o] : keys_) { entries.push_back({k, o}); }
+		auto sections = keys::encode(std::move(entries));
+		detail::append_built(sink, memory, format::section::keys, sections.keys);
 		detail::append_built(sink, memory, format::section::versions, encode_versions());
-		if (!key_hashes_.empty()) { detail::append_built(sink, memory, format::section::pk_filter, encode_pk_filter()); }
+		detail::append_built(sink, memory, format::section::key_index, sections.index);
 	}
 
 private:
 	// versions: [min u64][width u8][(version - min) in width bits each, little-endian bit order].
 	std::string encode_versions() const {
 		std::string out;
-		const std::uint64_t lo = versions_.empty() ? 0 : *std::min_element(versions_.begin(), versions_.end());
+		std::uint64_t lo = versions_.empty() ? 0 : *std::min_element(versions_.begin(), versions_.end());
 		const std::uint64_t hi = versions_.empty() ? 0 : *std::max_element(versions_.begin(), versions_.end());
-		const unsigned width = unsigned(std::bit_width(hi - lo));
+		unsigned width = unsigned(std::bit_width(hi - lo));
+		// The reader requires lo + 2^width - 1 to fit in 64 bits; when it would not, the base is
+		// 0 and the width 64, since every version then exceeds 2^63 (F13-R25 item 7).
+		if (width && lo > ~std::uint64_t(0) - (width >= 64 ? ~std::uint64_t(0) : (std::uint64_t(1) << width) - 1)) {
+			lo = 0;
+			width = 64;
+		}
 		format::put<std::uint64_t>(out, lo);
 		out.push_back(char(width));
 		std::string bits((versions_.size() * width + 7) / 8, '\0');
@@ -736,21 +757,9 @@ private:
 		return out + bits;
 	}
 
-	// pk_filter: [smallest key LEB length, bytes][largest key, likewise][fuse filter over
-	// the keys' xxHash64].
-	std::string encode_pk_filter() const {
-		std::string out;
-		format::put_leb(out, keys_min_.size());
-		out += keys_min_;
-		format::put_leb(out, keys_max_.size());
-		out += keys_max_;
-		return out + fusefilter::filter8::build(key_hashes_).serialize();
-	}
-
 	std::vector<std::uint64_t> versions_;
-	std::vector<std::uint64_t> key_hashes_;
-	std::string keys_min_, keys_max_;
-	std::uint64_t charged_ = 0;
+	std::vector<std::pair<std::string, ordinal_t>> keys_;
+	std::uint64_t key_bytes_ = 0, charged_ = 0;
 };
 
 // Stored records: the stored plugin's builder.
@@ -820,14 +829,20 @@ public:
 	flush_charge* memory = nullptr;
 	// When given, the stored section checks it per frame and throws task::cancelled.
 	const task::cancel_token* cancel = nullptr;
+	// The index's key prefix, for the inverted builder's backstop (F8); empty for none.
+	std::string key_prefix;
+	// The structures the segment holds, set from the index's configuration, never from its
+	// documents (F4).
+	std::uint32_t structures = format::bit::inverted | format::bit::norms | format::bit::keys | format::bit::stored;
 
 	// Adds a document and returns its ordinal. Docids strictly increase, so ordinal order
 	// is docid order. `length` is the document length used by weighting (Xapian: the sum
 	// of wdf over non-boolean terms). `stored` is the document's stored record, returned
-	// by segment::stored. `key` is the document's key term (one of its terms) or empty.
+	// by segment::stored. `key` is the document's key (F8), never one of its terms, or empty.
 	// Each term appears once, with its wdf and its positions in increasing order.
 	ordinal_t add(std::uint64_t docid, std::span<const posting_input> terms, std::uint32_t length, std::string_view stored = {},
 		std::uint64_t version = 0, std::string_view key = {}) {
+		if (!terms.empty() && !(structures & format::bit::inverted)) { throw std::invalid_argument("strata: terms in a segment without inverted"); }
 		const ordinal_t ord = begin_document(docid, length, stored, version, key);
 		inverted_.add_terms(ord, terms);
 		return ord;
@@ -839,6 +854,7 @@ public:
 	using token = inverted_builder::token;
 	ordinal_t add_tokens(std::uint64_t docid, std::span<const token> tokens, std::uint32_t length, std::string_view stored = {},
 		std::uint64_t version = 0, std::string_view key = {}) {
+		if (!tokens.empty() && !(structures & format::bit::inverted)) { throw std::invalid_argument("strata: terms in a segment without inverted"); }
 		const ordinal_t ord = begin_document(docid, length, stored, version, key);
 		inverted_.add_tokens(ord, tokens);
 		return ord;
@@ -879,6 +895,8 @@ private:
 	void sync() noexcept {
 		inverted_.memory = keys_.memory = stored_.memory = memory;
 		inverted_.wide_skip_offsets = wide_skip_offsets;
+		inverted_.key_prefix = key_prefix;
+		inverted_.norms = (structures & format::bit::norms) != 0;
 		stored_.cancel = cancel;
 	}
 
@@ -889,6 +907,8 @@ private:
 		if (inverted_.doc_count() >= std::size_t(no_more_docs) - 1) { throw std::length_error("strata: segment document limit"); }
 		if (docid == 0 || (!permuted && !docids_.empty() && docid <= docids_.back())) { throw std::invalid_argument("strata: docids must increase within a segment"); }
 		if (stored.size() > format::max_stored_record) { throw std::invalid_argument("strata: stored record too large"); }
+		if (!stored.empty() && !(structures & format::bit::stored)) { throw std::invalid_argument("strata: a stored record in a segment without stored"); }
+		if (!key.empty() && !(structures & format::bit::keys)) { throw std::invalid_argument("strata: a key in a segment without keys"); }
 		keys_.add({docid, version, key});
 		stored_.add(stored);
 		const ordinal_t ord = inverted_.begin(length);
@@ -897,18 +917,23 @@ private:
 		return ord;
 	}
 
-	// The file in format 12's order (L2): header; the inverted sections; docids; versions
-	// and the key filter; stored; stats; then the table of contents and footer.
+	// The file in F5's order: the header; the streamed sections (the inverted ones, then
+	// stored); the pinned tail by rank; then the table of contents and footer, with the
+	// configured structures (F4).
 	template <class Inverted>
 	void write(const std::array<std::uint8_t, 16>& segment_id, output& out, Inverted&& inverted) {
 		sync();
-		section_sink sink(out, region_shift);
+		constexpr std::uint32_t known = format::bit::inverted | format::bit::norms | format::bit::keys | format::bit::stored;
+		if ((structures & ~known) || ((structures & format::bit::norms) && !(structures & format::bit::inverted))) {
+			throw std::invalid_argument("strata: segment structures");
+		}
+		section_sink sink(out, region_shift, nullptr, memory);
 		detail::begin_segment(sink, segment_id);
-		inverted(sink);
+		if (structures & format::bit::inverted) { inverted(sink); }
 		detail::write_docids(sink, memory, docids_);
-		keys_.finish(sink);
-		stored_.finish(sink);
-		detail::finish_segment(sink, docids_, inverted_.legacy_stats());
+		if (structures & format::bit::keys) { keys_.finish(sink); }
+		if (structures & format::bit::stored) { stored_.finish(sink); }
+		detail::finish_segment(sink, docids_, structures);
 	}
 
 	inverted_builder inverted_;

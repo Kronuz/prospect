@@ -54,6 +54,7 @@ static std::string with_sections(const std::string& file, const std::map<strata:
 		e = strata::format::describe(e.kind, out.size(), b, e.region_shift);
 		out += b;
 	}
+	while (out.size() % strata::format::section_alignment) { out.push_back('\0'); }
 	const std::string toc_bytes = strata::format::encode_toc(toc);
 	f.toc_offset = out.size();
 	f.toc_length = toc_bytes.size();
@@ -68,6 +69,8 @@ static std::string with_section(const std::string& file, strata::format::section
 	return with_sections(file, {{kind, std::string(bytes)}}, edit);
 }
 
+static std::string section_of(const std::string& file, strata::format::section kind);
+
 // The file with its dictionary rebuilt from its own term infos, `change` editing each.
 static std::string with_terms(const std::string& file, const std::function<void(std::string_view, strata::format::term_info&)>& change) {
 	strata::segment seg(file);
@@ -81,7 +84,8 @@ static std::string with_terms(const std::string& file, const std::function<void(
 		return true;
 	});
 	auto t = b.finish();
-	return with_sections(file, {{strata::format::section::terms, t.blocks}, {strata::format::section::term_index, t.index}});
+	const std::string statistics = section_of(file, strata::format::section::term_index).substr(0, strata::inverted_plugin::statistics_size);
+	return with_sections(file, {{strata::format::section::terms, t.blocks}, {strata::format::section::term_index, statistics + t.index}});
 }
 
 static std::string section_of(const std::string& file, strata::format::section kind) {
@@ -237,9 +241,9 @@ int main() {
 			std::string bad = file;
 			const std::size_t at = rng() % bad.size();
 			bad[at] = char(bad[at] ^ char(1 + rng() % 255));
-			bool in_section = at >= file.size() - 48;  // the footer
+			bool in_section = at >= file.size() - strata::format::footer_size;
 			for (const auto& e : layout) { in_section = in_section || (at >= e.offset && at < e.offset + e.length); }
-			const std::uint64_t toc_at = strata::format::get<std::uint64_t>(file.data() + file.size() - 48);
+			const std::uint64_t toc_at = strata::format::get<std::uint64_t>(file.data() + file.size() - strata::format::footer_size);
 			in_section = in_section || at >= toc_at;
 			bool detected = false;
 			try {
@@ -300,9 +304,8 @@ int main() {
 					length += std::uint32_t(pos[k].size());
 				}
 			}
-			// Format 12: monotone docids with gaps, versions, and a key term per document.
+			// Monotone docids with gaps, versions, and a key per document.
 			const std::string key = "Q" + std::to_string(d);
-			in.push_back({key, 0, {}});
 			w.add(2 * d + 1, in, length, {}, 1 + d % 5, key);
 		}
 		std::string bytes = w.flush({});
@@ -461,8 +464,8 @@ int main() {
 		CHECK(throws_corrupt([&] { strata::segment s(file); }));
 	}
 
-	// Format 12's docids, versions, and key filter: random monotone docids map both ways,
-	// versions read back, keys are never missed, and keys outside the range are rejected.
+	// docids, versions, and keys: random monotone docids map both ways, versions read back,
+	// keys are never missed, and keys outside the range are rejected.
 	{
 		std::mt19937_64 r(12);
 		for (std::size_t docs : {1u, 127u, 128u, 129u, 5000u}) {
@@ -475,8 +478,8 @@ int main() {
 				ids.push_back(id);
 				versions.push_back(r() % 3 == 0 ? r() : r() % 50);
 				keys.push_back("Qk" + std::to_string(id));
-				std::vector<strata::posting_input> in{{keys.back(), 0, {}}};
-				w.add(id, in, 1, {}, versions.back(), keys.back());
+				std::vector<strata::posting_input> in{{"t", 1, {}}};
+				w.add(id, in, 1, {}, versions.back(), keys.back());  // the key is the document's, not a term (F8)
 			}
 			std::string bytes = w.flush({});
 			strata::segment s(bytes);
@@ -492,25 +495,38 @@ int main() {
 			std::size_t false_positives = 0;
 			for (int i = 0; i < 10000; ++i) { false_positives += s.get<strata::keys_plugin>().may_hold("Qk" + std::to_string(r()) + "x"); }
 			CHECK(false_positives < 200);  // about 1/256 for an 8-bit filter
-			// The keys reader's find and scan (L3), through call-time deps.
+			// The keys reader's find, and its scan from a lower bound (F8) against a brute-force
+			// model, from many bounds and with early stops; the dictionary holds no key.
 			const auto& kr = s.get<strata::keys_plugin>();
-			const auto deps = s.deps<strata::keys_plugin>();
 			std::vector<std::uint64_t> deleted((docs + 63) / 64, 0);
 			deleted[0] |= 1;
-			CHECK(kr.find(keys[0], {}, deps) == strata::ordinal_t(0));
-			CHECK(!kr.find(keys[0], {deleted.data()}, deps));
-			CHECK(!kr.find("Qk", {}, deps));
-			std::vector<std::pair<std::string, strata::ordinal_t>> seen, expect;
+			CHECK(kr.find(keys[0], {}) == strata::ordinal_t(0));
+			CHECK(!kr.find(keys[0], {deleted.data()}));
+			CHECK(!kr.find("Qk", {}));
+			CHECK(kr.key_count() == docs);
+			CHECK(!s.get<strata::inverted_plugin>().find_term(keys[0]));
+			std::vector<std::pair<std::string, strata::ordinal_t>> expect;
 			for (std::size_t d = 0; d < docs; ++d) { expect.push_back({keys[d], strata::ordinal_t(d)}); }
 			std::sort(expect.begin(), expect.end());
-			kr.scan("Qk", deps, [&](std::string_view k, strata::ordinal_t o) {
-				seen.push_back({std::string(k), o});
-				return true;
-			});
-			CHECK(seen == expect);
-			std::size_t calls = 0;
-			kr.scan("Qk", deps, [&](std::string_view, strata::ordinal_t) { return ++calls < 2; });
-			CHECK(calls == std::min<std::size_t>(docs, 2));
+			std::vector<std::string> bounds{"", "A", "Q", "Qk", "Qk5", "Z", "\xff"};
+			for (std::size_t d = 0; d < docs; d += 1 + docs / 40) {
+				bounds.push_back(keys[d]);
+				bounds.push_back(keys[d] + '\0');
+				bounds.push_back(keys[d].substr(0, keys[d].size() - 1));
+			}
+			for (const auto& from : bounds) {
+				for (std::size_t stop : {std::size_t(1), std::size_t(3), ~std::size_t(0)}) {
+					std::vector<std::pair<std::string, strata::ordinal_t>> seen, want;
+					for (const auto& e : expect) {
+						if (e.first >= from && want.size() < stop) { want.push_back(e); }
+					}
+					kr.scan(from, [&](std::string_view k, strata::ordinal_t o) {
+						seen.push_back({std::string(k), o});
+						return seen.size() < stop;
+					});
+					CHECK(seen == want);
+				}
+			}
 		}
 		// A docid that does not increase is refused at add.
 		strata::segment_writer w;
@@ -555,7 +571,7 @@ int main() {
 			id += 1 + d % 5;
 			const std::string key = "Qk" + std::to_string(id);
 			std::vector<std::uint32_t> none, one{1};
-			std::vector<strata::posting_input> in{{key, 0, none}, {"w", 1, one}};
+			std::vector<strata::posting_input> in{{"w", 1, one}};
 			kw.add(id, in, 1, "r", 1 + d % 7, key);
 		}
 		const std::string keyed = kw.flush({});
@@ -580,8 +596,10 @@ int main() {
 		CHECK(!opens(refooter([&](auto& f) { f.toc_offset = body + 1; })));
 		CHECK(!opens(refooter([&](auto& f) { f.toc_length = body - f.toc_offset + 1; })));
 		CHECK(!opens(refooter([&](auto& f) { --f.toc_length; })));
-		// stats: not 28 bytes.
-		CHECK(!opens(with_section(keyed, section::stats, section_of(keyed, section::stats).substr(0, 27))));
+		// stats: the count alone, 8 bytes (F7); term_index: its 20 bytes of statistics first.
+		CHECK(!opens(with_section(keyed, section::stats, section_of(keyed, section::stats).substr(0, 7))));
+		CHECK(!opens(with_section(keyed, section::stats, section_of(keyed, section::stats) + std::string(20, '\0'))));
+		CHECK(!opens(with_section(keyed, section::term_index, section_of(keyed, section::term_index).substr(0, 19))));
 		// Contiguous docids: size, base 0, base unlike the footer, and a range that wraps.
 		const std::string cd = section_of(plain, section::docids);
 		auto with_base = [&](std::uint64_t base) {
@@ -628,23 +646,75 @@ int main() {
 		CHECK(!opens(with_section(keyed, section::versions, with_versions(8, 65, 1))));
 		CHECK(!opens(with_section(keyed, section::versions, vs + "x")));
 		CHECK(!opens(with_section(keyed, section::versions, with_versions(0, ~std::uint64_t(0) - 2, 8))));
-		// Key filter: a length past the bytes, a broken filter, and min above max or empty.
-		const std::string pk = section_of(keyed, section::pk_filter);
-		auto key_filter = [&](std::string_view lo, std::string_view hi, std::string_view rest) {
-			std::string out;
-			out.push_back(char(lo.size()));
-			out += lo;
-			out.push_back(char(hi.size()));
-			out += hi;
-			return out + std::string(rest);
+		// key_index (F8): [count][min][max][filter][the key blocks' index]: a count above the
+		// documents, a length past the bytes, a broken filter, and min above max or empty.
+		const std::string ki = section_of(keyed, section::key_index);
+		const char* kp = ki.data();
+		const char* kend = kp + ki.size();
+		const std::uint64_t count = strata::format::get_leb(&kp, kend);
+		auto field = [&] {
+			const std::uint64_t n = strata::format::get_leb(&kp, kend);
+			std::string out(kp, std::size_t(n));
+			kp += n;
+			return out;
 		};
-		const std::size_t filter_at = 2 + std::size_t(std::uint8_t(pk[0])) + std::size_t(std::uint8_t(pk[1 + std::uint8_t(pk[0])]));
-		const std::string filter = pk.substr(filter_at);
-		CHECK(opens(with_section(keyed, section::pk_filter, key_filter("Qk101", "Qk9999", filter))));
-		CHECK(!opens(with_section(keyed, section::pk_filter, std::string("\x7f") + "Qk")));
-		CHECK(!opens(with_section(keyed, section::pk_filter, key_filter("Qk101", "Qk9999", "junk"))));
-		CHECK(!opens(with_section(keyed, section::pk_filter, key_filter("Qk9", "Qk1", filter))));
-		CHECK(!opens(with_section(keyed, section::pk_filter, key_filter("", "Qk1", filter))));
+		const std::string lo = field(), hi = field(), filter = field(), dict(kp, std::size_t(kend - kp));
+		auto key_index = [&](std::uint64_t n, std::string_view a, std::string_view b, std::string_view f) {
+			std::string out;
+			strata::format::put_leb(out, n);
+			for (auto v : {a, b, f}) {
+				strata::format::put_leb(out, v.size());
+				out += v;
+			}
+			return out + dict;
+		};
+		CHECK(count == 300 && !lo.empty() && lo < hi);
+		CHECK(opens(with_section(keyed, section::key_index, key_index(count, lo, hi, filter))));
+		CHECK(!opens(with_section(keyed, section::key_index, key_index(301, lo, hi, filter))));
+		CHECK(!opens(with_section(keyed, section::key_index, std::string("\x7f") + "Qk")));
+		CHECK(!opens(with_section(keyed, section::key_index, key_index(count, lo, hi, "junk"))));
+		CHECK(!opens(with_section(keyed, section::key_index, key_index(count, hi, lo, filter))));
+		CHECK(!opens(with_section(keyed, section::key_index, key_index(count, "", hi, filter))));
+		// A malformed key blocks' index (the FST) is damage, never std::invalid_argument (CR4).
+		{
+			std::string head = key_index(count, lo, hi, filter);
+			head.resize(head.size() - dict.size());
+			std::string flipped = dict;
+			flipped.back() ^= 0x5a;
+			for (const std::string& d : {dict.substr(0, dict.size() / 2), flipped, std::string("not an fst"), std::string()}) {
+				CHECK(!opens(with_section(keyed, section::key_index, head + d)));
+			}
+		}
+		// One key whose range has a minimum unlike its maximum (CR6, M2).
+		{
+			strata::segment_writer w1;
+			std::vector<std::uint32_t> one{1};
+			std::vector<strata::posting_input> in{{"w", 1, one}};
+			w1.add(5, in, 1, "r", 1, "Qk5");
+			const std::string single = w1.flush({});
+			const std::string k1 = section_of(single, section::key_index);
+			const char* q = k1.data();
+			const char* qend = q + k1.size();
+			std::string one_index;
+			strata::format::put_leb(one_index, strata::format::get_leb(&q, qend));
+			std::vector<std::string> parts;
+			for (int i = 0; i < 3; ++i) {
+				const std::uint64_t n = strata::format::get_leb(&q, qend);
+				parts.emplace_back(q, std::size_t(n));
+				q += n;
+			}
+			CHECK(parts[0] == "Qk5" && parts[1] == "Qk5");
+			auto with_range = [&](std::string_view a, std::string_view b) {
+				std::string out = one_index;
+				for (std::string_view v : {a, b, std::string_view(parts[2])}) {
+					strata::format::put_leb(out, v.size());
+					out += v;
+				}
+				return with_section(single, section::key_index, out + std::string(q, qend));
+			};
+			CHECK(opens(with_range("Qk5", "Qk5")));
+			CHECK(!opens(with_range("Qk5", "Qk6")));
+		}
 	}
 	// C13: decoders reached with crafted bytes: term-info ranges that wrap, impact lists
 	// whose sizes, counts, or ends disagree, a stored index without frames or whose first
@@ -722,8 +792,9 @@ int main() {
 		for (std::uint32_t d = 0; d < 50; ++d) {
 			std::vector<std::uint32_t> none;
 			const std::string key = "Q" + std::to_string(d);
-			std::vector<strata::posting_input> in{{key, 0, none}};
-			kw.add(d + 1, in, 1, {}, 1, key);  // each key term is a single posting
+			const std::string term = "w" + std::to_string(d);  // outlives the posting's view
+			std::vector<strata::posting_input> in{{term, 1, none}};
+			kw.add(d + 1, in, 1, {}, 1, key);  // each term is a single posting
 		}
 		const std::string singles = kw.flush({});
 		CHECK(!throws_corrupt([&] { read_all(singles); }));

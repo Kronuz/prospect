@@ -1,6 +1,6 @@
-// Fixtures pinning format 12's bytes and the index digest before the layers refactor
-// (layers.md, L14 step 0): every refactor step must reproduce them exactly. Regenerate
-// only for an intended format change: STRATA_WRITE_FIXTURES=1 fixtures_test.
+// Fixtures pinning format 13's bytes and the index digest (format-13.md F22): every commit must
+// reproduce them exactly. Regenerate only for an intended format change:
+// STRATA_WRITE_FIXTURES=1 fixtures_test.
 #include "strata/faultfs.hh"
 #include "strata/index.hh"
 #include "strata/merge.hh"
@@ -61,15 +61,13 @@ static std::uint32_t terms_of(std::uint32_t d, std::vector<std::vector<std::uint
 static std::string build(std::uint32_t docs, std::size_t stored, bool keyed, bool wide = false, std::uint32_t first = 1, std::uint32_t step = 1) {
 	segment_writer w;
 	w.wide_skip_offsets = wide;
+	if (!keyed) { w.structures &= ~format::bit::keys; }  // keyless: no keys structure (F4, F9)
 	std::vector<std::vector<std::uint32_t>> pos;
 	std::vector<posting_input> in;
 	for (std::uint32_t d = 0; d < docs; ++d) {
 		std::uint32_t length = terms_of(d, pos, in);
 		std::string key;
-		if (keyed) {
-			key = "Q" + std::to_string(first + d * step);
-			in.push_back({key, 0, {}});
-		}
+		if (keyed) { key = "Q" + std::to_string(first + d * step); }  // the document's key, not a term (F8)
 		if (in.empty()) {
 			pos[0] = {1};
 			in.push_back({words[0], 1, pos[0]});
@@ -77,7 +75,7 @@ static std::string build(std::uint32_t docs, std::size_t stored, bool keyed, boo
 		}
 		std::string record;
 		for (std::size_t i = 0; i < stored; ++i) { record.push_back(char('a' + (d + i) % 26)); }
-		w.add(first + d * step, in, length, record, 1 + d % 3, key);
+		w.add(first + d * step, in, length, record, keyed ? 1 + d % 3 : 0, key);  // a version belongs to a key (F9)
 	}
 	return w.flush(id);
 }
@@ -112,6 +110,13 @@ int main() {
 	pin("stored-frames.sx", build(300, 1000, true));
 	// No keys: no key filter section.
 	pin("keyless.sx", build(200, 0, false));
+	// The document profile (L12): keys and stored records, no inverted structure (F4).
+	{
+		segment_writer w;
+		w.structures = format::bit::keys | format::bit::stored;
+		for (std::uint32_t d = 0; d < 150; ++d) { w.add(d + 1, {}, 0, "record " + std::to_string(d), 1 + d % 3, "Q" + std::to_string(d)); }
+		pin("document.sx", w.flush(id));
+	}
 	// Wide skip offsets.
 	pin("wide-skips.sx", build(5000, 0, true, true));
 	// A two-segment merge, and one with deletes in both inputs.
@@ -137,7 +142,7 @@ int main() {
 		CHECK(moved.get<strata::keys_plugin>().may_hold("Q7") && moved.get<strata::keys_plugin>().version(6) == 1 + 6 % 3);
 		CHECK(moved.get<strata::stored_plugin>().stored(5).size() == 1000);
 		moved.verify_all();
-		// Presence is per segment (L11): a format-12 segment holds every plugin of its layout.
+		// Presence is per segment (L11): this segment holds every plugin of its layout.
 		CHECK(moved.holds<strata::inverted_plugin>() && moved.holds<strata::keys_plugin>() && moved.holds<strata::stored_plugin>());
 		CHECK(!moved.holds<outside_plugin>());
 		CHECK(docs_if_held<strata::inverted_plugin>(moved) == 300 && docs_if_held<outside_plugin>(moved) == 0);
@@ -167,7 +172,7 @@ int main() {
 				for (std::uint32_t p = 0; p < x.terms.back().wdf; ++p) { x.terms.back().positions.push_back(1 + k + 7 * p); }
 				x.length += x.terms.back().wdf;
 			}
-			x.terms.push_back({"Q" + std::to_string(d % 50), 0, {}});
+			x.key = "Q" + std::to_string(d % 50);
 			x.stored = "doc" + std::to_string(d);
 			return x;
 		};

@@ -55,7 +55,7 @@ static void run_merge(strata::index& ix, const step& s) {
 static document make_doc(std::mt19937_64& r, const std::string& key) {
 	static const char* words[] = {"the", "of", "lord", "rings", "garden", "eden", "time", "kids"};
 	document d;
-	if (!key.empty()) { d.terms.push_back({key, 0, {}}); }
+	d.key = key;
 	std::set<std::string> used;
 	const std::size_t n = 1 + r() % 4;
 	std::uint32_t pos = 0;
@@ -133,8 +133,16 @@ int main() {
 		keyed.reorder_settings.bisection.min_partition = 4;
 	}
 	// T2: replays under different schedules agree on verdicts and digests, the digest after
-	// every transaction included (the first ten seeds).
-	for (std::uint64_t seed = 0; seed < 40; ++seed) {
+	// every transaction included (the first ten seeds); over a keyed index, and over a
+	// keyless one, whose documents keep version 0 however flushes fall (F9, F13-R18).
+	const index::options keyless = [&] {
+		index::options o = keyed;
+		o.key_prefix.clear();
+		return o;
+	}();
+	for (int profile = 0; profile < 2; ++profile)
+	for (std::uint64_t seed = 0; seed < (profile ? 10u : 40u); ++seed) {
+		const index::options& opts = profile ? keyless : keyed;
 		const auto w = workload(seed, 200);
 		std::vector<std::vector<std::uint64_t>> verdicts[3];
 		std::vector<std::uint64_t> trace[3];  // the digest after every transaction (D12)
@@ -142,7 +150,7 @@ int main() {
 		for (int schedule = 0; schedule < 3; ++schedule) {
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
-			auto ix = index::create(io, keyed, uuid_a);
+			auto ix = index::create(io, opts, uuid_a);
 			std::uint64_t at = 0;
 			for (const auto& s : w) {
 				if (s.type == step::merge) {
@@ -167,7 +175,7 @@ int main() {
 				ix.commit();
 				CHECK(ix.digest() == digests[2]);
 				ix.close();
-				ix = index::open(io, keyed);
+				ix = index::open(io, opts);
 				CHECK(ix.digest() == digests[2]);
 				CHECK(ix.manifest().applied == files::position({at, 1}));
 			}

@@ -31,7 +31,7 @@ struct basic_merge_source {
 	const std::vector<std::uint64_t>* deleted = nullptr;  // bit per ordinal; null: none deleted
 	bool live(ordinal_t o) const { return live_bits{deleted ? deleted->data() : nullptr}.live(o); }
 };
-using merge_source = basic_merge_source<search_layout_12>;
+using merge_source = basic_merge_source<search_layout>;
 
 // A document of a merge's sources: which source, and its ordinal there.
 struct merge_ref {
@@ -53,7 +53,7 @@ struct merge_input {
 	bool live(ordinal_t o) const { return live_bits{deleted ? deleted->data() : nullptr}.live(o); }
 };
 
-// A source's live documents' keys, by ordinal (format 12 collects them with `scan`).
+// A source's live documents' keys, by ordinal, from the keys reader's `scan` (F8).
 using key_map = std::unordered_map<ordinal_t, std::string>;
 
 // What the core hands every plugin's merge (L6): the output's documents in output order.
@@ -63,11 +63,13 @@ struct merge_context {
 	std::span<const merge_input> inputs;
 	std::span<const merge_ref> order;         // [new ordinal] = its source
 	std::span<const std::uint64_t> docids;    // [new ordinal] = its docid
-	std::span<const key_map> keys;            // format 12: [input] each live document's key
+	std::span<const key_map> keys;            // [input] each live document's key
 	bool docid_order = true;                  // false when the output is reordered (P1)
 	const task::cancel_token* cancel = nullptr;
 	flush_charge* memory = nullptr;           // the merge's working memory, when budgeted
 	scratch* records = nullptr;               // out of docid order: where stored records spill
+	std::string_view key_prefix;              // the index's, for the inverted builder's backstop (F8)
+	std::uint32_t structures = ~std::uint32_t(0);  // the output's configured bits (F4)
 	void check() const {
 		if (cancel && cancel->requested()) { throw task::cancelled{}; }
 	}
@@ -81,6 +83,8 @@ struct merge_context {
 inline built inverted_plugin::merge(const merge_context& m, std::span<const reader* const> in, section_sink& sink) {
 	inverted_builder b;
 	b.memory = m.memory;
+	b.key_prefix = m.key_prefix;
+	b.norms = (m.structures & format::bit::norms) != 0;
 	for (const auto& src : m.order) { (void)b.begin(in[src.source]->length(src.ord)); }
 	std::deque<reader::term_cursor> terms;
 	std::vector<bool> more(in.size());
@@ -153,7 +157,7 @@ inline built inverted_plugin::merge(const merge_context& m, std::span<const read
 			return std::string_view(current);
 		}
 	});
-	return {1, b.legacy_stats()};
+	return {format::bit::inverted | (b.norms ? format::bit::norms : 0)};
 }
 
 // Rebuilt per new ordinal: its docid, its input's version, and its key.
@@ -167,7 +171,7 @@ inline built keys_plugin::merge(const merge_context& m, std::span<const reader* 
 		b.add(f);
 	}
 	b.finish(sink);
-	return {1, {}};
+	return {format::bit::keys};
 }
 
 // Rebuilt record by record in output order. In docid order each input's frames are read
@@ -219,7 +223,7 @@ inline built stored_plugin::merge(const merge_context& m, std::span<const reader
 		b.add(rec);
 	}
 	b.finish(sink);
-	return {1, {}};
+	return {format::bit::stored};
 }
 
 // Where a reordering merge's order comes from (L6, reordering review P1-R4 (d)): a layout
@@ -238,7 +242,8 @@ struct merge_options {
 	std::span<const merge_ref> order;            // [new ordinal] = the source document; empty: docid order, but
 	                                             // a single source out of docid order keeps its order
 	scratch* records = nullptr;                  // out of docid order: where each source's live records spill
-	std::string_view key_prefix;                 // format 12: the key terms' prefix (empty: none)
+	std::string_view key_prefix;                 // the index's, only for the inverted builder's backstop (F8)
+	std::uint32_t structures = ~std::uint32_t(0);  // the index's configured bits (F4); default: every one of the layout's
 };
 
 namespace detail {
@@ -248,7 +253,6 @@ template <class... Entries>
 merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> sources, const std::array<std::uint8_t, 16>& segment_id, output& out,
 	spill& positions_spill, const merge_options& options) {
 	using segment_type = basic_segment<layout<Entries...>>;
-	const std::string_view key_prefix = options.key_prefix;
 	const std::uint8_t region_shift = options.region_shift;
 	const task::cancel_token* const cancel = options.cancel;
 	flush_charge* const memory = options.memory;
@@ -263,20 +267,18 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 	check();
 	merge_plan plan;
 	plan.ordinals.resize(sources.size());
-	// Each live document's key, if any, from the keys reader (L3).
+	// Each live document's key, if any, from the keys reader's scan from the empty key (L3).
 	std::vector<key_map> keys(sources.size());
 	if constexpr (keyed) {
-		if (!key_prefix.empty()) {
-			for (std::size_t s = 0; s < sources.size(); ++s) {
-				const segment_type& seg = *sources[s].seg;
-				seg.template get<keys_plugin>().scan(key_prefix, seg.template deps<keys_plugin>(), [&](std::string_view key, ordinal_t o) {
-					if (sources[s].live(o)) {
-						keys[s][o] = std::string(key);
-						charge(64 + key.size());  // a map node and its key
-					}
-					return true;
-				});
-			}
+		for (std::size_t s = 0; s < sources.size(); ++s) {
+			const segment_type& seg = *sources[s].seg;
+			seg.template get<keys_plugin>().scan("", [&](std::string_view key, ordinal_t o) {
+				if (sources[s].live(o)) {
+					keys[s][o] = std::string(key);
+					charge(64 + key.size());  // a map node and its key
+				}
+				return true;
+			});
 		}
 	}
 	// Documents in docid order.
@@ -348,30 +350,33 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 	m.cancel = cancel;
 	m.memory = memory;
 	m.records = options.records;
+	m.key_prefix = options.key_prefix;
+	m.structures = options.structures;
 
-	section_sink sink(out, region_shift, &positions_spill);
+	section_sink sink(out, region_shift, &positions_spill, memory);
 	begin_segment(sink, segment_id);
-	std::string legacy_stats;
+	std::uint32_t structures = 0;
 	auto merge_entry = [&]<class E>(std::type_identity<E>) {
-		if constexpr (std::is_same_v<E, docids_section>) {
-			write_docids(sink, memory, docids);
-		} else {
+		{
+			if (!(options.structures & E::structure)) { return; }  // not configured: none of its sections (F4)
 			std::vector<const typename E::reader*> readers;
 			readers.reserve(sources.size());
 			for (const auto& src : sources) { readers.push_back(&src.seg->template get<E>()); }
 			built b = E::merge(m, readers, sink);
-			if (!b.legacy_stats.empty()) { legacy_stats = std::move(b.legacy_stats); }
+			structures |= b.structures;
 		}
 	};
 	(merge_entry(std::type_identity<Entries>{}), ...);
-	finish_segment(sink, docids, legacy_stats);
+	write_docids(sink, memory, docids);  // the core's, in the tail by rank (F5); after the plugins, off their peak (CR8)
+	finish_segment(sink, docids, structures);
 	return plan;
 }
 
 }  // namespace detail
 
-// Writes the merge of `sources` to sink (positions through spill). `key_prefix` names the
-// documents' key terms, which the result's key filter covers. Throws std::logic_error if
+// Writes the merge of `sources` to sink (positions through spill). Each live document keeps
+// its key, from the keys reader; `key_prefix` is the index's, for the inverted builder's
+// backstop (F8). Throws std::logic_error if
 // two live documents share a docid. With `cancel`, it throws task::cancelled when asked.
 // Stored records are read a frame at a time per source; out of docid order, `records`
 // (when given) takes each source's live records, every frame decoded once, and the output

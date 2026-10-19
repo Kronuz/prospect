@@ -25,12 +25,11 @@ static_assert(residency::backend<residency::sync_backend>);
 // The layers' plugins (layers.md L4) and format 13's document profile (L12) against a stub
 // keys plugin that depends on nothing, until format 13's keys plugin exists.
 static_assert(strata::section_plugin<strata::inverted_plugin> && strata::section_plugin<strata::keys_plugin> && strata::section_plugin<strata::stored_plugin>);
-static_assert(!strata::section_plugin<strata::docids_section>);
 struct stub_keys {
 	static constexpr std::string_view id = "keys";
-	static constexpr strata::section_rule rules[] = {
-		{strata::format::section::versions, strata::section_rule::pinned, strata::section_rule::with_plugin},
-	};
+	static constexpr strata::format::owner owner = strata::format::owner::keys;
+	static constexpr std::uint32_t structure = strata::format::bit::keys;
+	static constexpr std::uint32_t structures = strata::format::bit::keys;
 	struct reader {
 		explicit reader(const strata::open_context&) {}
 		void verify_all() const {}
@@ -38,10 +37,15 @@ struct stub_keys {
 	static strata::built merge(const strata::merge_context&, std::span<const reader* const>, strata::section_sink&);
 };
 static_assert(strata::section_plugin<stub_keys>);
+// A plugin's own bit must be one of its bits, and exactly one bit.
+struct stub_two_bits : stub_keys {
+	static constexpr std::uint32_t structure = strata::format::bit::keys | strata::format::bit::stored;
+};
+static_assert(!strata::section_plugin<stub_two_bits>);
 using document_layout = strata::layout<stub_keys, strata::stored_plugin>;
 template struct strata::basic_document<document_layout>;
 template class strata::basic_segment<document_layout>;
-static_assert(sizeof(strata::basic_document<document_layout>) == sizeof(strata::stored_plugin::part));
+static_assert(sizeof(strata::basic_document<document_layout>) == sizeof(strata::core_part) + sizeof(strata::stored_plugin::part));
 
 int main() {
 	docset::sorted_set s(100, {1, 5, 9});

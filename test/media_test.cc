@@ -29,7 +29,7 @@ static const std::array<char, 16> uuid = {'s', 't', 'r', 'a', 't', 'a', '-', 'm'
 static operation add(const std::string& key, const std::string& body) {
 	operation o;
 	o.type = operation::add;
-	o.doc.terms.push_back({key, 0, {}});
+	o.doc.key = key;
 	std::uint32_t pos = 0;
 	for (std::size_t i = 0; i < body.size(); i += 3) { o.doc.terms.push_back({body.substr(i, 3), 1, {++pos}}); }
 	o.doc.length = pos;
@@ -98,7 +98,14 @@ int main() {
 	for (const auto& name : names) {
 		const std::uint64_t size = fs.view(name).size();
 		const std::uint64_t stride = std::max<std::uint64_t>(1, size / 48);
+		// A segment's frozen prefix byte by byte (format-13.md F2), then a stride over the rest.
+		const std::uint64_t prefix = name.starts_with("seg-") ? std::min<std::uint64_t>(strata::format::prefix_size, size) : 0;
+		std::vector<std::uint64_t> offsets;
+		for (std::uint64_t at = 0; at < prefix; ++at) { offsets.push_back(at); }
 		for (std::uint64_t at = 0; at < size; at += stride) {
+			if (at >= prefix) { offsets.push_back(at); }
+		}
+		for (const std::uint64_t at : offsets) {
 			for (faultfs::media kind : {faultfs::media::bit_flip, faultfs::media::read_error}) {
 				// Transient: the medium returns the right bytes on the next read.
 				fs.clear_faults();
@@ -130,7 +137,7 @@ int main() {
 						CHECK(*d == reference);  // never a wrong answer
 						++sticky_unread;
 					}
-					// A merge reads the key terms and every posting: it fails only as corruption
+					// A merge reads every key and every posting: it fails only as corruption
 					// (condition 16), never with another library's error.
 					try {
 						ix.force_merge(1);

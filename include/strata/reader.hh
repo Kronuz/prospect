@@ -34,6 +34,7 @@
 #include "residency.hh"
 #include "strata/docids.hh"
 #include "strata/format.hh"
+#include "strata/keys.hh"
 #include "strata/section_io.hh"
 #include "termdict.hh"
 
@@ -45,7 +46,9 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -63,7 +66,29 @@ using docset::no_more_docs;
 
 // What stage-1 checks may consult (L4); Phase 4 adds the slot table.
 struct validate_context {
-	std::string_view key_prefix;  // the index's (R13)
+	std::string_view key_prefix;  // the index's (F8); empty in a keyless index
+};
+
+// One digest record (L8): a tag, then little-endian fixed-width fields; strings carry their
+// length as u32.
+class digest_record {
+public:
+	explicit digest_record(char tag) : rec_(1, tag) {}
+	void u32(std::uint32_t v) { format::put<std::uint32_t>(rec_, v); }
+	void u64(std::uint64_t v) { format::put<std::uint64_t>(rec_, v); }
+	void bytes(std::string_view b) {
+		u32(std::uint32_t(b.size()));
+		rec_ += b;
+	}
+	std::string_view data() const noexcept { return rec_; }
+
+private:
+	std::string rec_;
+};
+
+// The core's fields of a document (L10): its key, empty for none (F8).
+struct core_part {
+	std::string key;
 };
 
 // One term of a document as the host builds it; terms are unique within a document.
@@ -147,52 +172,46 @@ struct live_bits {
 	const std::uint64_t* deleted = nullptr;
 	bool live(ordinal_t o) const noexcept { return !deleted || !((deleted[o >> 6] >> (o & 63)) & 1); }
 };
-// Format 12 only: where the core's docids section sits between plugins in file order.
-struct docids_section {};
 struct inverted_plugin;
 struct keys_plugin;
 struct merge_context;
 struct stored_plugin;
-using search_layout_12 = layout<inverted_plugin, docids_section, keys_plugin, stored_plugin>;
+using search_layout = layout<inverted_plugin, keys_plugin, stored_plugin>;
 
 template <class Layout>
 class basic_segment;
-using segment = basic_segment<search_layout_12>;
+using segment = basic_segment<search_layout>;
 
-// The core of an open segment (L7): the footer, table of contents, and header; every
+// The core of an open segment (L7): the prefix first (F2), then the footer, table of
+// contents, and header; the structure bits against those this binary reads (F4); every
 // pinned section's checksum; stats' document count; docids; and the one verified-region
 // state that every regions-checked section shares.
 class core_segment {
 public:
-	core_segment(std::string_view file, std::span<const section_rule> rules) : file_(file) {
+	core_segment(std::string_view file, std::uint32_t readable) : file_(file) {
+		version_ = format::read_version(file);
 		footer_ = format::decode_footer(file);
+		format::classify_structures(footer_.structures, readable);  // before the table (F13-R35)
 		sections_ = format::decode_toc(file, footer_);
-		if (sections_.empty() || sections_[0].kind != format::section::header || sections_[0].offset != 0 ||
-			sections_[0].length != format::header_size) {
-			corrupt("header entry");
-		}
-		if (std::memcmp(file.data(), format::header_magic, 8) != 0 || format::get<std::uint32_t>(file.data() + 8) != format::version) {
-			corrupt("header magic or version");
-		}
-		// Kinds no rule claims are left alone in format 12, as before the split (decode_toc
-		// rejects a kind listed twice).
+		if (format::get<std::uint32_t>(file.data() + 16) != 0) { corrupt("header flags"); }
+		format::check_presence(sections_, footer_.structures);
+		// Each regions-checked section's CRCs move to its span; others are dropped. The
+		// table's rank order makes every kind appear at most once.
 		std::vector<residency::verified_regions::span> spans;
-		// Each regions-checked section's CRCs move to its span; others are dropped.
 		for (auto& e : sections_) {
-			const section_rule* r = rule_of(rules, e.kind);
-			if (r && r->check == section_rule::regions) {
+			const format::check c = format::rule_of(e.kind)->verify;
+			if (c == format::check::regions) {
 				spans.push_back({e.offset, e.length, e.region_shift, std::move(e.region_crcs)});
 			} else {
 				std::vector<std::uint32_t>().swap(e.region_crcs);
 			}
-			if (!r) { continue; }
-			if (r->check == section_rule::pinned) {
+			if (c == format::check::pinned) {
 				if (hashes::crc32c(file.data() + e.offset, e.length) != e.crc) { corrupt("section checksum"); }
 			}
 			if (e.kind == format::section::docids) { docids_ = file.substr(e.offset, e.length); }
 			if (e.kind == format::section::stats) { stats_ = file.substr(e.offset, e.length); }
 		}
-		if (stats_.size() != 28) { corrupt("stats"); }
+		if (stats_.size() != 8) { corrupt("stats"); }
 		doc_count_ = format::get<std::uint64_t>(stats_.data());
 		if (doc_count_ != footer_.doc_count) { corrupt("document count"); }
 		std::sort(spans.begin(), spans.end(), [](const auto& a, const auto& b) { return a.offset < b.offset; });
@@ -205,12 +224,8 @@ public:
 		validate_docids();
 	}
 
-	// The core's own sections, all verified whole at open.
-	static constexpr section_rule rules[] = {
-		{format::section::header, section_rule::pinned, section_rule::with_plugin},
-		{format::section::docids, section_rule::pinned, section_rule::with_plugin},
-		{format::section::stats, section_rule::pinned, section_rule::with_plugin},
-	};
+	// The structure bits the core reads (F4): none until index_sort's reader (F18).
+	static constexpr std::uint32_t reads = 0;
 
 	// The handle for a section, or an empty one when the segment lacks it.
 	section_handle section(format::section kind) const {
@@ -227,6 +242,9 @@ public:
 	}
 
 	std::uint64_t doc_count() const noexcept { return doc_count_; }
+	std::uint32_t version() const noexcept { return version_; }
+	// The footer's structure bits (F4).
+	std::uint32_t structures() const noexcept { return footer_.structures; }
 	std::string_view stats() const noexcept { return stats_; }
 	const std::vector<format::section_entry>& sections() const noexcept { return sections_; }
 	std::uint64_t min_docid() const noexcept { return footer_.min_docid; }
@@ -241,12 +259,6 @@ public:
 	bool docid_ordered() const noexcept { return ids_.docid_ordered(); }
 
 private:
-	static const section_rule* rule_of(std::span<const section_rule> rules, format::section kind) {
-		for (const auto& r : rules) {
-			if (r.kind == kind) { return &r; }
-		}
-		return nullptr;
-	}
 	// docids: see docids.hh; validated whole at open.
 	void validate_docids() { ids_ = docids::reader(docids_, doc_count_, footer_.min_docid, footer_.max_docid); }
 
@@ -259,13 +271,16 @@ private:
 	std::vector<format::section_entry> sections_;
 	std::unique_ptr<shared> regions_ = std::make_unique<shared>();  // stable address for handles
 	std::uint64_t doc_count_ = 0;
+	std::uint32_t version_ = 0;
 };
 
-// What a plugin reader's constructor sees (L7).
+// What a plugin reader's constructor sees (L7): `present` is its structure bit, which the
+// core read from the footer before any reader opened.
 struct open_context {
 	std::uint32_t version;
 	std::uint64_t doc_count;
 	const core_segment& core;
+	bool present = true;
 	section_handle section(format::section kind) const { return core.section(kind); }
 };
 
@@ -275,8 +290,8 @@ struct inverted_plugin {
 
 	// What a document carries for it (L10). `tokens` index `text` in order, positions
 	// strictly increasing; each adds one to its term's wdf and its position to the term's
-	// positions. A term is in `terms` or among the tokens, not both, and the key is in
-	// `terms`. With `split_text`, `tokens` is empty, `length` is 0, and the text's words
+	// positions. A term is in `terms` or among the tokens, not both; the key is the core's
+	// (F8). With `split_text`, `tokens` is empty, `length` is 0, and the text's words
 	// (maximal runs of bytes other than ' ') are its tokens at positions 1, 2, ...; the
 	// index counts them as its length.
 	struct part {
@@ -287,7 +302,8 @@ struct inverted_plugin {
 		bool split_text = false;
 	};
 	// Stage-1 checks (D10): terms non-empty, within the term limit, unique, positions
-	// increasing; tokens in bounds and increasing, none with the key prefix or equal to a term.
+	// increasing, none with the index's key prefix, which names keys (F8); tokens in bounds
+	// and increasing, none with the key prefix or equal to a term.
 	static bool validate(const validate_context& vc, const part& p) {
 		thread_local std::vector<std::string_view> terms;  // sorted, to find repeats
 		terms.clear();
@@ -295,11 +311,12 @@ struct inverted_plugin {
 		const std::string_view prefix = vc.key_prefix;
 		for (const auto& t : p.terms) {
 			if (t.term.empty() || t.term.size() > format::max_term_bytes) { return false; }
+			if (!prefix.empty() && t.term.starts_with(prefix)) { return false; }
 			for (std::size_t i = 1; i < t.positions.size(); ++i) {
 				if (t.positions[i] <= t.positions[i - 1]) { return false; }
 			}
 			terms.push_back(t.term);
-			if (prefix.empty() || !t.term.starts_with(prefix)) { firsts[std::uint8_t(t.term[0]) >> 6] |= std::uint64_t(1) << (std::uint8_t(t.term[0]) & 63); }
+			firsts[std::uint8_t(t.term[0]) >> 6] |= std::uint64_t(1) << (std::uint8_t(t.term[0]) & 63);
 		}
 		if (terms.size() > 1) {
 			std::sort(terms.begin(), terms.end());
@@ -367,21 +384,26 @@ struct inverted_plugin {
 		});
 		return ok;
 	}
-	static constexpr section_rule rules[] = {
-		{format::section::terms, section_rule::regions, section_rule::with_plugin},
-		{format::section::term_index, section_rule::pinned, section_rule::with_plugin},
-		{format::section::postings, section_rule::regions, section_rule::with_plugin},
-		{format::section::positions, section_rule::regions, section_rule::with_plugin},
-		{format::section::lengths, section_rule::first_use, section_rule::with_plugin},
-		{format::section::norms, section_rule::pinned, section_rule::with_plugin},
-	};
+	// The bytes of its statistics at the head of term_index (F7).
+	static constexpr std::size_t statistics_size = 20;
+	// Its sections are F3's rows owned by it; its bits are F4's (L4).
+	static constexpr format::owner owner = format::owner::inverted;
+	static constexpr std::uint32_t structure = format::bit::inverted;
+	static constexpr std::uint32_t structures = format::bit::inverted | format::bit::norms;
 
 	class reader {
 	public:
 		explicit reader(const open_context& c) : state_(std::make_unique<state>()), doc_count_(c.doc_count) {
-			const std::string_view stats = c.core.stats();
-			max_positions_ = format::get<std::uint32_t>(stats.data() + 24);
-			total_length_ = format::get<std::uint64_t>(stats.data() + 8);
+			if (!c.present) {
+				open_absent(c);
+				return;
+			}
+			// term_index: [total length u64][minimum length u32][maximum length u32][most
+			// positions u32], then the dictionary's index (F7), all under its section CRC.
+			const std::string_view term_index = c.section(format::section::term_index).bytes;
+			if (term_index.size() < statistics_size) { corrupt("term index statistics"); }
+			total_length_ = format::get<std::uint64_t>(term_index.data());
+			max_positions_ = format::get<std::uint32_t>(term_index.data() + 16);
 			state_->terms = c.section(format::section::terms);
 			postings_ = c.section(format::section::postings);
 			positions_ = c.section(format::section::positions);
@@ -389,15 +411,17 @@ struct inverted_plugin {
 			if (const auto* e = c.core.entry(format::section::lengths)) { lengths_crc_ = e->crc; }
 			if (const auto* e = c.core.entry(format::section::postings)) { postings_shift_ = e->region_shift; }
 			norms_ = c.section(format::section::norms).bytes;
+			// lengths' bytes, its width included, are read on first use only (F7, T7).
 			if (lengths_.empty()) { corrupt("lengths"); }
-			length_width_ = std::uint8_t(lengths_[0]);
-			if (length_width_ > 32 || lengths_.size() != 1 + (doc_count_ + 127) / 128 * bitpack::packed_bytes(length_width_)) {
-				corrupt("lengths size");
+			// Norms not built (F4) are derived from the exact lengths on first use, so an open
+			// reads no byte of lengths (T7; F13-R36).
+			if (c.core.structures() & format::bit::norms) {
+				if (norms_.size() != doc_count_) { corrupt("norms size"); }
+				norms_at_ = norms_.data();
 			}
-			if (norms_.size() != doc_count_) { corrupt("norms size"); }
 			// The term index is copied out of the mapping (verified at open), so later lookups
 			// never read bytes that could change or fault under the FST's unchecked traversal.
-			state_->pinned_index.assign(c.section(format::section::term_index).bytes);
+			state_->pinned_index.assign(term_index.substr(statistics_size));
 			try {
 				dict_.emplace(state_->terms.bytes, state_->pinned_index, &verify_terms, state_.get());  // validates the FST index
 			} catch (const termdict::corrupt&) {
@@ -407,7 +431,13 @@ struct inverted_plugin {
 			}
 		}
 
-		std::uint8_t norm(ordinal_t ord) const noexcept { return std::uint8_t(norms_[ord]); }
+		// A document's encode_length byte: the norms section's, or derived once from lengths
+		// when the segment has none, which throws corrupt_segment if lengths is damaged.
+		std::uint8_t norm(ordinal_t ord) const {
+			const char* n = norms_at_;
+			if (!n) [[unlikely]] { n = derived_norms(); }
+			return std::uint8_t(n[ord]);
+		}
 		void verify_postings(std::uint64_t offset, std::uint64_t length) const {
 			if (!postings_.verify(offset, length)) { corrupt("postings checksum"); }
 		}
@@ -423,7 +453,7 @@ struct inverted_plugin {
 		// section is verified whole on the first call (the default scheme reads norms only).
 		std::uint32_t length(ordinal_t ord) const {
 			if (state_->lengths_state.load(std::memory_order_acquire) != 1) [[unlikely]] { verify_lengths(); }
-			const unsigned w = length_width_;
+			const unsigned w = state_->length_width.load(std::memory_order_relaxed);
 			if (w == 0) { return 0; }
 			const char* block = lengths_.data() + 1 + std::size_t(ord / 128) * bitpack::packed_bytes(w);
 			const unsigned j = ord % 128, lane = j & 3, row = j >> 2;
@@ -532,72 +562,133 @@ struct inverted_plugin {
 		}
 
 	private:
+		const char* derived_norms() const {
+			if (!state_->norms_ready.load(std::memory_order_acquire)) {
+				std::lock_guard lock(state_->norms_mutex);
+				if (!state_->norms_ready.load(std::memory_order_relaxed)) {
+					std::string n(doc_count_, '\0');
+					for (ordinal_t o = 0; o < doc_count_; ++o) { n[o] = char(format::encode_length(length(o))); }
+					state_->owned_norms = std::move(n);
+					state_->norms_ready.store(true, std::memory_order_release);
+				}
+			}
+			return state_->owned_norms.data();
+		}
+		// Checks lengths whole on first use: its CRC, then its width against its size.
 		void verify_lengths() const {
 			auto& st = state_->lengths_state;
-			if (st.load(std::memory_order_acquire) == 0) { st.store(hashes::crc32c(lengths_.data(), lengths_.size()) == lengths_crc_ ? 1 : 2, std::memory_order_release); }
-			if (st.load(std::memory_order_acquire) != 1) { corrupt("lengths checksum"); }
+			if (st.load(std::memory_order_acquire) == 0) {
+				const unsigned w = std::uint8_t(lengths_[0]);
+				const bool good = hashes::crc32c(lengths_.data(), lengths_.size()) == lengths_crc_ && w <= 32 &&
+					lengths_.size() == 1 + (doc_count_ + 127) / 128 * bitpack::packed_bytes(w);
+				state_->length_width.store(std::uint8_t(w), std::memory_order_relaxed);
+				st.store(good ? 1 : 2, std::memory_order_release);
+			}
+			if (st.load(std::memory_order_acquire) != 1) { corrupt("lengths checksum or size"); }
 		}
 		static bool verify_terms(void* context, std::uint64_t offset, std::uint64_t length) {
 			return static_cast<state*>(context)->terms.verify(offset, length);
+		}
+		// A segment without the structure (F4): no terms, every length 0, norms 0, from
+		// owned stand-ins, so every read path stays the one it is.
+		void open_absent(const open_context& c) {
+			// Empty handles that still verify through the segment's region state.
+			state_->terms = c.section(format::section::terms);
+			postings_ = c.section(format::section::postings);
+			positions_ = c.section(format::section::positions);
+			auto tables = termdict::builder().finish();
+			state_->owned_blocks = std::move(tables.blocks);
+			state_->pinned_index = std::move(tables.index);
+			state_->owned_lengths.assign(1, '\0');  // width 0
+			lengths_ = state_->owned_lengths;
+			lengths_crc_ = hashes::crc32c(lengths_.data(), lengths_.size());
+			dict_.emplace(state_->owned_blocks, state_->pinned_index);
 		}
 		// Heap-held, so the dictionary's verifier context survives moving the segment.
 		struct state {
 			section_handle terms;
 			std::string pinned_index;  // the term index, copied out of the mapping
+			std::string owned_blocks, owned_lengths, owned_norms;  // stand-ins for absent sections
 			std::atomic<std::uint8_t> lengths_state{0};  // 0 unverified, 1 good, 2 bad
+			std::atomic<std::uint8_t> length_width{0};   // lengths' width, set by verify_lengths
+			std::mutex norms_mutex;                      // derives norms once, when not built
+			std::atomic<bool> norms_ready{false};
 		};
 		std::unique_ptr<state> state_;
 		section_handle postings_, positions_;
 		std::string_view lengths_, norms_;
+		const char* norms_at_ = nullptr;  // the norms section's bytes; null until derived
 		std::optional<termdict::reader> dict_;
 		std::uint64_t doc_count_ = 0, total_length_ = 0;
 		std::uint32_t max_positions_ = 0, lengths_crc_ = 0;
-		std::uint8_t length_width_ = 0, postings_shift_ = 0;
+		std::uint8_t postings_shift_ = 0;
 	};
 	// L6: rebuilds the plugin's sections for a merge's output (merge.hh).
 	static built merge(const merge_context& m, std::span<const reader* const> in, section_sink& sink);
+	// Its digest records (L8, F21): per document a length record, length 0 included, and per
+	// posting a P record; over a segment's live ordinals, or a buffered document.
+	template <class Live, class Emit>
+	static void records(const reader& r, const core_segment& core, Live&& live, Emit&& emit);
+	template <class Emit>
+	static void records(std::uint64_t docid, const part& p, Emit&& emit);
+	// A document's length record and a posting's record.
+	template <class Emit>
+	static void length_record(std::uint64_t docid, std::uint32_t length, Emit& emit) {
+		digest_record rec('N');
+		rec.u64(docid);
+		rec.u32(length);
+		emit(rec.data());
+	}
+	template <class Emit>
+	static void posting_record(std::uint64_t docid, std::string_view term, std::uint32_t wdf, std::span<const std::uint32_t> positions, Emit& emit) {
+		digest_record rec('P');
+		rec.u64(docid);
+		rec.bytes(term);
+		rec.u32(wdf);
+		rec.u32(std::uint32_t(positions.size()));
+		for (auto q : positions) { rec.u32(q); }
+		emit(rec.data());
+	}
 };
 
-// Versions and the key filter.
+// The document's key in its own dictionary (F8), and versions (F9).
 struct keys_plugin {
 	static constexpr std::string_view id = "keys";
 
-	// Format 12: a document's key is its one term with the index's key prefix (none
-	// without a prefix); `valid` turns false when it has two.
-	static std::optional<std::string> key_of(const validate_context& vc, const inverted_plugin::part& d, bool& valid) {
+	// A document's key is the core's field (L10), held exactly as given. A keyless index
+	// (no key prefix) refuses a document that carries one (F13-R39); with a prefix, a key
+	// that lacks it or passes the terms' limit is invalid (F13-R25 item 2, CR12).
+	static std::optional<std::string> key_of(const validate_context& vc, const core_part& d, bool& valid) {
 		valid = true;
-		const std::string_view prefix = vc.key_prefix;
-		if (prefix.empty()) { return std::nullopt; }
-		std::optional<std::string> key;
-		for (const auto& t : d.terms) {
-			if (t.term.starts_with(prefix)) {
-				if (key) { valid = false; }
-				key = t.term;
-			}
+		if (d.key.empty()) { return std::nullopt; }
+		if (vc.key_prefix.empty() || d.key.size() > format::max_term_bytes) {
+			valid = false;
+			return std::nullopt;
 		}
-		return key;
+		if (!d.key.starts_with(vc.key_prefix)) { valid = false; }
+		return d.key;
 	}
-	static constexpr section_rule rules[] = {
-		{format::section::versions, section_rule::pinned, section_rule::with_plugin},
-		{format::section::pk_filter, section_rule::pinned, section_rule::optional},
-	};
+	static constexpr format::owner owner = format::owner::keys;
+	static constexpr std::uint32_t structure = format::bit::keys;
+	static constexpr std::uint32_t structures = format::bit::keys;
 
-	// Format 12's keys are the inverted plugin's terms with the key prefix, so lookups read
-	// its reader, passed at each call (L3); no reader holds a sibling.
-	using depends_on = type_list<inverted_plugin>;
-	struct deps {
-		const inverted_plugin::reader& inverted;
-	};
+	// Keys are this plugin's own section, so its reader needs no other (L3).
+	using depends_on = type_list<>;
+	struct deps {};
 
 	class reader {
 	public:
-		explicit reader(const open_context& c) : versions_(c.section(format::section::versions).bytes), doc_count_(c.doc_count) {
+		explicit reader(const open_context& c)
+			: state_(std::make_unique<state>()), versions_(c.section(format::section::versions).bytes), doc_count_(c.doc_count) {
+			state_->keys = c.section(format::section::keys);  // empty when absent, verifying as any handle
+			if (!c.present) { return; }  // no keys; every version 0 (F4, F9)
 			validate_versions();
-			if (auto pk = c.section(format::section::pk_filter).bytes; !pk.empty()) { open_pk_filter(pk); }
+			keys_ = keys::reader(state_->keys.bytes, c.section(format::section::key_index).bytes, doc_count_, &verify_keys, state_.get());
 		}
 		// The document's version (0 when the segment's writer recorded none).
 		std::uint64_t version(ordinal_t ord) const {
 			if (ord >= doc_count_) { throw std::out_of_range("strata: ordinal out of range"); }
+			if (versions_.empty()) { return 0; }
 			const unsigned width = std::uint8_t(versions_[8]);
 			std::uint64_t v = 0;
 			for (unsigned b = 0; b < width; ++b) {
@@ -606,21 +697,31 @@ struct keys_plugin {
 			}
 			return format::get<std::uint64_t>(versions_.data()) + v;
 		}
-		void verify_all() const {}  // both sections are verified whole at open
-		// Whether the segment may hold a document with this key term: inside its key range
-		// and in its filter (false positives possible, false negatives not).
-		bool may_hold(std::string_view key) const {
-			if (!filter_) { return false; }
-			if (key < min_ || key > max_) { return false; }
-			return filter_->contains(xxh64::hash(key));
+		void verify_all() const {
+			if (!state_->keys.verify(0, state_->keys.bytes.size())) { corrupt("section checksum"); }
 		}
-		// The first live ordinal holding key, if any.
-		std::optional<ordinal_t> find(std::string_view key, live_bits live, const deps& d) const;
-		// Calls f(key, ord) for every ordinal, live or not, of every key starting with
-		// `prefix`, in key order, until f returns false. Format 12 cannot tell a key from
-		// another term, so `prefix` must start with the index's key prefix.
+		// Whether the segment may hold this key: inside its key range and in its filter
+		// (false positives possible, false negatives not).
+		bool may_hold(std::string_view key) const { return keys_.may_hold(key); }
+		// The key's ordinal, if the segment holds it and it is live.
+		std::optional<ordinal_t> find(std::string_view key, live_bits live) const { return find(key, live, xxh64::hash(key)); }
+		// The same with the key's hash, so a lookup across segments hashes once (CR7).
+		std::optional<ordinal_t> find(std::string_view key, live_bits live, std::uint64_t hash) const {
+			const auto ord = keys_.find(key, hash);
+			if (ord && !live.live(*ord)) { return std::nullopt; }
+			return ord;
+		}
+		// Calls f(key, ord) for every key >= from, in order, deleted copies included, until f
+		// returns false (F8; PLAN.md:47-48).
 		template <class F>
-		void scan(std::string_view prefix, const deps& d, F&& f) const;
+		void scan(std::string_view from, F&& f) const {
+			keys_.scan(from, std::forward<F>(f));
+		}
+		// The keys' count and range, and every key in order with its ordinal, checked as walked.
+		std::uint64_t key_count() const noexcept { return keys_.size(); }
+		std::string_view min_key() const noexcept { return keys_.min(); }
+		std::string_view max_key() const noexcept { return keys_.max(); }
+		keys::reader::cursor cursor() const { return keys::reader::cursor(keys_); }
 
 	private:
 		// versions: [min u64][width u8][packed bits]; exactly the bits doc_count needs, and no
@@ -634,24 +735,15 @@ struct keys_plugin {
 				corrupt("versions");
 			}
 		}
-		// pk_filter: the smallest and largest key, then the fuse filter.
-		void open_pk_filter(std::string_view pk) {
-			const char* p = pk.data();
-			const char* end = p + pk.size();
-			auto bytes = [&] {
-				const std::uint64_t n = format::get_leb(&p, end);
-				if (n > std::uint64_t(end - p)) { corrupt("pk_filter"); }
-				std::string_view out(p, n);
-				p += n;
-				return out;
-			};
-			min_ = bytes();
-			max_ = bytes();
-			filter_ = fusefilter::filter8_view::parse(std::string_view(p, std::size_t(end - p)));  // reads the mapping in place
-			if (!filter_ || min_ > max_ || min_.empty()) { corrupt("pk_filter"); }
+		static bool verify_keys(void* context, std::uint64_t offset, std::uint64_t length) {
+			return static_cast<state*>(context)->keys.verify(offset, length);
 		}
-		std::string_view versions_, min_, max_;
-		std::optional<fusefilter::filter8_view> filter_;
+		struct state {  // heap-held, so the dictionary's verifier context survives a move
+			section_handle keys;
+		};
+		std::unique_ptr<state> state_;
+		std::string_view versions_;
+		keys::reader keys_;
 		std::uint64_t doc_count_;
 	};
 	// L6: rebuilds the plugin's sections for a merge's output (merge.hh).
@@ -668,9 +760,9 @@ struct stored_plugin {
 	static bool validate(const validate_context&, const part& p) { return p.stored.size() <= format::max_stored_record; }
 	static std::uint64_t bytes(const part& p) { return p.stored.size(); }
 	static std::uint64_t disk_estimate(const part& p) { return p.stored.size() + p.stored.size() / 16; }
-	static constexpr section_rule rules[] = {
-		{format::section::stored, section_rule::regions, section_rule::with_plugin},
-	};
+	static constexpr format::owner owner = format::owner::stored;
+	static constexpr std::uint32_t structure = format::bit::stored;
+	static constexpr std::uint32_t structures = format::bit::stored;
 
 	class reader {
 	public:
@@ -774,6 +866,26 @@ struct stored_plugin {
 	};
 	// L6: rebuilds the plugin's sections for a merge's output (merge.hh).
 	static built merge(const merge_context& m, std::span<const reader* const> in, section_sink& sink);
+	// Its digest records (L8, F21): a record of a document's stored bytes, none for an empty one.
+	template <class Live, class Emit>
+	static void records(const reader& r, const core_segment& core, Live&& live, Emit&& emit) {
+		reader::stored_frame cache;
+		for (ordinal_t o = 0; o < core.doc_count(); ++o) {
+			if (live(o)) { record(core.docid(o), r.stored(o, cache), emit); }
+		}
+	}
+	template <class Emit>
+	static void records(std::uint64_t docid, const part& p, Emit&& emit) {
+		record(docid, p.stored, emit);
+	}
+	template <class Emit>
+	static void record(std::uint64_t docid, std::string_view bytes, Emit& emit) {
+		if (bytes.empty()) { return; }
+		digest_record rec('R');
+		rec.u64(docid);
+		rec.bytes(bytes);
+		emit(rec.data());
+	}
 };
 
 // --- documents (L10) --------------------------------------------------------------------
@@ -794,7 +906,6 @@ template <class E>
 using plugin_part_t = typename plugin_part<E>::type;
 }  // namespace detail
 
-struct core_part {};
 template <class Layout>
 struct basic_document;
 // The document is its parts: `d.terms`, `d.length`, and `d.stored` name the plugins'.
@@ -802,9 +913,10 @@ template <class... Entries>
 struct basic_document<layout<Entries...>> : core_part, detail::plugin_part_t<Entries>... {
 	// Stage-1 checks in layout order; false on the first that fails.
 	bool valid(const validate_context& vc) const { return (valid_part<Entries>(vc) && ...); }
-	// Buffer memory beyond the document object, and the parts' disk estimate.
-	std::uint64_t part_bytes() const { return (part_bytes_of<Entries>() + ... + 0); }
-	std::uint64_t disk_estimate() const { return (disk_estimate_of<Entries>() + ... + 0); }
+	// Buffer memory beyond the document object, and the parts' disk estimate; the core's key
+	// counts as a term does (its bytes, and an ordinal and version on disk).
+	std::uint64_t part_bytes() const { return key.size() + (part_bytes_of<Entries>() + ... + 0); }
+	std::uint64_t disk_estimate() const { return (key.empty() ? 0 : key.size() + 12) + (disk_estimate_of<Entries>() + ... + 0); }
 
 private:
 	template <class E>
@@ -832,9 +944,10 @@ private:
 		}
 	}
 };
-using document = basic_document<search_layout_12>;
+using document = basic_document<search_layout>;
 namespace detail {
-struct document_12 {  // format 12's document with the inverter's text inputs
+struct document_fields {  // the document's fields, with the inverter's text inputs
+	std::string key;
 	std::vector<term_entry> terms;
 	std::uint32_t length = 0;
 	std::string text;
@@ -844,51 +957,49 @@ struct document_12 {  // format 12's document with the inverter's text inputs
 };
 }  // namespace detail
 // The text inputs grow the document, so doc_bytes charges more and flush points move.
-static_assert(sizeof(document) == sizeof(detail::document_12), "doc_bytes and every flush trigger depend on it");
+static_assert(sizeof(document) == sizeof(detail::document_fields), "doc_bytes and every flush trigger depend on it");
 
 namespace detail {
 template <class E>
 struct reader_of {
 	using type = typename E::reader;
 };
-template <>
-struct reader_of<docids_section> {  // the core's section: no reader of its own
-	struct type {
-		explicit type(const open_context&) {}
-	};
-};
+// The structure bits a layout entry reads, and its own bit.
 template <class E>
-constexpr std::span<const section_rule> rules_of() {
-	if constexpr (std::is_same_v<E, docids_section>) {
-		return {};
-	} else {
-		return E::rules;
-	}
+constexpr std::uint32_t structures_of() {
+	return E::structures;
 }
-// No two of the core and the layout's plugins claim one section kind (L2).
+template <class E>
+constexpr std::uint32_t structure_of() {
+	return E::structure;
+}
+// No two plugins of a layout share an owner, so none claims another's kinds (F3), and no
+// two read one bit (F4).
 template <class... Entries>
-consteval bool kinds_disjoint() {
-	std::array<format::section, 64> kinds{};
-	std::size_t n = 0;
-	for (const auto& r : core_segment::rules) { kinds[n++] = r.kind; }
+consteval bool owners_distinct() {
+	std::uint32_t bits = core_segment::reads;
+	bool ok = true;
 	(..., [&] {
-		for (const auto& r : rules_of<Entries>()) { kinds[n++] = r.kind; }
+		ok = ok && !(bits & structures_of<Entries>());
+		bits |= structures_of<Entries>();
 	}());
-	for (std::size_t i = 0; i < n; ++i) {
-		for (std::size_t j = i + 1; j < n; ++j) {
-			if (kinds[i] == kinds[j]) { return false; }
-		}
-	}
-	return true;
+	std::array<int, 8> owners{};
+	(..., [&] {
+		ok = ok && owners[std::size_t(Entries::owner)]++ == 0;
+	}());
+	return ok;
 }
 }  // namespace detail
 
-// A plugin's shape in format 12 (L4): format 13 adds P::structure and P::structures, and
-// the builder joins it at the writer façade's split.
+// A plugin's shape (L4): its owner in F3's table and its bits in F4's, its own bit among
+// them; the builder joins it at the writer façade's split.
 template <class P>
 concept section_plugin = requires(const typename P::reader& r) {
 	{ P::id } -> std::convertible_to<std::string_view>;
-	{ P::rules } -> std::convertible_to<std::span<const section_rule>>;
+	{ P::owner } -> std::convertible_to<format::owner>;
+	{ P::structure } -> std::convertible_to<std::uint32_t>;
+	{ P::structures } -> std::convertible_to<std::uint32_t>;
+	requires ((P::structures & P::structure) == P::structure) && (std::popcount(P::structure) == 1);
 	r.verify_all();
 } && std::constructible_from<typename P::reader, const open_context&> &&
 	requires(const merge_context& m, std::span<const typename P::reader* const> in, section_sink& sink) {
@@ -904,23 +1015,18 @@ concept section_plugin = requires(const typename P::reader& r) {
 // Callers name the reader that owns each concern (L11).
 template <class... Entries>
 class basic_segment<layout<Entries...>> {
-	static_assert(((std::is_same_v<Entries, docids_section> || section_plugin<Entries>) && ...), "every layout entry is a section plugin");
-	static_assert((std::size_t(std::is_same_v<Entries, docids_section>) + ... + 0) <= 1, "docids_section appears at most once");
-	static_assert(detail::kinds_disjoint<Entries...>(), "two owners claim one section kind");
-	static std::vector<section_rule> all_rules() {
-		std::vector<section_rule> out(std::begin(core_segment::rules), std::end(core_segment::rules));
-		(..., [&] {
-			for (const auto& r : detail::rules_of<Entries>()) { out.push_back(r); }
-		}());
-		return out;
-	}
+	static_assert((section_plugin<Entries> && ...), "every layout entry is a section plugin");
+	static_assert(detail::owners_distinct<Entries...>(), "two plugins share an owner or a structure bit");
 
 public:
+	// The bits this layout reads (F4; layers R16): the core's and each entry's.
+	static constexpr std::uint32_t readable = (core_segment::reads | ... | detail::structures_of<Entries>());
+
 	// Verifies the footer, the table of contents, the header, and the pinned sections in
 	// full; other sections are verified per region as they are read. The file's bytes
 	// must outlive the segment; a temporary string cannot be one.
 	explicit basic_segment(std::string&&) = delete;
-	explicit basic_segment(std::string_view file) : core_(file, all_rules()), present_(presence(core_)), readers_(open(core_)) {}
+	explicit basic_segment(std::string_view file) : core_(file, readable), present_(presence(core_)), readers_(open(core_, present_)) {}
 
 	// The core's view: docids, ordinals, the document count, the table of contents.
 	const core_segment& core() const noexcept { return core_; }
@@ -957,13 +1063,16 @@ public:
 private:
 	using readers = std::tuple<typename detail::reader_of<Entries>::type...>;
 	static_assert(sizeof...(Entries) <= 32, "a layout's presence mask holds 32 entries");
-	// Format 12 requires every plugin of the layout; format 13 reads the footer's flags (L7).
-	static std::uint32_t presence(const core_segment&) noexcept {
-		return std::uint32_t((std::uint64_t(1) << sizeof...(Entries)) - 1);
+	// Bit i: entry i's own structure bit is set in the footer.
+	static std::uint32_t presence(const core_segment& core) noexcept {
+		std::uint32_t out = 0, i = 0;
+		(..., (out |= std::uint32_t((core.structures() & detail::structure_of<Entries>()) != 0) << i++));
+		return out;
 	}
-	static readers open(const core_segment& core) {
-		const open_context c{format::version, core.doc_count(), core};
-		return readers{typename detail::reader_of<Entries>::type(c)...};
+	static readers open(const core_segment& core, std::uint32_t present) {
+		std::uint32_t i = 0;
+		auto context = [&](std::uint32_t at) { return open_context{core.version(), core.doc_count(), core, bool((present >> at) & 1)}; };
+		return readers{typename detail::reader_of<Entries>::type(context(i++))...};
 	}
 	template <class P, class... Ds>
 	typename P::deps deps_of(type_list<Ds...>) const noexcept {
@@ -980,11 +1089,11 @@ private:
 	}
 	template <class E>
 	void verify_all_of() const {
-		if constexpr (!std::is_same_v<E, docids_section>) { get<E>().verify_all(); }
+		get<E>().verify_all();
 	}
 
 	core_segment core_;
-	std::uint32_t present_;  // bit i: layout entry i is present; set before the readers open (L7)
+	std::uint32_t present_;  // bit i: layout entry i is present; set before the readers open (F4)
 	readers readers_;
 };
 
@@ -1600,30 +1709,6 @@ inline std::vector<format::impact> inverted_plugin::reader::tail_impacts(const f
 	return format::competitive(std::move(pairs));
 }
 
-inline std::optional<ordinal_t> keys_plugin::reader::find(std::string_view key, live_bits live, const deps& d) const {
-	const auto info = d.inverted.find_term(key);
-	if (!info) { return std::nullopt; }
-	postings_iterator it(d.inverted, *info);
-	for (ordinal_t ord = it.next(); ord != no_more_docs; ord = it.next()) {
-		if (live.live(ord)) { return ord; }
-	}
-	return std::nullopt;
-}
-
-template <class F>
-void keys_plugin::reader::scan(std::string_view prefix, const deps& d, F&& f) const {
-	d.inverted.scan_dictionary(prefix, [&](std::string_view term, std::string_view) {
-		if (!term.starts_with(prefix)) { return false; }
-		const auto info = d.inverted.find_term(term);
-		if (!info) { corrupt("term index"); }
-		postings_iterator it(d.inverted, *info);
-		for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
-			if (!f(term, o)) { return false; }
-		}
-		return true;
-	});
-}
-
 class positions_reader {
 public:
 	positions_reader(const inverted_plugin::reader& seg, const format::term_info& info) {
@@ -1776,5 +1861,34 @@ private:
 	std::uint64_t decoded_counts_ = std::numeric_limits<std::uint64_t>::max();
 	std::uint64_t decoded_block_ = std::numeric_limits<std::uint64_t>::max(), decoded_offset_ = 0;
 };
+
+template <class Live, class Emit>
+void inverted_plugin::records(const reader& r, const core_segment& core, Live&& live, Emit&& emit) {
+	for (ordinal_t o = 0; o < core.doc_count(); ++o) {
+		if (live(o)) { length_record(core.docid(o), r.length(o), emit); }
+	}
+	r.scan_terms([&](std::string_view term, const format::term_info& info) {
+		postings_iterator it(r, info);
+		positions_reader pr(r, info);
+		for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
+			if (live(o)) { posting_record(core.docid(o), term, it.wdf(), pr.read(it), emit); }
+		}
+		return true;
+	});
+}
+
+template <class Emit>
+void inverted_plugin::records(std::uint64_t docid, const part& p, Emit&& emit) {
+	std::uint32_t length = p.length;
+	std::map<std::string_view, std::vector<std::uint32_t>> by_term;  // the tokens' postings
+	if (p.split_text) {
+		length = 0;
+		text_detail::split_words(p.text, [&](std::size_t offset, std::size_t size) { by_term[std::string_view(p.text).substr(offset, size)].push_back(++length); });
+	}
+	for (const auto& tk : p.tokens) { by_term[std::string_view(p.text).substr(tk.offset, tk.size)].push_back(tk.position); }
+	length_record(docid, length, emit);
+	for (const auto& t : p.terms) { posting_record(docid, t.term, t.wdf, t.positions, emit); }
+	for (const auto& [term, positions] : by_term) { posting_record(docid, term, std::uint32_t(positions.size()), positions, emit); }
+}
 
 }  // namespace strata

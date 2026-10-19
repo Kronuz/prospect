@@ -49,7 +49,7 @@ struct basic_operation {
 	basic_document<Layout> doc;                    // add, replace_*
 	std::string meta_key, meta_value;              // set_meta, delete_meta
 };
-using operation = basic_operation<search_layout_12>;
+using operation = basic_operation<search_layout>;
 
 template <class Layout>
 struct basic_transaction {
@@ -57,7 +57,7 @@ struct basic_transaction {
 	std::optional<std::uint64_t> expected_schema;  // the schema version it was built against
 	std::optional<std::uint64_t> set_schema;       // the schema version it sets
 };
-using transaction = basic_transaction<search_layout_12>;
+using transaction = basic_transaction<search_layout>;
 
 // Apply's answer. A rejected transaction left no trace.
 struct verdict {
@@ -337,7 +337,7 @@ struct index_options {
 	strata::reorder::settings reorder_settings;
 };
 
-// An index of a layout's segments (layers.md L2); `index` is format 12's search layout.
+// An index of a layout's segments (layers.md L2); `index` is the search layout's.
 template <class Layout>
 class basic_index {
 public:
@@ -360,6 +360,8 @@ public:
 		ix.clear_uncreated();
 		ix.m_.uuid = uuid;
 		ix.m_.key_prefix = opts.key_prefix;
+		// Every structure the index's layout reads, keys only with a key prefix (F4, F20).
+		ix.m_.configured = segment::readable & ~(opts.key_prefix.empty() ? format::bit::keys : 0);
 		ix.opts_ = opts;
 		if (opts.budget) { ix.permit_ = opts.budget->open(); }
 		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
@@ -605,7 +607,7 @@ public:
 			} catch (const corrupt_segment&) {
 			}
 			try {
-				auto fresh = read_checked([&] { return load_segment(*io_, s->ref, true); }, nullptr);
+				auto fresh = read_checked([&] { return load_segment(*io_, m_, s->ref, true); }, nullptr);
 				fresh->deleted = std::move(s->deleted);
 				fresh->dead = s->dead;
 				fresh->deletes_dirty = s->deletes_dirty;
@@ -647,109 +649,86 @@ public:
 
 	// --- deterministic core -------------------------------------------------------------
 
-	// The logical-content digest (design D12): the sum modulo 2^64 of xxHash64 over a
-	// record per live posting, live document, `lastdocid`, schema version, and metadata
-	// entry, so equal content gives equal digests whatever its segment layout. It checks
-	// at most one live copy per docid and per key, every docid at or below `lastdocid`,
-	// and throws std::logic_error otherwise.
+	// The logical-content digest (design D12; format 13's split, L8 and F21): the sum modulo
+	// 2^64 of xxHash64 over records. The core's D record per live document holds its docid,
+	// version, and key; each configured plugin adds its own records; the core adds
+	// `lastdocid`, the schema version, and each metadata entry. Equal content gives equal
+	// digests whatever its segment layout. It checks at most one live copy per docid and per
+	// key, every docid at or below `lastdocid`, and throws std::logic_error otherwise.
 	std::uint64_t digest() const {
 		std::uint64_t sum = 0;
-		std::string rec;
-		auto u32 = [&](std::uint32_t v) { rec.append(reinterpret_cast<const char*>(&v), 4); };
-		auto u64 = [&](std::uint64_t v) { rec.append(reinterpret_cast<const char*>(&v), 8); };
-		auto add = [&] {
-			sum += xxh64::hash(rec);
-			rec.clear();
-		};
+		auto emit = [&](std::string_view rec) { sum += xxh64::hash(rec); };
 		std::set<std::uint64_t> docids;
 		std::set<std::string> keys;
-		auto document_record = [&](std::uint64_t docid, std::uint64_t version, std::uint32_t length, std::string_view stored) {
+		auto document_record = [&](std::uint64_t docid, std::uint64_t version, std::string_view key) {
 			if (docid == 0 || docid > m_.last_docid || !docids.insert(docid).second) { throw std::logic_error("strata: digest: docid invariant"); }
-			rec.push_back('D');
-			u64(docid);
-			u64(version);
-			u32(length);
-			u32(std::uint32_t(stored.size()));
-			rec += stored;
-			add();
+			if (!key.empty() && !keys.insert(std::string(key)).second) { throw std::logic_error("strata: digest: key invariant"); }
+			digest_record rec('D');
+			rec.u64(docid);
+			rec.u64(version);
+			rec.bytes(key);
+			emit(rec.data());
 		};
-		auto posting_record = [&](std::uint64_t docid, std::string_view term, std::uint32_t wdf, std::span<const std::uint32_t> positions) {
-			rec.push_back('P');
-			u64(docid);
-			u32(std::uint32_t(term.size()));
-			rec += term;
-			u32(wdf);
-			u32(std::uint32_t(positions.size()));
-			for (auto p : positions) { u32(p); }
-			add();
-		};
+		const std::uint32_t configured = configured_structures();
 		for (const auto& sp : segs_) {
 			const auto& s = *sp;
-			auto dead = [&](ordinal_t o) { return (s.deleted[o >> 6] >> (o & 63)) & 1; };
+			auto live = [&](ordinal_t o) { return !((s.deleted[o >> 6] >> (o & 63)) & 1); };
 			const core_segment& core = s.seg.core();
-			const auto& inverted = s.seg.template get<inverted_plugin>();
-			for (ordinal_t o = 0; o < core.doc_count(); ++o) {
-				if (!dead(o)) { document_record(core.docid(o), s.seg.template get<keys_plugin>().version(o), inverted.length(o), s.seg.template get<stored_plugin>().stored(o)); }
-			}
-			inverted.scan_terms([&](std::string_view term, const format::term_info& info) {
-				postings_iterator it(inverted, info);
-				positions_reader pr(inverted, info);
-				for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
-					if (!dead(o)) { posting_record(core.docid(o), term, it.wdf(), pr.read(it)); }
-				}
+			std::vector<std::string> key_of(core.doc_count());  // from the keys reader's scan (L3)
+			s.seg.template get<keys_plugin>().scan("", [&](std::string_view key, ordinal_t o) {
+				key_of[o] = key;
 				return true;
 			});
-			// One live copy per key, from the keys reader's scan (L3, L8).
-			if (!m_.key_prefix.empty()) {
-				s.seg.template get<keys_plugin>().scan(m_.key_prefix, s.seg.template deps<keys_plugin>(), [&](std::string_view key, ordinal_t o) {
-					if (!dead(o) && !keys.insert(std::string(key)).second) { throw std::logic_error("strata: digest: key invariant"); }
-					return true;
+			for (ordinal_t o = 0; o < core.doc_count(); ++o) {
+				if (live(o)) { document_record(core.docid(o), s.seg.template get<keys_plugin>().version(o), key_of[o]); }
+			}
+			if (configured & inverted_plugin::structure) { inverted_plugin::records(s.seg.template get<inverted_plugin>(), core, live, emit); }
+			if (configured & stored_plugin::structure) { stored_plugin::records(s.seg.template get<stored_plugin>(), core, live, emit); }
+		}
+		if (active_) {  // the inverter's buffer: the same records as its documents' (F21)
+			const auto& a = *active_;
+			for (ordinal_t o = 0; o < a.buf.doc_count(); ++o) {
+				if (a.is_dead(o)) { continue; }
+				document_record(a.buf.docid(o), a.buf.version(o), a.buf.key(o));
+				if (configured & inverted_plugin::structure) { inverted_plugin::length_record(a.buf.docid(o), a.buf.length(o), emit); }
+				if (configured & stored_plugin::structure) { stored_plugin::record(a.buf.docid(o), a.buf.stored(o), emit); }
+			}
+			if (configured & inverted_plugin::structure) {
+				a.buf.scan([&](std::string_view term, ordinal_t o, std::uint32_t wdf, std::span<const std::uint32_t> positions) {
+					if (!a.is_dead(o)) { inverted_plugin::posting_record(a.buf.docid(o), term, wdf, positions, emit); }
 				});
 			}
 		}
-		if (active_) {
-			const auto& a = *active_;
-			for (ordinal_t o = 0; o < a.buf.doc_count(); ++o) {
-				if (!a.is_dead(o)) { document_record(a.buf.docid(o), a.buf.version(o), a.buf.length(o), a.buf.stored(o)); }
-			}
-			for (ordinal_t o = 0; o < a.buf.doc_count(); ++o) {
-				if (!a.is_dead(o) && !a.buf.key(o).empty() && !keys.insert(std::string(a.buf.key(o))).second) { throw std::logic_error("strata: digest: key invariant"); }
-			}
-			a.buf.scan([&](std::string_view term, ordinal_t o, std::uint32_t wdf, std::span<const std::uint32_t> positions) {
-				if (!a.is_dead(o)) { posting_record(a.buf.docid(o), term, wdf, positions); }
-			});
-		}
 		for (const auto& b : buffer_) {
 			if (b.dead) { continue; }
-			document_record(b.docid, b.version, b.doc.length, b.doc.stored);
-			if (!b.key.empty() && !keys.insert(b.key).second) { throw std::logic_error("strata: digest: key invariant"); }
-			for (const auto& t : b.doc.terms) { posting_record(b.docid, t.term, t.wdf, t.positions); }
-			std::map<std::string_view, std::vector<std::uint32_t>> by_term;  // the tokens' postings
-			for (const auto& tk : b.doc.tokens) { by_term[std::string_view(b.doc.text).substr(tk.offset, tk.size)].push_back(tk.position); }
-			for (const auto& [term, positions] : by_term) { posting_record(b.docid, term, std::uint32_t(positions.size()), positions); }
+			document_record(b.docid, b.version, b.doc.key);
+			if (configured & inverted_plugin::structure) { inverted_plugin::records(b.docid, b.doc, emit); }
+			if (configured & stored_plugin::structure) { stored_plugin::records(b.docid, b.doc, emit); }
 		}
-		rec.push_back('L');
-		u64(m_.last_docid);
-		add();
-		rec.push_back('S');
-		u64(m_.schema_version);
-		add();
+		digest_record last('L');
+		last.u64(m_.last_docid);
+		emit(last.data());
+		digest_record schema('S');
+		schema.u64(m_.schema_version);
+		emit(schema.data());
 		for (const auto& [k, v] : meta_) {
-			rec.push_back('M');
-			u32(std::uint32_t(k.size()));
-			rec += k;
-			u32(std::uint32_t(v.size()));
-			rec += v;
-			add();
+			digest_record m('M');
+			m.bytes(k);
+			m.bytes(v);
+			emit(m.data());
 		}
 		return sum;
 	}
+
+	// The structures this index is configured with, from the manifest (F20, F13-R28). Flushes
+	// and merges write them; the digest records them (F21).
+	std::uint32_t configured_structures() const noexcept { return m_.configured; }
 
 	// Checks every segment whole (check_segment) and the digest's invariants: one live copy
 	// per docid and per key, every docid at or below lastdocid. Throws at the first problem.
 	check_report check() const {
 		check_report r;
-		for (const auto& s : segs_) { check_segment(s->seg, &s->deleted, r); }
+		for (const auto& s : segs_) { check_segment(s->seg, &s->deleted, r, m_.key_prefix); }
 		(void)digest();
 		return r;
 	}
@@ -788,6 +767,7 @@ public:
 			theirs = files::decode_manifest(index_detail::read_all(*f));
 		}
 		if (theirs.generation != generation) { throw corrupt_index("install: manifest generation differs from its name"); }
+		check_readable(theirs);
 		auto got = load_files(source, theirs, true, &media_retries_);
 		// The copy, re-encoded live docs (16 bytes for their new names' fields), and the
 		// commit's metadata file and manifest.
@@ -834,6 +814,7 @@ public:
 			m_.schema_version = theirs.schema_version;
 			m_.applied = theirs.applied;
 			m_.key_prefix = theirs.key_prefix;
+			m_.configured = theirs.configured;
 			m_.pinned.clear();
 			applied_since_commit_ = 1;
 			commit_files();
@@ -946,8 +927,7 @@ private:
 	};
 	struct buffered {
 		std::uint64_t docid, version;
-		std::string key;
-		document doc;
+		document doc;  // its key is doc.key
 		bool dead = false;
 	};
 	// Documents inverted on arrival, and what the flush needs to write them in docid order.
@@ -1008,7 +988,7 @@ private:
 	// A segment just written to f: mapped when the backend maps and the mapping holds what
 	// was written (size and footer), so its bytes leave memory; else kept.
 	static std::unique_ptr<open_segment> written_segment(kronuz::journal::File& f, const files::segment_ref& r, std::string bytes) {
-		if (auto m = f.map(); m && m->bytes().size() == r.size && format::decode_footer(m->bytes()).toc_crc == r.footer_crc) {
+		if (auto m = f.map(); m && m->bytes().size() == r.size && (format::read_version(m->bytes()), format::decode_footer(m->bytes()).toc_crc == r.footer_crc)) {
 			return std::make_unique<open_segment>(r, std::move(m));
 		}
 		return std::make_unique<open_segment>(r, std::move(bytes));
@@ -1071,7 +1051,7 @@ private:
 		std::memcpy(job->header.data(), &job->id, 8);
 		std::memcpy(job->header.data() + 8, m_.uuid.data(), 8);
 		pending_.reserve(pending_.size() + 1);
-		const merge_env ctx{io_, exec_, opts_.rate, opts_.budget, opts_.merge_memory_wait, m_.key_prefix, opts_.reorder_settings};
+		const merge_env ctx{io_, exec_, opts_.rate, opts_.budget, opts_.merge_memory_wait, m_.key_prefix, opts_.reorder_settings, configured_structures()};
 		group_->post([job, ctx](const task::cancel_token& stop) { run_merge(*job, ctx, stop); });
 		pending_.push_back(std::move(job));
 	}
@@ -1085,6 +1065,7 @@ private:
 		std::uint64_t memory_wait;
 		std::string key_prefix;
 		strata::reorder::settings reorder;
+		std::uint32_t structures;  // the index's configured bits (F4)
 	};
 
 	// A merge's writes to one file, at increasing offsets: before each chunk an executor
@@ -1296,7 +1277,7 @@ private:
 					}
 					merge_spill positions(ctx, job, used, stop, chunk);
 					job.plan = detail::merge_layout(std::span<const basic_merge_source<Layout>>(sources), job.header, sink, positions,
-						{.cancel = &stop, .memory = &job.memory, .order = order, .records = records ? &*records : nullptr, .key_prefix = ctx.key_prefix});
+						{.cancel = &stop, .memory = &job.memory, .order = order, .records = records ? &*records : nullptr, .key_prefix = ctx.key_prefix, .structures = ctx.structures});
 				}
 				sink.finish();
 				job.memory.shrink(job.memory.held());  // the build's buffers are gone
@@ -1588,11 +1569,11 @@ private:
 	// The live copy of a key: the version map, then segments newest first.
 	std::optional<key_entry> lookup_key(std::string_view key) const {
 		if (auto v = key_slot(key)) { return key_entry{buffered_docid(*v), buffered_version(*v)}; }
+		const std::uint64_t hash = xxh64::hash(key);  // one hash, one filter probe per segment (CR7)
 		for (std::size_t i = segs_.size(); i-- > 0;) {
 			const auto& s = *segs_[i];
 			const auto& keys = s.seg.template get<keys_plugin>();
-			if (!keys.may_hold(key)) { continue; }
-			if (const auto ord = keys.find(key, live_bits{s.deleted.data()}, s.seg.template deps<keys_plugin>())) {
+			if (const auto ord = keys.find(key, live_bits{s.deleted.data()}, hash)) {
 				return key_entry{s.seg.core().docid(*ord), keys.version(*ord)};
 			}
 		}
@@ -1708,17 +1689,9 @@ private:
 		m_.last_docid = docid;
 	}
 
-	// The key term of a document: its one term with the index's key prefix.
+	// The core's stage-1 context: the index's key prefix (F8).
 	validate_context context() const { return {m_.key_prefix}; }
 	std::optional<std::string> key_of(const document& d, bool& valid) const { return keys_plugin::key_of(context(), d, valid); }
-
-	// The document's key term itself (key_of found exactly one).
-	std::string_view key_term(const document& d) const {
-		for (const auto& t : d.terms) {
-			if (t.term.starts_with(m_.key_prefix)) { return t.term; }
-		}
-		return {};
-	}
 
 	// Validation that can reject runs here, before anything changes (design D10).
 	bool valid(const document& d) const { return d.valid(context()); }
@@ -1819,13 +1792,14 @@ private:
 				docid = m_.last_docid + 1;
 			}
 			if (exists) { remove_copy(by_key ? locate_docid(by_key->docid) : by_docid); }
-			const std::uint64_t version = exists ? current + 1 : 1;
+			// A version belongs to a key: a document without one has version 0 (F9).
+			const std::uint64_t version = !key ? 0 : exists ? current + 1 : 1;
 			bump_last_docid(docid);
 			set_buffered_docid(docid, std::uint32_t(buffer_size()));
 			if (inverting()) {
-				pending_docs_.push_back({docid, version, key ? key_term(o.doc) : std::string_view(), &o.doc});
+				pending_docs_.push_back({docid, version, key ? std::string_view(o.doc.key) : std::string_view(), &o.doc});
 			} else {
-				buffer_.push_back({docid, version, key.value_or(std::string()), o.doc});
+				buffer_.push_back({docid, version, o.doc});
 				if (document& d = buffer_.back().doc; d.split_text) {  // the writer takes explicit tokens
 					d.split_text = false;
 					d.length = 0;
@@ -1860,7 +1834,7 @@ private:
 		return i < active_count() ? active_->buf.docid(ordinal_t(i)) : pending_docs_[i - active_count()].docid;
 	}
 	std::string_view buffered_key(std::size_t i) const {
-		if (!inverting()) { return buffer_[i].key; }
+		if (!inverting()) { return buffer_[i].doc.key; }
 		return i < active_count() ? active_->buf.key(ordinal_t(i)) : pending_docs_[i - active_count()].key;
 	}
 	std::uint64_t buffered_version(std::size_t i) const {
@@ -1961,6 +1935,8 @@ private:
 		std::memcpy(header.data() + 8, m_.uuid.data(), 8);
 		segment_writer encoder;
 		encoder.memory = &run;
+		encoder.key_prefix = m_.key_prefix;
+		encoder.structures = configured_structures();
 		// The segment goes to its file as it is written. ENOSPC removes the partial file and
 		// keeps the buffer, as write_unsynced does.
 		const std::string name = index_detail::segment_name(id);
@@ -2021,12 +1997,14 @@ private:
 					{
 						segment_writer w;
 						if (opts_.budget) { w.memory = &charge; }
+						w.key_prefix = m_.key_prefix;
+						w.structures = configured_structures();
 						std::vector<posting_input> in;
 						for (std::size_t i = begin; i < end; ++i) {
 							const buffered* b = docs[i];
 							in.clear();
 							for (const auto& t : b->doc.terms) { in.push_back({t.term, t.wdf, t.positions}); }
-							detail::writer_access::add_text(w, b->docid, in, b->doc.text, b->doc.tokens, b->doc.length, b->doc.stored, b->version, b->key);
+							detail::writer_access::add_text(w, b->docid, in, b->doc.text, b->doc.tokens, b->doc.length, b->doc.stored, b->version, b->doc.key);
 						}
 						std::array<std::uint8_t, 16> header{};
 						std::memcpy(header.data(), &ids[k], 8);
@@ -2142,7 +2120,13 @@ private:
 		if (applied_since_commit_) { ++next.revision; }
 		next.segments.clear();
 		next.doc_count = next.total_length = next.live_count = next.live_length = 0;
+		next.mask = next.configured;
+		next.min_version = next.max_version = 0;
 		for (const auto& s : segs_) {
+			next.mask |= s->seg.core().structures();
+			const std::uint32_t v = s->seg.core().version();
+			next.min_version = next.min_version ? std::min(next.min_version, v) : v;
+			next.max_version = std::max(next.max_version, v);
 			next.segments.push_back(s->ref);
 			next.doc_count += s->ref.doc_count;
 			next.total_length += s->seg.template get<inverted_plugin>().total_length();
@@ -2332,6 +2316,7 @@ private:
 		m_ = read_checked([&] { return files::decode_manifest(index_detail::read_all(*io_->open_existing(index_detail::manifest_name(chosen)))); }, &media_retries_);
 		if (m_.generation != chosen) { throw corrupt_index("manifest generation differs from its name"); }
 		// Every file the manifest names must exist and agree with its entry.
+		check_readable(m_);
 		auto files_of = load_files(*io_, m_, false, &media_retries_);
 		segs_ = std::move(files_of.segments);
 		meta_ = std::move(files_of.meta);
@@ -2397,10 +2382,28 @@ private:
 			throw corrupt_index(std::string("unreadable: ") + e.what());
 		}
 	}
+	// Refuses an index this binary cannot read before any segment opens (F20): a structure
+	// bit in the manifest's mask it lacks, or segment versions outside what it reads; then
+	// configured bits no flush could write, as damage.
+	static void check_readable(const files::manifest& m) {
+		if (const std::uint32_t lacked = m.mask & ~segment::readable) {
+			throw unsupported_index("strata: unsupported index: structure bit " + std::to_string(std::countr_zero(lacked)));
+		}
+		if (!m.segments.empty() && (m.min_version < format::min_read_version || m.max_version > format::version)) {
+			throw unsupported_index("strata: unsupported index: segment format versions " + std::to_string(m.min_version) + " to " + std::to_string(m.max_version));
+		}
+		// Configured bits a flush can write (CR5): each bit's owner set (F4), and keys set
+		// exactly when the index has a key prefix (F8).
+		for (std::uint32_t b = m.configured; b; b &= b - 1) {
+			const std::uint32_t owner = format::requires_of(b & -b);
+			if (owner && !(m.configured & owner)) { throw corrupt_index("configured structure bit " + std::to_string(std::countr_zero(b)) + " without its owner"); }
+		}
+		if (m.key_prefix.empty() == bool(m.configured & format::bit::keys)) { throw corrupt_index("the key prefix and the configured keys bit disagree"); }
+	}
 	static loaded_files load_files(kronuz::journal::IO& io, const files::manifest& m, bool whole, std::uint64_t* retries = nullptr) {
 		loaded_files out;
 		for (const auto& r : m.segments) {
-			out.segments.emplace_back(read_checked([&] { return load_segment(io, r, whole); }, retries));
+			out.segments.emplace_back(read_checked([&] { return load_segment(io, m, r, whole); }, retries));
 		}
 		if (m.meta.generation) {
 			out.meta = read_checked([&] {
@@ -2413,7 +2416,16 @@ private:
 		}
 		return out;
 	}
-	static std::unique_ptr<open_segment> load_segment(kronuz::journal::IO& io, const files::segment_ref& r, bool whole) {
+	// The manifest's mask and version range passed check_readable, so a segment it names that
+	// this binary cannot read disagrees with its manifest: damage (F2, F20).
+	static std::unique_ptr<open_segment> load_segment(kronuz::journal::IO& io, const files::manifest& m, const files::segment_ref& r, bool whole) {
+		try {
+			return load_segment_of(io, m, r, whole);
+		} catch (const unsupported_segment& e) {
+			throw corrupt_segment(e.what());
+		}
+	}
+	static std::unique_ptr<open_segment> load_segment_of(kronuz::journal::IO& io, const files::manifest& m, const files::segment_ref& r, bool whole) {
 		const std::string name = index_detail::segment_name(r.id);
 		std::unique_ptr<kronuz::journal::File> f;
 		try {
@@ -2427,9 +2439,15 @@ private:
 		if (!mapped) { bytes = index_detail::read_all(*f); }
 		const std::string_view view = mapped ? mapped->bytes() : std::string_view(bytes);
 		if (view.size() != r.size) { throw corrupt_index("file size differs from the manifest: " + name); }
+		(void)format::read_version(view);
 		if (format::decode_footer(view).toc_crc != r.footer_crc) { throw corrupt_index("segment differs from its manifest entry"); }
 		auto s = mapped ? std::make_unique<open_segment>(r, std::move(mapped)) : std::make_unique<open_segment>(r, std::move(bytes));
 		if (s->seg.core().doc_count() != r.doc_count) { throw corrupt_index("segment document count"); }
+		// The manifest vouches for its segments: one outside its mask or version range is damage.
+		const std::uint32_t v = s->seg.core().version();
+		if ((s->seg.core().structures() & ~m.mask) || v < m.min_version || v > m.max_version) {
+			throw corrupt_segment("segment outside its manifest's structures or versions");
+		}
 		if (whole) { s->seg.verify_all(); }
 		if (r.live.generation) {
 			const std::string lb = read_named(io, index_detail::live_name(r.id, r.live.generation), r.live.size);
@@ -2486,6 +2504,6 @@ private:
 	bool meta_dirty_ = false;
 	bool fenced_ = false;
 };
-using index = basic_index<search_layout_12>;
+using index = basic_index<search_layout>;
 
 }  // namespace strata

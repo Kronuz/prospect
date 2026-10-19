@@ -30,7 +30,7 @@ struct step {
 static document make_doc(std::mt19937_64& r, const std::string& key) {
 	static const char* words[] = {"the", "of", "lord", "rings", "garden", "eden", "time", "kids"};
 	document d;
-	if (!key.empty()) { d.terms.push_back({key, 0, {}}); }
+	d.key = key;
 	std::set<std::string> used;
 	const std::size_t n = 1 + r() % 4;
 	std::uint32_t pos = 0;

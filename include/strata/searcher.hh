@@ -100,11 +100,26 @@ inline statistics snapshot_statistics(std::span<const segment_snapshot> segs) {
 	return st;
 }
 
+// A term in one segment, routed by the index's key prefix (F8): a key-prefixed term is a
+// key leaf from the keys reader, at most one ordinal (deleted copies included, which the
+// live filter removes), wdf 0, no positions, so its upper bound is 0; any other term is
+// the dictionary's. An empty prefix routes every term to the dictionary (F13-R33).
+inline std::optional<format::term_info> find_term(const segment& seg, std::string_view term, std::string_view key_prefix) {
+	if (key_prefix.empty() || !term.starts_with(key_prefix)) { return seg.get<inverted_plugin>().find_term(term); }
+	const auto ord = seg.get<keys_plugin>().find(term, live_bits{});
+	if (!ord) { return std::nullopt; }
+	format::term_info t;
+	t.flags = format::single_posting | format::no_wdf | format::no_positions;
+	t.df = 1;
+	t.postings = *ord;
+	return t;
+}
+
 // A term's document frequency over every segment, deleted documents included.
-inline std::uint64_t snapshot_df(std::span<const segment_snapshot> segs, std::string_view term) {
+inline std::uint64_t snapshot_df(std::span<const segment_snapshot> segs, std::string_view term, std::string_view key_prefix = {}) {
 	std::uint64_t df = 0;
 	for (const auto& s : segs) {
-		if (auto info = s.seg->get<inverted_plugin>().find_term(term)) { df += info->df; }
+		if (auto info = find_term(*s.seg, term, key_prefix)) { df += info->df; }
 	}
 	return df;
 }
@@ -115,7 +130,9 @@ inline std::uint64_t snapshot_df(std::span<const segment_snapshot> segs, std::st
 // postings) are computed only when a scorer asks for the term in that segment.
 class term_table {
 public:
-	explicit term_table(std::span<const segment_snapshot> segs) : segs_(segs), st_(snapshot_statistics(segs)) {}
+	// `key_prefix` is the index's: its terms are key leaves (F8).
+	explicit term_table(std::span<const segment_snapshot> segs, std::string_view key_prefix = {})
+		: segs_(segs), key_prefix_(key_prefix), st_(snapshot_statistics(segs)) {}
 
 	// The snapshot's statistics (D13).
 	const statistics& stats() const noexcept { return st_; }
@@ -159,7 +176,7 @@ private:
 		c.term = term;
 		c.infos.reserve(segs_.size());
 		for (const auto& s : segs_) {
-			c.infos.push_back(s.seg->get<inverted_plugin>().find_term(term));
+			c.infos.push_back(find_term(*s.seg, term, key_prefix_));
 			if (c.infos.back()) { c.df += c.infos.back()->df; }
 		}
 		c.complete.assign(segs_.size(), 0);
@@ -172,6 +189,7 @@ private:
 		throw std::invalid_argument("strata: a segment outside the term table's snapshot");
 	}
 	std::span<const segment_snapshot> segs_;
+	std::string key_prefix_;
 	statistics st_;
 	std::deque<column_t> columns_;  // stable addresses as columns are added
 };

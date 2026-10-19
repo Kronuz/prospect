@@ -57,10 +57,8 @@ doc random_doc(std::mt19937_64& r, std::uint64_t docid) {
 		d.text += w;
 	}
 	d.length = std::uint32_t(d.tokens.size());
-	if (r() % 5) {
-		d.key = "Q" + std::to_string(docid);
-		d.terms.push_back({d.key, 0, {}});
-	}
+	if (r() % 5) { d.key = "Q" + std::to_string(docid); }  // a key is the core's, never a term (F8)
+	if (d.key.empty()) { d.version = 0; }                  // a version belongs to a key (F9)
 	if (r() % 3 == 0) { d.terms.push_back({"T" + std::to_string(r() % 4), 1, {}}); }   // positionless, wdf 1
 	if (r() % 3 == 0) { d.terms.push_back({"W" + std::to_string(r() % 4), 3, {pos + 5}}); }  // wdf apart from its count
 	if (r() % 7 == 0) { d.terms.push_back({std::string(400, 'Z'), 2, {pos + 7, pos + 9}}); }  // a long term given whole
@@ -146,10 +144,7 @@ int main() {
 		std::shuffle(ids.begin(), ids.end(), r);
 		for (std::size_t i = 0; i < docs.size(); ++i) {
 			docs[i].docid = ids[i];
-			if (!docs[i].key.empty()) {
-				docs[i].key = "Q" + std::to_string(ids[i]);
-				docs[i].terms[0].term = docs[i].key;
-			}
+			if (!docs[i].key.empty()) { docs[i].key = "Q" + std::to_string(ids[i]); }
 		}
 		std::vector<std::size_t> live;
 		for (std::size_t i = 0; i < docs.size(); ++i) {
@@ -241,8 +236,7 @@ int main() {
 				at = end + 1;
 			}
 			const std::string key = "Q" + std::to_string(i);
-			const std::vector<strata::posting_input> terms = {{key, 0, {}}};
-			CHECK(split.add_split(1 + i, terms, text, "s", 1, key) == given.add(1 + i, terms, text, tokens, pos, "s", 1, key));
+			CHECK(split.add_split(1 + i, {}, text, "s", 1, key) == given.add(1 + i, {}, text, tokens, pos, "s", 1, key));
 			CHECK(split.length(strata::ordinal_t(i)) == pos);
 		}
 		auto bytes = [](strata::detail::tuple_buffer& b) {
@@ -262,10 +256,9 @@ int main() {
 		b.batch_tuples = batch;
 		const std::string text = " a b a";
 		const std::vector<strata::text_token> tokens = {{1, 1, 1}, {3, 1, 2}, {5, 1, 3}};
-		const std::vector<strata::posting_input> terms = {{"Qk", 0, {}}};
-		b.add(7, terms, text, tokens, 3, "s", 1, "Qk");
+		b.add(7, {}, text, tokens, 3, "s", 1, "Qk");
 		CHECK(b.key(0) == "Qk");
-		b.add(8, {}, text, tokens, 3, "t", 1, "");  // drains the first when batches are 1 tuple
+		b.add(8, {}, text, tokens, 3, "t", 0, "");  // drains the first when batches are 1 tuple
 		CHECK(b.key(0) == "Qk" && b.key(1).empty());
 		std::vector<std::string> seen;
 		b.scan([&](std::string_view term, strata::ordinal_t o, std::uint32_t wdf, std::span<const std::uint32_t> positions) {
@@ -274,7 +267,7 @@ int main() {
 			seen.push_back(s);
 		});
 		std::sort(seen.begin(), seen.end());
-		CHECK((seen == std::vector<std::string>{"Qk:0:0", "a:0:2,1,3", "a:1:2,1,3", "b:0:1,2", "b:1:1,2"}));
+		CHECK((seen == std::vector<std::string>{"a:0:2,1,3", "a:1:2,1,3", "b:0:1,2", "b:1:1,2"}));
 		CHECK(b.key(0) == "Qk" && b.stored(0) == "s" && b.docid(0) == 7 && b.version(0) == 1 && b.length(0) == 3);
 	}
 	// Long terms tied on all but their last byte sort without deep recursion: 1 MiB here, and
@@ -335,8 +328,8 @@ int main() {
 		std::iota(far.begin(), far.end(), 1u);
 		const std::vector<strata::posting_input> many = {{"p", 4000, far}};
 		for (auto* x : {&b, &given}) {
-			x->add(1, wide, "", {}, 0, "", 1, "");
-			x->add(2, many, "", {}, 0, "", 1, "");
+			x->add(1, wide, "", {}, 0, "", 0, "");
+			x->add(2, many, "", {}, 0, "", 0, "");
 		}
 		CHECK(b.run_count() == 2 && given.run_count() == 0);
 		CHECK(flushed(b) == flushed(given));
@@ -351,11 +344,11 @@ int main() {
 		for (std::uint32_t i = 0; i < far.size(); ++i) { far[i] = 200 * (i + 1); }  // 2-byte deltas
 		const std::vector<strata::posting_input> k = {{"k", 1, {}}}, long_term = {{big, 1, {}}}, many = {{"p", 3000, far}};
 		for (auto* x : {&b, &given}) {
-			x->add(1, k, "", {}, 0, "", 1, "");
-			x->add(2, long_term, "", {}, 0, "", 1, "");
-			x->add(3, many, "", {}, 0, "", 1, "");
-			x->add_split(4, k, "a " + big, "", 1, "");
-			x->add(5, k, "", {}, 0, "", 1, "");
+			x->add(1, k, "", {}, 0, "", 0, "");
+			x->add(2, long_term, "", {}, 0, "", 0, "");
+			x->add(3, many, "", {}, 0, "", 0, "");
+			x->add_split(4, k, "a " + big, "", 0, "");
+			x->add(5, k, "", {}, 0, "", 0, "");
 		}
 		CHECK(b.doc_count() == 5 && flushed(b) == flushed(given));
 	}

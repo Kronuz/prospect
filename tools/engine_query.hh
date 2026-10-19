@@ -162,8 +162,10 @@ inline std::uint64_t run(const strata::segment& seg, std::string_view command, s
 
 // The k best documents of a query over an index's segments, weighted by the snapshot's
 // statistics (D13); with count, also the number of live matches.
-inline std::vector<strata::doc_hit> search_snapshot(std::span<const strata::segment_snapshot> segs, const parsed& q, std::size_t k, strata::scheme scheme = strata::scheme::bm25, std::uint64_t* count = nullptr) {
-	strata::term_table table(segs);
+// `key_prefix` is the index's: its terms are key leaves (F8).
+inline std::vector<strata::doc_hit> search_snapshot(std::span<const strata::segment_snapshot> segs, const parsed& q, std::size_t k, strata::scheme scheme = strata::scheme::bm25, std::uint64_t* count = nullptr,
+	std::string_view key_prefix = {}) {
+	strata::term_table table(segs, key_prefix);
 	auto builder = [&](const strata::segment& seg) { return build(seg, q, scheme, &table); };
 	return strata::search(segs, builder, k, count);
 }
@@ -183,8 +185,8 @@ inline const std::string* single_term(const parsed& q) {
 
 // The number of live matches of a query over an index's segments. A single word's count
 // in a segment without deletes is its document frequency there, from the term table (P6-7).
-inline std::uint64_t count_snapshot(std::span<const strata::segment_snapshot> segs, const parsed& q, strata::scheme scheme = strata::scheme::bm25) {
-	strata::term_table table(segs);
+inline std::uint64_t count_snapshot(std::span<const strata::segment_snapshot> segs, const parsed& q, strata::scheme scheme = strata::scheme::bm25, std::string_view key_prefix = {}) {
+	strata::term_table table(segs, key_prefix);
 	auto builder = [&](const strata::segment& seg) { return build(seg, q, scheme, &table); };
 	const std::string* term = single_term(q);
 	if (!term) { return strata::search_count(segs, builder); }
@@ -202,13 +204,14 @@ inline std::uint64_t count_snapshot(std::span<const strata::segment_snapshot> se
 
 // A query over an index's segments, as serve and churn answer it: the count for COUNT and
 // TOP_*_COUNT, else 1.
-inline std::uint64_t run(std::span<const strata::segment_snapshot> segs, std::string_view command, std::string_view query, strata::scheme scheme = strata::scheme::bm25) {
+inline std::uint64_t run(std::span<const strata::segment_snapshot> segs, std::string_view command, std::string_view query, strata::scheme scheme = strata::scheme::bm25,
+	std::string_view key_prefix = {}) {
 	const parsed q = parse(query);
-	if (command == "COUNT") { return count_snapshot(segs, q, scheme); }
+	if (command == "COUNT") { return count_snapshot(segs, q, scheme, key_prefix); }
 	std::size_t k = 0;
 	std::from_chars(command.data() + 4, command.data() + command.size(), k);
 	std::uint64_t n = 0;
-	(void)search_snapshot(segs, q, k, scheme, command.ends_with("_COUNT") ? &n : nullptr);
+	(void)search_snapshot(segs, q, k, scheme, command.ends_with("_COUNT") ? &n : nullptr, key_prefix);
 	return command.ends_with("_COUNT") ? n : 1;
 }
 

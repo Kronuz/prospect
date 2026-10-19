@@ -89,14 +89,12 @@ private:
 	std::array<char, 1 << 20> buffer_{}; std::size_t at_ = 0, end_ = 0;
 };
 
-// Fills d in place (its strings and vectors keep their capacity): the key in terms, the
-// text, which the index splits into its words at positions 1, 2, ... (split_text), and the
-// id as the stored record.
+// Fills d in place (its strings and vectors keep their capacity): the key, the text,
+// which the index splits into its words at positions 1, 2, ... (split_text), and the id
+// as the stored record.
 void fill_document(strata::document& d, std::string_view key, std::string_view id, std::string_view text) {
-	d.terms.resize(1);
-	d.terms[0].term.assign(key);
-	d.terms[0].wdf = 0;
-	d.terms[0].positions.clear();
+	d.key.assign(key);
+	d.terms.clear();
 	d.text.assign(text);
 	d.tokens.clear();
 	d.split_text = true;
@@ -245,12 +243,7 @@ int terms(const std::string& dir) {
 int sections(const std::string& dir) {
 	residency::file file;
 	strata::segment seg = open(dir, file);
-	static constexpr const char* names[] = {"header", "terms", "term_index", "postings", "positions", "lengths",
-		"stored", "docids", "stats", "norms", "versions", "pk_filter"};
-	for (const auto& e : seg.core().sections()) {
-		const auto k = std::size_t(e.kind);
-		std::cout << (k < std::size(names) ? names[k] : "unknown") << '\t' << e.length << '\n';
-	}
+	for (const auto& e : seg.core().sections()) { std::cout << strata::format::name_of(e.kind) << '\t' << e.length << '\n'; }
 	std::cout << "file\t" << file.size() << '\n';
 	return 0;
 }
@@ -428,7 +421,7 @@ int verify_index(const std::string& dir) {
 		++queries;
 		const parsed p = parse(q);
 		for (const auto scheme : {strata::scheme::bm25, strata::scheme::bm25_xapian}) {
-			strata::term_table table(view);
+			strata::term_table table(view, o.key_prefix);
 			auto builder = [&](const strata::segment& seg) { return build(seg, p, scheme, &table); };
 			std::vector<strata::doc_hit> scan;
 			for (const auto& sv : segs) {
@@ -487,7 +480,7 @@ int dump(const std::string& dir) {
 		for (const auto scheme : {strata::scheme::bm25, strata::scheme::bm25_xapian}) {
 			for (std::size_t k : {10u, 100u, 1000u}) {
 				std::uint64_t n = 0;
-				const auto hits = search_snapshot(segs, p, k, scheme, &n);
+				const auto hits = search_snapshot(segs, p, k, scheme, &n, o.key_prefix);
 				std::printf("%s\t%d\t%zu\t%llu", q.c_str(), int(scheme), k, (unsigned long long)n);
 				for (const auto& h : hits) { std::printf(" %llu:%a", (unsigned long long)h.docid, h.score); }
 				std::printf("\n");
@@ -584,7 +577,7 @@ int bench(const std::string& dir, std::string_view command, int runs, strata::sc
 		for (const auto& v : ix.segments()) { segs.push_back({v.seg, v.deleted, v.dead}); }
 		std::cerr << "bench: " << segs.size() << " segments\n";
 		const std::span<const strata::segment_snapshot> view(segs);
-		return bench_queries(runs, [&](std::string_view query) { return run(view, command, query, scheme); });
+		return bench_queries(runs, [&](std::string_view query) { return run(view, command, query, scheme, o.key_prefix); });
 	}
 	residency::file file;
 	strata::segment seg = open(dir, file);
@@ -610,7 +603,6 @@ int resident(const std::string& dir) {
 	if (core(&::mincore) != 0) { return 1; }
 	const std::string_view bytes(static_cast<const char*>(map), size);
 	const auto toc = strata::format::decode_toc(bytes, strata::format::decode_footer(bytes));
-	const char* names[] = {"header", "terms", "term_index", "postings", "positions", "lengths", "stored", "docids", "stats", "norms", "versions", "pk_filter"};
 	std::uint64_t total = 0;
 	for (const auto& e : toc) {
 		std::uint64_t held = 0;  // the section's bytes on resident pages
@@ -618,8 +610,7 @@ int resident(const std::string& dir) {
 			if (in[p] & 1) { held += std::min<std::uint64_t>((p + 1) * page, e.offset + e.length) - std::max<std::uint64_t>(p * page, e.offset); }
 		}
 		total += held;
-		const auto k = std::size_t(e.kind);
-		std::printf("%-12s %12llu bytes %10.1f MB resident (%.1f%%)\n", k < std::size(names) ? names[k] : "?", (unsigned long long)e.length, double(held) / 1e6,
+		std::printf("%-12s %12llu bytes %10.1f MB resident (%.1f%%)\n", strata::format::name_of(e.kind), (unsigned long long)e.length, double(held) / 1e6,
 			e.length ? 100.0 * double(held) / double(e.length) : 0.0);
 	}
 	std::printf("total %.1f MB resident of %.1f MB\n", double(total) / 1e6, double(size) / 1e6);
@@ -628,7 +619,7 @@ int resident(const std::string& dir) {
 }
 
 // A document of whitespace tokens: each distinct token with its wdf and positions, the
-// key term (wdf 0), and the id stored.
+// key (F8), and the id stored.
 
 int churn(const std::string& dir) {
 	std::ios::sync_with_stdio(false);
