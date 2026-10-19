@@ -1,8 +1,9 @@
-// The index directory (small-indexes D2): its owner lock is the directory's own, one writer
-// per directory within a process and across processes (T5); a pre-D2 index is refused before
-// anything is written, even while a pre-D2 writer holds its owner.lock (T5b); filesystems not
-// known local and lock errors other than busy refuse with nothing written and no other lock
-// taken (T7).
+// The index directory (small-indexes D2 and D3-C): its owner lock is the directory's own, one
+// writer per directory within a process and across processes (T5); a pre-D2 index is refused
+// before anything is written, even while a pre-D2 writer holds its owner.lock (T5b);
+// filesystems not known local and lock errors other than busy refuse with nothing written and
+// no other lock taken (T7); a standalone create under power loss never leaves an index that
+// neither open() nor create() accepts (T11's standalone half).
 //
 //   directory_test STATE_DIR [tmpfs]
 //   directory_test opener DIR open|create PARENT_DIR_FD   (the spawned second process)
@@ -187,6 +188,7 @@ int main(int argc, char** argv) {
 		return 2;
 	}
 	const fs::path root = argv[1];
+	const bool disk_only = argc > 2;  // a second filesystem, for the on-disk cases alone
 	fresh(root);
 #if defined(__linux__)
 	if (argc > 2 && std::string(argv[2]) == "tmpfs") {
@@ -324,6 +326,85 @@ int main(int argc, char** argv) {
 		fake_errno = 0;
 	}
 #endif
+
+	if (!disk_only) {  // faultfs: the first filesystem's run covers it
+		// D3-C: a standalone create is the deferred create (the directory lock and clearing an
+		// interrupted create's residue, writing nothing) and then the first commit, so a create
+		// over an empty directory makes 4 durability calls: 2 file syncs (the metadata file, the
+		// manifest) and 2 directory syncs. Clearing residue adds one directory sync.
+		{
+			auto syncs = [](faultfs::op kind, std::uint64_t nth, bool residue) {
+				faultfs::filesystem f;
+				faultfs::io io(f);
+				if (residue) {
+					io.create_exclusive("meta-1.kv")->write_at(0, "torn");
+					io.sync_directory();
+				}
+				f.add_fault({kind, nth, EIO});
+				return error_of([&] { auto ix = index::create(io, keyed(), uuid_a); }) != 0;  // the nth happened
+			};
+			CHECK(syncs(faultfs::op::sync, 2, false) && !syncs(faultfs::op::sync, 3, false));
+			CHECK(syncs(faultfs::op::sync_directory, 2, false) && !syncs(faultfs::op::sync_directory, 3, false));
+			CHECK(syncs(faultfs::op::sync_directory, 3, true) && !syncs(faultfs::op::sync_directory, 4, true));
+			// Power off before any mutation: create fails and the directory stays empty.
+			faultfs::filesystem f;
+			faultfs::io io(f);
+			f.power_off_after(0);
+			CHECK(error_of([&] { auto ix = index::create(io, keyed(), uuid_a); }) != 0);
+			CHECK(f.list().empty());
+		}
+
+		// T11, the standalone half: 20,000 seeded power losses over a create and its first commit,
+		// at every mutation; each outcome opens (the empty index or the committed one) or reads as
+		// never created and create() clears it. Never corrupt_index (SI-R22's 24.8% without syncs).
+		{
+			std::uint64_t total = 0, empty = 0, one = 0;
+			{
+				faultfs::filesystem f;
+				faultfs::io io(f);
+				auto ix = index::create(io, keyed(), uuid_a);
+				empty = ix.digest();
+				ix.apply(one_doc("Qa"), {});
+				ix.commit();
+				one = ix.digest();
+				total = f.mutations();
+			}
+			const std::uint64_t runs = 20000, per = (runs + total) / (total + 1);
+			std::uint64_t n = 0, opened_empty = 0, opened_one = 0, cleared = 0, corrupt = 0, other_errors = 0;
+			for (std::uint64_t at = 0; at <= total; ++at) {
+				for (std::uint64_t k = 0; k < per; ++k, ++n) {
+					faultfs::filesystem f;
+					faultfs::io io(f);
+					f.power_off_after(at);
+					try {
+						auto ix = index::create(io, keyed(), uuid_a);
+						ix.apply(one_doc("Qa"), {});
+						ix.commit();
+					} catch (const std::exception&) {
+					}
+					f.crash(n * 7919 + 13);
+					try {
+						const auto d = index::open(io, keyed()).digest();
+						opened_empty += d == empty;
+						opened_one += d == one;
+						CHECK(d == empty || d == one);
+					} catch (const index_not_created&) {
+						++cleared;
+						CHECK(error_of([&] { CHECK(index::create(io, keyed(), uuid_a).digest() == empty); }) == 0);
+					} catch (const corrupt_index& e) {
+						if (corrupt++ < 5) { std::fprintf(stderr, "t11: power off after %llu, seed %llu: %s\n", (unsigned long long)at, (unsigned long long)n, e.what()); }
+					} catch (const std::exception& e) {
+						if (other_errors++ < 5) { std::fprintf(stderr, "t11: power off after %llu: %s\n", (unsigned long long)at, e.what()); }
+					}
+				}
+			}
+			std::printf("  T11: %llu power losses over %llu mutations: %llu opened empty, %llu opened committed, %llu cleared by create, %llu corrupt\n",
+				(unsigned long long)n, (unsigned long long)total, (unsigned long long)opened_empty, (unsigned long long)opened_one, (unsigned long long)cleared,
+				(unsigned long long)corrupt);
+			CHECK(n >= runs && corrupt == 0 && other_errors == 0);
+			CHECK(opened_empty && opened_one && cleared);
+		}
+	}
 
 	fs::remove_all(root);
 	std::printf("directory: %s\n", failures ? "FAILED" : "ok");

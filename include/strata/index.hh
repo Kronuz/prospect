@@ -337,21 +337,11 @@ public:
 	// Creates an empty index and commits its first manifest, in an empty directory or over
 	// what an interrupted create left (removed first); any other strata file is refused.
 	// The owner lock is the directory's own (D2): busy is EWOULDBLOCK, and any lock error
-	// refuses as it is, nothing written.
+	// refuses as it is, nothing written. The directory's entry in its parent is the host's
+	// to make durable; one parent sync can cover many creates (SI-R21).
 	static basic_index create(kronuz::journal::IO& io, const options& opts, const std::array<char, 16>& uuid) {
-		basic_index ix(io);
-		ix.lock_ = io.acquire_directory_owner();
-		ix.clear_uncreated();
-		ix.m_.uuid = uuid;
-		ix.m_.key_prefix = opts.key_prefix;
-		// Every structure the index's layout reads, keys only with a key prefix (F4, F20).
-		ix.m_.configured = segment::readable & ~(opts.key_prefix.empty() ? format::bit::keys : 0);
-		ix.opts_ = opts;
-		ix.seed_identities();
-		if (opts.budget) { ix.permit_ = opts.budget->open(); }
-		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
-		ix.start_merges();
-		ix.commit();
+		basic_index ix = create_deferred(io, opts, uuid);
+		ix.commit();  // generation 1 (D3-C)
 		return ix;
 	}
 
@@ -2258,6 +2248,24 @@ private:
 
 	// --- recovery ---------------------------------------------------------------------------
 
+	// A create that writes nothing until its first commit (D3-C): the directory lock, an
+	// interrupted create's residue cleared, the state of an empty index in memory.
+	static basic_index create_deferred(kronuz::journal::IO& io, const options& opts, const std::array<char, 16>& uuid) {
+		basic_index ix(io);
+		ix.lock_ = io.acquire_directory_owner();
+		ix.clear_uncreated();
+		ix.m_.uuid = uuid;
+		ix.m_.key_prefix = opts.key_prefix;
+		// Every structure the index's layout reads, keys only with a key prefix (F4, F20).
+		ix.m_.configured = segment::readable & ~(opts.key_prefix.empty() ? format::bit::keys : 0);
+		ix.opts_ = opts;
+		ix.seed_identities();
+		if (opts.budget) { ix.permit_ = opts.budget->open(); }
+		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
+		ix.start_merges();
+		return ix;
+	}
+
 	// Whether names are only what an interrupted create leaves: the first metadata file and
 	// the first manifest's temporary.
 	static bool uncreated(const std::vector<std::string>& names) {
@@ -2268,7 +2276,7 @@ private:
 		return true;
 	}
 	// Removes an interrupted create's files, durably, under the owner lock; throws when the
-	// directory holds a committed index or a segment.
+	// directory holds a committed index or a segment. Syncs only when it removed something.
 	void clear_uncreated() {
 		std::vector<std::string> names;
 		{
@@ -2276,10 +2284,14 @@ private:
 			while (auto n = cursor->next()) { names.push_back(*n); }
 		}
 		if (!uncreated(names)) { throw std::system_error(std::make_error_code(std::errc::file_exists), "strata: the directory holds an index"); }
+		bool removed = false;
 		for (const auto& n : names) {
-			if (index_detail::parse_name(n)) { io_->remove(n); }
+			if (index_detail::parse_name(n)) {
+				io_->remove(n);
+				removed = true;
+			}
 		}
-		sync_dir();
+		if (removed) { sync_dir(); }
 	}
 
 	void recover(std::optional<std::uint64_t> to) {
