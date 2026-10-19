@@ -542,7 +542,7 @@ int main() {
 	// create under power loss at every mutation, under several crash seeds (condition 2):
 	// the directory then opens as the empty index, or as one that was never created, and
 	// create runs again over it. A directory with a segment but no manifest stays corrupt;
-	// create refuses an index, also one whose owner lock is gone, and an index whose
+	// create refuses an index, also one with no lock file, and an index whose
 	// documents were all deleted does not read as never created when its manifests are lost.
 	{
 		std::mt19937_64 cr(5);
@@ -625,8 +625,8 @@ int main() {
 					ix.commit();
 				}
 			}
-			lio.remove("owner.lock");
-			CHECK(throws([&] { index::create(lio, keyed, uuid_a); }));  // an index without its lock
+			for (const auto& n : lfs.list()) { CHECK(n != "owner.lock"); }  // the lock is the directory's (D2)
+			CHECK(throws([&] { index::create(lio, keyed, uuid_a); }));  // an index with no lock file
 		}
 		{
 			faultfs::filesystem dfs;

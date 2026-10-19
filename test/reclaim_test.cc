@@ -207,7 +207,7 @@ int main() {
 				ix.reclaim();
 				ix.commit();
 				ix.reclaim();
-				std::set<std::string> named{"owner.lock"};
+				std::set<std::string> named;
 				std::uint64_t bytes = 0;
 				for (const auto& f : fs.list()) {
 					if (auto p = index_detail::parse_name(f); p && p->type == index_detail::parsed_name::manifest) {

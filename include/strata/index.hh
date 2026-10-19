@@ -336,14 +336,11 @@ public:
 
 	// Creates an empty index and commits its first manifest, in an empty directory or over
 	// what an interrupted create left (removed first); any other strata file is refused.
+	// The owner lock is the directory's own (D2): busy is EWOULDBLOCK, and any lock error
+	// refuses as it is, nothing written.
 	static basic_index create(kronuz::journal::IO& io, const options& opts, const std::array<char, 16>& uuid) {
 		basic_index ix(io);
-		try {
-			ix.lock_ = io.acquire_owner(true);
-		} catch (const std::system_error& e) {
-			if (e.code().value() != EEXIST) { throw; }
-			ix.lock_ = io.acquire_owner(false);
-		}
+		ix.lock_ = io.acquire_directory_owner();
 		ix.clear_uncreated();
 		ix.m_.uuid = uuid;
 		ix.m_.key_prefix = opts.key_prefix;
@@ -362,17 +359,7 @@ public:
 	// closed when a file it names is missing or differs, then deletes orphans.
 	static basic_index open(kronuz::journal::IO& io, const options& opts = {}, std::optional<std::uint64_t> to = std::nullopt) {
 		basic_index ix(io);
-		try {
-			ix.lock_ = io.acquire_owner(false);
-		} catch (const std::system_error& e) {
-			// No owner lock: a create lost before its first file survived, or not an index.
-			if (e.code().value() != ENOENT) { throw; }
-			std::vector<std::string> names;
-			auto cursor = io.scan_directory();
-			while (auto n = cursor->next()) { names.push_back(*n); }
-			if (uncreated(names)) { throw index_not_created("strata: no index was committed here"); }
-			throw corrupt_index("no owner lock");
-		}
+		ix.lock_ = io.acquire_directory_owner();  // as create's
 		ix.opts_ = opts;
 		ix.seed_identities();
 		if (opts.budget) { ix.permit_ = opts.budget->open(); }
