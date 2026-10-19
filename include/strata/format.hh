@@ -40,6 +40,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace strata {
@@ -68,7 +69,7 @@ inline constexpr char footer_magic[4] = {'S', 'E', 'N', 'D'};
 // The version written, and the oldest one read (N - 1 from format 13 on: F2). Until format
 // 13 freezes, both are a pre-freeze number, bumped with each byte change and 13 at the
 // freeze, so an index from another pre-freeze build is refused, never misread (CR11).
-inline constexpr std::uint32_t pre_freeze = 0x8000'0003;
+inline constexpr std::uint32_t pre_freeze = 0x8000'0004;
 inline constexpr std::uint32_t version = pre_freeze;
 inline constexpr std::uint32_t min_read_version = pre_freeze;
 // Bytes 0-15, frozen in every version: magic, version, CRC-32C of bytes 0-11 (F2).
@@ -447,8 +448,8 @@ inline constexpr std::size_t group_blocks = 32;
 }  // namespace skip
 
 // A block's ordinal codec (F10, F11).
-enum class block_codec : std::uint8_t { deltas = 0, bitset = 1 };
-inline constexpr std::uint8_t max_block_codec = 1;
+enum class block_codec : std::uint8_t { deltas = 0, bitset = 1, elias_fano = 2 };
+inline constexpr std::uint8_t max_block_codec = 2;
 
 // The advance entries' size in bytes for a group of n blocks at the given widths.
 inline constexpr std::uint64_t advance_bytes(std::uint64_t n, unsigned wl, unsigned wo, unsigned wf) noexcept {
@@ -520,6 +521,142 @@ inline std::size_t decode_gaps(const std::uint8_t* in, std::size_t size, std::ui
 	}
 	return 1 + bitpack::packed_bytes(bits);
 }
+
+// --- Elias-Fano ordinal blocks (F11: M22) --------------------------------------------------------
+
+// An Elias-Fano block over the 128 ordinals of (base, last] (from 0 when first): with
+// v[i] = o[i] - first ordinal and u = last - first ordinal + 1, each v's low l = log2(u / 128)
+// bits bit-packed by bitpack at width l, then its high part in unary, bit h[i] + i set.
+// Its size follows from u alone, so a block needs no header.
+namespace ef {
+inline unsigned low_bits(std::uint64_t u) noexcept { return u >= 2 * block ? unsigned(std::bit_width(u / block)) - 1 : 0; }
+inline std::uint64_t high_bits(std::uint64_t u) noexcept { return block + ((u - 1) >> low_bits(u)); }
+inline std::uint64_t bytes(std::uint64_t u) noexcept { return bitpack::packed_bytes(low_bits(u)) + (high_bits(u) + 7) / 8; }
+
+// The block's span u for (base, last]: the number of ordinals it can hold.
+inline std::uint64_t span(std::uint32_t base, std::uint32_t last, bool first) noexcept {
+	return std::uint64_t(last) - (first ? std::uint64_t(-1) : std::uint64_t(base));
+}
+
+inline std::size_t encode(const std::uint32_t* ords, std::uint32_t base, bool first, std::uint8_t* out) noexcept {
+	const std::uint32_t from = first ? 0 : base + 1;
+	const std::uint64_t u = span(base, ords[block - 1], first);
+	const unsigned l = low_bits(u);
+	std::uint32_t low[block];
+	for (std::size_t i = 0; i < block; ++i) { low[i] = (ords[i] - from) & ((std::uint32_t(1) << l) - 1); }
+	bitpack::pack(low, l, out);
+	std::uint8_t* high = out + bitpack::packed_bytes(l);
+	const std::uint64_t hb = (high_bits(u) + 7) / 8;
+	std::memset(high, 0, hb);
+	for (std::size_t i = 0; i < block; ++i) {
+		const std::uint64_t at = ((ords[i] - from) >> l) + i;
+		high[at >> 3] = std::uint8_t(high[at >> 3] | 1u << (at & 7));
+	}
+	return std::size_t(bitpack::packed_bytes(l) + hb);
+}
+
+// Decodes a block of bytes(u) bytes: exactly 128 high bits set, the ordinals strictly
+// increasing and the last one at last. Returns false otherwise.
+inline bool decode(const std::uint8_t* in, std::uint32_t base, std::uint32_t last, bool first, std::uint32_t* out) noexcept {
+	const std::uint32_t from = first ? 0 : base + 1;
+	const std::uint64_t u = span(base, last, first);
+	if (u < block) { return false; }
+	const unsigned l = low_bits(u);
+	bitpack::unpack(in, l, out);
+	const std::uint8_t* high = in + bitpack::packed_bytes(l);
+	const std::uint64_t hb = (high_bits(u) + 7) / 8;
+	std::size_t n = 0;
+	for (std::uint64_t w = 0; w < hb; w += 8) {
+		std::uint64_t word = 0;
+		std::memcpy(&word, high + w, std::size_t(std::min<std::uint64_t>(8, hb - w)));
+		for (; word; word &= word - 1) {
+			if (n == block) { return false; }
+			const std::uint64_t at = w * 8 + std::uint64_t(std::countr_zero(word));
+			out[n] = from + std::uint32_t(((at - n) << l) | out[n]);
+			++n;
+		}
+	}
+	if (n != block || out[0] < from || out[block - 1] != last) { return false; }
+	std::uint32_t bad = 0;
+	for (std::size_t i = 1; i < block; ++i) { bad |= out[i] <= out[i - 1]; }
+	return !bad;
+}
+
+// One ordinal of a block without decoding it (the low part's lane, as bitpack lays it out).
+inline std::uint32_t low(const std::uint8_t* in, unsigned l, std::size_t i) noexcept {
+	if (!l) { return 0; }
+	const unsigned lane = unsigned(i & 3), start = unsigned(i >> 2) * l, word = start / 32, shift = start % 32;
+	std::uint32_t a;
+	std::memcpy(&a, in + 4 * (4 * word + lane), 4);
+	std::uint64_t v = a >> shift;
+	if (shift + l > 32) {
+		std::uint32_t b;
+		std::memcpy(&b, in + 4 * (4 * (word + 1) + lane), 4);
+		v |= std::uint64_t(b) << (32 - shift);
+	}
+	return std::uint32_t(v & ((std::uint64_t(1) << l) - 1));
+}
+
+// What a probe needs before it trusts a block: 128 high bits set and the last ordinal at last.
+inline bool probe_ready(const std::uint8_t* in, std::uint32_t base, std::uint32_t last, bool first) noexcept {
+	const std::uint64_t u = span(base, last, first);
+	if (u < block) { return false; }
+	const unsigned l = low_bits(u);
+	const std::uint8_t* high = in + bitpack::packed_bytes(l);
+	const std::uint64_t hb = (high_bits(u) + 7) / 8;
+	std::size_t n = 0;
+	std::uint64_t top = 0;
+	for (std::uint64_t w = 0; w < hb; w += 8) {
+		std::uint64_t word = 0;
+		std::memcpy(&word, high + w, std::size_t(std::min<std::uint64_t>(8, hb - w)));
+		n += std::size_t(std::popcount(word));
+		if (word) { top = w * 8 + 63 - std::uint64_t(std::countl_zero(word)); }
+	}
+	return n == block && (((top - (block - 1)) << l) | low(in, l, block - 1)) == u - 1;
+}
+
+// The index and ordinal of the block's first ordinal >= target, target in [first ordinal,
+// last]: select0 of target's bucket, then a scan. Index block when none (damage).
+inline std::pair<std::size_t, std::uint32_t> successor(const std::uint8_t* in, std::uint32_t base, std::uint32_t last, bool first, std::uint32_t target) noexcept {
+	const std::uint32_t from = first ? 0 : base + 1;
+	const std::uint64_t u = span(base, last, first);
+	const unsigned l = low_bits(u);
+	const std::uint8_t* high = in + bitpack::packed_bytes(l);
+	const std::uint64_t hb = (high_bits(u) + 7) / 8;
+	auto word_at = [&](std::uint64_t w) {
+		std::uint64_t word = 0;
+		std::memcpy(&word, high + 8 * w, std::size_t(std::min<std::uint64_t>(8, hb - 8 * w)));
+		return word;
+	};
+	const std::uint64_t v = std::uint64_t(target - from), bucket = v >> l, words = (hb + 7) / 8;
+	std::uint64_t p = 0;  // the first position of the bucket's run
+	if (bucket) {
+		std::uint64_t seen = 0, w = 0;
+		for (; w < words; ++w) {
+			const std::uint64_t zeros = std::uint64_t(std::popcount(~word_at(w)));
+			if (seen + zeros >= bucket) { break; }
+			seen += zeros;
+		}
+		if (w == words) { return {block, 0}; }
+		std::uint64_t word = ~word_at(w);
+		for (std::uint64_t k = seen + 1; k < bucket; ++k) { word &= word - 1; }
+		p = w * 64 + std::uint64_t(std::countr_zero(word)) + 1;
+	}
+	if (p < bucket) { return {block, 0}; }
+	for (std::size_t i = std::size_t(p - bucket); i < block; ++i, ++p) {
+		std::uint64_t word = p / 64 < words ? word_at(p / 64) >> (p % 64) : 0;
+		while (!word) {
+			p = (p / 64 + 1) * 64;
+			if (p / 64 >= words) { return {block, 0}; }
+			word = word_at(p / 64);
+		}
+		p += std::uint64_t(std::countr_zero(word));
+		const std::uint64_t x = ((p - i) << l) | low(in, l, i);
+		if (x >= v) { return x < u ? std::pair{i, from + std::uint32_t(x)} : std::pair{std::size_t(block), std::uint32_t(0)}; }
+	}
+	return {block, 0};
+}
+}  // namespace ef
 
 // --- term info (the termdict value) -----------------------------------------------------------
 

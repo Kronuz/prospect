@@ -17,7 +17,7 @@
 
 ## State
 
-M16 and M23 committed; M22 next.
+M16, M23, and M22 committed; M20 next; origin/main d058cd9 (dir-lock) to merge.
 
 ## Done
 
@@ -66,9 +66,30 @@ M16 and M23 committed; M22 next.
     check fails :378 and the walk (:319); removing the PFOR refusal fails :412; removing the
     constant's check crashes postings_test (SIGSEGV, an ordinal past the document count).
 
+- M22 (F11's codec code 2), the commit after b9a30d4: Elias-Fano as a block ordinal codec
+  (`format::ef`): the low l = log2(u / 128) bits of each ordinal's offset in the block's span u,
+  bit-packed by bitpack at width l, then the high parts in unary; no header, its size a function
+  of u. The writer takes the smallest of FOR at gap - 1, bitset, and Elias-Fano per block, ties
+  to the earlier. The reader keeps an Elias-Fano block in place like a bitset block: advance()
+  inside it is a successor probe (select0 of the target's bucket, then a scan), after a load
+  check of 128 high bits and the last ordinal; next() and the bulk paths decode it whole,
+  checking strict increase from the block's first ordinal to its last. Codec width 2 is now
+  readable; code 3 is refused by the entry check. `format::pre_freeze` 0x80000004; fixtures, the
+  T8 hash, the prefix CRC re-pinned; digest.txt unchanged. index_test's "postings can grow"
+  merge rooms start at 150,000 (from 170,000): the merged block is Elias-Fano, smaller than its
+  FOR, so the old range never refused (33 merged, 18 refused now). Tests: postings_test (a
+  clustered term with Elias-Fano and FOR blocks through every read path; 400 synthetic blocks of
+  four shapes round-tripped, every successor against the model, damage refused: a high bit
+  cleared, a last moved, a short span, two equal ordinals (decode refuses, the probe's load check
+  does not), an ordinal past the last in its bucket (the probe refuses); code 3 on a FOR block;
+  codecs swapped); fuzz_postings feeds raw bytes to ef::decode and ef::successor (4 min, 13,956
+  runs, no finding).
+  - Revert checks: the entry's code check fails postings_test:300; decode's increase check fails
+    :340 and :496; probe_ready's count fails :482; successor's bound fails :504.
+
 ## Next
 
-1. M22: Elias-Fano blocks chosen per block by size.
+1. M20: seeds, two stored pairs per k.
 
 ## Blocked on
 

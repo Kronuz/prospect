@@ -8,6 +8,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <map>
 #include <random>
@@ -37,7 +38,8 @@ struct corpus {
 };
 
 // Terms of several shapes: dense at 60% (bitset blocks), with and without wdf, every third,
-// sparse, boolean, irregular gaps with runs, and counts that differ from wdf; lengths 1 to 300.
+// sparse, clustered runs (Elias-Fano blocks), boolean, irregular gaps with runs, and counts
+// that differ from wdf; lengths 1 to 300.
 corpus build(std::uint32_t docs, std::uint64_t seed, bool wide = false) {
 	std::mt19937_64 rng(seed);
 	corpus c;
@@ -61,6 +63,8 @@ corpus build(std::uint32_t docs, std::uint64_t seed, bool wide = false) {
 			add("mid", n, n);
 		}
 		if (d % 23 == 0) { add("sparse", 1 + std::uint32_t(rng() % 50), 0); }
+		// Runs and long gaps (Elias-Fano blocks), and one long run (FOR constants).
+		if ((d / 120) % 9 == 0 || d % 997 == 0 || (d >= 10000 && d < 11000)) { add("clustered", 1, 0); }
 		if (d % 2 == 0) { add("bool", 0, 0); }
 		if (rng() % 7 == 0 || (d / 1000) % 5 == 1) { add("gaps", 1 + std::uint32_t(rng() % 9), 0); }
 		if (d % 4 == 1) {
@@ -252,7 +256,11 @@ int main() {
 		const auto dense = skip_test::parse(c.bytes, s, *s.get<strata::inverted_plugin>().term("dense"));
 		std::size_t bitsets = 0;
 		for (const auto& b : dense.blocks) { bitsets += b.codec == unsigned(f::block_codec::bitset); }
-		CHECK(bitsets > 0 && dense.groups[0].wf == 1);
+		CHECK(bitsets > 0 && dense.groups[0].wf >= 1);
+		const auto clustered = skip_test::parse(c.bytes, s, *s.get<strata::inverted_plugin>().term("clustered"));
+		std::size_t efs = 0;
+		for (const auto& b : clustered.blocks) { efs += b.codec == unsigned(f::block_codec::elias_fano); }
+		CHECK(efs > 0 && clustered.groups[0].wf == 2);
 		// Each group's advance entries take (n - 1) lasts and offsets and n codes at the
 		// widths level 1 implies, and the last block's last is the group's.
 		for (std::size_t i = 0; i < mid.blocks.size(); ++i) { CHECK(mid.blocks[i].last == c.terms.at("mid")[i * 128 + 127].ord); }
@@ -282,6 +290,23 @@ int main() {
 			const auto& g = l.groups[0];
 			skip_test::put(file, g.adv, g.bit_offset(3), g.wo, (std::uint64_t(1) << g.wo) - 1);
 		}, &bad));
+		// A code no format-13 codec has (3, at width 2), on a FOR block that would decode.
+		CHECK(damaged(c, "clustered", [](std::string& file, const skip_test::layout& l) {
+			std::size_t i = 0;
+			while (i + 1 < l.blocks.size() && l.blocks[i].codec != unsigned(f::block_codec::deltas)) { ++i; }
+			CHECK(l.blocks[i].codec == unsigned(f::block_codec::deltas));
+			const auto& g = l.groups[i / 32];
+			skip_test::put(file, g.adv, g.bit_codec(i % 32), g.wf, 3);
+		}, &bad));
+		// Elias-Fano blocks read as FOR, and FOR blocks as Elias-Fano.
+		for (unsigned code : {0u, 2u}) {
+			(void)damaged(c, "clustered", [&](std::string& file, const skip_test::layout& l) {
+				for (std::size_t i = 0; i < l.blocks.size(); ++i) {
+					const auto& g = l.groups[i / 32];
+					if (l.blocks[i].codec != code) { skip_test::put(file, g.adv, g.bit_codec(i % 32), g.wf, code); }
+				}
+			}, &bad);
+		}
 		// A bitset block read as FOR deltas.
 		CHECK(damaged(c, "dense", [](std::string& file, const skip_test::layout& l) {
 			const auto& g = l.groups[0];
@@ -298,7 +323,7 @@ int main() {
 		CHECK(!bad);
 		// Every bit of the two groups' advance entries flipped in turn: fence or answer.
 		strata::segment s0(c.bytes);
-		for (const char* term : {"mid", "dense", "dense0", "gaps"}) {
+		for (const char* term : {"mid", "dense", "dense0", "gaps", "clustered"}) {
 			const auto info = *s0.get<strata::inverted_plugin>().term(term);
 			const auto l = skip_test::parse(c.bytes, s0, info);
 			std::size_t flips = 0, fenced = 0;
@@ -411,6 +436,74 @@ int main() {
 		CHECK(buf[0] == bitpack::exceptions_flag);
 		CHECK(f::decode_gaps(buf, n, 0, f::block, false, out) == 0);
 		CHECK(f::decode_gaps(buf, n, 0, (1u << 20) + f::block, false, out) == 0);
+	}
+
+	// --- F11 (M22): Elias-Fano blocks --------------------------------------------------------
+	{
+		std::mt19937_64 rng(22);
+		std::uint32_t out[f::block];
+		std::uint8_t buf[2048];
+		std::size_t chosen = 0;
+		for (int trial = 0; trial < 400; ++trial) {
+			const bool first = trial % 3 == 0;
+			const std::uint32_t base = first ? 0 : std::uint32_t(rng() % 100000);
+			std::uint32_t ords[f::block], at = first ? std::uint32_t(-1) : base;
+			const unsigned shape = trial % 4;  // runs with jumps, uniform, one far last, consecutive
+			for (std::size_t i = 0; i < f::block; ++i) {
+				const std::uint32_t gap = shape == 0 ? (rng() % 8 == 0 ? 1 + std::uint32_t(rng() % 50000) : 1)
+					: shape == 1 ? 1 + std::uint32_t(rng() % (1u << (trial % 20)))
+					: shape == 2 ? (i == f::block - 1 ? 1u << 28 : 1) : 1;
+				ords[i] = at += gap;
+			}
+			const std::uint32_t last = ords[f::block - 1];
+			const std::uint64_t u = f::ef::span(base, last, first);
+			const std::size_t n = f::ef::encode(ords, base, first, buf);
+			CHECK(n == f::ef::bytes(u));
+			CHECK(f::ef::decode(buf, base, last, first, out) && std::equal(ords, ords + f::block, out));
+			CHECK(f::ef::probe_ready(buf, base, last, first));
+			// The successor of every ordinal in range, and of each block value, is the model's.
+			bool ok = true;
+			const std::uint32_t from = first ? 0 : base + 1;
+			for (std::uint64_t t = from; t <= last; t += 1 + (last - from) / 3000) {
+				const auto want = std::size_t(std::lower_bound(ords, ords + f::block, std::uint32_t(t)) - ords);
+				const auto [i, d] = f::ef::successor(buf, base, last, first, std::uint32_t(t));
+				ok = ok && i == want && d == ords[want];
+			}
+			for (std::size_t k = 0; k < f::block; ++k) {
+				const auto [i, d] = f::ef::successor(buf, base, last, first, ords[k]);
+				ok = ok && i == k && d == ords[k];
+			}
+			CHECK(ok);
+			std::uint8_t gaps[bitpack::max_encoded_bytes];
+			chosen += n < f::encode_gaps(ords, base, first, gaps);
+			// Damage: a high bit cleared, a duplicate low part, the last moved, a short span.
+			std::uint8_t bad[2048];
+			const std::size_t lowb = bitpack::packed_bytes(f::ef::low_bits(u));
+			std::memcpy(bad, buf, n);
+			for (std::size_t k = lowb; k < n; ++k) {
+				if (bad[k]) { bad[k] = std::uint8_t(bad[k] & (bad[k] - 1)); break; }
+			}
+			CHECK(!f::ef::decode(bad, base, last, first, out) && !f::ef::probe_ready(bad, base, last, first));
+			CHECK(!f::ef::decode(buf, base, last - 1, first, out) && !f::ef::probe_ready(buf, base, last + 1, first));
+			if (!first) { CHECK(!f::ef::decode(buf, last - 100, last, false, out) && !f::ef::probe_ready(buf, last - 100, last, false)); }
+		}
+		CHECK(chosen > 50);  // shapes where Elias-Fano is smaller than FOR at gap - 1
+		// Two equal ordinals: one high bit moved onto its neighbor's bucket with the same low part.
+		std::uint32_t ords[f::block];
+		for (std::size_t i = 0; i < f::block; ++i) { ords[i] = std::uint32_t(10 * i + 3); }
+		const std::size_t n = f::ef::encode(ords, 0, true, buf);
+		std::uint32_t dup[f::block];
+		std::copy(ords, ords + f::block, dup);
+		dup[5] = dup[4];
+		std::uint8_t bad[2048];
+		CHECK(f::ef::encode(dup, 0, true, bad) == n);
+		CHECK(!f::ef::decode(bad, 0, ords[f::block - 1], true, out));
+		CHECK(f::ef::probe_ready(bad, 0, ords[f::block - 1], true));  // the probe's check passes: decode is the one that refuses
+		// An ordinal past the last in the last's bucket: the probe refuses to answer it.
+		std::copy(ords, ords + f::block, dup);
+		dup[126] = 1279;  // bucket 159 at 3 low bits, as the last (1273), with a larger low part
+		CHECK(f::ef::encode(dup, 0, true, bad) == n && f::ef::probe_ready(bad, 0, 1273, true));
+		CHECK(f::ef::successor(bad, 0, 1273, true, 1273).first == f::block);
 	}
 
 	std::printf("postings: %s\n", failures ? "FAILED" : "ok");

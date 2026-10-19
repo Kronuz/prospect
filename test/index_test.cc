@@ -948,7 +948,8 @@ int main() {
 		}
 	}, 80000, 92000, 200);
 	// Postings can grow when merged: a term on A's first document and B's 127 is a tail of
-	// small deltas in B and one block in the merge, as wide as the jump across A.
+	// small deltas in B and one block in the merge, spanning the jump across A (an
+	// Elias-Fano block, smaller than FOR's, so the rooms start lower).
 	merge_rooms({}, [&](strata::index& ix) {
 		auto shared = [] {
 			document d;
@@ -969,7 +970,7 @@ int main() {
 		}
 		ix.refresh();
 		for (int i = 0; i < 127; ++i) { one(shared()); }
-	}, 170000, 200000, 1000);
+	}, 150000, 200000, 1000);
 	// A transaction admitted by draining a queued obsolete file commits at once on a disk of
 	// the budget's size: the drain frees the file's bytes durably before they count (L8).
 	{

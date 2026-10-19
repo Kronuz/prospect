@@ -550,8 +550,13 @@ private:
 			const ordinal_t base = b ? ords[b - 1] + 1 : 0;
 			const std::uint64_t span = std::uint64_t(ords[b + format::block - 1]) - base + 1;
 			const std::size_t for_bytes = format::encode_gaps(ords.data() + b, prev, b == 0, buf);
-			const bool bitset = (span + 7) / 8 < for_bytes;
-			if (bitset) {
+			const std::uint64_t ef_bytes = format::ef::bytes(format::ef::span(prev, ords[b + format::block - 1], b == 0));
+			// The smallest codec, ties to the earlier: FOR, bitset, Elias-Fano (M22).
+			const bool bitset = (span + 7) / 8 < for_bytes && (span + 7) / 8 <= ef_bytes;
+			const bool elias_fano = !bitset && ef_bytes < for_bytes;
+			if (elias_fano) {
+				blocks.append(reinterpret_cast<char*>(buf), format::ef::encode(ords.data() + b, prev, b == 0, buf));
+			} else if (bitset) {
 				bits.assign((span + 7) / 8, '\0');
 				for (std::size_t i = b; i < b + format::block; ++i) {
 					const std::uint64_t at = ords[i] - base;
@@ -565,7 +570,7 @@ private:
 			pairs_.clear();
 			for (std::size_t i = b; i < b + format::block; ++i) { pairs_.push_back({wdfs[i], format::encode_length(lengths_[ords[i]])}); }
 			meta.push_back({ords[b + format::block - 1], blocks.size() - start, position, format::competitive(pairs_)});
-			meta.back().codec = bitset ? format::block_codec::bitset : format::block_codec::deltas;
+			meta.back().codec = elias_fano ? format::block_codec::elias_fano : bitset ? format::block_codec::bitset : format::block_codec::deltas;
 			if (layout) {
 				meta.back().pos_offset = layout->offset_of(position);
 				if (with_counts) { meta.back().count_offset = layout->count_offsets[b / format::block]; }
