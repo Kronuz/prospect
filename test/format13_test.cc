@@ -571,6 +571,17 @@ int main() {
 		CHECK(with([](strata::files::manifest& m) { m.mask |= bit::compact; }) == verdict::unsupported);
 		CHECK(with([](strata::files::manifest& m) { m.mask |= std::uint64_t(1) << 40; }) == verdict::unsupported);  // bits 32 to 63 (F13-R40)
 		CHECK(with([](strata::files::manifest& m) { m.mask |= std::uint64_t(1) << 63; }) == verdict::unsupported);
+		// A later release's field (a values generation) under a mask bit this binary lacks: the
+		// mask is classified first, so unsupported; the field alone is damage (F13-R42).
+		CHECK(with([](strata::files::manifest& m) {
+			m.mask |= std::uint64_t(1) << 20;
+			m.segments.back().values_generation = 1;
+		}) == verdict::unsupported);
+		CHECK(with([](strata::files::manifest& m) { m.segments.back().values_generation = 1; }) == verdict::corrupt);
+		CHECK(with([](strata::files::manifest& m) {
+			m.mask |= std::uint64_t(1) << 20;
+			m.slots = {1, 10, 0};
+		}) == verdict::unsupported);
 		// A highest segment version above this binary's: unsupported.
 		CHECK(with([](strata::files::manifest& m) { m.max_version = strata::format::version + 1; }) == verdict::unsupported);
 		// An index an earlier pre-freeze build wrote, segments at 13: unsupported (CR11).
@@ -603,7 +614,10 @@ int main() {
 				CHECK(apply(a, upsert("Q1", "w")) == strata::verdict::accepted);
 				gen = a.checkpoint();
 			}
-			rewrite(fs_a, io_a, gen, [](strata::files::manifest& m) { m.mask |= bit::points; });
+			rewrite(fs_a, io_a, gen, [](strata::files::manifest& m) {
+				m.mask |= bit::points;
+				m.segments.back().values_generation = 1;  // a later field under it: still unsupported (F13-R42)
+			});
 			auto b = strata::index::create(io_b, o, {});
 			bool unsupported = false;
 			try {

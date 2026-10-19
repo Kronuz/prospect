@@ -761,7 +761,7 @@ public:
 		files::manifest theirs;
 		{
 			auto f = source.open_existing(index_detail::manifest_name(generation));
-			theirs = files::decode_manifest(index_detail::read_all(*f));
+			theirs = files::decode_manifest_for(index_detail::read_all(*f), readable());
 		}
 		if (theirs.generation != generation) { throw corrupt_index("install: manifest generation differs from its name"); }
 		check_readable(theirs);
@@ -2310,7 +2310,7 @@ private:
 			if (!std::binary_search(manifests.begin(), manifests.end(), *to)) { throw corrupt_index("no such manifest"); }
 			chosen = *to;
 		}
-		m_ = read_checked([&] { return files::decode_manifest(index_detail::read_all(*io_->open_existing(index_detail::manifest_name(chosen)))); }, &media_retries_);
+		m_ = read_checked([&] { return files::decode_manifest_for(index_detail::read_all(*io_->open_existing(index_detail::manifest_name(chosen))), readable()); }, &media_retries_);
 		if (m_.generation != chosen) { throw corrupt_index("manifest generation differs from its name"); }
 		// Every file the manifest names must exist and agree with its entry.
 		check_readable(m_);
@@ -2379,18 +2379,12 @@ private:
 			throw corrupt_index(std::string("unreadable: ") + e.what());
 		}
 	}
-	// Refuses an index this binary cannot read before any segment opens (F20): a structure
-	// bit in the manifest's mask it lacks, or segment versions outside what it reads; then
-	// configured bits no flush could write, as damage.
+	// What this binary reads, against which decode_manifest_for classifies a manifest before any
+	// segment opens (F20, F13-R42).
+	static files::readable_by readable() { return {segment::readable, format::min_read_version, format::version}; }
+	// Refuses configured bits no flush could write, as damage (CR5): each bit's owner set
+	// (F4), and keys set exactly when the index has a key prefix (F8).
 	static void check_readable(const files::manifest& m) {
-		if (const format::structure_bits lacked = m.mask & ~segment::readable) {
-			throw unsupported_index("strata: unsupported index: structure bit " + std::to_string(std::countr_zero(lacked)));
-		}
-		if (!m.segments.empty() && (m.min_version < format::min_read_version || m.max_version > format::version)) {
-			throw unsupported_index("strata: unsupported index: segment format versions " + std::to_string(m.min_version) + " to " + std::to_string(m.max_version));
-		}
-		// Configured bits a flush can write (CR5): each bit's owner set (F4), and keys set
-		// exactly when the index has a key prefix (F8).
 		for (format::structure_bits b = m.configured; b; b &= b - 1) {
 			const format::structure_bits owner = format::requires_of(b & -b);
 			if (owner && !(m.configured & owner)) { throw corrupt_index("configured structure bit " + std::to_string(std::countr_zero(b)) + " without its owner"); }
