@@ -462,7 +462,6 @@ int main() {
 			const std::size_t n = f::ef::encode(ords, base, first, buf);
 			CHECK(n == f::ef::bytes(u));
 			CHECK(f::ef::decode(buf, base, last, first, out) && std::equal(ords, ords + f::block, out));
-			CHECK(f::ef::probe_ready(buf, base, last, first));
 			// The successor of every ordinal in range, and of each block value, is the model's.
 			bool ok = true;
 			const std::uint32_t from = first ? 0 : base + 1;
@@ -485,9 +484,9 @@ int main() {
 			for (std::size_t k = lowb; k < n; ++k) {
 				if (bad[k]) { bad[k] = std::uint8_t(bad[k] & (bad[k] - 1)); break; }
 			}
-			CHECK(!f::ef::decode(bad, base, last, first, out) && !f::ef::probe_ready(bad, base, last, first));
-			CHECK(!f::ef::decode(buf, base, last - 1, first, out) && !f::ef::probe_ready(buf, base, last + 1, first));
-			if (!first) { CHECK(!f::ef::decode(buf, last - 100, last, false, out) && !f::ef::probe_ready(buf, last - 100, last, false)); }
+			CHECK(!f::ef::decode(bad, base, last, first, out));
+			CHECK(!f::ef::decode(buf, base, last - 1, first, out));
+			if (!first) { CHECK(!f::ef::decode(buf, last - 100, last, false, out)); }
 		}
 		CHECK(chosen > 50);  // shapes where Elias-Fano is smaller than FOR at gap - 1
 		// Two equal ordinals: one high bit moved onto its neighbor's bucket with the same low part.
@@ -500,12 +499,19 @@ int main() {
 		std::uint8_t bad[2048];
 		CHECK(f::ef::encode(dup, 0, true, bad) == n);
 		CHECK(!f::ef::decode(bad, 0, ords[f::block - 1], true, out));
-		CHECK(f::ef::probe_ready(bad, 0, ords[f::block - 1], true));  // the probe's check passes: decode is the one that refuses
 		// An ordinal past the last in the last's bucket: the probe refuses to answer it.
 		std::copy(ords, ords + f::block, dup);
 		dup[126] = 1279;  // bucket 159 at 3 low bits, as the last (1273), with a larger low part
-		CHECK(f::ef::encode(dup, 0, true, bad) == n && f::ef::probe_ready(bad, 0, 1273, true));
+		CHECK(f::ef::encode(dup, 0, true, bad) == n);
 		CHECK(f::ef::successor(bad, 0, 1273, true, 1273).first == f::block);
+		// A first high bit past the span: the block's first ordinal is refused, not answered.
+		std::memset(bad, 0, n);
+		const std::uint64_t u = f::ef::span(0, 1273, true);
+		const std::size_t lowb = bitpack::packed_bytes(f::ef::low_bits(u)), top = (f::ef::high_bits(u) + 7) / 8 * 8 - 1;
+		bad[lowb + top / 8] = std::uint8_t(1u << (top % 8));
+		std::uint32_t d0 = 0;
+		CHECK(!f::ef::first_ordinal(bad, 0, 1273, true, d0));
+		CHECK(f::ef::first_ordinal(buf, 0, ords[f::block - 1], true, d0) && d0 == ords[0]);
 	}
 
 	// --- F13 (M20): threshold seeds -----------------------------------------------------------

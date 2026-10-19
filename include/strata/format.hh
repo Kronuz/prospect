@@ -557,6 +557,17 @@ inline std::size_t encode(const std::uint32_t* ords, std::uint32_t base, bool fi
 
 // Decodes a block of bytes(u) bytes: exactly 128 high bits set, the ordinals strictly
 // increasing and the last one at last. Returns false otherwise.
+// Each byte's set bits, lowest first: how decode walks the high parts a byte at a time.
+inline constexpr auto byte_bits = [] {
+	std::array<std::array<std::uint8_t, 8>, 256> t{};
+	for (unsigned x = 0; x < 256; ++x) {
+		for (unsigned b = 0, k = 0; b < 8; ++b) {
+			if (x >> b & 1) { t[x][k++] = std::uint8_t(b); }
+		}
+	}
+	return t;
+}();
+
 inline bool decode(const std::uint8_t* in, std::uint32_t base, std::uint32_t last, bool first, std::uint32_t* out) noexcept {
 	const std::uint32_t from = first ? 0 : base + 1;
 	const std::uint64_t u = span(base, last, first);
@@ -565,18 +576,17 @@ inline bool decode(const std::uint8_t* in, std::uint32_t base, std::uint32_t las
 	bitpack::unpack(in, l, out);
 	const std::uint8_t* high = in + bitpack::packed_bytes(l);
 	const std::uint64_t hb = (high_bits(u) + 7) / 8;
+	std::uint32_t at[block + 8];  // each set high bit's position; a byte writes 8, keeps its count
 	std::size_t n = 0;
-	for (std::uint64_t w = 0; w < hb; w += 8) {
-		std::uint64_t word = 0;
-		std::memcpy(&word, high + w, std::size_t(std::min<std::uint64_t>(8, hb - w)));
-		for (; word; word &= word - 1) {
-			if (n == block) { return false; }
-			const std::uint64_t at = w * 8 + std::uint64_t(std::countr_zero(word));
-			out[n] = from + std::uint32_t(((at - n) << l) | out[n]);
-			++n;
-		}
+	for (std::uint64_t b = 0; b < hb; ++b) {
+		const auto& bits = byte_bits[high[b]];
+		for (unsigned j = 0; j < 8; ++j) { at[n + j] = std::uint32_t(b * 8 + bits[j]); }
+		n += std::size_t(std::popcount(high[b]));
+		if (n > block) { return false; }
 	}
-	if (n != block || out[0] < from || out[block - 1] != last) { return false; }
+	if (n != block) { return false; }
+	for (std::size_t i = 0; i < block; ++i) { out[i] = from + (((at[i] - std::uint32_t(i)) << l) | out[i]); }
+	if (out[0] < from || out[block - 1] != last) { return false; }
 	std::uint32_t bad = 0;
 	for (std::size_t i = 1; i < block; ++i) { bad |= out[i] <= out[i - 1]; }
 	return !bad;
@@ -597,22 +607,23 @@ inline std::uint32_t low(const std::uint8_t* in, unsigned l, std::size_t i) noex
 	return std::uint32_t(v & ((std::uint64_t(1) << l) - 1));
 }
 
-// What a probe needs before it trusts a block: 128 high bits set and the last ordinal at last.
-inline bool probe_ready(const std::uint8_t* in, std::uint32_t base, std::uint32_t last, bool first) noexcept {
+// The block's first ordinal without decoding it: the first high bit and the first low part.
+// False when it lies past the block's span.
+inline bool first_ordinal(const std::uint8_t* in, std::uint32_t base, std::uint32_t last, bool first, std::uint32_t& out) noexcept {
 	const std::uint64_t u = span(base, last, first);
 	if (u < block) { return false; }
 	const unsigned l = low_bits(u);
 	const std::uint8_t* high = in + bitpack::packed_bytes(l);
 	const std::uint64_t hb = (high_bits(u) + 7) / 8;
-	std::size_t n = 0;
-	std::uint64_t top = 0;
-	for (std::uint64_t w = 0; w < hb; w += 8) {
-		std::uint64_t word = 0;
-		std::memcpy(&word, high + w, std::size_t(std::min<std::uint64_t>(8, hb - w)));
-		n += std::size_t(std::popcount(word));
-		if (word) { top = w * 8 + 63 - std::uint64_t(std::countl_zero(word)); }
+	for (std::uint64_t b = 0; b < hb; ++b) {
+		if (high[b]) {
+			const std::uint64_t v = ((b * 8 + std::uint64_t(std::countr_zero(high[b]))) << l) | low(in, l, 0);
+			if (v >= u) { return false; }
+			out = (first ? 0 : base + 1) + std::uint32_t(v);
+			return true;
+		}
 	}
-	return n == block && (((top - (block - 1)) << l) | low(in, l, block - 1)) == u - 1;
+	return false;
 }
 
 // The index and ordinal of the block's first ordinal >= target, target in [first ordinal,

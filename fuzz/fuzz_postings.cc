@@ -112,7 +112,6 @@ void raw_blocks(const std::uint8_t* data, std::size_t size) {
 	if ((!first && last <= base) || u > (1u << 20) || size - 9 < f::ef::bytes(u)) { return; }
 	const std::uint8_t* in = data + 9;
 	if (f::ef::decode(in, base, last, first, out) && !valid()) { fail("ef::decode accepted a bad block"); }
-	if (!f::ef::probe_ready(in, base, last, first)) { return; }
 	const std::uint32_t from = first ? 0 : base + 1;
 	for (std::uint64_t t = from; t <= last; t += 1 + (last - from) / 64) {
 		const auto [i, d] = f::ef::successor(in, base, last, first, std::uint32_t(t));

@@ -1669,19 +1669,18 @@ private:
 		return std::size_t(bytes);
 	}
 
-	// Keeps an Elias-Fano block for probes (M22), its count and last checked; ords() decodes
-	// and checks it whole. Returns its bytes, which its span fixes.
+	// Keeps an Elias-Fano block in place (M22) with its first ordinal: the first advance()
+	// into it probes after checking its count and last; ords() decodes and checks it whole.
+	// Returns its bytes, which its span fixes.
 	std::size_t load_elias_fano(const char* p, const block_ref& r) {
 		const bool first = next_block_ == 0;
 		const std::uint64_t bytes = format::ef::bytes(format::ef::span(r.base, r.last, first));
 		const auto* in = reinterpret_cast<const std::uint8_t*>(p);
-		if (bytes > r.bytes || !format::ef::probe_ready(in, r.base, r.last, first)) { corrupt("elias-fano block"); }
+		if (bytes > r.bytes || !format::ef::first_ordinal(in, r.base, r.last, first, pending_doc0_)) { corrupt("elias-fano block"); }
 		ef_ = in;
 		ef_base_ = r.base;
 		ef_first_ = first;
-		const auto [i, d] = format::ef::successor(in, r.base, r.last, first, first ? 0 : r.base + 1);
-		if (i != 0) { corrupt("elias-fano block"); }
-		pending_doc0_ = d;
+		ef_probed_ = false;
 		pending_last_ = r.last;
 		pending_ = elias_fano;
 		return std::size_t(bytes);
@@ -1730,6 +1729,12 @@ private:
 	// (doc(), the block's last].
 	ordinal_t advance_pending(ordinal_t target) {
 		if (pending_ == bitset) { return advance_bits(target); }
+		if (ef_probed_) {  // a second target in the block: decode it whole, then search
+			ords();
+			pos_ += count_below(buf_ords_ + pos_, buf_len_ - pos_, target);
+			return doc_ = buf_ords_[pos_];
+		}
+		ef_probed_ = true;  // successor answers inside the block's span or not at all
 		const auto [i, d] = format::ef::successor(ef_, ef_base_, pending_last_, ef_first_, target);
 		if (i >= format::block || i < pos_) { corrupt("elias-fano block"); }
 		pos_ = i;
@@ -1824,7 +1829,7 @@ private:
 	ordinal_t bits_first_ = 0, pending_doc0_ = 0, pending_last_ = 0;
 	const std::uint8_t* ef_ = nullptr;  // the current Elias-Fano block
 	ordinal_t ef_base_ = 0;
-	bool ef_first_ = false;
+	bool ef_first_ = false, ef_probed_ = false;
 	mutable std::uint32_t buf_wdfs_[format::block] = {};
 	mutable const char* wdf_pending_ = nullptr;  // the current block's undecoded wdf block
 	std::size_t wdf_size_ = 0;
