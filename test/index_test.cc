@@ -221,6 +221,21 @@ int main() {
 		o.doc = two_keys;
 		CHECK(ix.apply(tx({o}), {}).result == verdict::invalid);
 		CHECK(ix.apply(tx({add("Qa", "again")}), {}).result == verdict::version_conflict);
+		// The reserved metadata prefix is the engine's (F20, F13-R49): a host's set_meta or
+		// delete_meta under it is invalid and undoes the transaction's earlier steps.
+		auto meta = [](operation::kind k, const char* key) {
+			operation m;
+			m.type = k;
+			m.meta_key = key;
+			m.meta_value = "host";
+			return m;
+		};
+		v = ix.apply(tx({meta(operation::set_meta, "m"), meta(operation::set_meta, "strata.order_preset")}), {});
+		CHECK(v.result == verdict::invalid && v.op == 1);
+		CHECK(ix.apply(tx({meta(operation::delete_meta, "strata.order_preset")}), {}).result == verdict::invalid);
+		CHECK(ix.apply(tx({meta(operation::set_meta, "strata"), meta(operation::set_meta, "stratum.x")}), {}).result == verdict::accepted);
+		ix.commit();
+		CHECK(!ix.metadata().count("m") && !ix.metadata().count("strata.order_preset") && ix.metadata().count("strata") == 1);
 	}
 	// Token documents hold the same content as their terms grouped (equal digests, buffered
 	// and flushed); empty, oversized, out-of-bounds, out-of-order, and keyed tokens reject, as

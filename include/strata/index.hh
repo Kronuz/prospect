@@ -1720,6 +1720,7 @@ private:
 			switch (o.type) {
 			case operation::set_meta:
 			case operation::delete_meta: {
+				if (o.meta_key.starts_with(files::reserved_meta_prefix)) { return reject(verdict::invalid); }  // the engine's (F20)
 				undo_step u{undo_step::meta};
 				u.key = o.meta_key;
 				u.prev_dirty = meta_dirty_;
