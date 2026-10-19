@@ -58,7 +58,6 @@ using key_map = std::unordered_map<ordinal_t, std::string>;
 
 // What the core hands every plugin's merge (L6): the output's documents in output order.
 struct merge_context {
-	std::uint32_t version = format::version;  // the format being written
 	std::uint8_t region_shift = format::default_region_shift;
 	std::uint32_t doc_count = 0;              // documents in the output
 	std::span<const merge_input> inputs;

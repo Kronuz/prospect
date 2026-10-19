@@ -803,12 +803,6 @@ public:
 		return ord;
 	}
 
-	// Adds a document's per-document data only, for a writer whose terms come from
-	// flush_from (a merge); returns its ordinal.
-	ordinal_t add_document(std::uint64_t docid, std::uint32_t length, std::string_view stored = {}, std::uint64_t version = 0, std::string_view key = {}) {
-		return begin_document(docid, length, stored, version, key);
-	}
-
 	std::size_t doc_count() const noexcept { return inverted_.doc_count(); }
 
 	// Writes the segment file and returns its bytes.
@@ -824,15 +818,6 @@ public:
 	// alongside the postings, so it goes to `positions` until the postings end.
 	void flush(const std::array<std::uint8_t, 16>& segment_id, output& sink, spill& positions_spill) {
 		write(segment_id, sink, [&](section_sink& s) { inverted_.finish_buffered(s, positions_spill); });
-	}
-
-	// Writes the segment with terms from next(tp), which fills tp and returns the term, in
-	// strictly increasing order, or nothing at the end. Documents come from add() or
-	// add_document(); a term's ordinals name them. `alphabet` holds every byte the terms
-	// use (the dictionary codes its keys over it; empty: all 256).
-	template <class Next>
-	void flush_from(const std::array<std::uint8_t, 16>& segment_id, output& sink, spill& positions_spill, std::string_view alphabet, Next&& next) {
-		write(segment_id, sink, [&](section_sink& s) { inverted_.finish(s, positions_spill, alphabet, std::forward<Next>(next)); });
 	}
 
 private:

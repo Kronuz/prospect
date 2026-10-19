@@ -171,7 +171,6 @@ public:
 	std::uint64_t min_docid() const noexcept { return footer_.min_docid; }
 	std::uint64_t max_docid() const noexcept { return footer_.max_docid; }
 	std::size_t verified_regions() const noexcept { return regions_->regions.verified(); }
-	bool verify(std::uint64_t offset, std::uint64_t length) const { return regions_->regions.verify({offset, length}); }
 
 	// The host docid of an ordinal.
 	std::uint64_t docid(ordinal_t ord) const { return ids_.docid(ord); }
