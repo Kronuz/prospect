@@ -9,6 +9,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -121,11 +122,12 @@ int main() {
 	for (std::uint32_t o = 1; o < 300; o += 5) { db[o >> 6] |= std::uint64_t(1) << (o & 63); }
 	pin("merge-deletes.sx", merged({a, b}, {da, db}));
 	// A segment moved after open still answers: terms, postings, keys, and stored records
-	// (under ASan in CI, any reader left pointing into the moved-from object faults).
+	// The source is freed before any read, so under ASan a reader left pointing into it faults.
 	{
 		const std::string file = build(300, 1000, true);
-		segment first(file);
-		segment moved(std::move(first));
+		auto first = std::make_unique<segment>(file);
+		segment moved(std::move(*first));
+		first.reset();
 		const auto info = moved.get<strata::inverted_plugin>().term("gamma");
 		CHECK(info && info->df > 0);
 		postings_iterator it(moved.get<strata::inverted_plugin>(), *info);
