@@ -63,7 +63,7 @@ using docset::no_more_docs;
 
 // What stage-1 checks may consult (L4); Phase 4 adds the slot table.
 struct validate_context {
-	std::string_view key_prefix;  // the manifest's, until format 13
+	std::string_view key_prefix;  // the index's (R13)
 };
 
 // One term of a document as the host builds it; terms are unique within a document.
@@ -110,14 +110,11 @@ public:
 		if (std::memcmp(file.data(), format::header_magic, 8) != 0 || format::get<std::uint32_t>(file.data() + 8) != format::version) {
 			corrupt("header magic or version");
 		}
-		// Kinds no rule claims are left alone in format 12, as before the split; a kind listed
-		// twice is corrupt.
+		// Kinds no rule claims are left alone in format 12, as before the split (decode_toc
+		// rejects a kind listed twice).
 		std::vector<residency::verified_regions::span> spans;
-		std::vector<format::section> seen;
 		// Each regions-checked section's CRCs move to its span; others are dropped.
 		for (auto& e : sections_) {
-			if (std::find(seen.begin(), seen.end(), e.kind) != seen.end()) { corrupt("section listed twice"); }
-			seen.push_back(e.kind);
 			const section_rule* r = rule_of(rules, e.kind);
 			if (r && r->check == section_rule::regions) {
 				spans.push_back({e.offset, e.length, e.region_shift, std::move(e.region_crcs)});

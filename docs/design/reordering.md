@@ -96,7 +96,7 @@ permuted mode, and the docids section's kind follows the order actually written 
 - **(b) Stored records.** A permuted order never keeps a source frame's documents
   contiguous, so I7's raw frame copy never applies and the stored section is re-encoded.
   `stored()` alone decompresses a record's whole frame. A merge reads each source through
-  a one-frame cache (`segment::stored_frame`), so docid order decodes each frame once. Out
+  a one-frame cache (`stored_plugin::reader::stored_frame`), so docid order decodes each frame once. Out
   of docid order the merge first copies every source's live records, frame by frame, into
   a record spill (`seg-<id>.rec`, written through the merge's file writes and mapped back,
   8 bytes an ordinal charged for its offsets), then writes them in `order`. Each source

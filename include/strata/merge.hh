@@ -29,7 +29,7 @@ template <class Layout>
 struct basic_merge_source {
 	const basic_segment<Layout>* seg = nullptr;
 	const std::vector<std::uint64_t>* deleted = nullptr;  // bit per ordinal; null: none deleted
-	bool live(ordinal_t o) const { return !deleted || !(((*deleted)[o >> 6] >> (o & 63)) & 1); }
+	bool live(ordinal_t o) const { return live_bits{deleted ? deleted->data() : nullptr}.live(o); }
 };
 using merge_source = basic_merge_source<search_layout_12>;
 
@@ -50,7 +50,7 @@ struct merge_input {
 	const core_segment* core = nullptr;                   // docids and document count
 	const std::vector<std::uint64_t>* deleted = nullptr;  // bit per ordinal; null: none deleted
 	std::span<const ordinal_t> new_ordinal;               // [old ordinal] = new, or no_more_docs
-	bool live(ordinal_t o) const { return !deleted || !(((*deleted)[o >> 6] >> (o & 63)) & 1); }
+	bool live(ordinal_t o) const { return live_bits{deleted ? deleted->data() : nullptr}.live(o); }
 };
 
 // A source's live documents' keys, by ordinal (format 12 collects them with `scan`).

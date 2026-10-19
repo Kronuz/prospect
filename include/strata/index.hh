@@ -900,13 +900,13 @@ private:
 		std::memcpy(job->header.data(), &job->id, 8);
 		std::memcpy(job->header.data() + 8, m_.uuid.data(), 8);
 		pending_.reserve(pending_.size() + 1);
-		const merge_context ctx{io_, exec_, opts_.rate, opts_.budget, opts_.merge_memory_wait, m_.key_prefix, opts_.reorder_settings};
+		const merge_env ctx{io_, exec_, opts_.rate, opts_.budget, opts_.merge_memory_wait, m_.key_prefix, opts_.reorder_settings};
 		group_->post([job, ctx](const task::cancel_token& stop) { run_merge(*job, ctx, stop); });
 		pending_.push_back(std::move(job));
 	}
 
 	// What a merge uses besides its job; the index's, never the index.
-	struct merge_context {
+	struct merge_env {
 		kronuz::journal::IO* io;
 		executor* exec;
 		rate_limiter* rate;
@@ -921,7 +921,7 @@ private:
 	// reservation past what it holds.
 	class merge_file {
 	public:
-		merge_file(kronuz::journal::File& f, const merge_context& ctx, merge_job& job, const task::cancel_token& stop) : f_(f), ctx_(ctx), job_(job), stop_(stop) {}
+		merge_file(kronuz::journal::File& f, const merge_env& ctx, merge_job& job, const task::cancel_token& stop) : f_(f), ctx_(ctx), job_(job), stop_(stop) {}
 		void write(std::string_view bytes, std::uint64_t& used) {
 			const std::size_t chunk = ctx_.rate ? ctx_.rate->chunk() : std::size_t(1) << 20;
 			while (!bytes.empty()) {
@@ -947,7 +947,7 @@ private:
 
 	private:
 		kronuz::journal::File& f_;
-		const merge_context& ctx_;
+		const merge_env& ctx_;
 		merge_job& job_;
 		const task::cancel_token& stop_;
 		std::uint64_t at_ = 0;
@@ -978,7 +978,7 @@ private:
 	// copied into the output and removed. A spill left by a crash is an orphan open removes.
 	class merge_spill final : public spill {
 	public:
-		merge_spill(const merge_context& ctx, merge_job& job, std::uint64_t& used, const task::cancel_token& stop, std::size_t chunk)
+		merge_spill(const merge_env& ctx, merge_job& job, std::uint64_t& used, const task::cancel_token& stop, std::size_t chunk)
 			: ctx_(ctx), job_(job), used_(used), stop_(stop), chunk_(chunk), name_(index_detail::spill_name(job.id)) {}
 		merge_spill(const merge_spill&) = delete;
 		merge_spill& operator=(const merge_spill&) = delete;
@@ -1025,7 +1025,7 @@ private:
 			file_->write(buf_, used_);
 			buf_.clear();
 		}
-		const merge_context& ctx_;
+		const merge_env& ctx_;
 		merge_job& job_;
 		std::uint64_t& used_;
 		const task::cancel_token& stop_;
@@ -1041,7 +1041,7 @@ private:
 	// and removed after use; one left by a crash is an orphan open removes.
 	class merge_scratch final : public strata::scratch {
 	public:
-		merge_scratch(const merge_context& ctx, merge_job& job, std::uint64_t& used, const task::cancel_token& stop, std::size_t chunk, std::string name)
+		merge_scratch(const merge_env& ctx, merge_job& job, std::uint64_t& used, const task::cancel_token& stop, std::size_t chunk, std::string name)
 			: ctx_(ctx), used_(used), name_(std::move(name)), f_(ctx.io->create_exclusive(name_)), file_(*f_, ctx, job, stop), out_(file_, used, chunk) {}
 		merge_scratch(const merge_scratch&) = delete;
 		merge_scratch& operator=(const merge_scratch&) = delete;
@@ -1063,7 +1063,7 @@ private:
 		}
 
 	private:
-		const merge_context& ctx_;
+		const merge_env& ctx_;
 		std::uint64_t& used_;
 		std::string name_;
 		std::unique_ptr<kronuz::journal::File> f_;
@@ -1078,7 +1078,7 @@ private:
 	// the output to its file unsynced (as a flush leaves it) under the rate limit with
 	// positions spilled to a file, then reads it back as the segment. A failed or stopped
 	// build removes its files.
-	static void run_merge(merge_job& job, const merge_context& ctx, const task::cancel_token& stop) {
+	static void run_merge(merge_job& job, const merge_env& ctx, const task::cancel_token& stop) {
 		try {
 			if (stop.requested()) { throw task::cancelled{}; }
 			std::uint64_t live = 0, estimate = 0;
