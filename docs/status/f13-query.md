@@ -17,7 +17,12 @@
 
 ## State
 
-All five items built and pushed, origin/main d058cd9 merged; the Mac measurements done (`docs/perf/format13-query-items.md`). M16, M23, M20, and M3t pass on this host with no loss; M22 closes the postings row by projection but fails D14's guard (intersections, phrases, negations, counted unions 1.09 to 1.42 against main), which blocks on a decision that is not mine (below).
+The lead's ruling on M22 applied: no share threshold cleared every row, so M22 is out of the
+writer with code 2 reserved (03c79cc); the kept set is M16 at A3@128, M23, M20, and M3t, with
+M16's sequential entry reads made cheaper (a2b08d7); A3@128 stands. The kept set still loses one
+row class on the reordered index, counted unions of more than three terms (1.06 to 1.07), not yet
+attributed between M16 and M23 (Next 1). The F10 deviations are listed
+below for the architect's freeze-readiness review.
 
 ## Done
 
@@ -144,32 +149,84 @@ All five items built and pushed, origin/main d058cd9 merged; the Mac measurement
   214 s); identity and verify 3 min; run-level sessions 99 to 122 s per phase at six runs, 31 to
   40 s at four runs of three commands; the 5 fuzz runs 3 to 5 min each.
 
+- The lead's ruling on M22 (2026-10-19): Elias-Fano only when it saves a share T of the FOR
+  block's bytes, measured at T = 10%, 25%, 40% (`.scratch/ef-threshold.patch` on 492b549):
+  1M postings −10.3%, −3.8%, −0.12% reordered and −5.9%, −0.63%, −0.02% merged against the same
+  items without Elias-Fano; losses against main in the four sessions 5/22/40/44, 1/3/2/1, 1/0/0/1.
+  No variant cleared every row: M22 out of the writer, 03c79cc. Code 2 is reserved (format.hh's
+  block_codec), refused through the skip flags' codec width (2 is damage) and the entry's code
+  check; the encoder, decoder, and probe are gone; `format::pre_freeze` 0x80000006 with fixtures,
+  the T8 hash, and the prefix CRC re-pinned; digest.txt unchanged. postings_test's M22 cases go;
+  the width-2 refusal stays (its revert alone does not fail: the entry's code check and the
+  decoders still fence, and no test isolates either check, since the writer can no longer make a
+  code-2 block). The ruling's item 2 (a faster in-block advance at the best T) was not tried:
+  492b549 already decodes a block whole on its second advance, and a SIMD select is not cheap.
+  Phase times: three builds 105 s; three 1M index sets 4.5 to 5 min each; twelve sessions 47 min;
+  the build without M22 and its sessions 20 min.
+- M16's sequential reads, a2b08d7: the build without M22 lost counted unions of three or more terms
+  in all four sessions (1.045 to 1.134), as T = 40% had; the per-item session showed M16's loss
+  there (`COUNT` union:num_tokens_3 1.050 [1.036–1.064], A/A to 1.007, which my first report
+  missed by reading class rows only). The last checked block is kept, so a walk reads its
+  successor's base and start from it (two bit-field reads fewer per block) and a repeated look-up
+  reads nothing: against the build before, `COUNT` union:num_tokens_3 0.953 and >3 0.952
+  reordered (wins). ctest 39/39.
+- The joint selection after the ruling: M22's savings are gone, so A4@128's +4.4 MB is not paid
+  for (the kept set nets −0.32 MB at 1M reordered, about −1.4 MB at 5M by ratio, the postings row
+  about 10.5 MB over keyed `-bp`'s `.doc`); A3@128 stands, and no A4@128 build was needed.
+
+## F10 deviations, for the architect's freeze-readiness review
+
+1. One record per group instead of separate areas: F10's items 1, 3, and 4 (advance entries,
+   impact entries, positional stream) sit back to back in one record located by level 1's record
+   offset (format 12's level-0 offset field). The impact lists start at the advance entries'
+   computed size and the positional deltas after the last impact list, found by stepping over
+   the lists, not by level-1 offsets of their own (F10: "located by a fixed-width offset per group
+   in level 1"); level 1 keeps format 12's fields and size.
+2. The flags field (F10 item 2) is inside A3's bit-packed entries, at a width per term (0, 1, or
+   2 bits, from the skip flags byte), not a field of its own of a bit or a byte per block.
+3. A3's widths are derived, not recorded in level 1: lasts at bit_width(group last - group base),
+   offsets at bit_width(group bytes - 1), both from level 1; the codec width from the term's skip
+   flags.
+4. Redundant entries are not stored: the last block's last (the group's, from level 1) and the
+   first block's offset (0); the positional deltas skip the group's first block (level 1 holds
+   it).
+5. The skip header's flags byte (format 12's wide byte) carries bit 0 wide, bits 1-2 the codec
+   width, bit 3 reserved for F12's partitions (P1, F13-R45's place) and refused; other bits refused.
+6. Validation (F10, "per block decoded") adds: a located block is found by a search that compares
+   only the entries it reads, so the block found ends at or after the target and its predecessor
+   before it, without checking the group's other entries; level 1's group fields are checked when a
+   group is located (last above the previous group's, below the document count, record and blocks
+   ranges inside the term's); an entry's last at most its group's last.
+7. M23's check (F10/F11): an exception (PFOR) header in an ordinal block is refused; a constant
+   block is checked by (value + 1) x 128 = last - base; tails keep LEB128 deltas and
+   check_increasing.
+8. M20's seeds (F13): stored after the skip flags and tail positions only for terms with skip blocks
+   and wdfs (a no_wdf term stores none), two pairs per k rather than up to three; the code pair
+   stores encode_length of the exact length (rounded down) and means "every one of the k postings
+   has a code at most this", read under bm25_xapian as the longest length with that code, where
+   F13 says the code is rounded up.
+9. M22: block code 2 reserved and refused, no Elias-Fano writer or reader in format 13's default.
+
+- The kept set at a2b08d7 against main, four run-level sessions (`docs/perf/format13-query-items.md`):
+  wins 31 to 35 per session (frequent terms 0.65 to 0.85, union `TOP_k` 0.87 to 0.94,
+  intersection `TOP_10` 0.94 to 0.97); losses: `COUNT` union:num_tokens_>3 1.073 and 1.061 on the
+  reordered index (both presets), and one query's two-phase-critic `TOP_1000` 1.108 merged
+  `bm25`. Phase times 91 to 121 s; 20 min with the first, failed attempt (the dir lock refuses a
+  symlinked index directory, so B's phase read nothing; rerun on the real directories).
+
 ## Next
 
-1. The lead's gate VM confirmation: the 5M bytes, identity, verify, and the run-level sessions
-   (commands in `docs/perf/format13-query-items.md`, "Gate VM confirmation"); parity against the
-   Xapian oracle there.
-2. M22's ruling (below), then either A4@128 (if M22 stays and the 5M bytes confirm), a cheaper
-   Elias-Fano rule, or M22's removal with its bump.
+1. The remaining loss, counted unions of more than three terms on the reordered index (6 to 7%):
+   a per-item `COUNT` rerun at more runs (M16 read 1.067, M23 1.082, both "neither" at four runs),
+   then a fix in the item it lands on; the guard is not met until it clears.
+2. The lead's gate VM confirmation: the 5M bytes, identity, verify, and the run-level sessions
+   (commands in `docs/perf/format13-query-items.md`), parity against the Xapian oracle there.
+3. The architect's freeze-readiness review of the F10 deviations above.
 
 ## Blocked on
 
-1. M22 (for the lead, the architect, and the owner): chosen per block by size, Elias-Fano is the
-   smallest codec for about a tenth of the postings' bytes at 1M, which closes the postings row
-   by projection (845.6 MB to about 757 MB at 5M, against keyed `-bp`'s 833.7), but every path
-   that decodes whole blocks then decodes Elias-Fano, and the kept set loses 1.09 to 1.42 on
-   intersections, phrases, negations, and counted unions against main even after 492b549. E6's
-   evidence was a probe per block on 50 terms, not the decode or the share by size. Options,
-   each a format decision: (a) keep it and spend effort on a faster decode (SIMD select, as
-   PISA's partitioned Elias-Fano does), measured before the freeze; (b) choose Elias-Fano only
-   when it saves a stated share of the FOR block's bytes (still a function of the block alone,
-   F13-R8 item 6), trading bytes for time on a measured curve; (c) drop M22 (its decoder and
-   code 2), which leaves the postings row about 10.5 MB over and A3@128 standing. Recommendation:
-   (b) measured at two or three thresholds on the gate VM, since it keeps the row's bytes where
-   blocks are sparse and FOR's speed where they are not; this branch builds nothing further for
-   M22 until the ruling.
-2. A4@128 against A3@128: paid for by projection only with M22 (the joint selection, F13-R8);
-   the lead's call after the 5M bytes.
+Nothing on this branch. M22's ruling is applied; whether Elias-Fano returns before the freeze (a
+faster decoder under a later pre-freeze version, or a structure bit after it) is the owner's.
 
 ## Last verified
 

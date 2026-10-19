@@ -43,7 +43,7 @@ ordinal bytes): over every term with skip blocks, Elias-Fano is the smallest cod
 blocks to take 9 to 10% off the reordered postings; M20 costs 0.25% (E6/E4b projected 1.2 to
 2.5 MB at 5M, 0.14 to 0.30%).
 
-## The joint selection (F13-R8)
+## The joint selection (F13-R8), before the ruling on M22 (superseded below)
 
 D15's constraint is the postings section at 5M at most keyed `-bp`'s `.doc`, 833.7 MB, where
 format 12's reordered postings are 845.6 MB (11.9 MB over), with the whole index's 3.2 MB of
@@ -123,6 +123,59 @@ when chosen by size over every term. That decision is recorded under "Blocked on
 docid merge 2, 2, 3 against 2, 2, 3; reordering merge 5, 5, 5 against 5, 5, 6: within this host's
 one-second resolution. Before dd55eb6 the writer scanned every length per term for the seeds, and a
 1M docid merge took 115 s against 71 to 79 s; the 1M timings after the fix are the gate VM's.
+
+## M22 at share thresholds, and the ruling (the lead's, 2026-10-19)
+
+The ruling: a block is Elias-Fano only when that saves at least T of its FOR bytes; keep the
+variant with the most bytes saved that loses no row, else drop M22 from the writer and reserve its
+code. Three builds of 492b549 with the rule (`.scratch/ef-threshold.patch`, T as a compile-time
+define), each indexed at 1M and run against main (`base`) in four run-level sessions of six runs,
+every command; phases 98 to 130 s each, the indexes 4.5 to 5 min per build.
+
+| T | 1M reordered postings (M22 alone) | 1M merged postings (M22 alone) | Losses: reordered `bm25`, reordered `bm25_xapian`, merged `bm25`, merged `bm25_xapian` |
+|---|---:|---:|---|
+| none (c21ae56's rule) | 170,713,796 (−19.75 MB, −10.4%) | 202,936,518 (−15.44 MB, −7.1%) | (the earlier sessions: up to 1.42) |
+| 10% | 170,877,946 (−19.59 MB, −10.3%) | 205,548,792 (−12.83 MB, −5.9%) | 5, 22, 40, 44 |
+| 25% | 183,169,402 (−7.29 MB, −3.8%) | 217,000,927 (−1.37 MB, −0.63%) | 1, 3, 2, 1 |
+| 40% | 190,226,177 (−0.24 MB, −0.12%) | 218,322,823 (−0.05 MB, −0.02%) | 1, 0, 0, 1 |
+| M22 out (03c79cc) | 190,464,122 | 218,375,775 | 2, 3, 5, 2 |
+
+"M22 alone" is against the same items without Elias-Fano (M16, M23, M20). At 25% the losses are
+phrase and intersection_union rows of two terms and counted unions of three or more; at 40% only
+counted unions of more than three terms, 1.045 to 1.134. **No variant cleared every row, so M22 is
+out of the writer** (03c79cc): code 2 is reserved and refused (a codec width of 2 in the skip flags
+is damage), and the encoder, decoder, and probe left the code (F1 item 2). The faster in-block
+advance at the best T (item 2 of the ruling) was not tried: 492b549 already decodes a block whole
+on its second advance (a cached probe), and a SIMD select is not cheap.
+
+The build without M22 lost the same counted-union rows as T = 40% (and a few single rows that
+varied by session), so those losses were not M22's: the per-item session had already shown a
+loss on M16 (`COUNT` union:num_tokens_3 1.050 [1.036–1.064], A/A to 1.007), which the class-level
+table above missed. a2b08d7 keeps the last checked block, so a walk reads its successor's base
+and start from it: against the build before, `COUNT` union:num_tokens_3 0.953 and >3 0.952
+(reordered, wins), 0.956 and 0.990 merged. The kept set at a2b08d7 against main:
+
+| Row (B/A [95% over runs]; verdict) | Reordered `bm25` | Reordered `bm25_xapian` | Merged `bm25` | Merged `bm25_xapian` |
+|---|---|---|---|---|
+| Wins / losses (every row) | 33 / 1 | 35 / 1 | 31 / 1 | 32 / 0 |
+| term:frequent `TOP_10` | 0.658 win | 0.650 win | 0.831 | 0.736 win |
+| term:frequent `TOP_1000` | 0.668 win | 0.743 win | 0.771 win | 0.850 win |
+| union `TOP_10` | 0.871 win | 0.904 win | 0.939 win | 0.914 win |
+| union `TOP_1000` | 0.898 win | 0.909 win | 0.914 win | 0.918 win |
+| intersection `TOP_10` | 0.941 win | 0.968 win | 0.974 | 0.959 win |
+| phrase `TOP_1000` | 1.020 | 1.022 | 1.014 | 1.015 |
+| `COUNT` union | 1.011 | 1.004 | 0.993 | 0.995 |
+| the loss | `COUNT` union:num_tokens_>3 1.073 [1.054–1.093], A/A to 1.011 | `COUNT` union:num_tokens_>3 1.061 [1.030–1.092], A/A to 1.012 | two-phase-critic `TOP_1000` (one query) 1.108 [1.076–1.142], A/A to 1.058 | none |
+
+Phases 91 to 121 s. The kept set still loses counted unions of more than three terms (20 queries)
+on the reordered index by 6 to 7%, beyond the A/A band; the per-item sessions put that row at
+M16 1.067 and M23 1.082 (both "neither" at four runs), so the next step is a per-item rerun of
+`COUNT` alone at more runs to attribute it, then a fix there (recorded in the ledger's Next).
+
+**The joint selection after the ruling.** With M22 out, the kept set nets −0.32 MB of the 1M
+reordered postings (M16 −0.72, M23 −0.08, M20 +0.49), about −1.4 MB at 5M by ratio: the postings
+row stays about 10.5 MB over keyed `-bp`'s `.doc`, A4@128's +4.4 MB is not paid for, and **A3@128
+stands** (step 4 of the ruling; no A4@128 build was needed).
 
 ## Gate VM confirmation (the lead's)
 
