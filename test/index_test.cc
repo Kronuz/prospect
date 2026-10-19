@@ -327,7 +327,7 @@ int main() {
 	}
 	// Inversion on arrival (one flush thread) writes the bytes of documents buffered whole
 	// (two threads, one run), with replaces and deletes inside the buffer, explicit docids out
-	// of order, rejected transactions, and term and token documents mixed.
+	// of order, rejected transactions, and term, token, and split documents mixed.
 	{
 		auto seg_files = [](const faultfs::filesystem& fs) {
 			std::map<std::string, std::string> out;
@@ -348,6 +348,16 @@ int main() {
 				i = j + 1;
 			}
 			d.length = pos;
+			d.stored = key + text;
+			return d;
+		};
+		// The same words split by the index: buffered whole at two threads, so the digest
+		// splits them (inverted_plugin::records, FM3) and the flush calls add_split.
+		auto split_doc = [](const std::string& key, const std::string& text) {
+			document d;
+			d.key = key;
+			d.text = text;
+			d.split_text = true;
 			d.stored = key + text;
 			return d;
 		};
@@ -376,7 +386,7 @@ int main() {
 						case 3: o = add("", text); break;
 						case 4: o = replace(key, text, r() % 4 ? std::nullopt : std::optional<std::uint64_t>(r() % 3)); break;
 						default:
-							o.type = operation::replace_key, o.key = key, o.doc = token_doc(key, text);
+							o.type = operation::replace_key, o.key = key, o.doc = r() % 2 ? token_doc(key, text) : split_doc(key, text);
 							break;
 						}
 						ops.push_back(std::move(o));
