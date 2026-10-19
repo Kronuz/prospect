@@ -627,6 +627,43 @@ int main() {
 			}
 			CHECK(unsupported);
 		}
+		// The segment identity (F6, F13-R41): unique across replicas, the producing term first,
+		// kept by install, and checked against the manifest's entry at open (I13).
+		{
+			auto header_id = [](const strata::index& ix, std::size_t i) {
+				return std::string(ix.segments()[i].seg->core().section(section::header).bytes.substr(strata::format::identity_offset, 16));
+			};
+			auto entry_id = [](const strata::index& ix, std::size_t i) {
+				const auto& id = ix.manifest().segments[i].identity;
+				return std::string(reinterpret_cast<const char*>(id.data()), 16);
+			};
+			strata::faultfs::filesystem fs_a, fs_b;
+			strata::faultfs::io io_a(fs_a), io_b(fs_b);
+			auto a = strata::index::create(io_a, o, {});
+			a.set_producer_term(7);
+			CHECK(apply(a, upsert("Q1", "w")) == strata::verdict::accepted);
+			const std::uint64_t gen = a.checkpoint();
+			const std::string first = header_id(a, 0);
+			std::uint64_t term = 0;
+			std::memcpy(&term, first.data(), 8);
+			CHECK(term == 7 && entry_id(a, 0) == first);
+			auto b = strata::index::create(io_b, o, {});
+			b.install(io_a, gen);
+			CHECK(b.segments().size() == 1 && header_id(b, 0) == first && entry_id(b, 0) == first);  // kept by the copy
+			// The probe's case: each replica commits one upsert of its own in the same term.
+			b.set_producer_term(7);
+			CHECK(apply(a, upsert("Q2", "a")) == strata::verdict::accepted);
+			CHECK(apply(b, upsert("Q2", "b")) == strata::verdict::accepted);
+			a.commit();
+			b.commit();
+			CHECK(a.segments().size() == 2 && b.segments().size() == 2);
+			CHECK(header_id(a, 1) != header_id(b, 1) && header_id(a, 1) != first && header_id(b, 1) != first);
+			CHECK(entry_id(a, 1) == header_id(a, 1) && entry_id(b, 1) == header_id(b, 1));
+		}
+		{
+			// A manifest entry naming another identity than its file's: damage, before any read.
+			CHECK(with([](strata::files::manifest& m) { m.segments.back().identity[15] ^= 1; }) == verdict::corrupt);
+		}
 		// install refuses a checkpoint whose configured bits no flush could write (CR5).
 		{
 			strata::faultfs::filesystem fs_a, fs_b;

@@ -329,14 +329,15 @@ int main() {
 			d.stored = key + text;
 			return d;
 		};
-		index::options whole = keyed;
+		index::options same = keyed, whole = keyed;  // one identity seed: the files compare byte for byte (F13-R41)
+		same.identity_seed = whole.identity_seed = 13;
 		whole.flush_threads = 2;
 		whole.flush_min_docs = std::size_t(1) << 30;
 		const char* words[] = {"a", "b", "c", "rare", "the", "of"};
 		for (std::uint64_t seed = 0; seed < 12; ++seed) {
 			faultfs::filesystem fa, fb;
 			faultfs::io ia(fa), ib(fb);
-			auto a = strata::index::create(ia, keyed, uuid), b = strata::index::create(ib, whole, uuid);
+			auto a = strata::index::create(ia, same, uuid), b = strata::index::create(ib, whole, uuid);
 			std::mt19937_64 r(seed);
 			for (int round = 0; round < 3; ++round) {
 				for (int i = 0; i < 300; ++i) {
@@ -401,14 +402,15 @@ int main() {
 			d.length = pos;
 			return d;
 		};
-		index::options whole = keyed;
+		index::options same = keyed, whole = keyed;  // one identity seed: the files compare byte for byte (F13-R41)
+		same.identity_seed = whole.identity_seed = 13;
 		whole.flush_threads = 2;
 		whole.flush_min_docs = std::size_t(1) << 30;
 		const std::string words[] = {"a", "b", "rare", "eightbyt", "ninebytes", "oneQinside", std::string(254, 'm'), std::string(300, 'l')};
 		for (std::uint64_t seed = 0; seed < 4; ++seed) {
 			faultfs::filesystem fa, fb, fc;
 			faultfs::io ia(fa), ib(fb), ic(fc);
-			auto a = strata::index::create(ia, keyed, uuid), b = strata::index::create(ib, keyed, uuid), c = strata::index::create(ic, whole, uuid);
+			auto a = strata::index::create(ia, same, uuid), b = strata::index::create(ib, same, uuid), c = strata::index::create(ic, whole, uuid);
 			std::mt19937_64 r(seed);
 			for (int round = 0; round < 2; ++round) {
 				for (int i = 0; i < 300; ++i) {
@@ -720,6 +722,7 @@ int main() {
 			o.reclaim_step = 4096;
 			o.reclaim_slice = 0;
 			o.retained_predecessors = 0;
+			o.identity_seed = 1;  // runs compare sizes: the manifest holds each footer CRC as LEB128 (F13-R41)
 			auto ix = strata::index::create(io, o, uuid);
 			std::mt19937_64 r(9);
 			std::string body(40000, '\0');
@@ -1478,6 +1481,7 @@ int main() {
 		for (std::size_t threads : {std::size_t(1), std::size_t(4)}) {
 			byte_budget budget(1ull << 40);
 			index::options opts = keyed, plain = keyed;
+			opts.identity_seed = plain.identity_seed = 13;  // the files compare byte for byte (F13-R41)
 			opts.budget = &budget;
 			opts.flush_threads = plain.flush_threads = threads;
 			opts.flush_min_docs = plain.flush_min_docs = 500;

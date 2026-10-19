@@ -31,6 +31,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <random>
 #include <set>
 #include <string>
 #include <system_error>
@@ -335,6 +336,9 @@ struct index_options {
 	reorder_mode reordering = reorder_mode::force_merge;
 	std::uint64_t reorder_min_docs = 262144;
 	strata::reorder::settings reorder_settings;
+	// The seed of the segments' identities (F13-R41); none: a random one per open. Tests that
+	// compare two indexes' files give both the same seed.
+	std::optional<std::uint64_t> identity_seed;
 };
 
 // An index of a layout's segments (layers.md L2); `index` is the search layout's.
@@ -363,6 +367,7 @@ public:
 		// Every structure the index's layout reads, keys only with a key prefix (F4, F20).
 		ix.m_.configured = segment::readable & ~(opts.key_prefix.empty() ? format::bit::keys : 0);
 		ix.opts_ = opts;
+		ix.seed_identities();
 		if (opts.budget) { ix.permit_ = opts.budget->open(); }
 		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
 		ix.start_merges();
@@ -386,6 +391,7 @@ public:
 			throw corrupt_index("no owner lock");
 		}
 		ix.opts_ = opts;
+		ix.seed_identities();
 		if (opts.budget) { ix.permit_ = opts.budget->open(); }
 		if (opts.storage) { ix.storage_permit_ = opts.storage->open(); }
 		ix.start_merges();
@@ -646,6 +652,9 @@ public:
 	std::uint64_t schema_version() const noexcept { return m_.schema_version; }
 	const std::map<std::string, std::string>& metadata() const noexcept { return meta_; }
 	std::size_t buffered_count() const noexcept { return buffer_size(); }
+	// The replicated log's term that produces this replica's segments from now on (F6,
+	// F13-R41; durability D8): the host sets it when its leader's term changes; 0 standalone.
+	void set_producer_term(std::uint64_t term) noexcept { producer_term_ = term; }
 
 	// --- deterministic core -------------------------------------------------------------
 
@@ -1045,8 +1054,7 @@ private:
 			}
 		}
 		job->id = m_.next_segment++;
-		std::memcpy(job->header.data(), &job->id, 8);
-		std::memcpy(job->header.data() + 8, m_.uuid.data(), 8);
+		job->header = new_identity();
 		pending_.reserve(pending_.size() + 1);
 		const merge_env ctx{io_, exec_, opts_.rate, opts_.budget, opts_.merge_memory_wait, m_.key_prefix, opts_.reorder_settings, configured_structures()};
 		group_->post([job, ctx](const task::cancel_token& stop) { run_merge(*job, ctx, stop); });
@@ -1294,6 +1302,7 @@ private:
 			const std::string_view view = mapped ? mapped->bytes() : std::string_view(bytes);
 			files::segment_ref ref;
 			ref.id = job.id;
+			ref.identity = job.header;
 			ref.size = view.size();
 			ref.footer_crc = format::decode_footer(view).toc_crc;
 			ref.doc_count = job.plan.doc_count;
@@ -1820,6 +1829,32 @@ private:
 
 	void set_schema(std::uint64_t version) { m_.schema_version = version; }
 
+	// --- segment identity ----------------------------------------------------------------
+
+	// A new segment's physical identity (F6, F13-R41): the producing term, then a base drawn
+	// at open plus a count, through splitmix64's bijective finalizer, so ids never repeat
+	// within an open and collide across producers only by chance (Lucene's randomId: a random
+	// base, incremented per id).
+	std::array<std::uint8_t, 16> new_identity() {
+		std::uint64_t z = identity_base_ + identities_++;
+		z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+		z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+		z ^= z >> 31;
+		std::array<std::uint8_t, 16> id{};
+		std::memcpy(id.data(), &producer_term_, 8);
+		std::memcpy(id.data() + 8, &z, 8);
+		return id;
+	}
+	void seed_identities() {
+		if (opts_.identity_seed) {
+			identity_base_ = *opts_.identity_seed;
+		} else {
+			std::random_device rd;
+			identity_base_ = std::uint64_t(rd()) << 32 ^ rd();
+		}
+		identities_ = 0;
+	}
+
 	// --- the buffer -------------------------------------------------------------------------
 
 	bool inverting() const noexcept { return opts_.flush_threads <= 1; }
@@ -1927,9 +1962,7 @@ private:
 			if (order.empty()) { return; }
 		}
 		const std::uint64_t id = m_.next_segment++;  // never reused, even after a failure
-		std::array<std::uint8_t, 16> header{};
-		std::memcpy(header.data(), &id, 8);
-		std::memcpy(header.data() + 8, m_.uuid.data(), 8);
+		const std::array<std::uint8_t, 16> header = new_identity();
 		segment_writer encoder;
 		encoder.memory = &run;
 		encoder.key_prefix = m_.key_prefix;
@@ -1953,6 +1986,7 @@ private:
 		track(name, sink.size());
 		files::segment_ref ref;
 		ref.id = id;
+		ref.identity = header;
 		ref.size = sink.size();
 		std::unique_ptr<open_segment> seg;
 		if (auto m = file->map(); m && m->bytes().size() == ref.size) {
@@ -1983,7 +2017,11 @@ private:
 			// Contiguous docid runs, one segment each, inverted and encoded in parallel (D18).
 			const std::size_t runs = std::max<std::size_t>(1, std::min(opts_.flush_threads, docs.size() / std::max<std::size_t>(1, opts_.flush_min_docs)));
 			std::vector<std::uint64_t> ids(runs);
-			for (auto& id : ids) { id = m_.next_segment++; }  // never reused, even after a failure
+			std::vector<std::array<std::uint8_t, 16>> identities(runs);
+			for (std::size_t k = 0; k < runs; ++k) {
+				ids[k] = m_.next_segment++;  // never reused, even after a failure
+				identities[k] = new_identity();
+			}
 			std::vector<std::string> outputs(runs);
 			std::vector<std::exception_ptr> errors(runs);
 			std::vector<flush_charge> charges(runs);  // each run's, held until its segment is published
@@ -2003,10 +2041,7 @@ private:
 							for (const auto& t : b->doc.terms) { in.push_back({t.term, t.wdf, t.positions}); }
 							detail::writer_access::add_text(w, b->docid, in, b->doc.text, b->doc.tokens, b->doc.length, b->doc.stored, b->version, b->doc.key);
 						}
-						std::array<std::uint8_t, 16> header{};
-						std::memcpy(header.data(), &ids[k], 8);
-						std::memcpy(header.data() + 8, m_.uuid.data(), 8);
-						outputs[k] = w.flush(header);
+						outputs[k] = w.flush(identities[k]);
 					}
 					// The writer's buffers are gone; the segment's bytes stay charged until published.
 					charge.shrink(charge.held() - std::min<std::uint64_t>(charge.held(), outputs[k].capacity()));
@@ -2036,6 +2071,7 @@ private:
 				auto file = std::move(files[k]);
 				files::segment_ref ref;
 				ref.id = ids[k];
+				ref.identity = identities[k];
 				ref.size = bytes.size();
 				ref.footer_crc = format::decode_footer(bytes).toc_crc;
 				ref.doc_count = docs.size() * (k + 1) / runs - docs.size() * k / runs;
@@ -2432,6 +2468,9 @@ private:
 		if (view.size() != r.size) { throw corrupt_index("file size differs from the manifest: " + name); }
 		(void)format::read_version(view);
 		if (format::decode_footer(view).toc_crc != r.footer_crc) { throw corrupt_index("segment differs from its manifest entry"); }
+		// The header's identity is the entry's (I13, F13-R41): a file of another producer under
+		// this name is never taken for the one the manifest names.
+		if (std::memcmp(view.data() + format::identity_offset, r.identity.data(), 16) != 0) { throw corrupt_index("segment identity differs from its manifest entry"); }
 		auto s = mapped ? std::make_unique<open_segment>(r, std::move(mapped)) : std::make_unique<open_segment>(r, std::move(bytes));
 		if (s->seg.core().doc_count() != r.doc_count) { throw corrupt_index("segment document count"); }
 		// The manifest vouches for its segments: one outside its mask or version range is damage.
@@ -2494,6 +2533,7 @@ private:
 	std::optional<std::uint64_t> pending_pin_, pending_unpin_;
 	bool meta_dirty_ = false;
 	bool fenced_ = false;
+	std::uint64_t producer_term_ = 0, identity_base_ = 0, identities_ = 0;
 };
 using index = basic_index<search_layout>;
 

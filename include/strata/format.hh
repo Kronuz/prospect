@@ -73,6 +73,7 @@ inline constexpr std::uint32_t min_read_version = pre_freeze;
 // Bytes 0-15, frozen in every version: magic, version, CRC-32C of bytes 0-11 (F2).
 inline constexpr std::size_t prefix_size = 16;
 inline constexpr std::size_t header_size = 36;
+inline constexpr std::size_t identity_offset = 20;  // the header's segment identity, 16 bytes (F6)
 inline constexpr std::size_t footer_size = 56;
 // Each section is verified per region of 2^region_shift bytes, recorded in its table of
 // contents entry (4 KiB by default: docs/perf/p15-region-size.md).
