@@ -344,29 +344,6 @@ struct inverted_plugin {
 		}
 		return n;
 	}
-	// validate()'s token checks for a document split at spaces: no tokens and no length
-	// given, no word begins with the key prefix (one memchr when the prefix's first byte is
-	// not in the text), and none equals one of its terms.
-	static bool valid_words(std::string_view prefix, const part& p, const std::vector<std::string_view>& terms, const std::array<std::uint64_t, 4>& firsts,
-		bool any_firsts) {
-		const std::string_view text = p.text;
-		if (!p.tokens.empty() || p.length != 0 || text.size() > std::numeric_limits<std::uint32_t>::max()) { return false; }
-		if (!prefix.empty()) {
-			for (const char* at = text.data(); (at = static_cast<const char*>(std::memchr(at, prefix[0], std::size_t(text.data() + text.size() - at))));) {
-				const std::size_t i = std::size_t(at - text.data());
-				const bool word_start = i == 0 || text[i - 1] == ' ';
-				if (word_start && text.substr(i, text.find(' ', i) - i).starts_with(prefix)) { return false; }
-				++at;
-			}
-		}
-		if (!any_firsts) { return true; }
-		bool ok = true;
-		text_detail::split_words(text, [&](std::size_t offset, std::size_t size) {
-			const std::uint8_t first = std::uint8_t(text[offset]);
-			if (ok && (firsts[first >> 6] >> (first & 63) & 1) && std::binary_search(terms.begin(), terms.end(), text.substr(offset, size))) { ok = false; }
-		});
-		return ok;
-	}
 	static constexpr section_rule rules[] = {
 		{format::section::terms, section_rule::regions, section_rule::with_plugin},
 		{format::section::term_index, section_rule::pinned, section_rule::with_plugin},
@@ -556,6 +533,31 @@ struct inverted_plugin {
 	};
 	// L6: rebuilds the plugin's sections for a merge's output (merge.hh).
 	static built merge(const merge_context& m, std::span<const reader* const> in, section_sink& sink);
+
+private:
+	// validate()'s token checks for a document split at spaces: no tokens and no length
+	// given, no word begins with the key prefix (one memchr when the prefix's first byte is
+	// not in the text), and none equals one of its terms.
+	static bool valid_words(std::string_view prefix, const part& p, const std::vector<std::string_view>& terms, const std::array<std::uint64_t, 4>& firsts,
+		bool any_firsts) {
+		const std::string_view text = p.text;
+		if (!p.tokens.empty() || p.length != 0 || text.size() > std::numeric_limits<std::uint32_t>::max()) { return false; }
+		if (!prefix.empty()) {
+			for (const char* at = text.data(); (at = static_cast<const char*>(std::memchr(at, prefix[0], std::size_t(text.data() + text.size() - at))));) {
+				const std::size_t i = std::size_t(at - text.data());
+				const bool word_start = i == 0 || text[i - 1] == ' ';
+				if (word_start && text.substr(i, text.find(' ', i) - i).starts_with(prefix)) { return false; }
+				++at;
+			}
+		}
+		if (!any_firsts) { return true; }
+		bool ok = true;
+		text_detail::split_words(text, [&](std::size_t offset, std::size_t size) {
+			const std::uint8_t first = std::uint8_t(text[offset]);
+			if (ok && (firsts[first >> 6] >> (first & 63) & 1) && std::binary_search(terms.begin(), terms.end(), text.substr(offset, size))) { ok = false; }
+		});
+		return ok;
+	}
 };
 
 // Versions and the key filter.

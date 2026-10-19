@@ -16,12 +16,19 @@
     private `max_run_bytes_` (`tuple_buffer::run_cap`, 2^32 - 1, by default), which only
     `index_test_access` (defined by `index_test.cc`) lowers, and `drain` asserts the cap is
     at most `run_cap`. No public field can pass it. ctest 35 of 35 (macOS, Apple clang,
-    Release); segments, manifests, and meta byte-identical to main's at 20k and 100k.
+    Release); segments, manifests, and meta byte-identical to main's at 20k and 100k
+    (`37ee946`).
+  - R27 and R28.2-3, R23's rest: `tuple_buffer::add_with`'s debug block asserts all six
+    stated preconditions (terms unique, by a sorted copy; each terms entry's positions
+    strictly increasing, beside the token clauses). The architect's `probe_preconditions`
+    aborts in all three cases with asserts on (case 1 at the uniqueness assert, case 2 at
+    the positions assert). `inverted_plugin::valid_words` is private; `inverted_builder::
+    add_text` is private, reached only by `segment_writer` (itself through `writer_access`).
+    ctest 35 of 35 (Release); `tuple_buffer_test`, `segment_test`, `index_test`, and
+    `multisegment_test` pass with asserts on (-O1); bytes identical to main's at 20k, 100k.
 - Next:
-  1. R23's rest: R27's two assertions; `valid_words` and `inverted_builder::add_text` internal
-     (R28.2, R28.3).
-  2. Duplication: `key_term` through `keys_plugin::key_of` (R29); `key_hash` through
+  1. Duplication: `key_term` through `keys_plugin::key_of` (R29); `key_hash` through
      `wordwise::hash` (R32.1).
-  3. C11: the tuple buffer's floor, measured before and after.
-  4. Text: L10 and D16 with the code (R30, R31).
+  2. C11: the tuple buffer's floor, measured before and after.
+  3. Text: L10 and D16 with the code (R30, R31).
 - Blocked on: nothing.

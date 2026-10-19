@@ -182,31 +182,6 @@ public:
 		}
 		for (term_buffer* t : touched_) { close_posting(*t, t->open_count, t->open_count); }
 	}
-	// Terms, each once with its wdf and positions, and the text's tokens in order, each
-	// adding one to its term's wdf; a term is in one of the two. Positions increase.
-	void add_text(ordinal_t ord, std::span<const posting_input> terms, std::string_view text, std::span<const text_token> tokens) {
-		for (const auto& in : terms) {
-			term_buffer& t = buffer_for(in.term);
-			if (t.df && t.last == ord) { throw std::invalid_argument("strata: term repeated within a document"); }
-			open_posting(t, ord);
-			for (auto p : in.positions) { add_position(t, p); }
-			close_posting(t, in.wdf, std::uint32_t(in.positions.size()));
-			t.open_prev = closed;
-		}
-		touched_.clear();
-		for (const auto& tk : tokens) {
-			term_buffer& t = buffer_for(text.substr(tk.offset, tk.size));
-			if (!t.df || t.last != ord) {
-				open_posting(t, ord);
-				touched_.push_back(&t);
-			} else if (t.open_prev == closed || tk.position <= t.open_prev) {
-				throw std::invalid_argument("strata: term repeated within a document");
-			}
-			add_position(t, tk.position);
-		}
-		for (term_buffer* t : touched_) { close_posting(*t, t->open_count, t->open_count); }
-	}
-
 	std::size_t doc_count() const noexcept { return lengths_.size(); }
 	std::uint64_t total_length() const noexcept { return total_length_; }
 	std::uint32_t min_length() const noexcept { return lengths_.empty() ? 0 : *std::min_element(lengths_.begin(), lengths_.end()); }
@@ -351,6 +326,31 @@ public:
 	}
 
 private:
+	friend class segment_writer;  // the inverter's text add (detail::writer_access)
+	// Terms, each once with its wdf and positions, and the text's tokens in order, each
+	// adding one to its term's wdf; a term is in one of the two. Positions increase.
+	void add_text(ordinal_t ord, std::span<const posting_input> terms, std::string_view text, std::span<const text_token> tokens) {
+		for (const auto& in : terms) {
+			term_buffer& t = buffer_for(in.term);
+			if (t.df && t.last == ord) { throw std::invalid_argument("strata: term repeated within a document"); }
+			open_posting(t, ord);
+			for (auto p : in.positions) { add_position(t, p); }
+			close_posting(t, in.wdf, std::uint32_t(in.positions.size()));
+			t.open_prev = closed;
+		}
+		touched_.clear();
+		for (const auto& tk : tokens) {
+			term_buffer& t = buffer_for(text.substr(tk.offset, tk.size));
+			if (!t.df || t.last != ord) {
+				open_posting(t, ord);
+				touched_.push_back(&t);
+			} else if (t.open_prev == closed || tk.position <= t.open_prev) {
+				throw std::invalid_argument("strata: term repeated within a document");
+			}
+			add_position(t, tk.position);
+		}
+		for (term_buffer* t : touched_) { close_posting(*t, t->open_count, t->open_count); }
+	}
 	struct term_buffer {
 		std::string ords, wdfs, counts, positions;  // LEB128 streams while buffering
 		ordinal_t last = 0;

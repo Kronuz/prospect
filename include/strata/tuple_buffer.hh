@@ -42,6 +42,7 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <limits>
 #include <map>
 #include <memory>
@@ -223,6 +224,15 @@ private:
 #ifndef NDEBUG
 		std::optional<std::uint32_t> prev_position;
 		auto is_term = [&](std::string_view t) { return std::any_of(terms.begin(), terms.end(), [&](const posting_input& in) { return in.term == t; }); };
+		{
+			std::vector<std::string_view> sorted;  // the terms, to find repeats
+			for (const auto& in : terms) {
+				assert(std::adjacent_find(in.positions.begin(), in.positions.end(), std::greater_equal<>()) == in.positions.end());
+				sorted.push_back(in.term);
+			}
+			std::sort(sorted.begin(), sorted.end());
+			assert(std::adjacent_find(sorted.begin(), sorted.end()) == sorted.end());
+		}
 #endif
 		auto token = [&](std::uint32_t offset, std::uint32_t size, std::uint32_t position) {
 			const char* p = base + offset;
