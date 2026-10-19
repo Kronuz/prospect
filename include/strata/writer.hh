@@ -549,11 +549,13 @@ private:
 		std::string bits;
 		for (std::size_t b = 0; b < full; b += format::block) {
 			const std::size_t start = blocks.size();
-			// A dense block is a bitset over (previous last, last] when that is smaller.
+			// A dense block is a bitset over (previous last, last] when that is smaller than FOR
+			// over its plain gaps, the boundary format 12 drew: gaps - 1 (M23) would take FOR's
+			// 17 bytes over an 18-byte bitset, which counting ORs in without decoding.
 			const ordinal_t base = b ? ords[b - 1] + 1 : 0;
 			const std::uint64_t span = std::uint64_t(ords[b + format::block - 1]) - base + 1;
 			const std::size_t for_bytes = format::encode_gaps(ords.data() + b, prev, b == 0, buf);
-			const bool bitset = (span + 7) / 8 < for_bytes;
+			const bool bitset = (span + 7) / 8 < gaps_bytes(ords.data() + b, b ? prev : std::numeric_limits<std::uint32_t>::max());
 			if (bitset) {
 				bits.assign((span + 7) / 8, '\0');
 				for (std::size_t i = b; i < b + format::block; ++i) {
@@ -682,6 +684,18 @@ private:
 		out += records;
 		out += blocks;
 		out += tail;
+	}
+
+	// The bytes bitpack's FOR or constant block would take over the block's plain gaps.
+	static std::size_t gaps_bytes(const std::uint32_t* ords, std::uint32_t prev) noexcept {
+		std::uint32_t all = 0, first = ords[0] - prev;
+		bool constant = true;
+		for (std::size_t i = 0; i < format::block; ++i) {
+			const std::uint32_t g = ords[i] - (i ? ords[i - 1] : prev);
+			all |= g;
+			constant = constant && g == first;
+		}
+		return constant ? 5 : 1 + bitpack::packed_bytes(32 - unsigned(std::countl_zero(all)));
 	}
 
 	// [count blocks bytes][count blocks][tail counts] when counts differ from wdf, then

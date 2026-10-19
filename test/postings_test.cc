@@ -369,6 +369,26 @@ int main() {
 		CHECK(!bad);
 	}
 
+	// --- F11: the bitset boundary stays format 12's -----------------------------------------
+	// A block of gaps 1 and 2 is FOR at width 1 over gaps - 1 (17 bytes) but a bitset (18 bytes)
+	// against FOR over plain gaps at width 2 (33): the writer keeps the bitset, which counting ORs
+	// in without decoding.
+	{
+		strata::segment_writer w;
+		const std::vector<std::uint32_t> none;
+		for (std::uint32_t d = 0; d < 3000; ++d) {
+			std::vector<strata::posting_input> in;
+			if (d % 10 != 0) { in.push_back({"ninety", 0, none}); }
+			w.add(d + 1, in, 1);
+		}
+		const std::string bytes = w.flush({});
+		strata::segment s(bytes);
+		const auto l = skip_test::parse(bytes, s, *s.get<strata::inverted_plugin>().term("ninety"));
+		bool all = !l.blocks.empty();
+		for (const auto& b : l.blocks) { all = all && b.codec == unsigned(f::block_codec::bitset); }
+		CHECK(all);
+	}
+
 	// --- F11 (M22's place): codec code 2 is reserved and refused ------------------------------
 	// A term with a FOR block and room in its advance entries' last byte, rewritten by hand to a
 	// codec width of 2 with that block's code 2 (Elias-Fano's) and the others' codes kept: every
