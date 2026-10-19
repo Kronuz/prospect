@@ -18,7 +18,7 @@
 #include "strata/writer.hh"
 
 #include "completion/io.h"
-#include "completion/posix.h"
+#include "completion/io.h"
 #include "hashes.hh"
 
 #include <algorithm>
@@ -325,7 +325,9 @@ struct index_options {
 	std::optional<std::uint64_t> identity_seed;
 	// A directory on a filesystem not known local (a network or FUSE mount), or one whose
 	// lock is unsupported: `warn` opens it and reports it (basic_index::filesystem_warning);
-	// `refuse` refuses with errc::not_supported, except a FUSE mount's type (F20).
+	// `refuse` refuses with errc::not_supported, except a FUSE mount's type (F20). The
+	// filesystem is IO::directory_filesystem's: an IO that does not classify is not local,
+	// so a wrapper must forward it for `refuse` to see the real filesystem.
 	enum class nonlocal_policy { warn, refuse };
 	nonlocal_policy nonlocal = nonlocal_policy::warn;
 };
@@ -564,8 +566,9 @@ public:
 	// pin is released. A host reports it: a damaged pinned checkpoint stops reclamation.
 	std::optional<std::uint64_t> retention_blocked() const noexcept { return retention_blocked_; }
 
-	// Set when the directory's lock may not exclude every other writer (options::nonlocal's
-	// warn). A host reports it.
+	// Set when the directory's lock may not exclude every other writer: under `warn`, a
+	// filesystem not known local, its classification failed, or its lock unsupported; under
+	// `refuse`, a FUSE mount (never refused by its type). A host reports it.
 	const std::optional<strata::filesystem_warning>& filesystem_warning() const noexcept { return fs_warning_; }
 
 	// Reads that failed or failed their checks once and passed when read again.
@@ -2294,24 +2297,30 @@ private:
 		return true;
 	}
 	// The owner lock is the directory's own (D2), writing nothing. Busy (EWOULDBLOCK) and
-	// other lock errors refuse as they are; a filesystem not known local, or a lock it does
-	// not support, warns or refuses as options::nonlocal says. Only PosixIO classifies.
+	// other lock errors refuse as they are. A filesystem not known local (an IO that does not
+	// classify is not), or a lock it does not support, warns or refuses as options::nonlocal
+	// says. A failed classification warns as an unknown filesystem, or refuses under refuse.
 	void lock_directory(const options& opts) {
-		std::optional<kronuz::journal::FilesystemClass> fs;
-		if (auto* posix = dynamic_cast<kronuz::journal::PosixIO*>(io_)) { fs = posix->directory_filesystem(); }
-		const bool fuse = fs && (fs->name.starts_with("fuse") || fs->name.starts_with("macfuse") || fs->name.starts_with("osxfuse"));
 		const bool refuse = opts.nonlocal == options::nonlocal_policy::refuse;
-		if (fs && !fs->local && refuse && !fuse) {
-			throw std::system_error(std::make_error_code(std::errc::not_supported), "strata: " + fs->name + " is not a known-local filesystem");
+		kronuz::journal::FilesystemClass fs;
+		try {
+			fs = io_->directory_filesystem();
+		} catch (const std::system_error& e) {
+			if (refuse) { throw std::system_error(e.code(), std::string("strata: the directory's filesystem is unknown: ") + e.what()); }
+			fs = {false, std::string("unknown (") + e.what() + ")"};
+		}
+		const bool fuse = fs.name.starts_with("fuse") || fs.name.starts_with("macfuse") || fs.name.starts_with("osxfuse");
+		if (!fs.local && refuse && !fuse) {
+			throw std::system_error(std::make_error_code(std::errc::not_supported), "strata: " + fs.name + " is not a known-local filesystem");
 		}
 		try {
 			lock_ = io_->acquire_directory_owner();
 		} catch (const std::system_error& e) {
 			if (e.code() != std::errc::not_supported || refuse) { throw; }  // unlocked: refuse's to stop
-			fs_warning_ = strata::filesystem_warning{fs ? fs->name : std::string(), fs && fs->local, false};
+			fs_warning_ = strata::filesystem_warning{fs.name, fs.local, false};
 			return;
 		}
-		if (fs && !fs->local) { fs_warning_ = strata::filesystem_warning{fs->name, false, true}; }
+		if (!fs.local) { fs_warning_ = strata::filesystem_warning{fs.name, false, true}; }
 	}
 
 	// Removes an interrupted create's files, durably, under the owner lock; throws when the

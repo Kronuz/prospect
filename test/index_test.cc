@@ -104,6 +104,7 @@ public:
 	bool fired() const { return left_ == 0; }
 	std::unique_ptr<kronuz::journal::OwnerLock> acquire_owner(bool create) override { return inner_->acquire_owner(create); }
 	std::unique_ptr<kronuz::journal::OwnerLock> acquire_directory_owner() override { return inner_->acquire_directory_owner(); }
+	kronuz::journal::FilesystemClass directory_filesystem() const override { return inner_->directory_filesystem(); }
 	std::unique_ptr<kronuz::journal::File> open_existing(std::string_view name) override {
 		if (left_ && name == name_ && --left_ == 0) {
 			if (--times_ > 0) { left_ = 1; }  // the next open of it fails too

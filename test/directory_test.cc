@@ -29,6 +29,7 @@
 #include <iterator>
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -126,6 +127,29 @@ static int spawn_opener(const char* self, const fs::path& dir, const std::string
 	while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
 	return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
+
+// An IO that forwards to another, as a host's metrics or quota layer would. With classify
+// off it leaves directory_filesystem to the base, which reports the filesystem unclassified.
+class wrapper_io final : public kronuz::journal::IO {
+public:
+	wrapper_io(kronuz::journal::IO& inner, bool classify) : inner_(&inner), classify_(classify) {}
+	std::unique_ptr<kronuz::journal::OwnerLock> acquire_owner(bool create) override { return inner_->acquire_owner(create); }
+	std::unique_ptr<kronuz::journal::OwnerLock> acquire_directory_owner() override { return inner_->acquire_directory_owner(); }
+	kronuz::journal::FilesystemClass directory_filesystem() const override {
+		return classify_ ? inner_->directory_filesystem() : kronuz::journal::IO::directory_filesystem();
+	}
+	std::unique_ptr<kronuz::journal::File> open_existing(std::string_view name) override { return inner_->open_existing(name); }
+	std::unique_ptr<kronuz::journal::File> create_exclusive(std::string_view name) override { return inner_->create_exclusive(name); }
+	void replace(std::string_view source, std::string_view destination) override { inner_->replace(source, destination); }
+	void remove(std::string_view name) override { inner_->remove(name); }
+	std::unique_ptr<kronuz::journal::DirectoryCursor> scan_directory() override { return inner_->scan_directory(); }
+	void sync_directory() override { inner_->sync_directory(); }
+	void sync_files(std::span<kronuz::journal::File* const> files) override { inner_->sync_files(files); }
+
+private:
+	kronuz::journal::IO* inner_;
+	bool classify_;
+};
 
 // --- T7's injections -----------------------------------------------------------------------
 
@@ -373,20 +397,119 @@ int main(int argc, char** argv) {
 			CHECK(!index::create(io, policy(refuse), uuid_a).filesystem_warning());
 		}
 #endif
+		// A failed statfs: warn proceeds, locked, and names the failure as an unknown filesystem;
+		// refuse refuses with the failure's own error (the lead's ruling, F20).
 		const auto made = listing(dir);
 		fake_errno = EIO;
-		for (const auto p : {warn, refuse}) {
+		{
 			kronuz::journal::PosixIO io(dir);
 			io.replace_statfs(fake_statfs);
-			CHECK(error_of([&] { open_or_create(io, "open"); }) == EIO);
-			CHECK(error_of([&] { auto ix = index::open(io, policy(p)); }) == EIO);
+			std::string what;
+			CHECK(error_of([&] { auto ix = index::open(io, policy(refuse)); }, &what) == EIO);
+			CHECK(what.find("unknown") != std::string::npos && what.find("inspect") != std::string::npos);
 			CHECK(listing(dir) == made);
+			auto warned = [&](const strata::index& ix) {
+				const auto& w = ix.filesystem_warning();
+				return w && w->filesystem.find("unknown") != std::string::npos && w->filesystem.find("inspect") != std::string::npos && !w->local && w->locked;
+			};
+			CHECK(error_of([&] { CHECK(warned(index::open(io, policy(warn)))); }) == 0);
+			CHECK(listing(dir) == made);
+			CHECK(error_of([&] { auto ix = index::create(io, policy(refuse), uuid_a); }) == EIO);
+			CHECK(listing(dir) == made);
+		}
+		fresh(dir);
+		{
+			kronuz::journal::PosixIO io(dir);
+			io.replace_statfs(fake_statfs);
+			auto ix = index::create(io, policy(warn), uuid_a);
+			const auto& w = ix.filesystem_warning();
+			CHECK(w && w->filesystem.find("unknown") != std::string::npos && !w->local && w->locked);
 		}
 		fake_errno = 0;
 	}
+	// T7: refuse is enforced through a wrapper that forwards the classification: a PosixIO on
+	// NFS refuses as bare, and warn reports it. A wrapper that does not forward is unclassified,
+	// so not local: refuse refuses it and warn warns (DL2).
+	{
+		static const fake_fs nfs{"nfs", false,
+#if defined(__linux__)
+			0x6969};
+#else
+			"nfs", false};
+#endif
+		faking = &nfs;
+		const fs::path dir = root / "t7-wrapper";
+		fresh(dir);
+		kronuz::journal::PosixIO inner(dir);
+		inner.replace_statfs(fake_statfs);
+		wrapper_io forwarding(inner, true);
+		CHECK(error_of([&] { auto ix = index::create(forwarding, policy(refuse), uuid_a); }) == int(std::errc::not_supported));
+		CHECK(listing(dir).empty());
+		{
+			auto ix = index::create(forwarding, policy(warn), uuid_a);
+			CHECK(ix.filesystem_warning() && ix.filesystem_warning()->filesystem == "nfs" && ix.filesystem_warning()->locked);
+		}
+		const auto made = listing(dir);
+		CHECK(error_of([&] { auto ix = index::open(forwarding, policy(refuse)); }) == int(std::errc::not_supported));
+		CHECK(listing(dir) == made);
+		wrapper_io bare(inner, false);
+		std::string what;
+		CHECK(error_of([&] { auto ix = index::open(bare, policy(refuse)); }, &what) == int(std::errc::not_supported));
+		CHECK(what.find("unclassified") != std::string::npos);
+		CHECK(listing(dir) == made);
+		auto ix = index::open(bare, policy(warn));
+		CHECK(ix.filesystem_warning() && ix.filesystem_warning()->filesystem == "unclassified" && !ix.filesystem_warning()->local &&
+			ix.filesystem_warning()->locked);
+		faking = nullptr;
+	}
 #endif
 
+	// T7 on faultfs, which models a local disk: classified local by default, so no warning;
+	// classified NFS, it refuses under refuse and warns under warn, through a wrapper too.
+	{
+		faultfs::filesystem f;
+		faultfs::io io(f);
+		{
+			auto ix = index::create(io, policy(refuse), uuid_a);
+			CHECK(!ix.filesystem_warning());
+		}
+		f.classify({false, "nfs"});
+		wrapper_io forwarding(io, true);
+		CHECK(error_of([&] { auto ix = index::open(io, policy(refuse)); }) == int(std::errc::not_supported));
+		CHECK(error_of([&] { auto ix = index::open(forwarding, policy(refuse)); }) == int(std::errc::not_supported));
+		auto ix = index::open(forwarding, policy(warn));
+		CHECK(ix.filesystem_warning() && ix.filesystem_warning()->filesystem == "nfs");
+	}
+
 	if (!disk_only) {  // faultfs: the first filesystem's run covers it
+		// DL1: nothing is written before the lock. A create over residue and an open beside a
+		// writer's temporary file, both against a held lock, are busy with the files untouched
+		// (recovery would remove the holder's in-flight files).
+		{
+			faultfs::filesystem f;
+			faultfs::io holder(f), other(f);
+			auto lock = holder.acquire_directory_owner();  // a create in progress, nothing written yet
+			other.create_exclusive("meta-1.kv")->write_at(0, "torn");
+			other.sync_directory();
+			const auto before = f.mutations();
+			CHECK(error_of([&] { auto ix = index::create(other, keyed(), uuid_a); }) == EWOULDBLOCK);
+			CHECK(f.mutations() == before);
+			CHECK(f.list().size() == 1);
+		}
+		{
+			faultfs::filesystem f;
+			faultfs::io holder(f), other(f);
+			auto ix = index::create(holder, keyed(), uuid_a);
+			ix.apply(one_doc("Qa"), {});
+			ix.commit();
+			other.create_exclusive("manifest-9.tmp")->write_at(0, "in flight");  // the holder's commit
+			const auto before = f.mutations();
+			const auto names = f.list();
+			CHECK(error_of([&] { auto o = index::open(other, keyed()); }) == EWOULDBLOCK);
+			CHECK(f.mutations() == before);
+			CHECK(f.list() == names);
+		}
+
 		// D3-C: a standalone create is the deferred create (the directory lock and clearing an
 		// interrupted create's residue, writing nothing) and then the first commit, so a create
 		// over an empty directory makes 4 durability calls: 2 file syncs (the metadata file, the
