@@ -1517,15 +1517,20 @@ private:
 	}
 	// Block b's entry, checked (F10): its last above the previous block's and at most its
 	// group's, its bytes inside the group's, its codec one the format keeps.
+	// The last block checked is kept: a walk reads its successor's base and start from it.
 	block_ref block_at(std::size_t b) {
+		if (b == checked_b_) { return checked_; }
 		const group& gr = group_at(b / format::skip::group_blocks);
 		const std::size_t i = b % format::skip::group_blocks;
-		const std::uint64_t last = entry_last(gr, i), base = i ? entry_last(gr, i - 1) : gr.base;
-		const std::uint64_t group_bytes = gr.blocks_end - gr.blocks_begin, start = entry_offset(gr, i),
+		const bool next = i && checked_b_ + 1 == b;
+		const std::uint64_t last = entry_last(gr, i), base = next ? checked_.last : i ? entry_last(gr, i - 1) : gr.base;
+		const std::uint64_t group_bytes = gr.blocks_end - gr.blocks_begin, start = next ? checked_.offset + checked_.bytes - gr.blocks_begin : entry_offset(gr, i),
 							end = i + 1 < gr.n ? entry_offset(gr, i + 1) : group_bytes;
 		const unsigned code = entry_codec(gr, i);
 		if (last > gr.last || (b && last <= base) || start >= end || end > group_bytes || code > format::max_block_codec) { corrupt("advance entry"); }
-		return {ordinal_t(last), b ? ordinal_t(base) : std::numeric_limits<ordinal_t>::max(), gr.blocks_begin + start, end - start, format::block_codec(code)};
+		checked_ = {ordinal_t(last), b ? ordinal_t(base) : std::numeric_limits<ordinal_t>::max(), gr.blocks_begin + start, end - start, format::block_codec(code)};
+		checked_b_ = b;
+		return checked_;
 	}
 
 	// Block b's pairs: the group's lists are walked once, then kept as views.
@@ -1775,6 +1780,8 @@ private:
 	std::string_view pairs_;    // the groups' competitive pairs
 	std::uint64_t records_bytes_ = 0;
 	group cur_;
+	block_ref checked_;
+	std::size_t checked_b_ = std::numeric_limits<std::size_t>::max();
 	std::string_view block_pairs_[format::skip::group_blocks];
 	const char* positional_at_ = nullptr;  // the pairs' group's positional deltas
 	position_start positional_[format::skip::group_blocks];
