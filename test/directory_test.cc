@@ -1,9 +1,10 @@
 // The index directory (small-indexes D2 and D3-C): its owner lock is the directory's own, one
 // writer per directory within a process and across processes (T5); a pre-D2 index is refused
-// before anything is written, even while a pre-D2 writer holds its owner.lock (T5b);
-// filesystems not known local and lock errors other than busy refuse with nothing written and
-// no other lock taken (T7); a standalone create under power loss never leaves an index that
-// neither open() nor create() accepts (T11's standalone half).
+// before anything is written, even while a pre-D2 writer holds its owner.lock (T5b); lock
+// errors other than busy refuse with nothing written, and a filesystem not known local or a
+// lock it does not support warns or refuses as the index's policy says (T7); a standalone
+// create under power loss never leaves an index that neither open() nor create() accepts
+// (T11's standalone half).
 //
 //   directory_test STATE_DIR [tmpfs]
 //   directory_test opener DIR open|create PARENT_DIR_FD   (the spawned second process)
@@ -128,34 +129,18 @@ static int spawn_opener(const char* self, const fs::path& dir, const std::string
 
 // --- T7's injections -----------------------------------------------------------------------
 
-// An IO whose directory lock fails with `error`; it counts calls to the file lock, which a
-// fallback would take.
-class refusing_io final : public kronuz::journal::IO {
-public:
-	refusing_io(kronuz::journal::IO& inner, int error) : inner_(&inner), error_(error) {}
-	int file_locks = 0;
-	std::unique_ptr<kronuz::journal::OwnerLock> acquire_directory_owner() override {
-		throw std::system_error(error_, std::generic_category(), "injected directory lock error");
-	}
-	std::unique_ptr<kronuz::journal::OwnerLock> acquire_owner(bool create) override {
-		++file_locks;
-		return inner_->acquire_owner(create);
-	}
-	std::unique_ptr<kronuz::journal::File> open_existing(std::string_view name) override { return inner_->open_existing(name); }
-	std::unique_ptr<kronuz::journal::File> create_exclusive(std::string_view name) override { return inner_->create_exclusive(name); }
-	void replace(std::string_view a, std::string_view b) override { inner_->replace(a, b); }
-	void remove(std::string_view name) override { inner_->remove(name); }
-	std::unique_ptr<kronuz::journal::DirectoryCursor> scan_directory() override { return inner_->scan_directory(); }
-	void sync_directory() override { inner_->sync_directory(); }
-
-private:
-	kronuz::journal::IO* inner_;
-	int error_;
-};
+// The lock's answer: 0 for the real flock, else that errno.
+static int flock_errno = 0;
+static int fake_flock(int fd, int operation) {
+	if (!flock_errno) { return ::flock(fd, operation); }
+	errno = flock_errno;
+	return -1;
+}
 
 #ifdef KRONUZ_COMPLETION_STATFS
 struct fake_fs {
-	const char* expect;  // the type name the refusal carries
+	const char* expect;  // the type name the warning or refusal carries
+	bool fuse;
 #if defined(__linux__)
 	std::uint32_t magic;
 #else
@@ -180,6 +165,14 @@ static int fake_statfs(int, struct statfs* out) {
 	return 0;
 }
 #endif
+
+static index::options policy(index::options::nonlocal_policy p) {
+	auto o = keyed();
+	o.nonlocal = p;
+	return o;
+}
+static constexpr auto warn = index::options::nonlocal_policy::warn;
+static constexpr auto refuse = index::options::nonlocal_policy::refuse;
 
 int main(int argc, char** argv) {
 	if (argc == 5 && std::string(argv[1]) == "opener") { return opener(argv[2], argv[3], std::atoi(argv[4])); }
@@ -265,64 +258,129 @@ int main(int argc, char** argv) {
 		CHECK(listing(dir) == before);
 	}
 
-	// T7: lock errors other than busy refuse as they are, with nothing written and no file lock
-	// taken in their place (SI-R27).
-	for (const int error : {ENOLCK, EINVAL, EBADF}) {
-		const fs::path dir = root / "t7-lock";
+	// T7: lock errors other than busy and unsupported refuse as they are under either policy,
+	// with nothing written (SI-R27).
+	for (const auto p : {warn, refuse}) {
+		for (const int error : {ENOLCK, EINVAL, EBADF}) {
+			const fs::path dir = root / "t7-lock";
+			fresh(dir);
+			{
+				kronuz::journal::PosixIO setup(dir);
+				auto ix = index::create(setup, keyed(), uuid_a);
+				CHECK(!ix.filesystem_warning());  // a known-local filesystem
+			}
+			const auto made = listing(dir);
+			flock_errno = error;
+			kronuz::journal::PosixIO io(dir);
+			io.replace_flock(fake_flock);
+			CHECK(error_of([&] { auto ix = index::open(io, policy(p)); }) == error);
+			CHECK(listing(dir) == made);
+			fresh(dir);
+			kronuz::journal::PosixIO empty(dir);
+			empty.replace_flock(fake_flock);
+			CHECK(error_of([&] { auto ix = index::create(empty, policy(p), uuid_a); }) == error);
+			CHECK(listing(dir).empty());
+			flock_errno = 0;
+		}
+	}
+	// T7: a lock the filesystem does not support: warn proceeds unlocked and says so; refuse
+	// refuses with not_supported, nothing written (the owner's ruling, F20).
+	for (const int error : {ENOTSUP, EOPNOTSUPP}) {
+		const fs::path dir = root / "t7-unsupported";
 		fresh(dir);
+		flock_errno = error;
 		{
-			kronuz::journal::PosixIO setup(dir);
-			auto ix = index::create(setup, keyed(), uuid_a);
+			kronuz::journal::PosixIO io(dir);
+			io.replace_flock(fake_flock);
+			CHECK(error_of([&] { auto ix = index::create(io, policy(refuse), uuid_a); }) == int(std::errc::not_supported));
+			CHECK(listing(dir).empty());
+			auto ix = index::create(io, policy(warn), uuid_a);
+			const auto& w = ix.filesystem_warning();
+			CHECK(w && w->local && !w->locked);
 		}
 		const auto made = listing(dir);
-		kronuz::journal::PosixIO inner(dir);
-		refusing_io io(inner, error);
-		CHECK(error_of([&] { auto ix = index::open(io, keyed()); }) == error);
+		kronuz::journal::PosixIO io(dir);
+		io.replace_flock(fake_flock);
+		CHECK(error_of([&] { auto ix = index::open(io, policy(refuse)); }) == int(std::errc::not_supported));
 		CHECK(listing(dir) == made);
-		fresh(dir);
-		kronuz::journal::PosixIO empty_inner(dir);
-		refusing_io empty(empty_inner, error);
-		CHECK(error_of([&] { auto ix = index::create(empty, keyed(), uuid_a); }) == error);
-		CHECK(listing(dir).empty());
-		CHECK(io.file_locks == 0 && empty.file_locks == 0);
+		{
+			auto ix = index::open(io, policy(warn));
+			CHECK(ix.filesystem_warning() && !ix.filesystem_warning()->locked);
+		}
+		flock_errno = 0;
 	}
 #ifdef KRONUZ_COMPLETION_STATFS
-	// T7: a filesystem not known local refuses create() and open() with not_supported, naming
-	// its type, and nothing is written; so does a failed statfs, with its own error.
+	// T7: a filesystem not known local. warn opens and creates, locked, and reports it; refuse
+	// refuses with not_supported naming the type and writes nothing, except FUSE, never refused
+	// (the lead's call), still reported. With the lock unsupported as well, warn and FUSE
+	// proceed unlocked. A failed statfs refuses with its own error.
 	{
 #if defined(__linux__)
-		static const fake_fs cases[] = {{"nfs", 0x6969}, {"cifs", 0xFF534D42}, {"fuse", 0x65735546}, {"9p", 0x01021997}, {"unknown type 0x12345678", 0x12345678}};
+		static const fake_fs cases[] = {{"nfs", false, 0x6969}, {"smb2", false, 0xFE534D42}, {"cifs", false, 0xFF534D42}, {"fuse", true, 0x65735546},
+			{"9p", false, 0x01021997}, {"unknown type 0x12345678", false, 0x12345678}};
 #else
-		static const fake_fs cases[] = {{"nfs", "nfs", false}, {"smbfs", "smbfs", false}, {"macfuse", "macfuse", true}, {"9p", "9p", false}, {"mystery", "mystery", false}};
+		static const fake_fs cases[] = {{"nfs", false, "nfs", false}, {"smbfs", false, "smbfs", false}, {"macfuse", true, "macfuse", false},
+			{"fusefs", true, "fusefs", false}, {"9p", false, "9p", false}, {"mystery", false, "mystery", false}};
 #endif
 		const fs::path dir = root / "t7-statfs";
-		fresh(dir);
-		{
-			kronuz::journal::PosixIO setup(dir);
-			auto ix = index::create(setup, keyed(), uuid_a);
-		}
-		const auto made = listing(dir);
-		const fs::path empty_dir = root / "t7-statfs-empty";
-		fresh(empty_dir);
 		for (const auto& c : cases) {
 			faking = &c;
-			for (const bool create : {false, true}) {
-				const fs::path& d = create ? empty_dir : dir;
-				kronuz::journal::PosixIO io(d);
-				io.replace_statfs(fake_statfs);
+			for (const bool unsupported : {false, true}) {
+				flock_errno = unsupported ? ENOTSUP : 0;
+				auto io_for = [&](kronuz::journal::PosixIO& io) {
+					io.replace_statfs(fake_statfs);
+					io.replace_flock(fake_flock);
+				};
+				auto warned = [&](const strata::index& ix) {
+					const auto& w = ix.filesystem_warning();
+					return w && w->filesystem == c.expect && !w->local && w->locked == !unsupported;
+				};
+				fresh(dir);
+				{
+					kronuz::journal::PosixIO io(dir);
+					io_for(io);
+					std::string what;
+					const int e = error_of([&] { CHECK(warned(index::create(io, policy(refuse), uuid_a))); }, &what);
+					if (c.fuse) {
+						CHECK(e == 0);  // the index is created; warn's create is the others' case
+					} else {
+						CHECK(e == int(std::errc::not_supported) && what.find(c.expect) != std::string::npos);
+						CHECK(listing(dir).empty());
+						CHECK(error_of([&] { CHECK(warned(index::create(io, policy(warn), uuid_a))); }) == 0);
+					}
+				}
+				const auto made = listing(dir);
+				kronuz::journal::PosixIO io(dir);
+				io_for(io);
 				std::string what;
-				const int e = error_of([&] { open_or_create(io, create ? "create" : "open"); }, &what);
-				CHECK(e == int(std::errc::not_supported));
-				if (what.find(c.expect) == std::string::npos) { std::fprintf(stderr, "t7: \"%s\" does not name %s\n", what.c_str(), c.expect); }
-				CHECK(what.find(c.expect) != std::string::npos);
-				CHECK(listing(d) == (create ? decltype(made){} : made));
+				const int e = error_of([&] { CHECK(warned(index::open(io, policy(refuse)))); }, &what);
+				CHECK(c.fuse ? e == 0 : e == int(std::errc::not_supported) && what.find(c.expect) != std::string::npos);
+				CHECK(listing(dir) == made);
+				CHECK(error_of([&] { CHECK(warned(index::open(io, policy(warn)))); }) == 0);
+				CHECK(listing(dir) == made);
+				flock_errno = 0;
 			}
 		}
+#if !defined(__linux__)
+		// A FUSE mount claiming MNT_LOCAL is local: the kernel flag is the classifier's evidence.
+		static const fake_fs claimed{"macfuse", true, "macfuse", true};
+		faking = &claimed;
+		fresh(dir);
+		{
+			kronuz::journal::PosixIO io(dir);
+			io.replace_statfs(fake_statfs);
+			CHECK(!index::create(io, policy(refuse), uuid_a).filesystem_warning());
+		}
+#endif
+		const auto made = listing(dir);
 		fake_errno = EIO;
-		kronuz::journal::PosixIO io(dir);
-		io.replace_statfs(fake_statfs);
-		CHECK(error_of([&] { open_or_create(io, "open"); }) == EIO);
-		CHECK(listing(dir) == made);
+		for (const auto p : {warn, refuse}) {
+			kronuz::journal::PosixIO io(dir);
+			io.replace_statfs(fake_statfs);
+			CHECK(error_of([&] { open_or_create(io, "open"); }) == EIO);
+			CHECK(error_of([&] { auto ix = index::open(io, policy(p)); }) == EIO);
+			CHECK(listing(dir) == made);
+		}
 		fake_errno = 0;
 	}
 #endif
