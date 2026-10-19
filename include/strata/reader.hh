@@ -1225,7 +1225,7 @@ public:
 		if (started_ && doc_ != no_more_docs && doc_ >= target) { return doc_; }
 		// Inside the decoded block: search it without touching skip data.
 		if (started_ && buf_len_ && target <= buf_last()) {
-			if (pending_) { return advance_pending(target); }
+			if (bits_pending_) { return advance_bits(target); }
 			pos_ += count_below(buf_ords_ + pos_, buf_len_ - pos_, target);
 			return doc_ = buf_ords_[pos_];
 		}
@@ -1241,7 +1241,7 @@ public:
 			// Search inside the block.
 			if (doc_ < target) {
 				if (target > buf_last()) { continue; }
-				if (pending_) { return advance_pending(target); }
+				if (bits_pending_) { return advance_bits(target); }
 				pos_ += count_below(buf_ords_ + pos_, buf_len_ - pos_, target);
 				return doc_ = buf_ords_[pos_];
 			}
@@ -1588,13 +1588,13 @@ private:
 			next_block_ = b;
 			buf_len_ = 0;
 			pos_ = 0;
-			pending_ = none;
+			bits_pending_ = false;
 		}
 	}
 
 	ordinal_t load_next_block() {
 		pos_ = 0;
-		pending_ = none;
+		bits_pending_ = false;
 		if (next_block_ < blocks_) {
 			const block_ref cur = block_at(next_block_);
 			const char* p = blocks_begin_ + cur.offset;  // block_at checked offset + bytes against the group's
@@ -1602,8 +1602,6 @@ private:
 			std::size_t used;
 			if (cur.codec == format::block_codec::bitset) {
 				used = load_bitset(p, cur);
-			} else if (cur.codec == format::block_codec::elias_fano) {
-				used = load_elias_fano(p, cur);
 			} else {
 				// Gaps - 1 (M23): ordinals increase within (base, last] by construction.
 				used = format::decode_gaps(reinterpret_cast<const std::uint8_t*>(p), cur.bytes, cur.base, cur.last, next_block_ == 0, buf_ords_);
@@ -1619,7 +1617,7 @@ private:
 			}
 			buf_len_ = format::block;
 			++next_block_;
-			return doc_ = pending_ ? pending_doc0_ : buf_ords_[0];
+			return doc_ = bits_pending_ ? bits_doc0_ : buf_ords_[0];
 		}
 		if (next_block_ == blocks_ && !tail_done_ && df_ % format::block) {
 			if (info_.flags & format::single_posting) {
@@ -1663,26 +1661,9 @@ private:
 		std::size_t w = 0;
 		while (!bits_[w]) { ++w; }
 		bits_first_ = first;
-		pending_doc0_ = first + ordinal_t(w * 64 + std::size_t(std::countr_zero(bits_[w])));
-		pending_last_ = r.last;
-		pending_ = bitset;
-		return std::size_t(bytes);
-	}
-
-	// Keeps an Elias-Fano block in place (M22) with its first ordinal: the first advance()
-	// into it probes after checking its count and last; ords() decodes and checks it whole.
-	// Returns its bytes, which its span fixes.
-	std::size_t load_elias_fano(const char* p, const block_ref& r) {
-		const bool first = next_block_ == 0;
-		const std::uint64_t bytes = format::ef::bytes(format::ef::span(r.base, r.last, first));
-		const auto* in = reinterpret_cast<const std::uint8_t*>(p);
-		if (bytes > r.bytes || !format::ef::first_ordinal(in, r.base, r.last, first, pending_doc0_)) { corrupt("elias-fano block"); }
-		ef_ = in;
-		ef_base_ = r.base;
-		ef_first_ = first;
-		ef_probed_ = false;
-		pending_last_ = r.last;
-		pending_ = elias_fano;
+		bits_doc0_ = first + ordinal_t(w * 64 + std::size_t(std::countr_zero(bits_[w])));
+		bits_last_ = r.last;
+		bits_pending_ = true;
 		return std::size_t(bytes);
 	}
 
@@ -1711,35 +1692,16 @@ private:
 
 	// The current block's ordinals, expanding a bitset block on first use.
 	const ordinal_t* ords() {
-		if (pending_ == elias_fano) {
-			if (!format::ef::decode(ef_, ef_base_, pending_last_, ef_first_, buf_ords_)) { corrupt("elias-fano block"); }
-			pending_ = none;
-		} else if (pending_ == bitset) {
+		if (bits_pending_) {
 			std::size_t n = 0;
 			for (std::size_t w = 0; n < format::block; ++w) {
 				for (std::uint64_t word = bits_[w]; word; word &= word - 1) { buf_ords_[n++] = bits_first_ + ordinal_t(w * 64 + std::size_t(std::countr_zero(word))); }
 			}
-			pending_ = none;
+			bits_pending_ = false;
 		}
 		return buf_ords_;
 	}
-	ordinal_t buf_last() const noexcept { return pending_ ? pending_last_ : buf_ords_[buf_len_ - 1]; }
-
-	// Advances inside an unexpanded block to the first posting >= target, which must be in
-	// (doc(), the block's last].
-	ordinal_t advance_pending(ordinal_t target) {
-		if (pending_ == bitset) { return advance_bits(target); }
-		if (ef_probed_) {  // a second target in the block: decode it whole, then search
-			ords();
-			pos_ += count_below(buf_ords_ + pos_, buf_len_ - pos_, target);
-			return doc_ = buf_ords_[pos_];
-		}
-		ef_probed_ = true;  // successor answers inside the block's span or not at all
-		const auto [i, d] = format::ef::successor(ef_, ef_base_, pending_last_, ef_first_, target);
-		if (i >= format::block || i < pos_) { corrupt("elias-fano block"); }
-		pos_ = i;
-		return doc_ = d;
-	}
+	ordinal_t buf_last() const noexcept { return bits_pending_ ? bits_last_ : buf_ords_[buf_len_ - 1]; }
 
 	// Advances inside an unexpanded bitset block to the first posting >= target, which
 	// must be in (doc(), the block's last]: the next set bit, ranked by popcount.
@@ -1823,13 +1785,9 @@ private:
 	std::uint64_t sum_ = 0;
 	bool with_positions_ = false, with_counts_ = false;
 	ordinal_t buf_ords_[format::block] = {};
-	// A bitset or Elias-Fano block not yet expanded into buf_ords_: probes read it in place.
-	enum : std::uint8_t { none, bitset, elias_fano } pending_ = none;
-	std::uint64_t bits_[64] = {};  // the current bitset block
-	ordinal_t bits_first_ = 0, pending_doc0_ = 0, pending_last_ = 0;
-	const std::uint8_t* ef_ = nullptr;  // the current Elias-Fano block
-	ordinal_t ef_base_ = 0;
-	bool ef_first_ = false, ef_probed_ = false;
+	std::uint64_t bits_[64] = {};  // the current bitset block while bits_pending_
+	ordinal_t bits_first_ = 0, bits_doc0_ = 0, bits_last_ = 0;
+	bool bits_pending_ = false;  // buf_ords_ not yet expanded from bits_
 	mutable std::uint32_t buf_wdfs_[format::block] = {};
 	mutable const char* wdf_pending_ = nullptr;  // the current block's undecoded wdf block
 	std::size_t wdf_size_ = 0;

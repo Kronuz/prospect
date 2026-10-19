@@ -950,8 +950,7 @@ int main() {
 		}
 	}, 80000, 92000, 200);
 	// Postings can grow when merged: a term on A's first document and B's 127 is a tail of
-	// small deltas in B and one block in the merge, spanning the jump across A (an
-	// Elias-Fano block, smaller than FOR's, so the rooms start lower).
+	// small deltas in B and one block in the merge, spanning the jump across A.
 	merge_rooms({}, [&](strata::index& ix) {
 		auto shared = [] {
 			document d;
