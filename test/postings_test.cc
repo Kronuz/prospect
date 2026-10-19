@@ -358,6 +358,61 @@ int main() {
 		CHECK(!bad);
 	}
 
+	// --- F11 (M23): gaps - 1, checked by the header width or a 64-bit sum ---------------------
+	{
+		std::mt19937_64 rng(23);
+		std::uint32_t out[f::block];
+		std::uint8_t buf[bitpack::max_encoded_bytes];
+		// Round trips at every width, from a term's first block and from a base.
+		for (unsigned width = 0; width <= 32; ++width) {
+			for (const bool first : {true, false}) {
+				const std::uint32_t base = first ? 0 : std::uint32_t(rng() % 1000);
+				std::uint32_t ords[f::block], at = first ? std::uint32_t(-1) : base;
+				const std::uint64_t cap = width ? (std::uint64_t(1) << width) - 1 : 0;
+				const std::uint64_t room = (0xffffffffull - (first ? 0 : base)) / f::block - 1;  // gaps that stay below 2^32
+				for (std::size_t i = 0; i < f::block; ++i) { ords[i] = at += std::uint32_t(1 + std::min<std::uint64_t>(i == 7 ? cap : rng() & cap, room)); }
+				const std::size_t n = f::encode_gaps(ords, base, first, buf);
+				CHECK(f::decode_gaps(buf, n, base, ords[f::block - 1], first, out) == n);
+				CHECK(std::equal(ords, ords + f::block, out));
+				// A last other than the block's: refused.
+				CHECK(f::decode_gaps(buf, n, base, ords[f::block - 1] - 1, first, out) == 0);
+				CHECK(f::decode_gaps(buf, n - 1, base, ords[f::block - 1], first, out) == 0);  // truncated
+			}
+		}
+		// Consecutive ordinals: a 5-byte constant block of 0.
+		std::uint32_t run[f::block];
+		for (std::size_t i = 0; i < f::block; ++i) { run[i] = std::uint32_t(500 + i); }
+		CHECK(f::encode_gaps(run, 499, false, buf) == 5 && buf[0] == bitpack::constant_flag && f::decode_gaps(buf, 5, 499, 627, false, out) == 5);
+		CHECK(f::decode_gaps(buf, 5, 498, 627, false, out) == 0);  // a constant inconsistent with the span
+		// Gaps that wrap by 2^32 and land on the entry's last: two gaps of 2^31, then 126 of
+		// 1. The last value matches, so only the 64-bit sum (header width 31 > 25) refuses it.
+		{
+			std::uint32_t g[f::block] = {};
+			g[0] = g[1] = (1u << 31) - 1;
+			std::uint8_t wide[1 + bitpack::packed_bytes(32)];
+			const std::size_t n = bitpack::encode_for(g, wide);
+			CHECK(wide[0] == 31);
+			const std::uint32_t base = 100, last = base + 126;
+			std::uint32_t at = base;
+			for (auto v : g) { at += v + 1; }
+			CHECK(at == last);
+			CHECK(f::decode_gaps(wide, n, base, last, false, out) == 0);
+			// The same width with an exact sum decodes.
+			for (std::size_t i = 0; i < f::block; ++i) { g[i] = i == 5 ? (1u << 30) : 0; }
+			const std::size_t m = bitpack::encode_for(g, wide);
+			CHECK(wide[0] == 31 && f::decode_gaps(wide, m, base, base + (1u << 30) + f::block, false, out) == m);
+			CHECK(out[4] == base + 5 && out[5] == base + 6 + (1u << 30) && out[f::block - 1] == base + (1u << 30) + f::block);
+		}
+		// An exception block (PFOR) is not an ordinal block, even where its low part alone
+		// (width 0: every gap 1) would end at the entry's last.
+		std::uint32_t g[f::block] = {};
+		g[3] = 1u << 20;
+		const std::size_t n = bitpack::encode_pfor(g, buf);
+		CHECK(buf[0] == bitpack::exceptions_flag);
+		CHECK(f::decode_gaps(buf, n, 0, f::block, false, out) == 0);
+		CHECK(f::decode_gaps(buf, n, 0, (1u << 20) + f::block, false, out) == 0);
+	}
+
 	std::printf("postings: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }

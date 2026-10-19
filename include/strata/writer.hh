@@ -540,9 +540,8 @@ private:
 		}
 		std::string blocks;
 		std::vector<block_meta> meta;
-		std::uint32_t deltas[format::block];
 		std::uint8_t buf[bitpack::max_encoded_bytes];
-		std::uint32_t prev = std::numeric_limits<std::uint32_t>::max();  // the first delta is ordinal + 1
+		std::uint32_t prev = std::numeric_limits<std::uint32_t>::max();  // the tail's first delta is ordinal + 1
 		std::uint64_t position = 0;
 		std::string bits;
 		for (std::size_t b = 0; b < full; b += format::block) {
@@ -550,8 +549,7 @@ private:
 			// A dense block is a bitset over (previous last, last] when that is smaller.
 			const ordinal_t base = b ? ords[b - 1] + 1 : 0;
 			const std::uint64_t span = std::uint64_t(ords[b + format::block - 1]) - base + 1;
-			bitpack::delta_encode(prev, ords.data() + b, deltas);
-			const std::size_t for_bytes = bitpack::encode_for(deltas, buf);
+			const std::size_t for_bytes = format::encode_gaps(ords.data() + b, prev, b == 0, buf);
 			const bool bitset = (span + 7) / 8 < for_bytes;
 			if (bitset) {
 				bits.assign((span + 7) / 8, '\0');

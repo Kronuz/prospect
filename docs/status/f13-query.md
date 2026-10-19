@@ -17,7 +17,7 @@
 
 ## State
 
-M16 committed; M23 next.
+M16 and M23 committed; M22 next.
 
 ## Done
 
@@ -47,9 +47,28 @@ M16 committed; M23 next.
     previous, offsets ordered and inside the group, the codec width) are defense in depth: with
     any one removed every damaged case still fences through the block decoders' own checks.
 
+- M23 (F11, F10's check), the commit after 88f23ee: FOR ordinal blocks store gap - 1
+  (`format::encode_gaps`, `decode_gaps`), so ordinals increase by construction; a block whose
+  header declares at most 25 bits is checked by its last ordinal against the entry's, a wider
+  one by the 64-bit sum of its gaps against last - base; a constant block by (value + 1) x 128;
+  an exception (PFOR) header is refused, since the writer never stores one. check_increasing
+  stays for tails only. The writer's bitset-or-FOR choice now compares against FOR at gap - 1,
+  so dense blocks with gaps of 1 and 2 move from bitset to FOR (17 bytes against 18 or more).
+  `format::pre_freeze` 0x80000003; fixtures, the T8 hash, the prefix CRC re-pinned; digest.txt
+  unchanged; segment_test's C13 term made 60% dense so it keeps bitset blocks. Tests:
+  postings_test (every header width 0 to 32 round trip from a first block and from a base, a
+  last off by one and a truncated block refused, a constant block, gaps wrapping by 2^32 onto the
+  entry's last refused at width 31, an exact width-31 block decoded, a PFOR header refused even
+  where its low part ends at the last); fuzz_postings now also feeds raw bytes to decode_gaps and
+  aborts if it accepts a block outside (base, last] (3 min, 9,619 runs, no finding; 66 inputs
+  added).
+  - Revert checks: removing the 64-bit sum fails postings_test:399 (the wrap); removing the last
+    check fails :378 and the walk (:319); removing the PFOR refusal fails :412; removing the
+    constant's check crashes postings_test (SIGSEGV, an ordinal past the document count).
+
 ## Next
 
-1. M23: gap - 1 with the header-width check.
+1. M22: Elias-Fano blocks chosen per block by size.
 
 ## Blocked on
 

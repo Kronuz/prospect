@@ -26,6 +26,7 @@
 
 #pragma once
 
+#include "bitpack.hh"
 #include "crc32c.hh"
 #include "termdict.hh"
 #include "varint.hh"
@@ -67,7 +68,7 @@ inline constexpr char footer_magic[4] = {'S', 'E', 'N', 'D'};
 // The version written, and the oldest one read (N - 1 from format 13 on: F2). Until format
 // 13 freezes, both are a pre-freeze number, bumped with each byte change and 13 at the
 // freeze, so an index from another pre-freeze build is refused, never misread (CR11).
-inline constexpr std::uint32_t pre_freeze = 0x8000'0002;
+inline constexpr std::uint32_t pre_freeze = 0x8000'0003;
 inline constexpr std::uint32_t version = pre_freeze;
 inline constexpr std::uint32_t min_read_version = pre_freeze;
 // Bytes 0-15, frozen in every version: magic, version, CRC-32C of bytes 0-11 (F2).
@@ -471,6 +472,53 @@ inline std::uint32_t get_bits(const char* p, std::uint64_t size, std::uint64_t a
 		std::memcpy(&v, p + byte, std::size_t(size - byte));
 	}
 	return std::uint32_t((v >> (at & 7)) & ((std::uint64_t(1) << w) - 1));
+}
+
+// --- ordinal blocks (F11: M23) ------------------------------------------------------------------
+
+// A FOR ordinal block stores each gap minus one (M23), so its ordinals increase by
+// construction: bitpack's FOR or constant block over g[i] = o[i] - o[i - 1] - 1, o[-1] the
+// previous block's last (-1 before a term's first block). Returns the encoded bytes.
+inline std::size_t encode_gaps(const std::uint32_t* ords, std::uint32_t prev, bool first, std::uint8_t* out) noexcept {
+	std::uint32_t g[block];
+	for (std::size_t i = 0; i < block; ++i) {
+		g[i] = ords[i] - (i ? ords[i - 1] : (first ? std::uint32_t(-1) : prev)) - 1;
+	}
+	return bitpack::encode_for(g, out);
+}
+
+// Decodes a block written by encode_gaps whose ordinals lie in (base, last] (from 0 when
+// first) and end at last; returns the bytes read, or 0 when the block is malformed, carries
+// exceptions, or is inconsistent with last. A header width of at most 25 bits cannot carry
+// 128 gaps past 2^32, so its last ordinal checks the block; a wider one checks the 64-bit
+// sum of its gaps (F10).
+inline std::size_t decode_gaps(const std::uint8_t* in, std::size_t size, std::uint32_t base, std::uint32_t last, bool first, std::uint32_t* out) noexcept {
+	if (size < 1 || (in[0] & bitpack::exceptions_flag)) { return 0; }
+	const std::uint64_t span = std::uint64_t(last) - (first ? std::uint64_t(-1) : std::uint64_t(base));  // sum of the gaps
+	if (first) { base = std::uint32_t(-1); }
+	if (!first && last <= base) { return 0; }
+	if (in[0] & bitpack::constant_flag) {
+		if (in[0] != bitpack::constant_flag || size < 5) { return 0; }
+		std::uint32_t v;
+		std::memcpy(&v, in + 1, 4);
+		if ((std::uint64_t(v) + 1) * block != span) { return 0; }
+		for (std::size_t i = 0; i < block; ++i) { out[i] = base + std::uint32_t((i + 1) * (std::uint64_t(v) + 1)); }
+		return 5;
+	}
+	const unsigned bits = in[0] & 0x3f;
+	if (bits > 32 || size < 1 + bitpack::packed_bytes(bits)) { return 0; }
+	if (bits <= 25) {
+		bitpack::unpack_delta(in + 1, bits, base, out);
+		for (std::size_t i = 0; i < block; ++i) { out[i] += std::uint32_t(i + 1); }
+		if (out[block - 1] != last) { return 0; }
+	} else {
+		bitpack::unpack(in + 1, bits, out);
+		std::uint64_t sum = 0;
+		for (std::size_t i = 0; i < block; ++i) { sum += out[i]; }
+		if (sum + block != span) { return 0; }
+		for (std::size_t i = 0; i < block; ++i) { out[i] = base += out[i] + 1; }
+	}
+	return 1 + bitpack::packed_bytes(bits);
 }
 
 // --- term info (the termdict value) -----------------------------------------------------------

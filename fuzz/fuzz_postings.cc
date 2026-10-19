@@ -10,6 +10,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <vector>
@@ -90,7 +91,25 @@ void walk(const strata::segment& s, const f::term_info& info) {
 
 }  // namespace
 
+// The block decoders on raw bytes: a block they accept holds 128 ordinals strictly
+// increasing within (base, last], ending at last.
+void raw_blocks(const std::uint8_t* data, std::size_t size) {
+	if (size < 9) { return; }
+	std::uint32_t base, last, out[f::block];
+	std::memcpy(&base, data, 4);
+	std::memcpy(&last, data + 4, 4);
+	const bool first = data[8] & 1;
+	auto valid = [&] {
+		for (std::size_t i = 0; i < f::block; ++i) {
+			if ((i ? out[i] <= out[i - 1] : (!first && out[0] <= base)) || out[i] > last) { return false; }
+		}
+		return out[f::block - 1] == last;
+	};
+	if (f::decode_gaps(data + 9, size - 9, base, last, first, out) && !valid()) { fail("decode_gaps accepted a bad block"); }
+}
+
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size) {
+	raw_blocks(data, size);
 	reader in{data, size};
 	const std::uint32_t docs = 1 + in.u16() % 6000;
 	const std::uint8_t shape = in.byte();

@@ -1578,7 +1578,8 @@ private:
 			if (cur.codec == format::block_codec::bitset) {
 				used = load_bitset(p, cur);
 			} else {
-				used = bitpack::decode_delta(reinterpret_cast<const std::uint8_t*>(p), cur.bytes, cur.base, buf_ords_);
+				// Gaps - 1 (M23): ordinals increase within (base, last] by construction.
+				used = format::decode_gaps(reinterpret_cast<const std::uint8_t*>(p), cur.bytes, cur.base, cur.last, next_block_ == 0, buf_ords_);
 				if (!used) { corrupt("ordinal block"); }
 			}
 			if (info_.flags & format::no_wdf) {
@@ -1591,10 +1592,7 @@ private:
 			}
 			buf_len_ = format::block;
 			++next_block_;
-			if (cur.codec == format::block_codec::bitset) { return doc_ = bits_doc0_; }
-			if (buf_ords_[format::block - 1] != cur.last || buf_ords_[0] == no_more_docs) { corrupt("block last ordinal"); }
-			check_increasing(cur.base);
-			return doc_ = buf_ords_[0];
+			return doc_ = cur.codec == format::block_codec::bitset ? bits_doc0_ : buf_ords_[0];
 		}
 		if (next_block_ == blocks_ && !tail_done_ && df_ % format::block) {
 			if (info_.flags & format::single_posting) {
@@ -1711,8 +1709,8 @@ private:
 		return std::size_t(base - v) + (*base < target);
 	}
 
-	// Ordinals strictly increase from base (none before the first block) and stay below
-	// the document count; branch-free so it vectorizes.
+	// The tail's ordinals strictly increase from base (none before the first block) and stay
+	// below the document count; branch-free so it vectorizes.
 	void check_increasing(ordinal_t base) const {
 		const std::size_t n = buf_len_ ? buf_len_ : std::min<std::size_t>(format::block, df_);
 		if (n == 0) { return; }

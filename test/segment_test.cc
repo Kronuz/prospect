@@ -953,11 +953,16 @@ int main() {
 	// no positions keeps bitset blocks. A bit flipped in block 2 fails its count; block 3's
 	// advance offset moved back 8 bytes keeps the group's total and fails block 2's bounds.
 	{
+		auto dense = [](std::uint32_t d) {
+			std::uint32_t x = (d + 1) * 0x9e3779b9u;
+			x ^= x >> 16, x *= 0x85ebca6bu, x ^= x >> 13;
+			return x % 100 < 60;
+		};
 		strata::segment_writer w;
 		for (std::uint32_t d = 0; d < 5000; ++d) {
 			std::vector<std::uint32_t> none;
 			std::vector<strata::posting_input> in;
-			if (d % 10 != 0) { in.push_back({"dense", 0, none}); }  // 90%: bitset blocks (all would be one constant FOR block)
+			if (dense(d)) { in.push_back({"dense", 0, none}); }  // 60% with gaps to 8: bitset blocks
 			if (d % 3 == 0) { in.push_back({"m3", 0, none}); }
 			if (d % 5 == 0) { in.push_back({"m5", 0, none}); }
 			w.add(d + 1, in, 1);
@@ -978,7 +983,7 @@ int main() {
 			return strata::count(any);
 		};
 		std::uint64_t any = 0;
-		for (std::uint32_t d = 0; d < 5000; ++d) { any += d % 10 != 0 || d % 3 == 0 || d % 5 == 0; }
+		for (std::uint32_t d = 0; d < 5000; ++d) { any += dense(d) || d % 3 == 0 || d % 5 == 0; }
 		CHECK(window_count(good) == any);
 		std::string flipped = good;
 		flipped[lay.blocks[2].at + 3] ^= 0x10;
