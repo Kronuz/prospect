@@ -51,10 +51,13 @@ Over the 962 gate queries and 200 stratified terms (1,162 lines):
 | Index | `dump` A against B (k 10, 100, 1,000, both presets, with a count) | `probe_search dump` (k 1, 10, 11, 100, 1,000, 1,001, both presets, no count) | `strata_engine verify` on B | `probe_search verify` on B (with and without a count) |
 |---|---|---|---|---|
 | Reordered | identical, 6,972 lines | identical, 13,944 lines | 0 mismatches of 1,162 | 0 mismatches of 1,162 |
+| Merged (docid order) | identical, 6,972 lines | identical, 13,944 lines | 0 mismatches of 1,162 | 0 mismatches of 1,162 |
 
 Phase times (reordered): the two `dump`s 38 to 40 s in parallel; the no-count dumps 23 to 25 s;
 `verify` 131 s; the probe's `verify` 191 s (its first attempt ran beside `verify` and was refused
-by the journal lock, so it was rerun alone).
+by the journal lock, so it was rerun alone). Merged: dumps 41 s, no-count dumps 29 s, `verify` 128 s, the probe's
+`verify` 207 s. The run-level sessions (rows 4a and 5) also compare every query's count or top-k
+result between the sides in every round: 0 mismatches, including format 12 against B.
 
 ### Row 2: bytes at 5M (D15)
 
@@ -77,6 +80,24 @@ frequencies and skip data, positions excluded):
 | Keyed Tantivy 0.26 (`tantivy-0.26-st`, `.idx`) | 1,067,081,129 | 20.9% smaller | 3,066,216,363 | 17.6% smaller |
 | PISA 0.8.2, unkeyed, reordered (`inv.simdbp`; no positions) | 1,065,643,487 | 20.8% smaller | 1,384,946,259 (no positions or stored) | not comparable |
 
+Merged (docid order), with format 12 (F12, main `69a3f8c`, its own fresh build) beside them:
+
+| Section | F12 merged | A merged | B merged | B − A | B against F12 |
+|---|---:|---:|---:|---:|---|
+| Postings | 1,007,889,746 | 1,007,889,746 | 1,005,615,335 | −2,274,411 (−0.23%) | 0.23% smaller |
+| Positions | 1,631,157,618 | 1,631,157,618 | 1,631,157,618 | 0 | equal |
+| Terms, term index, keys, key index (F12: terms, term index, `pk_filter`) | 97,666,972 | 85,930,465 | 85,930,263 | −202 | 12.0% smaller |
+| Stored | 15,489,384 | 15,489,384 | 15,489,384 | 0 | equal |
+| Whole file | 2,770,003,548 | 2,758,255,204 | 2,755,978,368 | −2,276,836 (−0.08%) | 0.51% smaller |
+
+**Reading.** The query items take 1.92 MB off the reordered postings and 2.27 MB off the merged
+ones at 5M (0.23% each), against the joint selection's projection of about 1.4 MB from 1M. The
+postings row is not closed: B's reordered postings are 9.96 MB over keyed `-bp`'s `.doc` (1.2%
+larger; projected about 10.5 MB), so D15's constraint misses by that much, while the whole index
+is 16.9 MB under keyed `-bp`'s (0.67% smaller). A4@128 (+4.4 MB) stays unpaid for. PISA's
+postings (1,065.6 MB) are larger than keyed `-bp`'s `.doc`, so keyed `-bp` stays the reference
+(F13-R29).
+
 ### Row 3: merge times (C3, FQ4)
 
 One reordering merge per side, A then B, four reorder threads, strict hold; `/usr/bin/time -v`:
@@ -84,6 +105,25 @@ One reordering merge per side, A then B, four reorder threads, strict hold; `/us
 | Merge | A wall | B wall | B/A | A CPU (user + sys) | B CPU | A peak RSS | B peak RSS |
 |---|---:|---:|---|---:|---:|---:|---:|
 | Reordering, 16 segments to one | 1,063.3 s | 1,054.7 s | 0.992 | 2,705.0 s | 2,683.0 s | 4.76 GiB | 4.85 GiB |
+| Docid order, 16 segments to one (B first, then A) | 141.8 s | 155.0 s | **1.093** | 138.4 s | 154.7 s | 4.74 GiB | 4.75 GiB |
+
+Format 12's docid merge (F12) took 184.8 s at 4.79 GiB, run once right after its own index build
+read the corpus cold (184.4 s CPU, 23 s of it system time), so it is reported, not compared.
+
+The indexes these merges read, built one thread at the 256 MB buffer without merges, the corpus
+warm in the page cache (A, B, B, A by time; F12 once, from a cold corpus):
+
+| Build | A wall (CPU) | B wall (CPU) | B/A | A peak RSS | B peak RSS | F12 |
+|---|---|---|---|---|---|---|
+| Reordered layout's (A first) | 132.6 s (132.1 s) | 143.7 s (143.6 s) | 1.084 | 572.0 MiB | 573.3 MiB | |
+| Merged layout's (B first) | 128.6 s (128.3 s) | 143.5 s (143.1 s) | 1.116 | 573.5 MiB | 573.5 MiB | 218.0 s (216.0 s, cold corpus), 604.5 MiB |
+
+**Reading.** The reordering merge does not move (0.992; one pair, bisection dominates). The docid
+merge is 1.09 times slower with the query items (+13.2 s wall, +16.3 s CPU), and so is indexing:
+1.08 and 1.12 times slower in both orders, about +13 s of CPU per 5M documents. Both are one or two
+pairs, so their intervals are not established, but the index builds agree in both orders and in
+CPU time, and the docid merge's CPU moves by the same share. C3's figure is therefore a loss on the
+indexing axis of about 10% at 5M; the attribution is below (Row 3's profile).
 
 ### Row 4a: B against A at the run level (T4's guard)
 
