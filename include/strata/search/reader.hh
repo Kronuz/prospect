@@ -138,6 +138,11 @@ class inverted_builder;
 class inverting_buffer;
 struct inverted_plugin;
 using search_layout = layout<inverted_plugin, keys_plugin, stored_plugin>;
+// Declared here, defined in reorder.hh: a translation unit that names the search layout without
+// reorder.hh fails to compile rather than take the primary's "no order source" and a different
+// index_options layout than the rest of the program.
+template <>
+struct order_source<search_layout>;
 using segment = basic_segment<search_layout>;
 
 // Terms, postings, positions, lengths, and norms.

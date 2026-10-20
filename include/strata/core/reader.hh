@@ -120,6 +120,10 @@ struct stored_plugin;
 template <class Layout>
 class basic_segment;
 
+// A layout's source of a reordering merge's order (core/merge.hh defines the primary: none).
+template <class Layout>
+struct order_source;
+
 
 // The core of an open segment (L7): the prefix first (F2), then the footer, table of
 // contents, and header; the structure bits against those this binary reads (F4); every
@@ -516,6 +520,10 @@ struct stored_plugin {
 	}
 };
 
+// The core's own layout: a sorted key-value store with versions, snapshots, and atomic batches
+// (layers.md L12). It links no term dictionary, postings, or scorers.
+using document_layout = layout<keys_plugin, stored_plugin>;
+
 // --- documents (L10) --------------------------------------------------------------------
 
 template <class E>
@@ -731,6 +739,6 @@ private:
 
 // Readers hold views of the file and pointers into heap-held state, so a segment moves
 // without leaving one dangling (layers.md L3).
-static_assert(std::is_nothrow_move_constructible_v<basic_segment<layout<keys_plugin, stored_plugin>>>);
+static_assert(std::is_nothrow_move_constructible_v<basic_segment<document_layout>>);
 
 }  // namespace strata
