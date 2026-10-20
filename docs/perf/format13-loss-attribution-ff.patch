@@ -1,0 +1,112 @@
+diff --git a/include/strata/search.hh b/include/strata/search.hh
+index 16bbbd5..44f1eba 100644
+--- a/include/strata/search.hh
++++ b/include/strata/search.hh
+@@ -958,7 +958,31 @@ private:
+ 			if (window_end_ == no_more_docs || d > window_end_) {
+ 				const ordinal_t end = req_->block_end(d);
+ 				window_end_ = end;
+-				opt_bound_ = opt_->max_score(d, end == no_more_docs ? d : end);
++				const ordinal_t upto = end == no_more_docs ? d : end;
++				opt_bound_ = opt_->max_score(d, upto);
++				// EXPERIMENT (Lucene's ReqOptSumScorer): a block whose bounds together cannot
++				// compete is skipped; one whose required bound alone cannot needs the optional.
++				const double req_bound = req_->max_score(d, upto);
++				if (sum_upper(req_bound + opt_bound_, 2) <= min_) {
++					window_end_ = no_more_docs;
++					d = end == no_more_docs ? req_->next() : req_->advance(end + 1);
++					continue;
++				}
++				opt_required_ = req_bound <= min_;
++			}
++			if (opt_required_) {
++				if (!opt_started_ || opt_->doc() < d) {
++					opt_started_ = true;
++					opt_->advance(d);
++				}
++				if (const ordinal_t o = opt_->doc(); o != d) {
++					if (o == no_more_docs || window_end_ == no_more_docs) {
++						d = o == no_more_docs && window_end_ == no_more_docs ? no_more_docs : (window_end_ == no_more_docs ? req_->advance(o) : req_->advance(window_end_ + 1));
++					} else {
++						d = req_->advance(o > window_end_ ? window_end_ + 1 : o);
++					}
++					continue;
++				}
+ 			}
+ 			req_score_ = req_->score();
+ 			req_scored_ = d;
+@@ -969,7 +993,7 @@ private:
+ 	}
+ 
+ 	scorer_ptr req_, opt_;
+-	bool opt_started_ = false;
++	bool opt_started_ = false, opt_required_ = false;
+ 	double min_ = 0, req_score_ = 0, opt_bound_ = 0;
+ 	ordinal_t req_scored_ = no_more_docs, window_end_ = no_more_docs;
+ };
+@@ -1407,12 +1431,24 @@ inline bool disjunction_scorer::collect_top_k(top_collector& c) {
+ 	const std::size_t n = children_.size();
+ 	std::vector<double> acc(n * window, 0.0), bound(n), below;  // acc: one window per clause
+ 	std::vector<std::size_t> order(n);
+-	std::uint64_t bits[window / 64];
++	std::uint64_t bits[window / 64], cbits[window / 64];
++	// EXPERIMENT: counting keeps its own fresh iterators, so the count comes from window bits
++	// and scoring prunes as top-k does.
++	std::vector<scorer_ptr> counters;
++	if (c.counting) {
++		for (auto& ch : children_) {
++			auto f = ch->fresh();
++			if (!f) { counters.clear(); break; }
++			f->next();
++			counters.push_back(std::move(f));
++		}
++	}
++	const bool split = c.counting && counters.size() == n;
+ 	for (auto& ch : children_) { ch->next(); }
+ 	ordinal_t window_min = 0;
+ 	for (;;) {
+ 		// Clauses that can still matter given the global bounds.
+-		const double min = c.counting ? 0.0 : c.min_competitive();
++		const double min = c.counting && !split ? 0.0 : c.min_competitive();
+ 		double prefix = 0;
+ 		std::size_t global_from = 0;
+ 		if (min > 0) {
+@@ -1423,9 +1459,23 @@ inline bool disjunction_scorer::collect_top_k(top_collector& c) {
+ 			if (children_[i]->doc() < window_min) { children_[i]->advance(window_min); }
+ 			first = std::min(first, children_[i]->doc());
+ 		}
++		if (split) {
++			for (auto& k : counters) {
++				if (k->doc() < window_min) { k->advance(window_min); }
++				first = std::min(first, k->doc());
++			}
++		}
+ 		if (first == no_more_docs) { break; }
+ 		window_min = first;
+ 		const ordinal_t window_max = window_min > no_more_docs - window ? no_more_docs - 1 : window_min + window - 1;
++		if (split) {
++			std::fill(cbits, cbits + window / 64, 0);
++			for (auto& k : counters) {
++				if (k->doc() < window_min) { k->advance(window_min); }
++				if (k->doc() <= window_max) { k->fill(window_min, window_max + 1, cbits); }
++			}
++			for (auto w : cbits) { c.count += std::uint64_t(std::popcount(w)); }
++		}
+ 		// Per-window split.
+ 		for (std::size_t i = 0; i < n; ++i) {
+ 			order[i] = i;
+@@ -1464,11 +1514,11 @@ inline bool disjunction_scorer::collect_top_k(top_collector& c) {
+ 					score += parts_[rank_[order[e]]] = a;
+ 					a = 0;
+ 				}
+-				++c.count;
++				if (!split) { ++c.count; }
+ 				bool competes = true;
+ 				for (std::size_t e = essential; e-- > 0;) {
+-					const double m = c.counting ? 0.0 : c.min_competitive();
+-					if (!c.counting && sum_upper(score + below[e + 1], n) <= m) {
++					const double m = c.counting && !split ? 0.0 : c.min_competitive();
++					if ((!c.counting || split) && sum_upper(score + below[e + 1], n) <= m) {
+ 						competes = false;
+ 						break;
+ 					}

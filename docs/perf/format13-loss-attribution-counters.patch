@@ -1,0 +1,231 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index e771f54..e44973e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -26,11 +26,13 @@ FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compre
+ # on every platform, whatever zstd the system has.
+ set(COMPRESSORS_ZSTD_PINNED ON CACHE BOOL "" FORCE)
+ FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefilter.git GIT_TAG 28f4241f22b27aa68ff92cdddc66b124e71f3298)
++# The query counters' Counter (include/strata/counters.hh), at completion's own pin.
++FetchContent_Declare(metrics GIT_REPOSITORY https://github.com/Kronuz/metrics.git GIT_TAG c975765bafe61fa79a0aa417be6deb30edf3b1db)
+ # Index I/O goes through kronuz::journal::IO, from the completion library.
+ FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG 773454495e73361d231ec4dc59ad72b9b8f6163d)
+ # Background merges' default threaded executor: one pool per node, a task group per index.
+ FetchContent_Declare(threadpool GIT_REPOSITORY https://github.com/Kronuz/threadpool.git GIT_TAG 628679a2e27b563cf2709a6f35f98f1657baf7b3)
+-FetchContent_MakeAvailable(docset bitpack fst task hashes residency varint termdict unicode snowball analysis compressors fusefilter completion threadpool)
++FetchContent_MakeAvailable(docset bitpack fst task hashes residency varint termdict unicode snowball analysis compressors fusefilter metrics completion threadpool)
+ 
+ add_library(strata INTERFACE)
+ target_include_directories(strata INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+@@ -178,4 +180,16 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+   target_link_libraries(strata_engine PRIVATE strata)
+   add_executable(keybench tools/keybench.cc)
+   target_link_libraries(keybench PRIVATE strata)
++  # Per-query counters (include/strata/counters.hh) in the tool: a counting build is never
++  # timed. Their test always counts.
++  option(STRATA_COUNTERS "Count per-query work in strata_engine (never for timing)" OFF)
++  if(STRATA_COUNTERS)
++    target_compile_definitions(strata_engine PRIVATE STRATA_COUNTERS)
++    target_link_libraries(strata_engine PRIVATE metrics::metrics)
++  endif()
++  add_executable(counters_test test/counters_test.cc)
++  target_include_directories(counters_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tools")
++  target_link_libraries(counters_test PRIVATE strata metrics::metrics)
++  target_compile_definitions(counters_test PRIVATE STRATA_COUNTERS)
++  add_test(NAME counters COMMAND counters_test)
+ endif()
+diff --git a/include/strata/counters.hh b/include/strata/counters.hh
+new file mode 100644
+index 0000000..a464bbe
+--- /dev/null
++++ b/include/strata/counters.hh
+@@ -0,0 +1,80 @@
++// Per-query work counters for attribution (the query-gap design's E1). Built only with
++// STRATA_COUNTERS defined; otherwise every STRATA_COUNT expands to nothing. Counts are
++// the calling thread's: reset() before a query, read current() after it. Define it in
++// every translation unit of a program or none: it changes inline functions' bodies.
++#pragma once
++
++#ifdef STRATA_COUNTERS
++#include "metrics.hh"
++
++#include <cstddef>
++
++namespace strata::counters {
++
++using kronuz::metrics::Counter;
++
++// X(name): every counter, in print order.
++#define STRATA_COUNTER_FIELDS(X)                                                                  \
++	X(blocks_for)            /* FOR blocks decoded */                                             \
++	X(blocks_bitset)         /* bitset blocks decoded */                                          \
++	X(blocks_tail)           /* tails decoded by iterators */                                     \
++	X(bound_tails)           /* tails walked for a short term's competitive pairs */              \
++	X(blocks_ored)           /* bitset blocks OR'd into a window without decoding */             \
++	X(groups_decoded)        /* level-0 groups decoded */                                         \
++	X(advances)              /* advance() calls that move */                                      \
++	X(advances_in_block)     /* ... landing in the decoded block */                               \
++	X(advances_new_block)    /* ... needing another block */                                      \
++	X(advances_new_group)    /* ... whose target lies in another group */                         \
++	X(max_score_block)       /* max_score resolved by a block's pairs */                          \
++	X(max_score_group)       /* ... by a group's pairs */                                         \
++	X(max_score_term)        /* ... by the term's pairs */                                        \
++	X(bound_evals)           /* bounds computed from pairs (memoized ones not counted) */         \
++	X(pairs_evaluated)       /* pairs those bounds read */                                        \
++	X(skipped_blocks)        /* blocks skipped by bound */                                        \
++	X(skipped_groups)        /* groups skipped by bound */                                        \
++	X(skipped_terms)         /* term lists ended by their whole-term bound */                     \
++	X(windows)               /* windows opened (lead blocks, 4,096-ordinal union windows) */      \
++	X(windows_skipped)       /* ... skipped whole by their summed bounds */                       \
++	X(count_windows)         /* count()'s 4,096-ordinal windows filled */                         \
++	X(postings_scored)       /* term scores computed */                                           \
++	X(candidates)            /* documents scored and offered to the collector */                  \
++	X(rejected_by_bound)     /* documents dropped by a bound before full scoring */               \
++	X(collected)             /* candidates the collector kept (at the time) */                    \
++	X(excluded_advances)     /* the excluded side's advances (H12) */                             \
++	X(included)              /* documents the exclusion let through (H12) */                      \
++	X(pair_walks)            /* groups whose impact lists were walked (load_pairs) */             \
++	X(positional_groups)     /* groups whose positional deltas were read (load_positional) */      \
++	X(position_blocks)       /* position blocks decoded */
++
++struct query_counters {
++#define STRATA_COUNTER_MEMBER(name) Counter name;
++	STRATA_COUNTER_FIELDS(STRATA_COUNTER_MEMBER)
++#undef STRATA_COUNTER_MEMBER
++	double theta = 0;  // the largest k-th score of the query's collections at their end (0: < k hits)
++
++	// Calls f(name, value) for every counter, in order.
++	template <class F>
++	void each(F&& f) const {
++#define STRATA_COUNTER_VISIT(name) f(#name, name.get());
++		STRATA_COUNTER_FIELDS(STRATA_COUNTER_VISIT)
++#undef STRATA_COUNTER_VISIT
++	}
++};
++
++inline query_counters& current() noexcept {
++	static thread_local query_counters c;
++	return c;
++}
++inline void reset() noexcept { current() = query_counters{}; }
++inline void observe_theta(double t) noexcept {
++	if (t > current().theta) { current().theta = t; }
++}
++
++}  // namespace strata::counters
++
++#define STRATA_COUNT(name, n) (::strata::counters::current().name.add(n))
++#define STRATA_COUNTING(...) __VA_ARGS__
++#else
++#define STRATA_COUNT(name, n) ((void)0)
++#define STRATA_COUNTING(...)
++#endif
+diff --git a/include/strata/reader.hh b/include/strata/reader.hh
+index ef38a9d..73bed10 100644
+--- a/include/strata/reader.hh
++++ b/include/strata/reader.hh
+@@ -32,6 +32,7 @@
+ #include "fusefilter.hh"
+ #include "hashes.hh"
+ #include "residency.hh"
++#include "strata/counters.hh"
+ #include "strata/docids.hh"
+ #include "strata/format.hh"
+ #include "strata/keys.hh"
+@@ -1223,12 +1224,16 @@ public:
+ 
+ 	ordinal_t advance(ordinal_t target) {
+ 		if (started_ && doc_ != no_more_docs && doc_ >= target) { return doc_; }
++		STRATA_COUNT(advances, 1);
+ 		// Inside the decoded block: search it without touching skip data.
+ 		if (started_ && buf_len_ && target <= buf_last()) {
++			STRATA_COUNT(advances_in_block, 1);
+ 			if (bits_pending_) { return advance_bits(target); }
+ 			pos_ += count_below(buf_ords_ + pos_, buf_len_ - pos_, target);
+ 			return doc_ = buf_ords_[pos_];
+ 		}
++		STRATA_COUNT(advances_new_block, 1);
++		STRATA_COUNTING(if (!started_ || !buf_len_ || in_tail() || (groups_n_ && group_of(target) != current_block() / 32)) { STRATA_COUNT(advances_new_group, 1); })
+ 		// Skip whole blocks using skip data before decoding.
+ 		if (blocks_) { skip_to_block_containing(target); }
+ 		while (true) {
+@@ -1417,6 +1422,8 @@ public:
+ 				const block_ref r = block_at(next_block_);
+ 				if (r.codec != format::block_codec::bitset || r.last >= end) { break; }
+ 				or_bitset(r, base, bits);
++		STRATA_COUNT(blocks_ored, 1);
++				STRATA_COUNT(blocks_ored, 1);
+ 				++next_block_;
+ 			}
+ 			pos_ = buf_len_ - 1;
+@@ -1430,6 +1437,7 @@ public:
+ 		const block_ref r = block_at(b);
+ 		if (r.codec != format::block_codec::bitset) { corrupt("bitset block codec"); }
+ 		or_bitset(r, base, bits);
++		STRATA_COUNT(blocks_ored, 1);
+ 	}
+ 
+ private:
+@@ -1502,6 +1510,7 @@ private:
+ 			gr.count_offset = offset_at(e, 4);
+ 		}
+ 		gr.g = g;
++		STRATA_COUNT(groups_decoded, 1);
+ 		cur_ = gr;
+ 	}
+ 	// Entry i's stored last (relative to the group's base; i < n - 1), offset (0 < i), and code.
+@@ -1541,6 +1550,7 @@ private:
+ 	}
+ 	void load_pairs(std::size_t g) {
+ 		if (pairs_g_ == g) { return; }
++		STRATA_COUNT(pair_walks, 1);
+ 		const group& gr = group_at(g);
+ 		const char* p = gr.adv + gr.adv_bytes;
+ 		need(p, std::uint64_t(gr.end - p));
+@@ -1552,6 +1562,7 @@ private:
+ 	// Each block's positional fields: level 1's for the group's first, deltas for the rest.
+ 	void load_positional(std::size_t g) {
+ 		if (positional_g_ == g) { return; }
++		STRATA_COUNT(positional_groups, 1);
+ 		load_pairs(g);
+ 		const group& gr = group_at(g);
+ 		const char* p = positional_at_;
+@@ -1607,9 +1618,11 @@ private:
+ 			need(p, cur.bytes);
+ 			std::size_t used;
+ 			if (cur.codec == format::block_codec::bitset) {
++				STRATA_COUNT(blocks_bitset, 1);
+ 				used = load_bitset(p, cur);
+ 			} else {
+ 				// Gaps - 1 (M23): ordinals increase within (base, last] by construction.
++				STRATA_COUNT(blocks_for, 1);
+ 				used = format::decode_gaps(reinterpret_cast<const std::uint8_t*>(p), cur.bytes, cur.base, cur.last, next_block_ == 0, buf_ords_);
+ 				if (!used) { corrupt("ordinal block"); }
+ 			}
+@@ -1626,6 +1639,7 @@ private:
+ 			return doc_ = bits_pending_ ? bits_doc0_ : buf_ords_[0];
+ 		}
+ 		if (next_block_ == blocks_ && !tail_done_ && df_ % format::block) {
++			STRATA_COUNT(blocks_tail, 1);
+ 			if (info_.flags & format::single_posting) {
+ 				tail_done_ = true;
+ 				buf_len_ = 1;
+@@ -1810,7 +1824,9 @@ private:
+ inline std::vector<format::impact> inverted_plugin::reader::tail_impacts(const format::term_info& info) const {
+ 	std::vector<format::impact> pairs;
+ 	postings_iterator it(*this, info);
++	STRATA_COUNTING(const auto tails = counters::current().blocks_tail;)  // this walk is a bound's, not an iterator's
+ 	for (ordinal_t d = it.next(); d != no_more_docs; d = it.next()) { pairs.push_back({it.wdf(), norm(d)}); }
++	STRATA_COUNTING(STRATA_COUNT(bound_tails, counters::current().blocks_tail.get() - tails.get()); counters::current().blocks_tail = tails;)
+ 	return format::competitive(std::move(pairs));
+ }
+ 
+@@ -1934,7 +1950,7 @@ private:
+ 		}
+ 		if (offset < blocks_bytes_) { need_block(blocks_ + offset, blocks_bytes_ - offset); }
+ 		if (offset >= blocks_bytes_ ||
+-			!bitpack::decode(reinterpret_cast<const std::uint8_t*>(blocks_ + offset), blocks_bytes_ - offset, block_buf_)) {
++			(STRATA_COUNT(position_blocks, 1), !bitpack::decode(reinterpret_cast<const std::uint8_t*>(blocks_ + offset), blocks_bytes_ - offset, block_buf_))) {
+ 			corrupt("position block");
+ 		}
+ 		decoded_block_ = j;

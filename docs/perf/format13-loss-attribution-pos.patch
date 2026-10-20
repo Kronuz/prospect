@@ -1,0 +1,90 @@
+diff --git a/include/strata/reader.hh b/include/strata/reader.hh
+index ef38a9d..3dac9fd 100644
+--- a/include/strata/reader.hh
++++ b/include/strata/reader.hh
+@@ -1180,7 +1180,7 @@ public:
+ 			// region is checked against the term's range here, each group when located.
+ 			const std::uint64_t pairs_bytes = format::get_leb(&p_, end_), records_bytes = format::get_leb(&p_, end_),
+ 								blocks_bytes = format::get_leb(&p_, end_);
+-			entry_size_ = 8 + offset_width_ * (with_positions_ ? 5 : 2);
++			entry_size_ = 8 + offset_width_ * (with_positions_ ? 6 : 2);
+ 			groups_n_ = groups;
+ 			std::uint64_t range = std::uint64_t(end_ - p_);
+ 			if (groups > range / entry_size_) { corrupt("skip groups bounds"); }
+@@ -1458,7 +1458,7 @@ private:
+ 		const char* end = nullptr;
+ 		std::uint64_t adv_bytes = 0;
+ 		std::uint64_t blocks_begin = 0, blocks_end = 0;  // from blocks_begin_
+-		std::uint64_t first_position = 0, pos_offset = 0, count_offset = 0;
++		std::uint64_t first_position = 0, pos_offset = 0, count_offset = 0, positional = 0;
+ 	};
+ 	// A block's checked entry: base is the previous block's last (max before the term's
+ 	// first block, so base + 1 is its first possible ordinal).
+@@ -1500,6 +1500,8 @@ private:
+ 			gr.first_position = offset_at(e, 2);
+ 			gr.pos_offset = offset_at(e, 3);
+ 			gr.count_offset = offset_at(e, 4);
++			gr.positional = offset_at(e, 5);
++			if (gr.positional < gr.adv_bytes || gr.positional > std::uint64_t(gr.end - gr.adv)) { corrupt("positional offset"); }
+ 		}
+ 		gr.g = g;
+ 		cur_ = gr;
+@@ -1552,9 +1554,9 @@ private:
+ 	// Each block's positional fields: level 1's for the group's first, deltas for the rest.
+ 	void load_positional(std::size_t g) {
+ 		if (positional_g_ == g) { return; }
+-		load_pairs(g);
+ 		const group& gr = group_at(g);
+-		const char* p = positional_at_;
++		const char* p = gr.adv + gr.positional;
++		need(p, std::uint64_t(gr.end - p));
+ 		position_start at{gr.first_position, gr.pos_offset, gr.count_offset};
+ 		positional_[0] = at;
+ 		for (std::size_t i = 1; i < gr.n; ++i) {
+diff --git a/include/strata/writer.hh b/include/strata/writer.hh
+index 9b5a5cc..e891b73 100644
+--- a/include/strata/writer.hh
++++ b/include/strata/writer.hh
+@@ -606,7 +606,7 @@ private:
+ 		struct group_fields {
+ 			ordinal_t last;
+ 			std::uint32_t pairs;
+-			std::uint64_t record, blocks, first_position, pos_offset, count_offset;
++			std::uint64_t record, blocks, first_position, pos_offset, count_offset, positional;
+ 		};
+ 		std::vector<group_fields> fields;
+ 		std::uint8_t codecs = 0;
+@@ -632,6 +632,7 @@ private:
+ 				format::encode_sized_impacts(record, meta[i].impacts);
+ 				group_pairs.insert(group_pairs.end(), meta[i].impacts.begin(), meta[i].impacts.end());
+ 			}
++			const std::uint64_t positional_at = record.size();  // EXPERIMENT: level 1 locates the deltas
+ 			if (with_positions) {
+ 				for (std::size_t i = b0 + 1; i < b1; ++i) {
+ 					format::put_leb(record, meta[i].first_position - meta[i - 1].first_position);
+@@ -641,7 +642,7 @@ private:
+ 			}
+ 			if (pairs.size() > std::numeric_limits<std::uint32_t>::max()) { throw std::length_error("strata: skip data too large"); }
+ 			const block_meta& first = meta[b0];
+-			fields.push_back({last, std::uint32_t(pairs.size()), records.size(), blocks_before, first.first_position, first.pos_offset, first.count_offset});
++			fields.push_back({last, std::uint32_t(pairs.size()), records.size(), blocks_before, first.first_position, first.pos_offset, first.count_offset, positional_at});
+ 			format::encode_impacts(pairs, format::competitive(std::move(group_pairs)));
+ 			records += record;
+ 			blocks_before += group_bytes;
+@@ -649,7 +650,7 @@ private:
+ 		// Offsets take 32 bits unless one of this term's needs 64.
+ 		bool wide = wide_skip_offsets;
+ 		for (const auto& f : fields) {
+-			wide = wide || std::max({f.record, f.blocks, f.first_position, f.pos_offset, f.count_offset}) > std::numeric_limits<std::uint32_t>::max();
++			wide = wide || std::max({f.record, f.blocks, f.first_position, f.pos_offset, f.count_offset, f.positional}) > std::numeric_limits<std::uint32_t>::max();
+ 		}
+ 		auto put_offset = [&](std::uint64_t v) {
+ 			if (wide) {
+@@ -667,6 +668,7 @@ private:
+ 				put_offset(f.first_position);
+ 				put_offset(f.pos_offset);
+ 				put_offset(f.count_offset);
++				put_offset(f.positional);
+ 			}
+ 		}
+ 		format::put_leb(out, groups);

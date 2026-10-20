@@ -47,11 +47,23 @@ offset's scratch build (`.scratch/wt-pos`) ready.
   and A' 1.002 [0.961-1.045] and 1.005 [0.953-1.059]; A'/A 0.995 and 0.988. In situ the new
   `seeds_of` takes 15 cycles per posting (2.3% of the build, 2.7% of the merge) against 59.
   One session (22:14) was aborted at host load 157 to 195 and discarded.
+- K3 and K4 (`docs/perf/format13-loss-attribution.md`): counters (main with perf/query-counters
+  merged and ported, three new counters) and `sample` profiles per class at 1M; prototypes of
+  pruned counted unions (0.478 and 0.364 of main at `TOP_100_COUNT`, unions of 3 and more) and
+  Lucene's req-opt skipping (0.82 to 0.88 at intersection_union top-k), both verified (0
+  mismatches, dumps identical); FQ3's level-1 positional offset built and timed: 0.988 phrase
+  `COUNT`, 0.983 `TOP_1000`, for +253,760 bytes at 1M. Every format-dependent cause found already
+  has its place (F12's bit 3, P20's bit 11) except FQ3's offset, which is the architect's (C2).
+- The first 5M VM session (06:19 VM time) is void: the VM ran another session's builds (load 7
+  to 8 on the host, 6 to 35 s of system time per run); its user times are kept in
+  `.scratch/vm-session1.txt` only.
 
 ## Next
 
-1. The 5M confirmation's numbers (gate VM, running).
-2. Counters and profiles per loss class at 1M; the format-free A/Bs; FQ3's offset A/B.
+1. The 5M confirmation's numbers (gate VM, session 2 running; it waits for the VM's load to fall
+   below 1.5 before each step).
+2. For the lead: rows 2 and 3's prototypes are ready to become a workstream (format-free, after
+   the freeze); FQ3's offset goes to the architect with C2.
 
 ## Blocked on
 
