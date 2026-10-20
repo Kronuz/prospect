@@ -337,7 +337,9 @@ public:
 			if (memory) {
 				const std::uint64_t now = (tp.ords.capacity() + tp.wdfs.capacity() + tp.counts.capacity() + tp.positions.capacity()) * sizeof(std::uint32_t) +
 					all.capacity() * sizeof(format::impact) + encoded_postings.capacity() + term_positions.capacity() +
-					(seed_order_.capacity() + seed_counts_.capacity() + seed_heap_[0].capacity() + seed_heap_[1].capacity() + seed_heap_[2].capacity()) * sizeof(std::uint32_t);
+					(seed_ones_.capacity() + seed_sorted_.capacity() + seed_counts_.capacity() + seed_long_.capacity() + seed_scratch_.capacity() + seed_exact_.capacity() +
+						seed_block_.capacity()) * sizeof(std::uint32_t) +
+					seed_rest_.capacity() * sizeof(std::uint64_t) + seed_levels_.capacity() * sizeof(std::pair<std::uint32_t, std::uint32_t>);
 				if (now > scratch) {
 					memory->grow(now - scratch);
 					scratch = now;
@@ -749,57 +751,116 @@ private:
 	}
 
 	// F13 (M20): for each stored k, among the pairs (w, the k-th shortest length of the postings
-	// with wdf >= w), the one each preset scores highest at this segment's statistics. Postings
-	// are visited by wdf, highest first, until no lower wdf can beat every best at the
-	// segment's shortest length.
+	// with wdf >= w), the one each preset scores highest at this segment's statistics. Levels of
+	// wdf are visited highest first, until no lower wdf can beat every best at the segment's
+	// shortest length. A level's k-th shortest depends on no order, so it is read from counts of
+	// lengths, exact and per 16, which the levels fill as they are visited.
 	std::array<format::seed_pairs, 3> seeds_of(const std::vector<std::uint32_t>& ords, const std::vector<std::uint32_t>& wdfs) {
 		std::array<format::seed_pairs, 3> out{};
 		const std::size_t df = ords.size();
 		const strata::statistics st(lengths_.size(), total_length_);
 		const weight lucene = weight::bm25(st, 1), xapian = weight::bm25_xapian(st, 1);
-		std::uint32_t top = 0;
-		for (auto w : wdfs) { top = std::max(top, w); }
-		// Postings by wdf, highest first: a counting sort while wdfs are small, else a sort.
-		seed_order_.resize(df);
-		if (top <= (1u << 16)) {
-			seed_counts_.assign(std::size_t(top) + 2, 0);
-			for (auto w : wdfs) { ++seed_counts_[top - w + 1]; }
-			for (std::size_t i = 1; i < seed_counts_.size(); ++i) { seed_counts_[i] += seed_counts_[i - 1]; }
-			for (std::size_t i = 0; i < df; ++i) { seed_order_[seed_counts_[top - wdfs[i]]++] = std::uint32_t(i); }
-		} else {
-			for (std::size_t i = 0; i < df; ++i) { seed_order_[i] = std::uint32_t(i); }
-			std::stable_sort(seed_order_.begin(), seed_order_.end(), [&](std::uint32_t a, std::uint32_t b) { return wdfs[a] > wdfs[b]; });
+		if (seed_exact_.empty()) {
+			seed_exact_.assign(seed_cap + 1, 0);
+			seed_block_.assign((seed_cap >> 4) + 1, 0);
 		}
+		// Lengths with wdf 1, and (wdf, length) of the rest above 1, by branchless compaction.
+		seed_ones_.resize(df);
+		seed_rest_.resize(df);
+		std::uint32_t top = 0;
+		std::size_t ones = 0, rest = 0;
+		for (std::size_t i = 0; i < df; ++i) {
+			const std::uint32_t w = wdfs[i], l = lengths_[ords[i]];
+			top = std::max(top, w);
+			seed_ones_[ones] = l;
+			ones += w == 1;
+			seed_rest_[rest] = std::uint64_t(w) << 32 | l;
+			rest += w >= 2;
+		}
+		// The rest's lengths by wdf, highest first, and each level's (wdf, end): a counting sort
+		// while wdfs are small, else a sort. wdf 1 is the last level.
+		seed_levels_.clear();
+		seed_sorted_.resize(rest);
+		if (top <= (1u << 16)) {
+			seed_counts_.assign(std::size_t(top) + 1, 0);
+			for (std::size_t i = 0; i < rest; ++i) { ++seed_counts_[seed_rest_[i] >> 32]; }
+			std::size_t at = 0;
+			for (std::uint32_t w = top; w >= 2; --w) {
+				const std::uint32_t n = seed_counts_[w];
+				seed_counts_[w] = std::uint32_t(at);
+				at += n;
+				if (n) { seed_levels_.push_back({w, std::uint32_t(at)}); }
+			}
+			for (std::size_t i = 0; i < rest; ++i) { seed_sorted_[seed_counts_[seed_rest_[i] >> 32]++] = std::uint32_t(seed_rest_[i]); }
+		} else {
+			std::sort(seed_rest_.begin(), seed_rest_.begin() + std::ptrdiff_t(rest), std::greater<>());
+			for (std::size_t i = 0; i < rest; ++i) {
+				seed_sorted_[i] = std::uint32_t(seed_rest_[i]);
+				if (i + 1 == rest || seed_rest_[i + 1] >> 32 != seed_rest_[i] >> 32) { seed_levels_.push_back({std::uint32_t(seed_rest_[i] >> 32), std::uint32_t(i + 1)}); }
+			}
+		}
+		if (ones) { seed_levels_.push_back({1, std::uint32_t(rest + ones)}); }
+		const std::size_t ks = std::size_t(std::count_if(std::begin(format::seed_ks), std::end(format::seed_ks), [&](std::uint32_t k) { return k <= df; }));
 		const std::uint32_t shortest = seed_shortest_;
 		const std::uint8_t shortest_code = format::encode_length(shortest);
 		double best_lucene[3] = {-1, -1, -1}, best_xapian[3] = {-1, -1, -1};
-		const std::size_t ks = std::size_t(std::count_if(std::begin(format::seed_ks), std::end(format::seed_ks), [&](std::uint32_t k) { return k <= df; }));
-		for (std::size_t j = 0; j < ks; ++j) { seed_heap_[j].clear(); }
-		for (std::size_t i = 0; i < df;) {
-			const std::uint32_t w = wdfs[seed_order_[i]];
-			if (w == 0) { break; }
-			for (; i < df && wdfs[seed_order_[i]] == w; ++i) {
-				const std::uint32_t length = lengths_[ords[seed_order_[i]]];
-				for (std::size_t j = 0; j < ks; ++j) {
-					auto& h = seed_heap_[j];  // the k shortest lengths so far, longest on top
-					if (h.size() < format::seed_ks[j]) {
-						h.push_back(length);
-						std::push_heap(h.begin(), h.end());
-					} else if (length < h.front()) {
-						std::pop_heap(h.begin(), h.end());
-						h.back() = length;
-						std::push_heap(h.begin(), h.end());
-					}
+		// Each k's k-th shortest length so far, and the postings at or below it; none until the
+		// first full level. Lengths from seed_cap on are counted together, and kept in seed_long_.
+		constexpr std::uint32_t none = std::numeric_limits<std::uint32_t>::max();
+		std::uint32_t kth[3] = {none, none, none};
+		std::size_t at_most[3] = {};
+		auto add = [&](const std::uint32_t* p, std::size_t n) {
+			std::size_t a0 = at_most[0], a1 = at_most[1], a2 = at_most[2];
+			const std::uint32_t k0 = kth[0], k1 = kth[1], k2 = kth[2];
+			for (std::size_t i = 0; i < n; ++i) {
+				const std::uint32_t l = p[i];
+				if (l < seed_cap) {
+					++seed_exact_[l];
+					++seed_block_[l >> 4];
+				} else {
+					++seed_block_[seed_cap >> 4];
+					seed_long_.push_back(l);
 				}
+				a0 += l <= k0, a1 += l <= k1, a2 += l <= k2;
 			}
+			at_most[0] = a0, at_most[1] = a1, at_most[2] = a2;
+		};
+		std::size_t begin = 0;
+		for (std::size_t li = 0; li < seed_levels_.size(); ++li) {
+			const auto [w, end] = seed_levels_[li];
+			add(w == 1 ? seed_ones_.data() : seed_sorted_.data() + begin, w == 1 ? ones : end - begin);
+			begin = end;
 			bool full = true;
 			for (std::size_t j = 0; j < ks; ++j) {
-				auto& h = seed_heap_[j];
-				if (h.size() < format::seed_ks[j]) {
+				const std::size_t k = format::seed_ks[j];
+				if (end < k) {
 					full = false;
 					continue;
 				}
-				const std::uint32_t l = h.front();
+				std::uint32_t l = kth[j];
+				std::size_t p = at_most[j];
+				if (l == none || l >= seed_cap) {  // upward from 0: blocks, then lengths
+					std::size_t b = 0;
+					p = 0;
+					while (p + seed_block_[b] < k) { p += seed_block_[b++]; }
+					if (b == seed_cap >> 4) {
+						seed_scratch_.assign(seed_long_.begin(), seed_long_.end());
+						std::nth_element(seed_scratch_.begin(), seed_scratch_.begin() + std::ptrdiff_t(k - p - 1), seed_scratch_.end());
+						l = seed_scratch_[k - p - 1];  // found again at every level: at_most is not kept
+					} else {
+						l = std::uint32_t(b << 4);
+						while (p + seed_exact_[l] < k) { p += seed_exact_[l++]; }
+						p += seed_exact_[l];
+					}
+				} else {  // downward while the length below still holds k postings
+					while (p - seed_exact_[l] >= k) {
+						p -= seed_exact_[l--];
+						if ((l & 15) == 15) {
+							while (p - seed_block_[l >> 4] >= k) { p -= seed_block_[l >> 4], l -= 16; }
+						}
+					}
+				}
+				kth[j] = l, at_most[j] = p;
 				const std::uint8_t code = format::encode_length(l);
 				if (const double f = lucene.by_norm(w, code); f > best_lucene[j]) {
 					best_lucene[j] = f;
@@ -812,17 +873,32 @@ private:
 					out[j].exact = l;
 				}
 			}
-			if (full && i < df) {
-				const std::uint32_t next = wdfs[seed_order_[i]];
+			if (full && li + 1 < seed_levels_.size()) {
+				const std::uint32_t next = seed_levels_[li + 1].first;
 				bool done = true;
 				for (std::size_t j = 0; j < ks; ++j) { done = done && lucene.by_norm(next, shortest_code) <= best_lucene[j] && xapian(next, shortest) <= best_xapian[j]; }
 				if (done) { break; }
 			}
 		}
+		auto clear = [&](const std::uint32_t* p, std::size_t n) {
+			for (std::size_t i = 0; i < n; ++i) {
+				const std::uint32_t l = std::min(p[i], seed_cap);
+				seed_exact_[l] = 0;
+				seed_block_[l >> 4] = 0;
+			}
+		};
+		clear(seed_sorted_.data(), std::min(begin, rest));
+		if (begin > rest) { clear(seed_ones_.data(), ones); }
+		seed_long_.clear();
 		return out;
 	}
 
-	std::vector<std::uint32_t> seed_order_, seed_counts_, seed_heap_[3];  // seeds_of's scratch
+	// seeds_of's scratch. Its counts cover lengths below seed_cap exactly, and seed_exact_'s
+	// one more slot is written only by clear; both are zero between calls.
+	static constexpr std::uint32_t seed_cap = 1u << 16;
+	std::vector<std::uint32_t> seed_ones_, seed_sorted_, seed_counts_, seed_long_, seed_scratch_, seed_exact_, seed_block_;
+	std::vector<std::uint64_t> seed_rest_;
+	std::vector<std::pair<std::uint32_t, std::uint32_t>> seed_levels_;
 	std::uint32_t seed_shortest_ = 0;  // the segment's shortest length, set once by finish
 	std::vector<format::impact> pairs_;  // write_postings: one block's pairs
 	detail::stable_bytes arena_{std::size_t(1) << 20};

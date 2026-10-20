@@ -8,6 +8,8 @@
 #include "strata/writer.hh"
 #include "skip_layout.hh"
 
+#include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -543,6 +545,84 @@ int main() {
 		strata::check_report r;
 		strata::check_segment(s, nullptr, r);
 		CHECK(r.terms == c.terms.size());
+		// The stored pairs are exactly the writer's rule: levels of wdf highest first, each k's
+		// k-th shortest at a level, the first strictly best kept, stopping where no lower wdf can
+		// beat every best at the segment's shortest length. Lengths reach past 65,536, where the
+		// writer's exact counts end, and the k-th shortest lands past it.
+		{
+			std::mt19937_64 rng(77);
+			strata::segment_writer w;
+			std::map<std::string, std::vector<std::pair<std::uint32_t, std::uint32_t>>> terms;  // (wdf, length)
+			std::vector<std::uint32_t> lengths;
+			for (std::uint32_t d = 0; d < 6000; ++d) {
+				const std::uint32_t r = std::uint32_t(rng() % 100);
+				const std::uint32_t length = r < 5 ? 65536 + std::uint32_t(rng() % 200000) : r < 8 ? 65520 + std::uint32_t(rng() % 32) : 1 + std::uint32_t(rng() % 3000);
+				std::vector<strata::posting_input> in;
+				auto add = [&](const char* t, std::uint32_t wdf) {
+					in.push_back({t, wdf, {}});
+					terms[t].push_back({wdf, length});
+				};
+				add("all", 1 + std::uint32_t(rng() % 3));
+				if (length >= 65520) { add("long", 1 + std::uint32_t(rng() % 2)); }  // the k-th shortest past the cap
+				if (rng() % 3 == 0) { add("skewed", rng() % 50 == 0 ? 1 + std::uint32_t(rng() % 70000) : 1 + std::uint32_t(rng() % 4)); }
+				if (rng() % 2 == 0) { add("zeros", std::uint32_t(rng() % 3)); }
+				lengths.push_back(length);
+				w.add(1 + d, in, length);
+			}
+			const std::string bytes = w.flush({});
+			strata::segment s2(bytes);
+			const auto& inv2 = s2.get<strata::inverted_plugin>();
+			std::uint64_t total = 0;
+			for (auto l : lengths) { total += l; }
+			const strata::statistics st2(lengths.size(), total);
+			const auto lucene = strata::weight::bm25(st2, 1), xapian = strata::weight::bm25_xapian(st2, 1);
+			const std::uint32_t shortest = *std::min_element(lengths.begin(), lengths.end());
+			for (const auto& [term, ps] : terms) {
+				std::vector<std::uint32_t> levels;
+				for (const auto& p : ps) { levels.push_back(p.first); }
+				std::sort(levels.begin(), levels.end(), std::greater<>());
+				levels.erase(std::unique(levels.begin(), levels.end()), levels.end());
+				std::array<f::seed_pairs, 3> want{};
+				double best_l[3] = {-1, -1, -1}, best_x[3] = {-1, -1, -1};
+				const std::size_t ks = std::size_t(std::count_if(std::begin(f::seed_ks), std::end(f::seed_ks), [&](std::uint32_t k) { return k <= ps.size(); }));
+				for (std::size_t li = 0; li < levels.size() && levels[li] > 0; ++li) {
+					const std::uint32_t lw = levels[li];
+					std::vector<std::uint32_t> lens;
+					for (const auto& p : ps) {
+						if (p.first >= lw) { lens.push_back(p.second); }
+					}
+					bool full = true;
+					for (std::size_t j = 0; j < ks; ++j) {
+						const std::size_t k = f::seed_ks[j];
+						if (lens.size() < k) {
+							full = false;
+							continue;
+						}
+						std::nth_element(lens.begin(), lens.begin() + std::ptrdiff_t(k - 1), lens.end());
+						const std::uint32_t l = lens[k - 1];
+						if (const double v = lucene.by_norm(lw, f::encode_length(l)); v > best_l[j]) { best_l[j] = v, want[j].code_wdf = lw, want[j].code = f::encode_length(l); }
+						if (const double v = xapian(lw, l); v > best_x[j]) { best_x[j] = v, want[j].exact_wdf = lw, want[j].exact = l; }
+					}
+					if (full && li + 1 < levels.size()) {
+						const std::uint32_t next = levels[li + 1];
+						bool done = true;
+						for (std::size_t j = 0; j < ks; ++j) { done = done && lucene.by_norm(next, f::encode_length(shortest)) <= best_l[j] && xapian(next, shortest) <= best_x[j]; }
+						if (done) { break; }
+					}
+				}
+				strata::postings_iterator it(inv2, *inv2.term(term));
+				CHECK(it.seed_count() == ks);
+				for (std::size_t j = 0; j < it.seed_count(); ++j) {
+					const auto& got = it.seed_at(j);
+					CHECK(got.code_wdf == want[j].code_wdf && got.code == want[j].code && got.exact_wdf == want[j].exact_wdf && got.exact == want[j].exact);
+				}
+			}
+			// "long"'s 100th shortest is past the cap; "skewed" has a wdf past 65,536 (the sort).
+			std::size_t below = 0, high = 0;
+			for (const auto& p : terms["long"]) { below += p.second < 65536; }
+			for (const auto& p : terms["skewed"]) { high += p.first > 65536; }
+			CHECK(terms["long"].size() >= 128 && below < 100 && high > 0);
+		}
 		// check() refuses a seed that claims more than its postings hold.
 		{
 			std::string file = c.bytes;
