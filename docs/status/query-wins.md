@@ -22,16 +22,29 @@
 
 ## State
 
-Implementing.
+Code, tests, revert checks, and mutants done (Q3); identity, parity, sanitizers, and the A/B
+wait on the host (strict holds from 07:16).
 
 ## Done
 
+- `5bcc81a` search: counted unions prune; required plus optional skips blocks (rows 1 and 3,
+  NOTICE and the Apache License for the Lucene port, search_test's scoring tally).
+- `c507f2a` strata_engine: verify checks the uncounted search too; `STRATA_DUMP_COUNT=0`.
+- Q3: with row 1 reverted, search_test's tally check fails (4 of 4: two segments, k 10 and
+  100); with row 3 reverted, likewise (4 of 4). Mutants caught: M1 (`count(*copy)` as
+  `copy->cost()`), M1b (count also inline), M3 (window skip on the required bound alone),
+  M3b (leapfrog past the window when the required side competes alone), M3c (`>=` in the
+  optional bound's zero case).
+- Full Release suite: 39 of 39 pass (macOS x86_64).
+- Pushed; CI run 39438785455 (push of `c507f2a`).
+
 ## Next
 
-1. Row 1 in `disjunction_scorer::collect_top_k`; row 3 in `required_optional_scorer`.
-2. Tests, revert checks, mutants, sanitizers.
-3. Indexes (100k, 1M; merged and reordered) from main's binary; dump and verify identity.
-4. A/A then A/B at 1M under a light hold.
+1. Indexes (100k, 1M; merged and reordered) from main's binary (`.scratch/build_idx.sh`).
+2. Identity (`.scratch/identity.sh`): dumps with and without a count, both presets; verify.
+3. Parity against the oracle ranks (one segment, four, reordered).
+4. ASan and UBSan locally (CI's sanitizer job too).
+5. A/A then A/B at 1M reordered, both presets (`.scratch/session.sh`), light hold.
 
 ## Blocked on
 
