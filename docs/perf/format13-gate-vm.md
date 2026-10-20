@@ -55,9 +55,13 @@ Over the 962 gate queries and 200 stratified terms (1,162 lines):
 
 Phase times (reordered): the two `dump`s 38 to 40 s in parallel; the no-count dumps 23 to 25 s;
 `verify` 131 s; the probe's `verify` 191 s (its first attempt ran beside `verify` and was refused
-by the journal lock, so it was rerun alone). Merged: dumps 41 s, no-count dumps 29 s, `verify` 128 s, the probe's
-`verify` 207 s. The run-level sessions (rows 4a and 5) also compare every query's count or top-k
+by the journal lock, so it was rerun alone). Merged: dumps 41 s, no-count dumps 29 s, `verify`
+128 s, the probe's `verify` 207 s. The run-level sessions (rows 4a and 5) also compare every query's count or top-k
 result between the sides in every round: 0 mismatches, including format 12 against B.
+
+The dumps are also byte-identical across layouts: A's and B's reordered and merged dumps share one
+SHA-256 with a count (`136edf25…`) and one without (`92e1832f…`), so reordering changes no
+result either (`id-*/dumps.sha256`).
 
 ### Row 2: bytes at 5M (D15)
 
@@ -170,6 +174,27 @@ B is 1.08 to 1.10 times faster on the queries under `bm25` (0.908 to 0.927 on fo
 `COUNT` 0.911) and 1.38 to 1.55 times faster on the terms at the top-k commands (0.645 to 0.724),
 with terms `COUNT` at 1.015 [1.007–1.024], 1.5% slower.
 
+Merged (docid order), the same method; phases 263 s and 255 s (`bm25`), 316 s and 301 s
+(`bm25_xapian`):
+
+| Session | Wins / losses (125 rows) | A/A band, widest | term:frequent `TOP_10` | term:frequent `TOP_1000` | union `TOP_10` | union `TOP_1000` | intersection `TOP_10` | `COUNT` union:num_tokens_>3 | phrase `TOP_1000` | term:rare `TOP_10` |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Merged `bm25` | 9 / 0 | 0.793–1.348 | 0.710 win | 0.796 | 0.923 | 0.936 | 0.972 | 0.976 | 1.025 [1.003–1.047] | 1.081 [1.015–1.151], A/A to 1.080 |
+| Merged `bm25_xapian` | 10 / 0 | 0.743–1.475 | 0.639 win | 0.886 win | 0.962 | 0.942 | 0.991 | 0.963 | 1.033 [1.019–1.048], A/A to 1.216 | 1.021 |
+
+**Reading (4a).** B loses no row against A in any of the four sessions (C1's identity holds in
+every round), with 9 to 31 wins, the frequent terms the largest (0.39 to 0.71 at `TOP_10`). The
+merged sessions' A/A bands are wider (to 1.35 and 1.48), so fewer rows clear them. Two leans recur,
+each "neither" in every session:
+1. **Phrases, 1.5% to 3.3% slower** at `TOP_1000` (1.015, 1.025, 0.989, 1.033). It fits FQ3 item
+   2's mechanism: the positional deltas are found by stepping over a group's impact lists, so a
+   phrase now parses them.
+2. **Rare terms and terms' `COUNT`, up to 1.09 and 1.15 by ratio, but tenths of a microsecond:**
+   rare terms' median `TOP_10` is 2.4 µs (A) against 2.6 µs (B) reordered and 1.9 against 2.4 µs
+   merged; terms' `COUNT` 0.8 against 0.9 µs, at the timer's 0.1 µs resolution. A fixed cost per
+   query of about 0.2 to 0.5 µs (FQ7's every-scorer-first `search()` is the candidate), visible only
+   where a query costs a few microseconds.
+
 ### Row 4b: strata against the baselines (harness, run level)
 
 `src/client.py` through `harness.sh`: B's reordered 5M index as `f13g-strata`, the same binary
@@ -180,7 +205,7 @@ rotated, `WARMUP_TIME=5`, `NUM_ITER=5` (D17 item 7's settings), light hold. Each
 time over the engine's (below 1: strata faster). Counts equal Lucene's, Lucene `-bp`'s, and
 Tantivy's on every query of every trial; PISA's differ on all 40 intersection_union and all 19
 negated queries in every trial, so PISA does not answer those queries as the others do and its
-rows for them are not comparable. Trials 160 to 165 s (terms) and 298 to 339 s (queries); 42 min
+rows for them are not comparable. Trials 159 to 165 s (terms) and 298 to 339 s (queries); 39 min
 in all.
 
 By set, query-level geometric mean of per-query best times (strata over engine):
@@ -202,26 +227,16 @@ Run level, every class and stratum row (125; PISA 100), against the same trials'
 | Tantivy 0.26 | 27 | 32 | phrases at every command, 1.10 to 1.21; intersections at `TOP_1000` 1.15 (two terms 1.17, more than three 1.25) and `TOP_100_COUNT` 1.18; counted unions of three or more terms at `TOP_100_COUNT` 1.71 and 1.97; intersection_union at `TOP_100`, `TOP_1000`, and `TOP_100_COUNT` 1.08 to 1.24; negated `TOP_1000` 1.10 and two-term negations at `TOP_100_COUNT` 1.27; two-phase-critic 1.21 to 1.30 |
 | PISA 0.8.2 (the 60 comparable rows: terms, intersections, unions) | 10 | 27 | unions of two and three terms and intersections at the top-k commands: unions 1.39 (`TOP_10`) to 2.40 (`TOP_1000`), intersections 1.25 to 1.44 at `TOP_100` and `TOP_1000`, `TOP_100_COUNT` 1.43 to 1.80; `COUNT` intersections of three or more 1.09 and 1.25. Wins: frequent terms at every top-k command (0.18 to 0.54), unions of more than three terms at `TOP_10` and `TOP_100` (0.65, 0.72), and `COUNT` unions (0.18 to 0.57) |
 
-Merged (docid order), the same method; phases 263 s and 255 s (`bm25`), 316 s and 301 s
-(`bm25_xapian`):
-
-| Session | Wins / losses (125 rows) | A/A band, widest | term:frequent `TOP_10` | term:frequent `TOP_1000` | union `TOP_10` | union `TOP_1000` | intersection `TOP_10` | `COUNT` union:num_tokens_>3 | phrase `TOP_1000` | term:rare `TOP_10` |
-|---|---|---|---|---|---|---|---|---|---|---|
-| Merged `bm25` | 9 / 0 | 0.793–1.348 | 0.710 win | 0.796 | 0.923 | 0.936 | 0.972 | 0.976 | 1.025 [1.003–1.047] | 1.081 [1.015–1.151], A/A to 1.080 |
-| Merged `bm25_xapian` | 10 / 0 | 0.743–1.475 | 0.639 win | 0.886 win | 0.962 | 0.942 | 0.991 | 0.963 | 1.033 [1.019–1.048], A/A to 1.216 | 1.021 |
-
-**Reading (4a).** B loses no row against A in any of the four sessions (C1's identity holds in
-every round), with 9 to 31 wins, the frequent terms the largest (0.39 to 0.71 at `TOP_10`). The
-merged sessions' A/A bands are wider (to 1.35 and 1.48), so fewer rows clear them. Two leans recur,
-each "neither" in every session:
-1. **Phrases, 1.5% to 3.3% slower** at `TOP_1000` (1.015, 1.025, 0.989, 1.033). It fits FQ3 item
-   2's mechanism: the positional deltas are found by stepping over a group's impact lists, so a
-   phrase now parses them.
-2. **Rare terms and terms' `COUNT`, up to 1.09 and 1.15 by ratio, but tenths of a microsecond:**
-   rare terms' median `TOP_10` is 2.4 µs (A) against 2.6 µs (B) reordered and 1.9 against 2.4 µs
-   merged; terms' `COUNT` 0.8 against 0.9 µs, at the timer's 0.1 µs resolution. A fixed cost per
-   query of about 0.2 to 0.5 µs (FQ7's every-scorer-first `search()` is the candidate), visible only
-   where a query costs a few microseconds.
+**The warm-up.** D17 item 7 asked for a check of the 5 s warm-up against 20 s, which I found no
+record of. One trial at `WARMUP_TIME=20` (Lucene, Lucene `-bp`, Tantivy; S′; 375 s and 304 s;
+`h-w20/`) ran every engine faster than the five 5 s trials did. The geometric mean of per-query
+best times, 20 s over each 5 s trial, ranged 0.49 to 1.02 for Lucene `-bp`, 0.50 to 1.02 for
+Lucene, and 0.66 to 1.03 for Tantivy, whose native code has no JIT to warm. With no strata engine
+in that trial, host drift and warm-up cannot be told apart. The JVM engines gain somewhat more
+than Tantivy at the top-k commands (`TOP_100` queries: `-bp` 0.67 to 0.87 against Tantivy's 0.73
+to 1.00), so row 4b's ratios against Lucene and Lucene `-bp` may flatter strata by up to about
+10%. Its wins against the JVM engines are therefore not established at that margin, and its losses
+would only grow.
 
 ### Row 5: format 13's owed rows
 
@@ -250,10 +265,81 @@ lean (1.7% to 2.9% slower, "neither"; the fixed per-query cost of row 4a, item 2
 |---|---:|---:|---:|---|
 | Indexing peak RSS, 5M flushed build (MiB; each run) | 604.5, 604.6, 604.6 | 572.0, 573.5 | 573.3, 573.5, 576.8, 576.8 | 4.6% to 5.2% smaller |
 | Docid merge peak RSS, 16 segments to one | 4.79 GiB | 4.74 GiB | 4.75 GiB | 0.8% smaller |
-| Reordering merge peak RSS | | 4.76 GiB | 4.85 GiB | (B 1.9% larger than A) |
+| Reordering merge peak RSS | | 4.76 GiB | 4.85 GiB | (B 2.0% larger than A) |
 | Serving memory, merged (`serve_mem.py`, 962 queries × `TOP_10`, `COUNT`, `TOP_1000`, page cache dropped; three rounds, order alternating) | 581 MB (8 anonymous, 573 to 574 mapped) | | 581 MB (8, 573) | equal at 1 MB resolution |
 
 T10's serving row passes (equal to format 12's in one session). The 1M note's indexing peak RSS of
 1.056 against format 12 (with auto merges, on macOS) does not appear at 5M on Linux: format 13's
 flushed builds peak 5% lower, before and after the query items. That build has no merges; the
 merges' peaks are within 2% across F12, A, and B.
+
+## Verdict for the freeze
+
+Rows that pass:
+1. **C1 (FQ1, FQ2):** results at 5M are identical to main before the query items, with and without
+   a count, on both layouts, and `verify` is clean both ways. The run-level sessions found no
+   differing result in any round, format 12 included.
+2. **T4's guard:** B loses no row against A in four sessions (both layouts, both presets), with 9 to
+   31 wins.
+3. **The owed single-term row:** against format 12 on the merged index, B is 1.20 to 1.25 times
+   faster on terms at `TOP_10` and `TOP_100`.
+4. **T10's serving memory:** equal to format 12's. Indexing peak RSS is 5% lower.
+5. **C3's merge times are recorded.** Reordering does not move (0.992).
+
+Rows that miss:
+1. **D15's postings constraint.** B's reordered postings are 9.96 MB over keyed `-bp`'s `.doc`
+   (1.2% larger), as the joint selection projected (about 10.5 MB). The whole index is 0.67%
+   smaller. This decides the freeze unless the row is carried.
+2. **Indexing, about 10% slower.** Indexing is 1.06 to 1.08 times format 12's time and 1.08 to 1.12
+   times A's; the docid merge is 1.09 times A's. M20's `seeds_of` is 11% of the CPU of both. T5's
+   ≤ 1.03 misses. The fix is in the writer, not the bytes: the same pairs, computed more cheaply.
+3. **Against the baselines (row 4b, informational):** strata wins most rows against Lucene. Its
+   losses:
+   - Lucene `-bp`: intersection_union, 1.11 to 1.41 times slower.
+   - Tantivy: phrases, 1.10 to 1.21; counted unions of three or more terms at `TOP_100_COUNT`,
+     1.7 to 2.0.
+   - Lucene and Lucene `-bp`: counted unions of more than three terms, 2.3 and 2.8 times slower.
+   - PISA's comparable rows: unions and intersections at the top-k commands, 1.25 to 2.4.
+
+   Those ratios rest on a 5 s warm-up not shown to be enough for the JVM engines.
+
+Leans to watch, each "neither" in every session:
+1. **Phrases at `TOP_1000`, 1.5% to 3.3% slower than A.** The cause is FQ3 item 2's layout, which
+   C2 rules on: the positional deltas are found by walking the impact lists.
+2. **A fixed cost of about 0.2 to 0.5 µs per query,** visible on rare terms.
+
+## Phase times
+
+| Step | Wall |
+|---|---|
+| Builds (A, B, F12), `nice -n 19`, four jobs | 58 s, 64 s, 57 s |
+| 5M flushed indexes | 128.6 to 144.1 s each (eight warm builds; F12's cold one 218 s) |
+| Reordering merges, strict hold | 1,063 s, 1,055 s |
+| Docid merges | 142 s, 155 s, 185 s (F12) |
+| Identity and verify | 3.3 min (reordered, plus the 191 s rerun), 6.8 min (merged) |
+| Run-level sessions A/B, four | 8.6 to 13 min each, A/A included |
+| Harness, five trials of six engines | 39 min |
+| Format 12 sessions, two | 2.3 and 2.7 min |
+| Serving memory, three rounds | about 2 min |
+| Profiles (1M builds and merges, both sides) | about 2.5 min |
+| Format 12 against B builds, two pairs | 9 min |
+| Warm-up check | 11 min |
+
+## Gate VM afterwards
+
+All 5M indexes, the three source trees and builds, the probe binaries, the harness engine
+directories (`engines/f13g-*`), and the bulky dump outputs (their SHA-256s kept) are removed. The
+raw results stay in `~/bench/results/f13g/` (32 MB), and a copy is in this worktree's `.scratch/f13g/`,
+hashed in `format13-gate-vm.sha256`. Free space: 12,283,772,928 bytes (11.4 GiB, 91% used),
+against 12 GB at the start.
+
+## Not run
+
+- FreeBSD, macOS, and arm64: the gate VM is Linux x86_64 only, and the developer's 1M rows are
+  macOS x86_64.
+- Parity against the Xapian oracle (`tools/parity`).
+- Any reordered pair of merges beyond one.
+- A strata anchor in the 20 s warm-up trial.
+- The full 1,162-query set in the harness: S′ instead, by D17.
+- `STRATA_DELETE_EVERY` indexes: segments with deletes, where the seeds are off, are not covered at
+  5M.
