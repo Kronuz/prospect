@@ -309,8 +309,13 @@ public:
 			if (t.counts_are_wdf) { info.flags |= format::counts_are_wdf; }
 
 			if (df >= format::block) {  // the term info stores whole-list pairs only with skip blocks
+				// Each posting's length, gathered once for these pairs, the blocks', and the seeds.
+				term_lengths_.resize(df);
 				all.clear();
-				for (std::size_t i = 0; i < ords.size(); ++i) { all.push_back({wdfs[i], format::encode_length(lengths_[ords[i]])}); }
+				for (std::size_t i = 0; i < ords.size(); ++i) {
+					term_lengths_[i] = lengths_[ords[i]];
+					all.push_back({wdfs[i], format::encode_length(term_lengths_[i])});
+				}
 				info.impacts = format::competitive(all);
 			}
 
@@ -329,13 +334,13 @@ public:
 			} else {
 				info.postings = postings.size();
 				encoded_postings.clear();
-				write_postings(encoded_postings, ords, wdfs, !t.all_zero_wdf, counts, t.any_positions ? &layout : nullptr, !t.counts_are_wdf);
+				write_postings(encoded_postings, ords, wdfs, term_lengths_.data(), !t.all_zero_wdf, counts, t.any_positions ? &layout : nullptr, !t.counts_are_wdf);
 				info.postings_length = encoded_postings.size();
 				postings.write(encoded_postings);
 			}
 			dict.add(key, format::encode_term_info(info, run, dict.next_is_restart()));
 			if (memory) {
-				const std::uint64_t now = (tp.ords.capacity() + tp.wdfs.capacity() + tp.counts.capacity() + tp.positions.capacity()) * sizeof(std::uint32_t) +
+				const std::uint64_t now = (tp.ords.capacity() + tp.wdfs.capacity() + tp.counts.capacity() + tp.positions.capacity() + term_lengths_.capacity()) * sizeof(std::uint32_t) +
 					all.capacity() * sizeof(format::impact) + encoded_postings.capacity() + term_positions.capacity() +
 					(seed_ones_.capacity() + seed_sorted_.capacity() + seed_counts_.capacity() + seed_long_.capacity() + seed_scratch_.capacity() + seed_exact_.capacity() +
 						seed_block_.capacity()) * sizeof(std::uint32_t) +
@@ -532,7 +537,8 @@ private:
 		}
 	};
 
-	void write_postings(std::string& out, const std::vector<std::uint32_t>& ords, const std::vector<std::uint32_t>& wdfs, bool with_wdf,
+	// lengths: each posting's document length, read only when the term has skip blocks.
+	void write_postings(std::string& out, const std::vector<std::uint32_t>& ords, const std::vector<std::uint32_t>& wdfs, const std::uint32_t* lengths, bool with_wdf,
 		const std::vector<std::uint32_t>& counts, const positions_layout* layout, bool with_counts) {
 		const std::size_t full = ords.size() / format::block * format::block;
 		if (full == 0) {  // a tail alone: deltas from ordinal + 1, then wdfs
@@ -570,7 +576,7 @@ private:
 			}
 			if (with_wdf) { blocks.append(reinterpret_cast<char*>(buf), bitpack::encode_pfor(wdfs.data() + b, buf)); }
 			pairs_.clear();
-			for (std::size_t i = b; i < b + format::block; ++i) { pairs_.push_back({wdfs[i], format::encode_length(lengths_[ords[i]])}); }
+			for (std::size_t i = b; i < b + format::block; ++i) { pairs_.push_back({wdfs[i], format::encode_length(lengths[i])}); }
 			meta.push_back({ords[b + format::block - 1], blocks.size() - start, position, format::competitive(pairs_)});
 			meta.back().codec = bitset ? format::block_codec::bitset : format::block_codec::deltas;
 			if (layout) {
@@ -670,7 +676,7 @@ private:
 			format::put_leb(out, layout->offset_of(position));
 		}
 		if (with_wdf) {
-			const auto seeds = seeds_of(ords, wdfs);
+			const auto seeds = seeds_of(lengths, wdfs);
 			for (std::size_t j = 0; j < 3 && format::seed_ks[j] <= ords.size(); ++j) {
 				format::put_leb(out, seeds[j].code_wdf);
 				out.push_back(char(seeds[j].code));
@@ -755,9 +761,9 @@ private:
 	// wdf are visited highest first, until no lower wdf can beat every best at the segment's
 	// shortest length. A level's k-th shortest depends on no order, so it is read from counts of
 	// lengths, exact and per 16, which the levels fill as they are visited.
-	std::array<format::seed_pairs, 3> seeds_of(const std::vector<std::uint32_t>& ords, const std::vector<std::uint32_t>& wdfs) {
+	std::array<format::seed_pairs, 3> seeds_of(const std::uint32_t* lengths, const std::vector<std::uint32_t>& wdfs) {
 		std::array<format::seed_pairs, 3> out{};
-		const std::size_t df = ords.size();
+		const std::size_t df = wdfs.size();
 		const strata::statistics st(lengths_.size(), total_length_);
 		const weight lucene = weight::bm25(st, 1), xapian = weight::bm25_xapian(st, 1);
 		if (seed_exact_.empty()) {
@@ -770,7 +776,7 @@ private:
 		std::uint32_t top = 0;
 		std::size_t ones = 0, rest = 0;
 		for (std::size_t i = 0; i < df; ++i) {
-			const std::uint32_t w = wdfs[i], l = lengths_[ords[i]];
+			const std::uint32_t w = wdfs[i], l = lengths[i];
 			top = std::max(top, w);
 			seed_ones_[ones] = l;
 			ones += w == 1;
@@ -896,6 +902,7 @@ private:
 	// seeds_of's scratch. Its counts cover lengths below seed_cap exactly, and seed_exact_'s
 	// one more slot is written only by clear; both are zero between calls.
 	static constexpr std::uint32_t seed_cap = 1u << 16;
+	std::vector<std::uint32_t> term_lengths_;  // finish: the term's lengths, by posting
 	std::vector<std::uint32_t> seed_ones_, seed_sorted_, seed_counts_, seed_long_, seed_scratch_, seed_exact_, seed_block_;
 	std::vector<std::uint64_t> seed_rest_;
 	std::vector<std::pair<std::uint32_t, std::uint32_t>> seed_levels_;
