@@ -10,9 +10,15 @@
 
 ## State
 
-Plan written; builds next.
+Reordered layout in progress: A's reordering merge done, B's running (strict hold).
 
 ## Done
+
+- Plan, ddaa0c9. Builds on the VM (Release, clang 18): A 58 s, B 64 s, F12 57 s; the review's
+  `probe_search` built against A and B. Dry run at 20k: dumps identical, verify clean, the
+  harness with all six engines, `bench/quick/engines_ab.py` scoring through `ab.py --aa`.
+- 5M flushed indexes (16 segments, 256 MB buffer): A 132.6 s, 572 MiB peak; B 143.7 s, 573 MiB.
+- A's reordering merge: 1,063 s, 4.76 GiB peak RSS; postings 845,553,044 bytes.
 
 ## Next
 
