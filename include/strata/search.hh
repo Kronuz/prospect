@@ -920,18 +920,14 @@ private:
 class required_optional_scorer final : public scorer {
 public:
 	required_optional_scorer(scorer_ptr required, scorer_ptr optional) : req_(std::move(required)), opt_(std::move(optional)) {}
-	ordinal_t doc() const noexcept override { return req_->doc(); }
-	ordinal_t next() override { return prune(req_->next()); }
-	ordinal_t advance(ordinal_t t) override { return prune(req_->advance(t)); }
+	ordinal_t doc() const noexcept override { return doc_; }
+	ordinal_t next() override { return doc_ == no_more_docs ? doc_ : doc_ = prune(req_->next()); }
+	ordinal_t advance(ordinal_t t) override { return doc_ == no_more_docs ? doc_ : doc_ = prune(req_->advance(t)); }
 	std::uint64_t cost() const noexcept override { return req_->cost(); }
 	double score() override {
 		const ordinal_t d = req_->doc();
 		double s = req_scored_ == d ? req_score_ : req_->score();
-		if (opt_->doc() < d || !opt_started_) {
-			opt_started_ = true;
-			opt_->advance(d);
-		}
-		if (opt_->doc() == d) { s += opt_->score(); }
+		if (optional_at(d) == d) { s += opt_->score(); }
 		return s;
 	}
 	double max_score(ordinal_t from, ordinal_t upto) override { return req_->max_score(from, upto) + opt_->max_score(from, upto); }
@@ -950,15 +946,33 @@ public:
 	}
 
 private:
-	// With a minimum competitive score, skips required matches whose score plus the
-	// optional side's bound over the required block cannot compete, before moving the
-	// optional side.
+	// The optional side's first match at or after d, positioning it there.
+	ordinal_t optional_at(ordinal_t d) {
+		if (opt_started_ && opt_->doc() >= d) { return opt_->doc(); }
+		opt_started_ = true;
+		return opt_->advance(d);
+	}
+
+	// With a minimum competitive score, the first required match at or after d that can
+	// compete. Ported from Lucene's ReqOptSumScorer (Apache-2.0; see NOTICE): windows whose
+	// two bounds cannot compete are skipped, and where the required bound alone cannot, the
+	// optional side is required too and the two leapfrog. Inside a window, a required match
+	// whose score plus the optional bound cannot compete is skipped before the optional moves.
 	ordinal_t prune(ordinal_t d) {
 		while (min_ > 0 && d != no_more_docs) {
-			if (window_end_ == no_more_docs || d > window_end_) {
-				const ordinal_t end = req_->block_end(d);
-				window_end_ = end;
-				opt_bound_ = opt_->max_score(d, end == no_more_docs ? d : end);
+			if (window_end_ == no_more_docs || d > window_end_) { open_window(d); }
+			if (sum_upper(req_bound_ + opt_bound_, 2) <= min_) {
+				d = past_window();
+				continue;
+			}
+			if (sum_upper(req_bound_, 2) <= min_) {
+				if (const ordinal_t o = optional_at(d); o != d) {
+					// Past the window, the next window decides, unless the required side can
+					// never compete alone (Lucene's upperBound).
+					const bool alone = sum_upper(req_->max_score_total(), 2) > min_;
+					d = o > window_end_ && alone ? past_window() : o == no_more_docs ? no_more_docs : req_->advance(o);
+					continue;
+				}
 			}
 			req_score_ = req_->score();
 			req_scored_ = d;
@@ -968,10 +982,26 @@ private:
 		return d;
 	}
 
+	// The window from d and both sides' bounds over it: to the end of the required side's
+	// block or the optional side's, or to just before the optional side's next match, where
+	// it adds nothing (Lucene's advanceShallow).
+	void open_window(ordinal_t d) {
+		ordinal_t end = req_->block_end(d);
+		if (opt_started_ && opt_->doc() > d) {
+			end = std::min(end, opt_->doc() - 1);
+		} else {
+			end = std::min(end, opt_->block_end(d));
+		}
+		window_end_ = std::min(end, no_more_docs - 1);
+		req_bound_ = req_->max_score(d, window_end_);
+		opt_bound_ = opt_started_ && opt_->doc() > window_end_ ? 0.0 : opt_->max_score(d, window_end_);
+	}
+	ordinal_t past_window() { return window_end_ >= no_more_docs - 1 ? no_more_docs : req_->advance(window_end_ + 1); }
+
 	scorer_ptr req_, opt_;
 	bool opt_started_ = false;
-	double min_ = 0, req_score_ = 0, opt_bound_ = 0;
-	ordinal_t req_scored_ = no_more_docs, window_end_ = no_more_docs;
+	double min_ = 0, req_score_ = 0, req_bound_ = 0, opt_bound_ = 0;
+	ordinal_t doc_ = 0, req_scored_ = no_more_docs, window_end_ = no_more_docs;
 };
 
 // Documents `include` matches and `exclude` does not; scores come from `include`.
@@ -1398,10 +1428,18 @@ inline std::uint64_t count(scorer& s) {
 // clauses, lowest bound first, into non-essential ones (bounds summing to at most the
 // minimum competitive score) and essential ones. Essential clauses add their scores into
 // a dense array with a match bitset; each matched document then consults the non-
-// essential clauses, highest bound first, while it can still compete. When counting,
-// every clause is essential and every match is counted.
+// essential clauses, highest bound first, while it can still compete. When counting, a
+// fresh copy counts the matches from window bits (count()) and the scoring prunes as top-k
+// does; without a copy, every clause is essential and every match is counted here.
 inline bool disjunction_scorer::collect_top_k(top_collector& c) {
 	if (started_) { return false; }
+	bool count_here = c.counting;
+	if (count_here) {
+		if (auto copy = fresh()) {
+			c.count += count(*copy);
+			count_here = false;
+		}
+	}
 	started_ = true;
 	constexpr ordinal_t window = 4096;
 	const std::size_t n = children_.size();
@@ -1412,7 +1450,7 @@ inline bool disjunction_scorer::collect_top_k(top_collector& c) {
 	ordinal_t window_min = 0;
 	for (;;) {
 		// Clauses that can still matter given the global bounds.
-		const double min = c.counting ? 0.0 : c.min_competitive();
+		const double min = count_here ? 0.0 : c.min_competitive();
 		double prefix = 0;
 		std::size_t global_from = 0;
 		if (min > 0) {
@@ -1464,11 +1502,10 @@ inline bool disjunction_scorer::collect_top_k(top_collector& c) {
 					score += parts_[rank_[order[e]]] = a;
 					a = 0;
 				}
-				++c.count;
+				if (count_here) { ++c.count; }
 				bool competes = true;
 				for (std::size_t e = essential; e-- > 0;) {
-					const double m = c.counting ? 0.0 : c.min_competitive();
-					if (!c.counting && sum_upper(score + below[e + 1], n) <= m) {
+					if (!count_here && sum_upper(score + below[e + 1], n) <= c.min_competitive()) {
 						competes = false;
 						break;
 					}
