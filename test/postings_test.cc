@@ -632,6 +632,30 @@ int main() {
 			for (const auto& p : terms["skewed"]) { high += p.first > 65536; }
 			CHECK(terms["long"].size() >= 128 && below < 100 && high > 0);
 		}
+		// An exact tie keeps the higher wdf. Average length 9 (2,502 over 278 documents): bm25
+		// orders as w / (w + 9 + 3·len), so wdf 3 at length 3 and wdf 2 at length 1 score 3/21
+		// both; one empty document keeps the stop rule from ending at wdf 3.
+		{
+			strata::segment_writer w;
+			std::uint64_t docid = 1;
+			auto doc = [&](const char* t, std::uint32_t wdf, std::uint32_t length) {
+				std::vector<strata::posting_input> in;
+				if (t) { in.push_back({t, wdf, {}}); }
+				w.add(docid++, in, length);
+			};
+			for (int i = 0; i < 10; ++i) { doc("tie", 3, 3); }
+			for (int i = 0; i < 10; ++i) { doc("tie", 2, 1); }
+			for (int i = 0; i < 110; ++i) { doc("tie", 1, 1); }
+			doc(nullptr, 0, 0);
+			for (int i = 0; i < 147; ++i) { doc("filler", 1, 16); }
+			const std::string bytes = w.flush({});
+			strata::segment s3(bytes);
+			const auto& inv3 = s3.get<strata::inverted_plugin>();
+			CHECK(inv3.doc_count() == 278 && inv3.total_length() == 2502);
+			strata::postings_iterator it(inv3, *inv3.term("tie"));
+			CHECK(it.seed_count() == 2);
+			CHECK(it.seed_at(0).code_wdf == 3 && it.seed_at(0).code == f::encode_length(3));
+		}
 		// check() refuses a seed that claims more than its postings hold.
 		{
 			std::string file = c.bytes;
