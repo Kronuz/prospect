@@ -193,6 +193,33 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
       target_link_options(fuzz_${target} PRIVATE -fsanitize=fuzzer,address,undefined)
     endif()
   endforeach()
+  # The boundary (docs/design/core-split.md): every core header compiled alone, in a translation
+  # unit of its own, with only strata::core's include root and libraries, where no search header
+  # or search library exists to be found; and a key-value program that links strata::core alone.
+  # core_boundary builds with everything else, so a core header that includes search fails the
+  # build; its ctest entry rebuilds it, and core_boundary_negative proves the check can fail.
+  file(GLOB core_headers CONFIGURE_DEPENDS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/include/strata/core/*.hh")
+  set(core_boundary_sources "")
+  foreach(header ${core_headers})
+    string(REPLACE "/" "_" unit "${header}")
+    file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/core_boundary/${unit}.cc" CONTENT "#include \"${header}\"\n")
+    list(APPEND core_boundary_sources "${CMAKE_CURRENT_BINARY_DIR}/core_boundary/${unit}.cc")
+  endforeach()
+  set_source_files_properties(${core_boundary_sources} PROPERTIES GENERATED TRUE)
+  add_library(core_boundary OBJECT ${core_boundary_sources})
+  target_link_libraries(core_boundary PRIVATE strata::core)
+  add_test(NAME core_boundary COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}" --config $<CONFIG> --target core_boundary)
+  # A search header is not found from core's include root.
+  file(GENERATE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/core_boundary/negative.cc" CONTENT "#include \"strata/search/format.hh\"\n")
+  add_library(core_boundary_negative OBJECT EXCLUDE_FROM_ALL "${CMAKE_CURRENT_BINARY_DIR}/core_boundary/negative.cc")
+  set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/core_boundary/negative.cc" PROPERTIES GENERATED TRUE)
+  target_link_libraries(core_boundary_negative PRIVATE strata::core)
+  add_test(NAME core_boundary_negative COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}" --config $<CONFIG> --target core_boundary_negative)
+  set_tests_properties(core_boundary_negative PROPERTIES PASS_REGULAR_EXPRESSION "strata/search/format.hh.* file not found|strata/search/format.hh.*No such file")
+  set_tests_properties(core_boundary core_boundary_negative PROPERTIES RUN_SERIAL TRUE)
+  add_executable(core_kv_test test/core_kv_test.cc)
+  target_link_libraries(core_kv_test PRIVATE strata::core)
+  add_test(NAME core_kv COMMAND core_kv_test)
   add_executable(parity tools/parity.cc)
   target_link_libraries(parity PRIVATE strata)
   add_executable(strata_engine tools/strata_engine.cc)
