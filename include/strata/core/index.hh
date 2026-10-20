@@ -284,6 +284,7 @@ struct no_inverter {
 	std::uint64_t docid(ordinal_t) const noexcept { return 0; }
 	std::uint64_t version(ordinal_t) const noexcept { return 0; }
 	std::string_view key(ordinal_t) const noexcept { return {}; }
+	std::string_view stored(ordinal_t) const noexcept { return {}; }
 	template <class Doc>
 	ordinal_t add(std::uint64_t, std::uint64_t, std::string_view, const Doc&) { return 0; }
 	template <class Transaction>
@@ -866,6 +867,19 @@ public:
 	// The live document's (docid, version) for a key, if any.
 	std::optional<std::pair<std::uint64_t, std::uint64_t>> find_key(std::string_view key) const {
 		if (auto e = lookup_key(key)) { return std::pair{e->docid, e->version}; }
+		return std::nullopt;
+	}
+	// The live document's stored record for a key, if any: the buffered copy, else the newest
+	// segment that holds the key live. For layouts with the `stored` plugin.
+	std::optional<std::string> get(std::string_view key) const
+		requires(segment::template contains<stored_plugin>())
+	{
+		if (const auto v = key_slot(key)) { return std::string(buffered_stored(*v)); }
+		const std::uint64_t hash = xxh64::hash(key);
+		for (std::size_t i = segs_.size(); i-- > 0;) {
+			const auto& s = *segs_[i];
+			if (const auto ord = s.seg.template get<keys_plugin>().find(key, live_bits{s.deleted.data()}, hash)) { return s.seg.template get<stored_plugin>().stored(*ord); }
+		}
 		return std::nullopt;
 	}
 	bool has_docid(std::uint64_t docid) const { return locate_docid(docid).found; }
@@ -1901,6 +1915,12 @@ private:
 	std::uint64_t buffered_docid(std::size_t i) const {
 		if (!inverting()) { return buffer_[i].docid; }
 		return i < active_count() ? active_->buf.docid(ordinal_t(i)) : pending_docs_[i - active_count()].docid;
+	}
+	std::string_view buffered_stored(std::size_t i) const
+		requires(segment::template contains<stored_plugin>())
+	{
+		if (!inverting()) { return static_cast<const typename stored_plugin::part&>(buffer_[i].doc).stored; }
+		return i < active_count() ? active_->buf.stored(ordinal_t(i)) : std::string_view(static_cast<const typename stored_plugin::part&>(*pending_docs_[i - active_count()].doc).stored);
 	}
 	std::string_view buffered_key(std::size_t i) const {
 		if (!inverting()) { return buffer_[i].doc.key; }

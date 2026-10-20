@@ -183,8 +183,10 @@ int main() {
 		// A document without a key has version 0 (F9).
 		CHECK(v.result == verdict::accepted && v.docids == std::vector<std::uint64_t>({1, 2, 3}) && v.versions == std::vector<std::uint64_t>({1, 1, 0}));
 		CHECK(ix.find_key("Qa") == kv(1, 1));  // from the version map
+		CHECK(ix.get("Qa") == "alpha" && !ix.get("Qz"));  // the buffered record
 		ix.refresh();
 		CHECK(ix.find_key("Qa") == kv(1, 1));  // from the segment
+		CHECK(ix.get("Qa") == "alpha" && ix.get("Qb") == "beta");
 		v = ix.apply(tx({replace("Qa", "alpha2")}), {});
 		CHECK(v.result == verdict::accepted && v.docids[0] == 1 && v.versions[0] == 2);
 		v = ix.apply(tx({erase("Qb")}), {});
