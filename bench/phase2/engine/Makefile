@@ -1,5 +1,5 @@
-# prospect as a search-benchmark-game engine, named strata in the harness and its results;
-# copy to engines/strata. PROSPECT_SRC points at a prospect checkout. LIBS, when set, names a
+# prospect as a search-benchmark-game engine, named prospect in the harness and its results;
+# copy to engines/prospect. PROSPECT_SRC points at a prospect checkout. LIBS, when set, names a
 # directory of sibling Kronuz library checkouts (strata among them) used instead of the pinned
 # commits; unset, the pins build.
 PROSPECT_SRC ?= $(HOME)/libs/prospect
@@ -10,23 +10,23 @@ OVERRIDES := $(if $(LIBS),$(foreach l,strata docset bitpack fst task hashes resi
 clean:
 	rm -fr idx build
 
-# compile always rebuilds through ninja, which tracks sources: build/strata_engine
+# compile always rebuilds through ninja, which tracks sources: build/prospect_engine
 # existing is not proof that it is current. serve writes only the engine's answers to
 # stdout, so it runs the binary as built.
 .PHONY: compile clean index serve
 compile:
 	@[ -f build/build.ninja ] || cmake -S $(PROSPECT_SRC) -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_CXX_FLAGS="-march=native" $(OVERRIDES)
-	@cmake --build build --target strata_engine
+	@cmake --build build --target prospect_engine
 
-build/strata_engine:
+build/prospect_engine:
 	$(MAKE) compile
 
 index: idx
 
-idx: | build/strata_engine
-	@echo "--- Indexing strata ---"
+idx: | build/prospect_engine
+	@echo "--- Indexing prospect ---"
 	rm -fr idx && mkdir -p idx
-	build/strata_engine index idx < $(CORPUS)
+	build/prospect_engine index idx < $(CORPUS)
 
 serve:
-	@build/strata_engine serve idx
+	@build/prospect_engine serve idx

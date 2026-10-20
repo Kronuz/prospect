@@ -16,13 +16,13 @@ cd "$harness"
 lucene=engines/lucene-10.4.0-st
 command_of() {
 	case $1 in
-	strata) echo "engines/strata/build/strata_engine churn {dir}" ;;
+	prospect) echo "engines/prospect/build/prospect_engine churn {dir}" ;;
 	tantivy-0.26-st) echo "engines/tantivy-0.26-st/target/release/churn {dir}" ;;
 	lucene-10.4.0-st) echo "java -XX:+UseParallelGC --add-modules jdk.incubator.vector -cp $lucene/build/libs/search-index-benchmark-game-lucene-1.0-SNAPSHOT.jar:$lucene/build/dependencies/* Churn {dir}" ;;
 	xapian-2.1.0) echo "engines/xapian-2.1.0/xapian_engine churn {dir}" ;;
 	esac
 }
-for e in strata tantivy-0.26-st lucene-10.4.0-st xapian-2.1.0; do
+for e in prospect tantivy-0.26-st lucene-10.4.0-st xapian-2.1.0; do
 	[ -s "$out/$e.jsonl" ] && [ "$(wc -l < "$out/$e.jsonl")" -gt "$cycles" ] && continue
 	echo "$(date +%T) soak $e"
 	# shellcheck disable=SC2086

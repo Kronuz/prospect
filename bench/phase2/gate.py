@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Phase 2 query gate over harness trials (BENCHMARKS rule 3, Phase 2 review G5).
 
-  gate.py [--md] [--target X] [--strata NAME] [--baseline FILE] TRIAL [TRIAL...]
+  gate.py [--md] [--target X] [--prospect NAME] [--baseline FILE] TRIAL [TRIAL...]
                                                     TRIAL: RESULTS_JSON[+RESULTS_JSON...]
 
 --baseline fills in, from baseline.py's cached file, every engine a trial did not run. The
@@ -9,22 +9,24 @@ anchor engine must be in both the trials and the baseline; its times per command
 must stay within the baseline's drift (3%) by geometric mean, or the row is marked DRIFT
 and passes nothing.
 
---strata names the engine scored as strata (e.g. strata-merged); the default is strata.
+--prospect names the engine scored as prospect (e.g. prospect-merged); the default is prospect.
+Results recorded before the rename label it strata, strata-merged, strata-a, and strata-b; those
+labels read as their prospect names, here and in the other scripts that read results.
 
 Without --target, Phase 2's verdicts (1.5x, 2x blocks); with it, a class fails when its
 interval's upper bound exceeds X (Phase 3: --target 1.0).
 
 A trial is one or more harness runs (the gate queries and the stratified term set) of
-strata and its baselines (Lucene, Tantivy, and Xapian
+prospect and its baselines (Lucene, Tantivy, and Xapian
 when present). A query's time is its fastest run. The pipe floor is the smallest time
 over every trial, engine, and query, since one run's minimum can be a query's real work.
 
-Per trial, command, and class: the geometric mean over queries of strata / engine, raw
+Per trial, command, and class: the geometric mean over queries of prospect / engine, raw
 and with the floor subtracted from both (at least 1 us each). The ratio against the
 fastest of Lucene, Lucene with reordering, and Tantivy (those present) is the largest
 of their geometric means. Across trials:
 the median and the 95% bootstrap interval of the median. A class is flagged when the
-floor exceeds half the mean time of strata or the faster engine. Counts must equal
+floor exceeds half the mean time of prospect or the faster engine. Counts must equal
 every baseline's; mismatches are reported per engine. A query an engine answers
 UNSUPPORTED (PISA has no phrases) is left out of that engine's ratios and counts.
 PISA, when present, is reported beside Xapian (the stretch goal's reference).
@@ -42,16 +44,28 @@ FAST = ["lucene-10.4.0", "lucene-10.4.0-bp", "tantivy-0.26"]
 XAPIAN = "xapian-2.1.0"
 PISA = "pisa-0.8.2"
 COUNTED = {"COUNT", "TOP_100_COUNT"}
+# The labels of results recorded before the engine was renamed.
+LEGACY = {
+    "strata": "prospect",
+    "strata-merged": "prospect-merged",
+    "strata-a": "prospect-a",
+    "strata-b": "prospect-b",
+}
 
 
-def load(trial, strata="strata"):
+def canon(engine):
+    return LEGACY.get(engine, engine)
+
+
+def load(trial, prospect="prospect"):
     merged = defaultdict(lambda: defaultdict(list))
     for path in trial.split("+"):
         with open(path) as f:
             results = json.load(f)["results"]
         for cmd, per in results.items():
             for e, qs in per.items():
-                merged[cmd]["strata" if e == strata else e] += qs
+                e = canon(e)
+                merged[cmd]["prospect" if e == canon(prospect) else e] += qs
     return merged
 
 
@@ -61,8 +75,8 @@ def with_baseline(r, base):
         if cmd not in r:
             continue
         for e, qs in per.items():
-            if e not in r[cmd]:
-                r[cmd][e] = qs
+            if canon(e) not in r[cmd]:
+                r[cmd][canon(e)] = qs
     return r
 
 
@@ -112,14 +126,14 @@ def trial(r, floor):
         mism[cmd] = {
             e: sum(
                 1
-                for qs, q in t["strata"].items()
+                for qs, q in t["prospect"].items()
                 if t[e][qs]["count"] is not None and q["count"] != t[e][qs]["count"]
             )
             for e in t
-            if e != "strata"
+            if e != "prospect"
         }
         by = defaultdict(list)
-        for qs, q in t["strata"].items():
+        for qs, q in t["prospect"].items():
             for tag in q["tags"]:
                 if ":" not in tag:
                     by[tag].append(qs)
@@ -135,9 +149,9 @@ def trial(r, floor):
             }
             row = {"n": len(qs), "mean": mean}
             for e in t:
-                if e != "strata" and supported(e):
+                if e != "prospect" and supported(e):
                     times = [
-                        (min(t["strata"][x]["duration"]), min(t[e][x]["duration"]))
+                        (min(t["prospect"][x]["duration"]), min(t[e][x]["duration"]))
                         for x in supported(e)
                     ]
                     row[e] = (
@@ -158,7 +172,7 @@ def trial(r, floor):
             row["raw"] = max(row[e][0] for e in fast)
             row["sub"] = max(row[e][1] for e in fast)
             faster = min(fast, key=lambda e: mean[e])
-            row["flag"] = floor > 0.5 * min(mean["strata"], mean[faster])
+            row["flag"] = floor > 0.5 * min(mean["prospect"], mean[faster])
             rows[(cmd, tag)] = row
     return rows, mism
 
@@ -178,17 +192,17 @@ def interval(values, reps=10000, seed=2026):
 def main(argv):
     md = "--md" in argv
     target = float(argv[argv.index("--target") + 1]) if "--target" in argv else None
-    strata = argv[argv.index("--strata") + 1] if "--strata" in argv else "strata"
+    prospect = argv[argv.index("--prospect") + 1] if "--prospect" in argv else "prospect"
     base = None
     if "--baseline" in argv:
         with open(argv[argv.index("--baseline") + 1]) as f:
             base = json.load(f)
     skip = set()
-    for flag in ("--target", "--strata", "--baseline"):
+    for flag in ("--target", "--prospect", "--baseline"):
         if flag in argv:
             skip |= {argv.index(flag), argv.index(flag) + 1}
     paths = [a for i, a in enumerate(argv) if a != "--md" and i not in skip]
-    results = [load(p, strata) for p in paths]
+    results = [load(p, prospect) for p in paths]
     drift = {}
     if base:
         anchor, limit = base["baseline"]["anchor"], base["baseline"]["drift"]
@@ -213,7 +227,7 @@ def main(argv):
     )
     if md:
         print(
-            "\n| Command | Class | n | Trials | strata µs | Lucene µs | Lucene -bp µs | Tantivy µs | Xapian µs | PISA µs | Raw | Floor-subtracted | Against Xapian | Against PISA |"
+            "\n| Command | Class | n | Trials | prospect µs | Lucene µs | Lucene -bp µs | Tantivy µs | Xapian µs | PISA µs | Raw | Floor-subtracted | Against Xapian | Against PISA |"
         )
         print("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for cmd in dict.fromkeys(cmd for r in results for cmd in r):
@@ -266,7 +280,7 @@ def main(argv):
                     return f"{us[e]:,.0f}" if e in us else "–"
 
                 print(
-                    f"| `{cmd}` | {tag} | {n} | {len(rows)} | {col('strata')} | {col('lucene-10.4.0')} | {col('lucene-10.4.0-bp')} | {col('tantivy-0.26')} | {col(XAPIAN)} | {col(PISA)} "
+                    f"| `{cmd}` | {tag} | {n} | {len(rows)} | {col('prospect')} | {col('lucene-10.4.0')} | {col('lucene-10.4.0-bp')} | {col('tantivy-0.26')} | {col(XAPIAN)} | {col(PISA)} "
                     f"| {raw[0]:.2f}× [{raw[1]:.2f}–{raw[2]:.2f}] | {sub[0]:.2f}× [{sub[1]:.2f}–{sub[2]:.2f}] {flag}{' DRIFT' if verdict == 'DRIFT' else ''} | {x} | {px} |"
                 )
             else:

@@ -10,7 +10,7 @@ cd ~/bench/search-benchmark-game
 out=~/bench/results/g5
 mkdir -p $out
 export COMMANDS="TOP_10 TOP_100 TOP_1000 TOP_100_COUNT COUNT" PATH=$HOME/.cargo/bin:$PATH
-engines=(strata tantivy-0.26 lucene-10.4.0 xapian-2.1.0)
+engines=(prospect tantivy-0.26 lucene-10.4.0 xapian-2.1.0)
 rotated() {  # rotation k of the engine list
 	local k=$1 n=${#engines[@]}
 	for i in $(seq 0 $((n - 1))); do echo -n "${engines[$(((i + k) % n))]} "; done
@@ -31,7 +31,7 @@ done
 
 [ -f corpus-1m.json ] || head -1000000 corpus.json > corpus-1m.json
 export CORPUS=$PWD/corpus-1m.json
-index_engines=(strata tantivy-0.26-st lucene-10.4.0-st xapian-2.1.0)
+index_engines=(prospect tantivy-0.26-st lucene-10.4.0-st xapian-2.1.0)
 for t in 1 2 3; do
 	for i in 0 1 2 3; do
 		e=${index_engines[$(((i + t - 1) % 4))]}
@@ -42,7 +42,7 @@ for t in 1 2 3; do
 		rm -rf $dir && mkdir -p $dir
 		sync; echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
 		case $e in
-		strata) cmd="engines/strata/build/strata_engine index $dir" ;;
+		prospect) cmd="engines/prospect/build/prospect_engine index $dir" ;;
 		xapian-2.1.0) cmd="engines/xapian-2.1.0/xapian_engine index $dir/idx" ;;
 		*) dir=engines/$e/idx; rm -rf $dir; cmd="make -C engines/$e index" ;;  # idx is a make target
 		esac
@@ -60,5 +60,5 @@ for t in 1 2 3; do
 		fi
 	done
 done
-rm -rf ~/idx1m-strata ~/idx1m-xapian-2.1.0
+rm -rf ~/idx1m-prospect ~/idx1m-xapian-2.1.0
 echo TRIALS_DONE

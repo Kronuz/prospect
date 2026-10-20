@@ -179,10 +179,10 @@ struct hit {
 
 // The threshold one segment's collection hands down once the k-th score is known: the score
 // itself, so blocks bounded at it are skipped (a later tie has a larger ordinal, hence a larger
-// docid, and never enters). Built with STRATA_EXPERIMENT_NO_EQUAL_SKIP, the score just below
+// docid, and never enters). Built with PROSPECT_EXPERIMENT_NO_EQUAL_SKIP, the score just below
 // it, as a reordered segment needs (reordering review, P1-R9): the experiment that measures it.
 inline double equal_bound(double kth) noexcept {
-#ifdef STRATA_EXPERIMENT_NO_EQUAL_SKIP
+#ifdef PROSPECT_EXPERIMENT_NO_EQUAL_SKIP
 	return std::nextafter(kth, -std::numeric_limits<double>::infinity());
 #else
 	return kth;

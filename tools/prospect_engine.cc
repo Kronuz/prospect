@@ -1,16 +1,16 @@
-// strata as a search-benchmark-game engine.
-//   strata_engine index DIR < corpus.json   one segment from JSON lines ("text": whitespace tokens)
-//   strata_engine serve DIR                  "COMMAND\tquery" lines -> one count per line
-//   strata_engine terms DIR                  every term and its document frequency
-//   strata_engine dictstats DIR              the term dictionary's bytes by part
-//   strata_engine sections DIR               each section's kind and length, then the file size
-//   strata_engine check DIR                  every byte verified and every structure decoded
-//   strata_engine verify DIR < queries.txt   pruned top-k equals an exhaustive scan, k = 10, 100, 1000,
+// prospect as a search-benchmark-game engine.
+//   prospect_engine index DIR < corpus.json   one segment from JSON lines ("text": whitespace tokens)
+//   prospect_engine serve DIR                  "COMMAND\tquery" lines -> one count per line
+//   prospect_engine terms DIR                  every term and its document frequency
+//   prospect_engine dictstats DIR              the term dictionary's bytes by part
+//   prospect_engine sections DIR               each section's kind and length, then the file size
+//   prospect_engine check DIR                  every byte verified and every structure decoded
+//   prospect_engine verify DIR < queries.txt   pruned top-k equals an exhaustive scan, k = 10, 100, 1000,
 //                                            ordinals and scores, Lucene and Xapian BM25
-//   strata_engine bench DIR COMMAND RUNS [bm25_xapian] < queries.txt
+//   prospect_engine bench DIR COMMAND RUNS [bm25_xapian] < queries.txt
 //                                            per query: fastest of RUNS in-process runs, in µs,
 //                                            on a segment file or an index's segments
-//   strata_engine churn DIR < ops            the soak's op stream through prospect::index (bench/soak):
+//   prospect_engine churn DIR < ops            the soak's op stream through prospect::index (bench/soak):
 //                                            "P\tid\ttext" upserts, "D\tid" deletes, "C" commits and
 //                                            prints "C\tµs\tsegments", "Q\tCOMMAND\tquery" prints
 //                                            "Q\tµs\tresult"
@@ -112,8 +112,8 @@ template <class Index> static void warn_trust(const Index& ix) {
 }
 
 // Phase 3's index: each document upserted by its key ("Q" + id, Xapiand's key prefix),
-// the buffer flushing past STRATA_BUFFER_MB (default 256) on STRATA_THREADS inversion
-// threads (default 1, D18) and merging by the tiered policy (STRATA_AUTO_MERGE=0 turns
+// the buffer flushing past PROSPECT_BUFFER_MB (default 256) on PROSPECT_THREADS inversion
+// threads (default 1, D18) and merging by the tiered policy (PROSPECT_AUTO_MERGE=0 turns
 // merges off), committed once at the end. Segments, versions,
 // keys, and merges cost what Phase 3's gate measures (T4).
 int index(const std::string& dir) {
@@ -123,21 +123,21 @@ int index(const std::string& dir) {
 	kronuz::journal::PosixIO io(dir, 0600, host_io);
 	prospect::index::options o;
 	o.key_prefix = "Q";
-	const char* mb = std::getenv("STRATA_BUFFER_MB");
+	const char* mb = std::getenv("PROSPECT_BUFFER_MB");
 	o.buffer_share = (mb ? std::strtoull(mb, nullptr, 10) : 256) << 20;
-	// STRATA_BUDGET_MB: the node's indexing budget (D17), this index's whole share of it,
+	// PROSPECT_BUDGET_MB: the node's indexing budget (D17), this index's whole share of it,
 	// which the gate calibrates to the reference engine's peak RSS (BENCHMARKS.md).
 	std::unique_ptr<strata::byte_budget> budget;
-	if (const char* node = std::getenv("STRATA_BUDGET_MB")) {
+	if (const char* node = std::getenv("PROSPECT_BUDGET_MB")) {
 		budget = std::make_unique<strata::byte_budget>(std::strtoull(node, nullptr, 10) << 20);
 		o.budget = budget.get();
 		o.buffer_share = budget->capacity();
 	}
-	const char* merge = std::getenv("STRATA_AUTO_MERGE");
+	const char* merge = std::getenv("PROSPECT_AUTO_MERGE");
 	o.auto_merge = !merge || std::string_view(merge) != "0";
-	if (const char* threads = std::getenv("STRATA_THREADS")) { o.flush_threads = std::max<std::size_t>(1, std::strtoull(threads, nullptr, 10)); }
-	// STRATA_IDENTITY_SEED: segment ids from a fixed base, so runs compare byte for byte.
-	if (const char* seed = std::getenv("STRATA_IDENTITY_SEED")) { o.identity_seed = std::strtoull(seed, nullptr, 10); }
+	if (const char* threads = std::getenv("PROSPECT_THREADS")) { o.flush_threads = std::max<std::size_t>(1, std::strtoull(threads, nullptr, 10)); }
+	// PROSPECT_IDENTITY_SEED: segment ids from a fixed base, so runs compare byte for byte.
+	if (const char* seed = std::getenv("PROSPECT_IDENTITY_SEED")) { o.identity_seed = std::strtoull(seed, nullptr, 10); }
 	const std::array<char, 16> uuid{'s', 't', 'r', 'a', 't', 'a', '-', 'b', 'e', 'n', 'c', 'h'};
 	auto ix = prospect::index::create(io, o, uuid);
 	warn_trust(ix);
@@ -156,7 +156,7 @@ int index(const std::string& dir) {
 	std::string line;
 	std::uint64_t n = 0;
 	std::vector<std::string> keys;
-	const bool keep_keys = std::getenv("STRATA_DELETE_EVERY") != nullptr;
+	const bool keep_keys = std::getenv("PROSPECT_DELETE_EVERY") != nullptr;
 	for (LineReader in; in.next(line);) {
 		if (line.empty()) { continue; }
 		if (batched == t.ops.size()) { t.ops.emplace_back(); }
@@ -171,9 +171,9 @@ int index(const std::string& dir) {
 		if (++n % 100000 == 0) { std::cerr << n << '\n'; }
 	}
 	apply();
-	// STRATA_DELETE_EVERY=N deletes every Nth document by key: T8's index with deletes.
+	// PROSPECT_DELETE_EVERY=N deletes every Nth document by key: T8's index with deletes.
 	std::uint64_t deleted = 0;
-	if (const char* every = std::getenv("STRATA_DELETE_EVERY"); every && std::strtoull(every, nullptr, 10)) {
+	if (const char* every = std::getenv("PROSPECT_DELETE_EVERY"); every && std::strtoull(every, nullptr, 10)) {
 		const auto step = std::strtoull(every, nullptr, 10);
 		for (std::uint64_t i = 0; i < keys.size(); i += step, ++deleted) {
 			if (batched == t.ops.size()) { t.ops.emplace_back(); }
@@ -191,15 +191,15 @@ int index(const std::string& dir) {
 }
 
 // Merges every segment into one and commits: the "after merging" index of T8. The merge
-// reorders (the default); STRATA_REORDER=0 keeps docid order, and STRATA_REORDER_THREADS
+// reorders (the default); PROSPECT_REORDER=0 keeps docid order, and PROSPECT_REORDER_THREADS
 // bisects on that many threads.
 int merge(const std::string& dir) {
 	kronuz::journal::PosixIO io(dir, 0600, host_io);
 	prospect::index::options o;
 	o.key_prefix = "Q";
-	if (const char* r = std::getenv("STRATA_REORDER"); r && std::string_view(r) == "0") { o.reordering = prospect::index::options::reorder_mode::off; }
-	if (const char* t = std::getenv("STRATA_REORDER_THREADS")) { o.reorder_settings.bisection.threads = std::uint32_t(std::max(1L, std::strtol(t, nullptr, 10))); }
-	if (const char* seed = std::getenv("STRATA_IDENTITY_SEED")) { o.identity_seed = std::strtoull(seed, nullptr, 10); }
+	if (const char* r = std::getenv("PROSPECT_REORDER"); r && std::string_view(r) == "0") { o.reordering = prospect::index::options::reorder_mode::off; }
+	if (const char* t = std::getenv("PROSPECT_REORDER_THREADS")) { o.reorder_settings.bisection.threads = std::uint32_t(std::max(1L, std::strtol(t, nullptr, 10))); }
+	if (const char* seed = std::getenv("PROSPECT_IDENTITY_SEED")) { o.identity_seed = std::strtoull(seed, nullptr, 10); }
 	auto ix = prospect::index::open(io, o);
 	warn_trust(ix);
 	const auto start = std::chrono::steady_clock::now();
@@ -484,7 +484,7 @@ int verify_index(const std::string& dir) {
 // Every query's top k at k = 10, 100, and 1,000 under both schemes, as docids and exact
 // scores (%a), with the live count: two indexes of the same documents print the same lines
 // whatever their segments' order (reordering.md D5, the scale check).
-// With STRATA_DUMP_COUNT=0, without the count (the uncounted, pruned path).
+// With PROSPECT_DUMP_COUNT=0, without the count (the uncounted, pruned path).
 int dump(const std::string& dir) {
 	kronuz::journal::PosixIO io(dir, 0600, host_io);
 	prospect::index::options o;
@@ -493,7 +493,7 @@ int dump(const std::string& dir) {
 	warn_trust(ix);
 	std::vector<prospect::segment_snapshot> segs;
 	for (const auto& v : ix.segments()) { segs.push_back({v.seg, v.deleted, v.dead}); }
-	const char* count_env = std::getenv("STRATA_DUMP_COUNT");
+	const char* count_env = std::getenv("PROSPECT_DUMP_COUNT");
 	const bool with_count = !count_env || std::string_view(count_env) != "0";
 	LineReader in;
 	for (std::string line; in.next(line);) {
@@ -740,6 +740,6 @@ int main(int argc, char** argv) {
 		const bool xapian = argc == 6 && std::string_view(argv[5]) == "bm25_xapian";
 		return bench(argv[2], argv[3], std::atoi(argv[4]), xapian ? prospect::scheme::bm25_xapian : prospect::scheme::bm25);
 	}
-	std::cerr << "usage: strata_engine index|serve|terms|dictstats|verify|dump|check|resident|churn DIR | bench DIR COMMAND RUNS < queries\n";
+	std::cerr << "usage: prospect_engine index|serve|terms|dictstats|verify|dump|check|resident|churn DIR | bench DIR COMMAND RUNS < queries\n";
 	return 2;
 }

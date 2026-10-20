@@ -50,7 +50,7 @@ for attempt in $(seq 1 200); do
 		if [ "$over" -ge "$NOISY" ]; then
 			noisy=1
 			# The trials script leads its own session: stop it and everything it started.
-			"$here/linux.sh" ssh 'g=$(pgrep -f "^/bin/bash /home/strata/bench/'"$script"'" | head -1); [ -n "$g" ] && kill -TERM -- -$g; sleep 2; pkill -f "strata_engine|do_query|java|xapian_engine"' || true
+			"$here/linux.sh" ssh 'g=$(pgrep -f "^/bin/bash /home/strata/bench/'"$script"'" | head -1); [ -n "$g" ] && kill -TERM -- -$g; sleep 2; pkill -f "prospect_engine|do_query|java|xapian_engine"' || true
 			break
 		fi
 		sleep 30

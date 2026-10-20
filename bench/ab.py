@@ -3,7 +3,7 @@
 
   ab.py [--md] TRIAL [TRIAL...]      TRIAL: RESULTS_JSON[+RESULTS_JSON...]
 
-Per trial, command, and class: the geometric mean over queries of strata-b / strata-a, a
+Per trial, command, and class: the geometric mean over queries of prospect-b / prospect-a, a
 query's time being its fastest run. Across trials: the median and the 95% bootstrap
 interval of the median. Counts must match between the variants.
 """
@@ -21,8 +21,8 @@ def main(argv):
     ratios, mism = defaultdict(list), 0
     for path in (a for a in argv if a != "--md"):
         for cmd, per in load(path).items():
-            a = {q["query"]: q for q in per["strata-a"]}
-            b = {q["query"]: q for q in per["strata-b"]}
+            a = {q["query"]: q for q in per["prospect-a"]}
+            b = {q["query"]: q for q in per["prospect-b"]}
             mism += sum(1 for qs in a if a[qs]["count"] != b[qs]["count"])
             by = defaultdict(list)
             for qs, q in a.items():

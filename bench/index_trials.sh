@@ -1,5 +1,5 @@
 #!/bin/bash
-# Indexing of the 1M corpus by strata, Tantivy, Lucene, and Xapian, five trials (PLAN's
+# Indexing of the 1M corpus by prospect, Tantivy, Lucene, and Xapian, five trials (PLAN's
 # minimum from Phase 3) with the engine order rotated. On Linux the page cache is dropped before each
 # unit; elsewhere (no root) the corpus is read once before each, so every unit starts
 # warm.
@@ -7,9 +7,9 @@
 # Results in ~/bench/results/index-NAME: wall time, peak RSS, bytes, segments.
 # ENGINES overrides the engine list, DOCS the corpus size (a count, or "all" for the full
 # corpus), and KEYED=1 makes every engine upsert by id (T4), passed to each indexer.
-# strata runs on STRATA_BUDGET_MB, the node budget calibrate_rss.sh matched to the
-# reference's peak RSS, and STRATA_THREADS for the multi-thread rows.
-#   STRATA_BUDGET_MB=N [STRATA_THREADS=8] [ENGINES="strata tantivy-0.26-st"] [DOCS=all] [KEYED=1] index_trials.sh NAME
+# prospect runs on PROSPECT_BUDGET_MB, the node budget calibrate_rss.sh matched to the
+# reference's peak RSS, and PROSPECT_THREADS for the multi-thread rows.
+#   PROSPECT_BUDGET_MB=N [PROSPECT_THREADS=8] [ENGINES="prospect tantivy-0.26-st"] [DOCS=all] [KEYED=1] index_trials.sh NAME
 set -u
 name=${1:-run}
 cd ~/bench/search-benchmark-game
@@ -26,9 +26,9 @@ if [ "$docs" = all ]; then export CORPUS=$PWD/corpus.json; else
 	export CORPUS=$PWD/corpus-$docs.json
 fi
 export KEYED=${KEYED:-0}
-[ -n "${STRATA_BUDGET_MB:-}" ] || { echo "STRATA_BUDGET_MB is required: run calibrate_rss.sh"; exit 1; }
-export STRATA_BUDGET_MB
-read -r -a engines <<< "${ENGINES:-strata tantivy-0.26-st lucene-10.4.0-st xapian-2.1.0}"
+[ -n "${PROSPECT_BUDGET_MB:-}" ] || { echo "PROSPECT_BUDGET_MB is required: run calibrate_rss.sh"; exit 1; }
+export PROSPECT_BUDGET_MB
+read -r -a engines <<< "${ENGINES:-prospect tantivy-0.26-st lucene-10.4.0-st xapian-2.1.0}"
 count=${#engines[@]}
 for e in "${engines[@]}"; do make -s -C engines/$e compile > /dev/null 2>&1; done
 for t in 1 2 3 4 5; do
@@ -45,7 +45,7 @@ for t in 1 2 3 4 5; do
 			cat "$CORPUS" > /dev/null
 		fi
 		case $e in
-		strata) cmd="engines/strata/build/strata_engine index $dir" ;;
+		prospect) cmd="engines/prospect/build/prospect_engine index $dir" ;;
 		xapian-2.1.0) cmd="engines/xapian-2.1.0/xapian_engine index $dir/idx" ;;
 		*) dir=engines/$e/idx; rm -rf $dir; cmd="make -C engines/$e index" ;;
 		esac
@@ -58,7 +58,7 @@ for t in 1 2 3 4 5; do
 		fi
 	done
 done
-rm -rf ~/idx1m-strata ~/idx1m-xapian-2.1.0
+rm -rf ~/idx1m-prospect ~/idx1m-xapian-2.1.0
 for e in "${engines[@]}"; do
 	printf '%-18s' $e
 	if [ "$os" = Linux ]; then

@@ -1,10 +1,10 @@
 #!/bin/bash
-# Quick in-process A/B of two strata builds: `strata_engine bench` over the gate queries
+# Quick in-process A/B of two prospect builds: `prospect_engine bench` over the gate queries
 # and the stratified terms, sides alternating each round, best of RUNS per query and
 # round. Minutes, not hours, and no quiet host needed: noise hits both sides alike and
 # the per-query best over rounds discards it. Score with quick/ab.py.
 #   [SCHEME=bm25_xapian] ab.sh OUT A_BIN A_DIR B_BIN B_DIR [ROUNDS] [RUNS] [COMMANDS]
-# SCHEME passes a weighting preset to `strata_engine bench` (default: its own, bm25).
+# SCHEME passes a weighting preset to `prospect_engine bench` (default: its own, bm25).
 set -eu
 out=$1 a_bin=$2 a_dir=$3 b_bin=$4 b_dir=$5
 rounds=${6:-6} runs=${7:-3}

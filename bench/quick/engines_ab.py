@@ -2,7 +2,7 @@
 """Turns harness trials (src/client.py's results.json, one per trial and set) into ab.sh's
 round files, so quick/ab.py --aa scores engines at the run level (docs/perf/ab-run-level.md).
 
-Each trial is a run. Side a is the reference engine and side b strata, so B/A is strata's time
+Each trial is a run. Side a is the reference engine and side b prospect, so B/A is prospect's time
 over the reference's; a query's time in a run is its best over the trial's iterations, and
 its result the count. A query an engine does not answer (PISA's phrases) is left out.
 
@@ -23,6 +23,11 @@ import shutil
 import sys
 from typing import Any
 
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "phase2")
+)
+from gate import canon
+
 
 def set_name(name: str) -> str:
     return "terms" if name.startswith("terms") else "queries"
@@ -42,7 +47,7 @@ def convert(trials: str, out: str, a: str, b: str) -> int:
             ]
         for cmd, engines in results.items():
             for side, engine in (("a", a), ("b", b)):
-                rows = engines.get(engine)
+                rows = {canon(e): r for e, r in engines.items()}.get(canon(engine))
                 if rows is None:
                     continue
                 target = os.path.join(out, f"{trial}-{side}-{cmd}-{qset}.tsv")

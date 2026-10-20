@@ -20,7 +20,7 @@ fuzz/             libFuzzer targets (segment, postings) and their corpora; each 
                   replays as a ctest, PROSPECT_FUZZ=ON (Clang) builds the fuzzers.
 bench/            Gate benchmarks: engines/ (Lucene, Tantivy, Xapian harnesses for
                   search-benchmark-game), phase0/, phase2/ (gate.py), quick/ A/Bs, soak/.
-tools/            strata_engine.cc (the harness's engine), parity.cc (oracle ranks),
+tools/            prospect_engine.cc (the harness's engine), parity.cc (oracle ranks),
                   keybench.cc (T5's key lookups on a search index), coverage, vm/ (gate VM).
 docs/             ARCHITECTURE; design/ (phase 4), gates/ (phase 2, phase 3's ratchets),
                   reviews/, perf/, status/ (search ledgers), testing/parity.md.
@@ -32,13 +32,36 @@ frame and the first search design), reordering.md (the docids section is the cor
 layers.md and core-split.md (the plugin seam), and the reviewers' `calibration.md`. The lead's
 workstream index is strata's `docs/status/README.md`.
 
-## Names kept on purpose
+## Renamed from strata, and names kept
 
-The benchmark harness, the gate VM's scripts, and every recorded result name the engine
-`strata`: the binary is `strata_engine`, the harness engine is `engines/strata`, and its knobs
-are `STRATA_THREADS`, `STRATA_BUDGET_MB`, `STRATA_IDENTITY_SEED`, and the rest. They stay until
-the harness and its records move together; build options are prospect's (`PROSPECT_FUZZ`,
-`PROSPECT_FIXTURES`).
+The search side's names say prospect. Result files, status ledgers, and reviews recorded before
+the rename keep their names, so a past command in them names the old one:
+
+| Before | Now |
+|---|---|
+| `strata_engine` (tool, CMake target) | `prospect_engine` |
+| harness engine `engines/strata`, labels `strata` | `engines/prospect`, `prospect` |
+| `engines/strata-merged`, `strata-merged` | `engines/prospect-merged`, `prospect-merged` |
+| `strata-a`, `strata-b` (bench/ab.sh) | `prospect-a`, `prospect-b` |
+| `gate.py --strata NAME` | `gate.py --prospect NAME` |
+| `STRATA_THREADS`, `STRATA_BUDGET_MB`, `STRATA_BUFFER_MB`, `STRATA_AUTO_MERGE`, `STRATA_IDENTITY_SEED`, `STRATA_DELETE_EVERY`, `STRATA_REORDER`, `STRATA_REORDER_THREADS`, `STRATA_DUMP_COUNT` (prospect_engine) | the same names with `PROSPECT_` |
+| `STRATA_CRASH_POINTS`, `STRATA_BG_CRASH_POINTS`, `STRATA_LIFECYCLE_REORDER`, `STRATA_CHURN_CYCLES`, `STRATA_WRITE_FIXTURES`, `STRATA_FUZZ_VERDICTS` (prospect's tests and fuzzers) | the same names with `PROSPECT_` |
+| `STRATA_EXPERIMENT_NO_EQUAL_SKIP` (search.hh) | `PROSPECT_EXPERIMENT_NO_EQUAL_SKIP` |
+
+The scripts that read results (`bench/phase2/gate.py`, `baseline.py`, `bench/ab.py`,
+`bench/index_gate.py`, `bench/quick/engines_ab.py`) read the old engine labels as the new ones,
+so recorded runs stay comparable (`gate.canon`); a baseline file or `i1-strata.time` from before
+the rename works unchanged.
+
+Kept as `STRATA_*` because strata's code reads them, or because the thing they name is strata's:
+
+- `STRATA_FAULTFS_MAP`: read by strata's `faultfs.hh`; the `*_mapped` tests set it.
+- The gate VM's `STRATA_VM_*`, `STRATA_BSD_*`, and `STRATA_TRIALS_LOG` (`tools/vm/`), and the VM's
+  `strata` user and hostnames: the VM is strata's machine, shared by both repositories.
+- `STRATA_WRITE_FIXTURES` in strata's own tests writes strata's fixtures; prospect's tests read
+  `PROSPECT_WRITE_FIXTURES` for theirs.
+
+Build options are prospect's (`PROSPECT_FUZZ`, `PROSPECT_FIXTURES`).
 
 ## Rules
 
@@ -56,7 +79,7 @@ the harness and its records move together; build options are prospect's (`PROSPE
   trial count. Iterate on small samples (about 100,000 documents) against the fastest
   baseline; one larger run confirms a gate row (strata's PLAN.md, "Targeted runs").
 - **Byte identity.** A change that is not meant to change the format keeps `fixtures_test`
-  passing and keeps `strata_engine index` output byte for byte under `STRATA_IDENTITY_SEED`.
+  passing and keeps `prospect_engine index` output byte for byte under `PROSPECT_IDENTITY_SEED`.
 - **Stage explicit paths.** Never `git commit -a`; reviewers may be editing alongside.
 
 ## Verify a change

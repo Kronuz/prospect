@@ -11,8 +11,8 @@
 //     a second power loss after each mutation of the recovery. Then the same with background
 //     merges on a stepping executor, crash points covering the merges' mutations too, and
 //     the commit points equal to an inline-merging twin's.
-// STRATA_CRASH_POINTS sets how many crash points to cover (default 10,000), and
-// STRATA_BG_CRASH_POINTS how many with background merges (default 2,000; the gate's
+// PROSPECT_CRASH_POINTS sets how many crash points to cover (default 10,000), and
+// PROSPECT_BG_CRASH_POINTS how many with background merges (default 2,000; the gate's
 // count is 10,000, run as docs/gates/phase-3-lifecycle.md records).
 #include "prospect/index.hh"
 #include "stepping_executor.hh"
@@ -123,9 +123,9 @@ static transaction tx_of(operation o) {
 int main() {
 	index::options keyed;
 	keyed.key_prefix = "Q";
-	// STRATA_LIFECYCLE_REORDER: every merge reorders, with test-sized thresholds, so each
+	// PROSPECT_LIFECYCLE_REORDER: every merge reorders, with test-sized thresholds, so each
 	// crash point, replay, and background schedule below covers reordering merges (T5).
-	const bool reorder_all = std::getenv("STRATA_LIFECYCLE_REORDER") != nullptr;
+	const bool reorder_all = std::getenv("PROSPECT_LIFECYCLE_REORDER") != nullptr;
 	if (reorder_all) {
 		keyed.reordering = index::options::reorder_mode::merges;
 		keyed.reorder_min_docs = 0;
@@ -672,8 +672,8 @@ int main() {
 	// and of the merges is a crash point. The background runs' commit points must equal an
 	// inline-merging twin's.
 	std::size_t target = 10000, bg_target = 2000;
-	if (const char* env = std::getenv("STRATA_CRASH_POINTS")) { target = std::strtoull(env, nullptr, 10); }
-	if (const char* env = std::getenv("STRATA_BG_CRASH_POINTS")) { bg_target = std::strtoull(env, nullptr, 10); }
+	if (const char* env = std::getenv("PROSPECT_CRASH_POINTS")) { target = std::strtoull(env, nullptr, 10); }
+	if (const char* env = std::getenv("PROSPECT_BG_CRASH_POINTS")) { bg_target = std::strtoull(env, nullptr, 10); }
 	struct tally {
 		std::size_t points = 0, workloads = 0, recovery_points = 0;
 	};

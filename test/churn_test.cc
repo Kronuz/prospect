@@ -7,7 +7,7 @@
 //   - At a constant live set, half replaced every cycle: segment bytes, segment count,
 //     and the deleted fraction stay bounded against a fresh index of the same documents,
 //     and do not trend upward.
-// STRATA_CHURN_CYCLES sets the number of churn cycles (default 8).
+// PROSPECT_CHURN_CYCLES sets the number of churn cycles (default 8).
 #include "prospect/index.hh"
 #include "prospect/searcher.hh"
 #include "strata/core/faultfs.hh"
@@ -146,7 +146,7 @@ int main() {
 	o.key_prefix = "Q";
 	o.auto_merge = true;
 	std::size_t cycles = 8;
-	if (const char* env = std::getenv("STRATA_CHURN_CYCLES")) { cycles = std::strtoull(env, nullptr, 10); }
+	if (const char* env = std::getenv("PROSPECT_CHURN_CYCLES")) { cycles = std::strtoull(env, nullptr, 10); }
 	// Churn against the model.
 	{
 		std::mt19937_64 r(2026);

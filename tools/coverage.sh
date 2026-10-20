@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Source-based coverage as TESTING specifies: every test (T1 at STRATA_CRASH_POINTS, 2,000
+# Source-based coverage as TESTING specifies: every test (T1 at PROSPECT_CRASH_POINTS, 2,000
 # by default), parity against the oracle's ranks, and verify over a sample index, in a
 # build configured with -fprofile-instr-generate -fcoverage-mapping. Prints each header's
 # line and branch coverage.
@@ -23,15 +23,15 @@ fi
 cmake --build "$B"
 rm -rf "$B/prof" "$B/cov-idx" && mkdir -p "$B/prof" "$B/cov-idx"
 export LLVM_PROFILE_FILE="$B/prof/%p-%m.profraw"
-(cd "$B" && STRATA_CRASH_POINTS="${STRATA_CRASH_POINTS:-2000}" ctest -j4 | grep -E "tests passed|Failed")
+(cd "$B" && PROSPECT_CRASH_POINTS="${PROSPECT_CRASH_POINTS:-2000}" ctest -j4 | grep -E "tests passed|Failed")
 "$B/parity" "$COV_CORPUS" "$docs" "$COV_RANKS" | tail -1
-head -n "$docs" "$COV_CORPUS" | "$B/strata_engine" index "$B/cov-idx" | tail -1
-"$B/strata_engine" verify "$B/cov-idx" < "$COV_QUERIES" | tail -1
+head -n "$docs" "$COV_CORPUS" | "$B/prospect_engine" index "$B/cov-idx" | tail -1
+"$B/prospect_engine" verify "$B/cov-idx" < "$COV_QUERIES" | tail -1
 unset LLVM_PROFILE_FILE
 "$LLVM/llvm-profdata" merge -sparse "$B"/prof/*.profraw -o "$B/all.profdata"
 # Union over the binaries: llvm-cov report keeps one binary's counters for an inline
 # function several instantiate, so a check one test reaches could read as unreached.
-binaries() { for b in "$1"/*_test "$1"/fuzz_*_replay "$1/parity" "$1/strata_engine"; do echo "$b"; done; }
+binaries() { for b in "$1"/*_test "$1"/fuzz_*_replay "$1/parity" "$1/prospect_engine"; do echo "$b"; done; }
 args=("$LLVM" "$B/all.profdata")
 while read -r b; do args+=("$b"); done < <(binaries "$B")
 if [[ -n "${COV_CONFIRM:-}" ]]; then

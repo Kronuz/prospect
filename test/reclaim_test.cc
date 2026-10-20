@@ -7,7 +7,7 @@
 //   2. The reopened head's pinned manifests are on disk and intact.
 //   3. The open succeeds; after reclaim() and a commit, every strata file on disk is named
 //      by a manifest on disk, and a storage budget's permit covers the bytes on disk.
-// STRATA_CRASH_POINTS sets how many crash points to cover per workload (default 400).
+// PROSPECT_CRASH_POINTS sets how many crash points to cover per workload (default 400).
 #include "prospect/index.hh"
 #include "strata/core/faultfs.hh"
 
@@ -112,7 +112,7 @@ static std::string intact(faultfs::filesystem& fs, const std::string& manifest) 
 
 int main() {
 	const std::uint64_t workloads = 12;
-	const char* env = std::getenv("STRATA_CRASH_POINTS");
+	const char* env = std::getenv("PROSPECT_CRASH_POINTS");
 	const std::uint64_t max_points = env ? std::strtoull(env, nullptr, 10) : 400;
 	std::size_t points = 0, bad_manifests = 0, bad_pins = 0, open_failures = 0, leftovers = 0, uncovered = 0, truncations = 0, manifests_checked = 0;
 	for (std::uint64_t seed = 0; seed < workloads; ++seed) {

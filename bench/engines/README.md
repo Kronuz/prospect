@@ -1,6 +1,6 @@
 # Baseline engines
 
-The baselines strata measures against, as engines of
+The baselines prospect measures against, as engines of
 [search-benchmark-game](https://github.com/quickwit-oss/search-benchmark-game) (MIT):
 
 - `tantivy-0.26-st`, `lucene-10.4.0-st`: the harness's Tantivy 0.26 and Lucene 10.4.0
@@ -13,6 +13,6 @@ The baselines strata measures against, as engines of
   is a reference for query speed (BENCHMARKS.md), not a ratchet target.
 
 Each engine except IResearch and PISA also has a `churn` mode that reads the comparative soak's op stream
-(`bench/soak/soak.py`). strata's own engine is `bench/phase2/engine`.
+(`bench/soak/soak.py`). prospect's own engine is `bench/phase2/engine`.
 
-`install.sh HARNESS` copies these and strata's engine into a harness checkout's `engines/`.
+`install.sh HARNESS` copies these and prospect's engine into a harness checkout's `engines/`.

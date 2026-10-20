@@ -5,17 +5,17 @@
 # quiet VM: anything else writing to the device counts too. Append-only, and with
 # REPLACES=1 a stream where half the documents replace an earlier one by id (keyed
 # engines). Results in ~/bench/results/wamp-NAME.
-#   STRATA_BUDGET_MB=N [ENGINES="strata lucene-10.4.0-st tantivy-0.26-st"] [DOCS=1000000|all] [REPLACES=1] write_amp.sh NAME
+#   PROSPECT_BUDGET_MB=N [ENGINES="prospect lucene-10.4.0-st tantivy-0.26-st"] [DOCS=1000000|all] [REPLACES=1] write_amp.sh NAME
 set -u
 name=${1:-run}
 cd ~/bench/search-benchmark-game
 out=~/bench/results/wamp-$name
 mkdir -p "$out"
 export PATH=$HOME/.cargo/bin:$PATH KEYED=1
-# Equal memory (T3): strata runs on the node budget whose peak RSS matches the reference
+# Equal memory (T3): prospect runs on the node budget whose peak RSS matches the reference
 # engine's (bench/calibrate_rss.sh); buffer settings are not comparable across engines.
-[ -n "${STRATA_BUDGET_MB:-}" ] || { echo "STRATA_BUDGET_MB is required: run calibrate_rss.sh"; exit 1; }
-export STRATA_BUDGET_MB
+[ -n "${PROSPECT_BUDGET_MB:-}" ] || { echo "PROSPECT_BUDGET_MB is required: run calibrate_rss.sh"; exit 1; }
+export PROSPECT_BUDGET_MB
 docs=${DOCS:-1000000}
 if [ "$docs" = all ]; then corpus=$PWD/corpus.json; else
 	[ -f corpus-$docs.json ] || head -n "$docs" corpus.json > corpus-$docs.json
@@ -41,14 +41,14 @@ PY
 fi
 device=$(lsblk -no PKNAME "$(df --output=source ~ | tail -1)" 2>/dev/null || basename "$(df --output=source ~ | tail -1)")
 written() { awk -v d="$device" '$3 == d { print $10 * 512 }' /proc/diskstats; }
-read -r -a engines <<< "${ENGINES:-strata lucene-10.4.0-st tantivy-0.26-st}"
+read -r -a engines <<< "${ENGINES:-prospect lucene-10.4.0-st tantivy-0.26-st}"
 [ -s "$corpus" ] || { echo "empty corpus $corpus"; exit 1; }
 failed=0
 for e in "${engines[@]}"; do
 	[ -f "$out/$e.result" ] && continue
 	dir=~/wamp-$e; rm -rf "$dir" && mkdir -p "$dir"
 	case $e in
-	strata) cmd=(engines/strata/build/strata_engine index "$dir") ;;
+	prospect) cmd=(engines/prospect/build/prospect_engine index "$dir") ;;
 	tantivy-0.26-st) cmd=(engines/tantivy-0.26-st/target/release/build_index "$dir") ;;
 	lucene-10.4.0-st) cmd=(java -server --add-modules jdk.incubator.vector --enable-native-access=ALL-UNNAMED -cp "engines/lucene-10.4.0-st/build/libs/search-index-benchmark-game-lucene-1.0-SNAPSHOT.jar:engines/lucene-10.4.0-st/build/dependencies/*" BuildIndex "$dir") ;;
 	*) echo "unknown engine $e"; continue ;;

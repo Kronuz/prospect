@@ -201,7 +201,7 @@ int main() {
 		}
 		const std::string bytes = w.flush({});
 		const char* path = PROSPECT_FIXTURES "/permuted.sx";
-		if (std::getenv("STRATA_WRITE_FIXTURES")) {
+		if (std::getenv("PROSPECT_WRITE_FIXTURES")) {
 			std::FILE* f = std::fopen(path, "wb");
 			std::fwrite(bytes.data(), 1, bytes.size(), f);
 			std::fclose(f);

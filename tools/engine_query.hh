@@ -1,6 +1,6 @@
 // The benchmark engine's query layer: the harness's query syntax, scorers built from it,
 // and queries over one segment or an index's segments with the snapshot's statistics.
-// Shared by tools/strata_engine.cc and its tests.
+// Shared by tools/prospect_engine.cc and its tests.
 //   words are optional, +word is required, -word is excluded, "a b" is a phrase.
 #pragma once
 

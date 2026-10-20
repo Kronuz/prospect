@@ -220,8 +220,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 	} else if (data[1] % 8 != 0) {
 		refresh_checksums(file);  // one input in eight checks detection instead
 	}
-	// STRATA_FUZZ_VERDICTS prints each input's verdict, to compare two builds' outcomes.
-	static const bool verdicts = std::getenv("STRATA_FUZZ_VERDICTS") != nullptr;
+	// PROSPECT_FUZZ_VERDICTS prints each input's verdict, to compare two builds' outcomes.
+	static const bool verdicts = std::getenv("PROSPECT_FUZZ_VERDICTS") != nullptr;
 	const char* verdict = "accepted";
 	try {
 		prospect::segment seg(file);

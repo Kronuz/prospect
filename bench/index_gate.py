@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Indexing ratchet rows over bench/index_trials.sh results (PLAN, "Indexing speed").
 
-  index_gate.py DIR [STRATA_BUDGET_MB]
+  index_gate.py DIR [PROSPECT_BUDGET_MB]
 
 DIR holds i{t}-{engine}.time (GNU time -v) and .bytes per trial. Per engine: the wall
 times, the median, the peak RSS (largest over trials), and the index bytes. Per trial,
-strata's throughput over the reference's is the reference's time over strata's; the
+prospect's throughput over the reference's is the reference's time over prospect's; the
 reference is the engine with the highest median throughput among the others. Across
 trials: the median ratio and the 95% bootstrap interval of the median. With a budget,
-the memory row checks strata's peak RSS against the budget plus 10%.
+the memory row checks prospect's peak RSS against the budget plus 10%.
 """
 
 import os
@@ -16,6 +16,10 @@ import random
 import re
 import statistics
 import sys
+
+# canon reads i{t}-strata.time, recorded before the rename, as prospect.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "phase2"))
+from gate import canon
 
 
 def seconds(text):
@@ -63,9 +67,9 @@ def main(argv):
                 with open(size) as f:
                     row["bytes"] = int(f.read().split()[0])
             if "time" in row:
-                runs.setdefault(m.group(2), {})[int(m.group(1))] = row
-    if "strata" not in runs:
-        sys.exit("no strata trials")
+                runs.setdefault(canon(m.group(2)), {})[int(m.group(1))] = row
+    if "prospect" not in runs:
+        sys.exit("no prospect trials")
     print("| Engine | Wall time (s, per trial) | Median | Peak RSS | Index bytes |")
     print("|---|---|---|---|---|")
     medians = {}
@@ -80,11 +84,11 @@ def main(argv):
         print(
             f"| {e} | {', '.join(f'{x:.1f}' for x in times)} | {medians[e]:.1f} | {rss / 2**30:.2f} GiB | {size / 1e6:.1f} MB |"
         )
-    others = [e for e in runs if e != "strata"]
+    others = [e for e in runs if e != "prospect"]
     if others:
         ref = min(others, key=lambda e: medians[e])
-        common = sorted(set(runs["strata"]) & set(runs[ref]))
-        ratios = [runs[ref][t]["time"] / runs["strata"][t]["time"] for t in common]
+        common = sorted(set(runs["prospect"]) & set(runs[ref]))
+        ratios = [runs[ref][t]["time"] / runs["prospect"][t]["time"] for t in common]
         med, lo, hi = interval(ratios)
         verdict = "passes" if lo >= 1.0 else "misses"
         print(
@@ -92,10 +96,10 @@ def main(argv):
             f"95% interval [{lo:.3f}, {hi:.3f}] over {len(ratios)} trials; the 1.0x target {verdict}."
         )
     if budget:
-        rss = max(r.get("rss", 0) for r in runs["strata"].values())
+        rss = max(r.get("rss", 0) for r in runs["prospect"].values())
         limit = budget * 1.1
         print(
-            f"Memory: strata's peak RSS {rss / 2**30:.2f} GiB against the budget plus 10%, "
+            f"Memory: prospect's peak RSS {rss / 2**30:.2f} GiB against the budget plus 10%, "
             f"{limit / 2**30:.2f} GiB: {'within' if rss <= limit else 'over'}."
         )
 

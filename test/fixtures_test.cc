@@ -1,6 +1,6 @@
 // Fixtures pinning format 13's bytes and the index digest (format-13.md F22): every commit must
 // reproduce them exactly. Regenerate only for an intended format change:
-// STRATA_WRITE_FIXTURES=1 fixtures_test.
+// PROSPECT_WRITE_FIXTURES=1 fixtures_test.
 #include "prospect/index.hh"
 #include "prospect/merge.hh"
 #include "prospect/reader.hh"
@@ -26,10 +26,10 @@ static int failures = 0;
 
 using namespace prospect;
 
-// Compares bytes with the named fixture, or writes it under STRATA_WRITE_FIXTURES.
+// Compares bytes with the named fixture, or writes it under PROSPECT_WRITE_FIXTURES.
 static void pin(const std::string& name, const std::string& bytes) {
 	const std::string path = std::string(PROSPECT_FIXTURES) + "/" + name;
-	if (std::getenv("STRATA_WRITE_FIXTURES")) {
+	if (std::getenv("PROSPECT_WRITE_FIXTURES")) {
 		std::FILE* f = std::fopen(path.c_str(), "wb");
 		std::fwrite(bytes.data(), 1, bytes.size(), f);
 		std::fclose(f);

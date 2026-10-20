@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A cached baseline from full harness runs, for nights that run only strata and an anchor.
+"""A cached baseline from full harness runs, for nights that run only prospect and an anchor.
 
   baseline.py OUT.json TRIAL [TRIAL...]        TRIAL: RESULTS_JSON[+RESULTS_JSON...]
 
@@ -15,9 +15,13 @@ pass nothing.
 import datetime
 import hashlib
 import json
+import os
 import statistics
 import sys
 from collections import defaultdict
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from gate import canon
 
 ANCHOR = "tantivy-0.26"
 DRIFT = 0.03
@@ -43,6 +47,7 @@ def main(argv):
                 results = json.load(f)["results"]
             for cmd, per in results.items():
                 for e, qs in per.items():
+                    e = canon(e)
                     for q in qs:
                         meta[(cmd, q["query"])] = {"tags": q["tags"]}
                         meta[(cmd, q["query"], e)] = q["count"]
