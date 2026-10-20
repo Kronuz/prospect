@@ -77,7 +77,7 @@ std::string profile_segment(std::uint64_t structures, std::uint32_t first = 1) {
 	return w.flush({});
 }
 
-using document_layout = strata::layout<strata::keys_plugin, strata::stored_plugin>;
+using strata::document_layout;
 using document_segment = strata::basic_segment<document_layout>;
 
 template <class S>
