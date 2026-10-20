@@ -1,9 +1,9 @@
 // Merges: the merge of an index's segments, after deletes and replacements, is the same
 // bytes as one flush of its live documents in docid order; and the result answers as the
 // sources did.
+#include "prospect/index.hh"
+#include "prospect/merge.hh"
 #include "strata/core/faultfs.hh"
-#include "strata/search/index.hh"
-#include "strata/search/merge.hh"
 #include "strata/core/merge_policy.hh"
 
 #include <algorithm>
@@ -20,7 +20,7 @@ static int failures = 0;
 		if (!(cond)) { std::fprintf(stderr, "%s:%d: CHECK(%s)\n", __FILE__, __LINE__, #cond); if (++failures > 20) std::exit(1); } \
 	} while (0)
 
-using namespace strata;
+using namespace prospect;
 
 static const std::array<char, 16> uuid = {'m', 'e', 'r', 'g', 'e', '-', 't', 'e', 's', 't', '-', 'u', 'u', 'i', 'd', '!'};
 
@@ -31,7 +31,7 @@ int main() {
 		faultfs::io io(fs);
 		index::options opts;
 		opts.key_prefix = "Q";
-		auto ix = strata::index::create(io, opts, uuid);
+		auto ix = prospect::index::create(io, opts, uuid);
 		// The model: each live docid's document, key, and version.
 		struct live {
 			document doc;
@@ -239,7 +239,7 @@ int main() {
 		merging.auto_merge = true;
 		index::options plain;
 		plain.key_prefix = "Q";
-		auto a = strata::index::create(ia, merging, uuid), b = strata::index::create(ib, plain, uuid);
+		auto a = prospect::index::create(ia, merging, uuid), b = prospect::index::create(ib, plain, uuid);
 		std::mt19937_64 r(8);
 		for (int i = 0; i < 2000; ++i) {
 			transaction t;
@@ -261,7 +261,7 @@ int main() {
 		CHECK(a.digest() == b.digest());
 		a.commit();
 		a.close();
-		a = strata::index::open(ia, merging);
+		a = prospect::index::open(ia, merging);
 		CHECK(a.digest() == b.digest());
 	}
 	// Forced merges on an index: force_merge_deletes rewrites only segments past its
@@ -271,7 +271,7 @@ int main() {
 		faultfs::io io(fs);
 		index::options o;
 		o.key_prefix = "Q";
-		auto ix = strata::index::create(io, o, uuid);
+		auto ix = prospect::index::create(io, o, uuid);
 		auto deleted_in = [&](const index::segment_view& v) {
 			std::uint64_t n = 0;
 			if (v.deleted) {

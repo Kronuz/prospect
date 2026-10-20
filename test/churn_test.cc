@@ -8,9 +8,9 @@
 //     and the deleted fraction stay bounded against a fresh index of the same documents,
 //     and do not trend upward.
 // STRATA_CHURN_CYCLES sets the number of churn cycles (default 8).
+#include "prospect/index.hh"
+#include "prospect/searcher.hh"
 #include "strata/core/faultfs.hh"
-#include "strata/search/index.hh"
-#include "strata/search/searcher.hh"
 
 #include <algorithm>
 #include <cstdio>
@@ -27,9 +27,9 @@ static int failures = 0;
 		if (!(cond)) { std::fprintf(stderr, "%s:%d: CHECK(%s)\n", __FILE__, __LINE__, #cond); if (++failures > 20) std::exit(1); } \
 	} while (0)
 
-using strata::document;
-using strata::operation;
-using strata::transaction;
+using prospect::document;
+using prospect::operation;
+using prospect::transaction;
 using strata::verdict;
 
 namespace faultfs = strata::faultfs;
@@ -73,7 +73,7 @@ static model_doc random_doc(std::mt19937_64& r, bool huge = false) {
 
 // Applies one change to the index and the model: add or replace (with the new version
 // the index assigns) or delete.
-static void put(strata::index& ix, model& m, const std::string& key, const model_doc* doc) {
+static void put(prospect::index& ix, model& m, const std::string& key, const model_doc* doc) {
 	transaction t;
 	operation o;
 	o.key = key;
@@ -95,15 +95,15 @@ static void put(strata::index& ix, model& m, const std::string& key, const model
 	}
 }
 
-static std::vector<strata::segment_snapshot> snapshot(const strata::index& ix) {
-	std::vector<strata::segment_snapshot> out;
+static std::vector<prospect::segment_snapshot> snapshot(const prospect::index& ix) {
+	std::vector<prospect::segment_snapshot> out;
 	for (const auto& s : ix.segments()) { out.push_back({s.seg, s.deleted, s.dead}); }
 	return out;
 }
 
 // The index against the model: live keys, versions, stored records, sampled term counts,
 // and the offline check.
-static void verify(const strata::index& ix, const model& m, std::mt19937_64& r, const char* when) {
+static void verify(const prospect::index& ix, const model& m, std::mt19937_64& r, const char* when) {
 	std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> live;  // docid -> (version, stored)
 	for (const auto& s : ix.segments()) {
 		for (strata::ordinal_t o = 0; o < s.seg->core().doc_count(); ++o) {
@@ -122,10 +122,10 @@ static void verify(const strata::index& ix, const model& m, std::mt19937_64& r, 
 		const std::string word = q < 10 ? "w" + std::to_string(r() % 200) : "h" + std::to_string(r() % 20000);
 		std::uint64_t want = 0;
 		for (const auto& [key, doc] : m) { want += std::binary_search(doc.words.begin(), doc.words.end(), word); }
-		const auto got = strata::search_count(segs, [&](const strata::segment& seg) -> strata::scorer_ptr {
-			auto info = seg.get<strata::inverted_plugin>().term(word);
+		const auto got = prospect::search_count(segs, [&](const prospect::segment& seg) -> prospect::scorer_ptr {
+			auto info = seg.get<prospect::inverted_plugin>().term(word);
 			if (!info) { return nullptr; }
-			return std::make_unique<strata::term_scorer>(seg.get<strata::inverted_plugin>(), *info);
+			return std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *info);
 		});
 		CHECK(got == want);
 	}
@@ -135,14 +135,14 @@ static void verify(const strata::index& ix, const model& m, std::mt19937_64& r, 
 }
 
 // The committed segments' bytes (call after a commit).
-static std::uint64_t segment_bytes(const strata::index& ix) {
+static std::uint64_t segment_bytes(const prospect::index& ix) {
 	std::uint64_t n = 0;
 	for (const auto& s : ix.manifest().segments) { n += s.size; }
 	return n;
 }
 
 int main() {
-	strata::index::options o;
+	prospect::index::options o;
 	o.key_prefix = "Q";
 	o.auto_merge = true;
 	std::size_t cycles = 8;
@@ -155,7 +155,7 @@ int main() {
 		strata::byte_budget memory(4 << 20);
 		o.budget = &memory;
 		o.buffer_share = 1 << 20;
-		auto ix = strata::index::create(io, o, uuid);
+		auto ix = prospect::index::create(io, o, uuid);
 		model m;
 		std::size_t next_key = 0;
 		for (std::size_t c = 0; c < cycles; ++c) {
@@ -206,7 +206,7 @@ int main() {
 			}
 			if (c % 4 == 3) {
 				ix.close();
-				ix = strata::index::open(io, o);
+				ix = prospect::index::open(io, o);
 				verify(ix, m, r, "a reopen");
 			}
 		}
@@ -220,11 +220,11 @@ int main() {
 		std::mt19937_64 r(7);
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		strata::index::options so;
+		prospect::index::options so;
 		so.key_prefix = "Q";
 		so.auto_merge = true;
 		so.policy.floor_bytes = 4096;  // tiers at this scale, as at 16 MiB on real ones
-		auto ix = strata::index::create(io, so, uuid);
+		auto ix = prospect::index::create(io, so, uuid);
 		model m;
 		for (int i = 0; i < 1000; ++i) {
 			const auto d = random_doc(r);
@@ -256,7 +256,7 @@ int main() {
 		// A fresh index of the same documents.
 		faultfs::filesystem ffs;
 		faultfs::io fio(ffs);
-		auto fresh = strata::index::create(fio, so, uuid);
+		auto fresh = prospect::index::create(fio, so, uuid);
 		model fm;
 		for (const auto& [key, doc] : m) { put(fresh, fm, key, &doc); }
 		fresh.commit();

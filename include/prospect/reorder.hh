@@ -3,8 +3,8 @@
 // order merge_segments writes. Documents are numbered by rank: their place in docid order.
 #pragma once
 
-#include "strata/search/bisection.hh"
-#include "strata/search/merge.hh"
+#include "prospect/bisection.hh"
+#include "prospect/merge.hh"
 
 #include <algorithm>
 #include <cstdint>
@@ -15,7 +15,7 @@
 #include <string_view>
 #include <vector>
 
-namespace strata::reorder {
+namespace prospect::reorder {
 
 struct settings {
 	std::uint32_t min_df = 4096;            // graph terms hold at least this many live documents
@@ -235,19 +235,16 @@ inline std::vector<merge_ref> order(std::span<const merge_source> sources, scrat
 	return out;
 }
 
-}  // namespace strata::reorder
-
-namespace strata {
+}  // namespace prospect::reorder
 
 // The search layout's order source: bisection over the inverted plugin's postings (D4).
 template <>
-struct order_source<search_layout> {
+struct strata::order_source<prospect::search_layout> {
 	static constexpr bool exists = true;
-	using settings = reorder::settings;
-	static std::vector<merge_ref> order(std::span<const merge_source> sources, scratch& file, const reorder::settings& set, const task::cancel_token* cancel,
+	using settings = prospect::reorder::settings;
+	static std::vector<merge_ref> order(std::span<const prospect::merge_source> sources, scratch& file, const prospect::reorder::settings& set, const task::cancel_token* cancel,
 		flush_charge* memory) {
-		return reorder::order(sources, file, set, cancel, memory);
+		return prospect::reorder::order(sources, file, set, cancel, memory);
 	}
 };
 
-}  // namespace strata

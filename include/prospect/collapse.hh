@@ -28,7 +28,7 @@
 
 #pragma once
 
-#include "strata/search/ordered.hh"
+#include "prospect/ordered.hh"
 #include "varint.hh"
 
 #include <algorithm>
@@ -44,7 +44,7 @@
 #include <utility>
 #include <vector>
 
-namespace strata::collapse {
+namespace prospect::collapse {
 
 namespace detail {
 
@@ -215,4 +215,4 @@ inline triple merge_collapsed(std::span<const triple> shards) noexcept {
 	return t;
 }
 
-}  // namespace strata::collapse
+}  // namespace prospect::collapse

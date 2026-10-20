@@ -1,8 +1,8 @@
 // The index on faultfs: keys and versions, replace and delete, atomic transactions,
 // explicit docids, replayed positions, commits surviving crashes, fencing, ENOSPC
 // recovery, retention, and fail-closed opens.
+#include "prospect/index.hh"
 #include "strata/core/faultfs.hh"
-#include "strata/search/index.hh"
 
 #include <cstdio>
 #include <cstdlib>
@@ -14,7 +14,7 @@
 namespace strata {
 // Test hooks no public option offers: a lower run cap (CR12, R28).
 struct index_test_access {
-	static void max_run_bytes(index& ix, std::uint64_t n) { ix.max_run_bytes_ = n; }
+	static void max_run_bytes(prospect::index& ix, std::uint64_t n) { ix.max_run_bytes_ = n; }
 };
 }  // namespace strata
 
@@ -24,7 +24,7 @@ static int failures = 0;
 		if (!(cond)) { std::fprintf(stderr, "%s:%d: CHECK(%s)\n", __FILE__, __LINE__, #cond); if (++failures > 30) std::exit(1); } \
 	} while (0)
 
-using namespace strata;
+using namespace prospect;
 using kv = std::pair<std::uint64_t, std::uint64_t>;
 
 static const std::array<char, 16> uuid = {'s', 't', 'r', 'a', 't', 'a', '-', 't', 'e', 's', 't', '-', 'u', 'u', 'i', 'd'};
@@ -64,7 +64,7 @@ static transaction tx(std::vector<operation> ops) {
 }
 
 // docid -> (version, stored) over every live document in every segment.
-static std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> contents(const strata::index& ix) {
+static std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> contents(const prospect::index& ix) {
 	std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> out;
 	for (const auto& s : ix.segments()) {
 		for (ordinal_t o = 0; o < s.seg->core().doc_count(); ++o) {
@@ -149,7 +149,7 @@ static bool throws(const std::function<void()>& f) {
 }
 
 int main() {
-	strata::index::options keyed;
+	prospect::index::options keyed;
 	keyed.key_prefix = "Q";
 	// The version map's table against std::map: inserts, finds, and removals (which shift
 	// entries back) with hashes narrowed so many values share one.
@@ -178,7 +178,7 @@ int main() {
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		auto ix = strata::index::create(io, keyed, uuid);
+		auto ix = prospect::index::create(io, keyed, uuid);
 		auto v = ix.apply(tx({add("Qa", "alpha"), add("Qb", "beta"), add("", "anonymous")}), {});
 		// A document without a key has version 0 (F9).
 		CHECK(v.result == verdict::accepted && v.docids == std::vector<std::uint64_t>({1, 2, 3}) && v.versions == std::vector<std::uint64_t>({1, 1, 0}));
@@ -201,7 +201,7 @@ int main() {
 		ix.commit();
 		const auto before = contents(ix);
 		ix.close();
-		ix = strata::index::open(io, keyed);
+		ix = prospect::index::open(io, keyed);
 		CHECK(contents(ix) == before);
 		CHECK(ix.last_docid() == 4 && ix.find_key("Qa") == kv(1, 2));
 	}
@@ -209,7 +209,7 @@ int main() {
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		auto ix = strata::index::create(io, keyed, uuid);
+		auto ix = prospect::index::create(io, keyed, uuid);
 		ix.apply(tx({add("Qa", "a")}), {});
 		auto v = ix.apply(tx({replace("Qa", "a2", 0)}), {});  // 0: must be absent
 		CHECK(v.result == verdict::version_conflict && v.current_version == 1);
@@ -282,7 +282,7 @@ int main() {
 		};
 		faultfs::filesystem fa, fb;
 		faultfs::io ia(fa), ib(fb);
-		auto a = strata::index::create(ia, keyed, uuid), b = strata::index::create(ib, keyed, uuid);
+		auto a = prospect::index::create(ia, keyed, uuid), b = prospect::index::create(ib, keyed, uuid);
 		std::mt19937_64 r(5);
 		const char* words[] = {"a", "b", "c", "rare", "the", "of"};
 		for (int round = 0; round < 3; ++round) {
@@ -374,7 +374,7 @@ int main() {
 		for (std::uint64_t seed = 0; seed < 12; ++seed) {
 			faultfs::filesystem fa, fb;
 			faultfs::io ia(fa), ib(fb);
-			auto a = strata::index::create(ia, same, uuid), b = strata::index::create(ib, whole, uuid);
+			auto a = prospect::index::create(ia, same, uuid), b = prospect::index::create(ib, whole, uuid);
 			std::mt19937_64 r(seed);
 			for (int round = 0; round < 3; ++round) {
 				for (int i = 0; i < 300; ++i) {
@@ -447,7 +447,7 @@ int main() {
 		for (std::uint64_t seed = 0; seed < 4; ++seed) {
 			faultfs::filesystem fa, fb, fc;
 			faultfs::io ia(fa), ib(fb), ic(fc);
-			auto a = strata::index::create(ia, same, uuid), b = strata::index::create(ib, same, uuid), c = strata::index::create(ic, whole, uuid);
+			auto a = prospect::index::create(ia, same, uuid), b = prospect::index::create(ib, same, uuid), c = prospect::index::create(ic, whole, uuid);
 			std::mt19937_64 r(seed);
 			for (int round = 0; round < 2; ++round) {
 				for (int i = 0; i < 300; ++i) {
@@ -497,17 +497,17 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		const std::string key = "Q" + std::string(std::size_t(1) << 20, 'k'), body = std::string(65531, 'b');
-		auto ix = strata::index::create(io, keyed, uuid);
+		auto ix = prospect::index::create(io, keyed, uuid);
 		ix.apply(tx({add(key, body), add("Qs", body + "x")}), {});
 		CHECK(ix.find_key(key) == kv(1, 1) && ix.find_key("Qs") == kv(2, 1));
 		ix.commit();
 		ix.apply(tx({add("Qt", body)}), {});
 		ix.commit();
 		ix.close();
-		ix = strata::index::open(io, keyed);
+		ix = prospect::index::open(io, keyed);
 		auto df = [&] {
 			std::uint64_t n = 0;
-			for (const auto& seg : ix.segments()) { if (auto t = seg.seg->get<strata::inverted_plugin>().term(body)) { n += t->df; } }
+			for (const auto& seg : ix.segments()) { if (auto t = seg.seg->get<prospect::inverted_plugin>().term(body)) { n += t->df; } }
 			return n;
 		};
 		CHECK(ix.find_key(key) == kv(1, 1) && ix.segments().size() == 2 && df() == 2);
@@ -520,7 +520,7 @@ int main() {
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		auto ix = strata::index::create(io, keyed, uuid);
+		auto ix = prospect::index::create(io, keyed, uuid);
 		auto v = ix.apply(tx({add("", "keyless")}), {});
 		const auto docid = v.docids[0];
 		for (std::uint64_t expected : {0u, 1u, 5u}) {
@@ -537,7 +537,7 @@ int main() {
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		auto ix = strata::index::create(io, keyed, uuid);
+		auto ix = prospect::index::create(io, keyed, uuid);
 		operation o;
 		o.type = operation::replace_docid;
 		o.docid = 100;
@@ -553,7 +553,7 @@ int main() {
 		ix.commit();
 		CHECK(ix.manifest().applied == files::position({3, 2}));
 		ix.close();
-		ix = strata::index::open(io, keyed);
+		ix = prospect::index::open(io, keyed);
 		CHECK(ix.manifest().applied == files::position({3, 2}) && ix.has_docid(100) && ix.has_docid(101));
 	}
 	// Commits survive crashes; uncommitted work does not, and nothing half-applied appears.
@@ -562,7 +562,7 @@ int main() {
 		faultfs::io io(fs);
 		std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> committed;
 		{
-			auto ix = strata::index::create(io, keyed, uuid);
+			auto ix = prospect::index::create(io, keyed, uuid);
 			ix.apply(tx({add("Qa", "a"), add("Qb", "b")}), {});
 			ix.commit();
 			ix.apply(tx({replace("Qa", "a2")}), {});
@@ -574,7 +574,7 @@ int main() {
 			if (seed % 2) { ix.refresh(); }
 		}
 		fs.crash(seed);
-		auto ix = strata::index::open(io, keyed);
+		auto ix = prospect::index::open(io, keyed);
 		CHECK(contents(ix) == committed);
 	}
 	// A crash during commit opens either the previous commit or the new one.
@@ -583,7 +583,7 @@ int main() {
 		faultfs::io io(fs);
 		std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> first, second;
 		{
-			auto ix = strata::index::create(io, keyed, uuid);
+			auto ix = prospect::index::create(io, keyed, uuid);
 			ix.apply(tx({add("Qa", "a"), add("Qb", "b")}), {});
 			ix.commit();
 			first = contents(ix);
@@ -598,7 +598,7 @@ int main() {
 			second = contents(ix);  // what the commit meant to make durable
 		}
 		fs.crash(seed);
-		auto ix = strata::index::open(io, keyed);
+		auto ix = prospect::index::open(io, keyed);
 		const auto now = contents(ix);
 		CHECK(now == first || now == second);
 	}
@@ -606,7 +606,7 @@ int main() {
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		auto ix = strata::index::create(io, keyed, uuid);
+		auto ix = prospect::index::create(io, keyed, uuid);
 		ix.apply(tx({add("Qa", "a")}), {});
 		ix.commit();
 		const auto good = contents(ix);
@@ -616,14 +616,14 @@ int main() {
 		CHECK(throws([&] { ix.apply(tx({add("Qc", "c")}), {}); }));  // fenced
 		fs.clear_faults();
 		ix.close();
-		ix = strata::index(strata::index::open(io, keyed));
+		ix = prospect::index(prospect::index::open(io, keyed));
 		CHECK(contents(ix) == good);
 	}
 	// ENOSPC while flushing keeps the buffer; the same commit succeeds once space returns.
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		auto ix = strata::index::create(io, keyed, uuid);
+		auto ix = prospect::index::create(io, keyed, uuid);
 		operation big = add("Qa", "a");
 		std::mt19937_64 r(9);
 		big.doc.stored.resize(20000);
@@ -647,7 +647,7 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		auto parallel = keyed; parallel.flush_threads = 2; parallel.flush_min_docs = 1;
-		auto ix = strata::index::create(io, parallel, uuid);
+		auto ix = prospect::index::create(io, parallel, uuid);
 		std::mt19937_64 r(10);
 		for (const char* key : {"Qa", "Qb"}) {
 			operation big = add(key, key + 1);  // the body term without the key prefix
@@ -674,7 +674,7 @@ int main() {
 	for (int fault = 0; fault < 2; ++fault) {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		auto ix = strata::index::create(io, keyed, uuid);
+		auto ix = prospect::index::create(io, keyed, uuid);
 		std::mt19937_64 r(10);
 		for (int i = 0; i < 4; ++i) {
 			operation o = add("Q" + std::to_string(i), "body");
@@ -705,7 +705,7 @@ int main() {
 			CHECK(ix.segments().size() == 1 && ix.digest() == digest);
 			ix.commit();
 			ix.close();
-			ix = strata::index(strata::index::open(io, keyed));
+			ix = prospect::index(prospect::index::open(io, keyed));
 			CHECK(contents(ix) == good && ix.segments().size() == 1);
 		} else {
 			fs.add_fault({faultfs::op::create, 1, EIO, false});
@@ -713,7 +713,7 @@ int main() {
 			CHECK(throws([&] { ix.commit(); }));  // fenced
 			fs.clear_faults();
 			ix.close();
-			ix = strata::index(strata::index::open(io, keyed));
+			ix = prospect::index(prospect::index::open(io, keyed));
 			CHECK(contents(ix) == good && ix.digest() == digest);
 		}
 	}
@@ -731,11 +731,11 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		byte_budget storage(~std::uint64_t(0) >> 1);
-		strata::index::options o = keyed;
+		prospect::index::options o = keyed;
 		o.storage = &storage;
 		o.auto_merge = true;
 		{
-			auto ix = strata::index::create(io, o, uuid);
+			auto ix = prospect::index::create(io, o, uuid);
 			for (int i = 0; i < 300; ++i) {
 				ix.apply(tx({add("Q" + std::to_string(i % 120), "body " + std::to_string(i))}), {});
 				if (i % 40 == 39) { ix.commit(); }
@@ -744,7 +744,7 @@ int main() {
 			CHECK(storage.used() > on_disk(fs) && storage.used() - on_disk(fs) < 4096);
 		}
 		CHECK(storage.used() == 0);
-		auto ix = strata::index::open(io, o);
+		auto ix = prospect::index::open(io, o);
 		CHECK(storage.used() > on_disk(fs) && storage.used() - on_disk(fs) < 4096);
 	}
 	// A failed truncation round (condition 18): a truncate or the file's sync fails mid-round,
@@ -754,13 +754,13 @@ int main() {
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
 			byte_budget storage(1ull << 40);
-			strata::index::options o = keyed;
+			prospect::index::options o = keyed;
 			o.storage = &storage;
 			o.reclaim_step = 4096;
 			o.reclaim_slice = 0;
 			o.retained_predecessors = 0;
 			o.identity_seed = 1;  // runs compare sizes: the manifest holds each footer CRC as LEB128 (F13-R41)
-			auto ix = strata::index::create(io, o, uuid);
+			auto ix = prospect::index::create(io, o, uuid);
 			std::mt19937_64 r(9);
 			std::string body(40000, '\0');
 			for (auto& c : body) { c = char(r()); }
@@ -801,7 +801,7 @@ int main() {
 		faultfs::io io(fs), other_io(other_fs);
 		const std::uint64_t capacity = 256 * 1024;
 		byte_budget storage(capacity);
-		strata::index::options o = keyed;
+		prospect::index::options o = keyed;
 		o.storage = &storage;
 		std::mt19937_64 r(21);
 		auto doc_of = [&](const std::string& key) {
@@ -810,11 +810,11 @@ int main() {
 			for (auto& c : op.doc.stored) { c = char(r()); }
 			return op;
 		};
-		auto other = strata::index::create(other_io, o, uuid);
+		auto other = prospect::index::create(other_io, o, uuid);
 		for (int i = 0; i < 30; ++i) { CHECK(other.apply(tx({doc_of("Qo" + std::to_string(i))}), {}).result == verdict::accepted); }
 		other.commit();
 		fs.set_capacity(capacity - storage.used());  // the disk this index has left
-		auto ix = strata::index::create(io, o, uuid);
+		auto ix = prospect::index::create(io, o, uuid);
 		int accepted = 0;
 		for (int i = 0; i < 200; ++i) {
 			const auto v = ix.apply(tx({doc_of("Q" + std::to_string(i))}), {});
@@ -850,7 +850,7 @@ int main() {
 		ix.commit();
 		CHECK(contents(ix).size() == before.size() + 1 && ix.segments().size() == ids.size());
 		ix.close();
-		ix = strata::index::open(io, o);
+		ix = prospect::index::open(io, o);
 		CHECK(contents(ix).size() == before.size() + 1);
 	}
 	// Admission covers what it admits (review findings 9-11): on a disk exactly the budget's
@@ -861,9 +861,9 @@ int main() {
 		faultfs::filesystem fs(capacity);
 		faultfs::io io(fs);
 		byte_budget storage(capacity);
-		strata::index::options o = keyed;
+		prospect::index::options o = keyed;
 		o.storage = &storage;
-		auto ix = strata::index::create(io, o, uuid);
+		auto ix = prospect::index::create(io, o, uuid);
 		int accepted = 0;
 		bool disk_full = false;
 		for (int i = 0; i < 1000; ++i) {
@@ -885,20 +885,20 @@ int main() {
 	// With `queued` bytes, an obsolete segment of one incompressible record of that size
 	// waits in the reclaim queue (reclaim_slice 0 keeps it there across the reopen), so
 	// admission drains it during the merge.
-	auto merge_rooms = [&](const strata::index::options& base, const std::function<void(strata::index&)>& build, std::uint64_t first, std::uint64_t last, std::uint64_t step,
+	auto merge_rooms = [&](const prospect::index::options& base, const std::function<void(prospect::index&)>& build, std::uint64_t first, std::uint64_t last, std::uint64_t step,
 						   std::uint64_t queued = 0) {
 		std::size_t merged = 0, refused = 0;
 		for (std::uint64_t room = first; room <= last; room += step) {
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
 			byte_budget storage(1ull << 40);
-			strata::index::options o = base;
+			prospect::index::options o = base;
 			o.storage = &storage;
 			if (queued) {
 				o.reclaim_slice = 0;
 				o.retained_predecessors = 0;
 			}
-			auto ix = strata::index::create(io, o, uuid);
+			auto ix = prospect::index::create(io, o, uuid);
 			if (queued) {
 				std::mt19937_64 r(queued);
 				operation big;
@@ -925,7 +925,7 @@ int main() {
 			// A merge streams its output, drawing on the budget before each chunk (review L5,
 			// as background merges do): with the disk holding just what the budget has, a write
 			// past the reservation would meet the disk's ENOSPC, not admission's refusal.
-			ix = strata::index::open(io, o);
+			ix = prospect::index::open(io, o);
 			fs.set_capacity(fs.used() + (tight.capacity() - tight.used()));  // the disk has what the budget has
 			try {
 				ix.merge(ids);
@@ -940,7 +940,7 @@ int main() {
 		CHECK(merged > 0 && (refused > 0 || queued));
 		if (!merged || (!refused && !queued)) { std::fprintf(stderr, "  merge rooms: %zu merged, %zu refused\n", merged, refused); }
 	};
-	merge_rooms(keyed, [&](strata::index& ix) {
+	merge_rooms(keyed, [&](prospect::index& ix) {
 		for (std::uint64_t base : {1ull, 1ull << 40}) {  // two segments, docids far apart
 			for (std::uint64_t d = 0; d < 2000; ++d) {
 				operation op;
@@ -954,7 +954,7 @@ int main() {
 	}, 80000, 92000, 200);
 	// Postings can grow when merged: a term on A's first document and B's 127 is a tail of
 	// small deltas in B and one block in the merge, spanning the jump across A.
-	merge_rooms({}, [&](strata::index& ix) {
+	merge_rooms({}, [&](prospect::index& ix) {
 		auto shared = [] {
 			document d;
 			for (int t = 0; t < 1000; ++t) { d.terms.push_back({"t" + std::to_string(t), 0, {}}); }
@@ -981,7 +981,7 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		byte_budget storage(1ull << 40);
-		strata::index::options o = keyed;
+		prospect::index::options o = keyed;
 		o.storage = &storage;
 		o.reclaim_slice = 0;
 		o.retained_predecessors = 0;
@@ -992,7 +992,7 @@ int main() {
 			for (auto& c : op.doc.stored) { c = char(r()); }
 			return op;
 		};
-		auto ix = strata::index::create(io, o, uuid);
+		auto ix = prospect::index::create(io, o, uuid);
 		ix.apply(tx({record("Qold", 31000)}), {});
 		ix.commit();
 		ix.apply(tx({erase("Qold")}), {});
@@ -1001,7 +1001,7 @@ int main() {
 		byte_budget tight(storage.used() + 2000);
 		ix.close();
 		o.storage = &tight;
-		ix = strata::index::open(io, o);
+		ix = prospect::index::open(io, o);
 		fs.set_capacity(fs.used() + (tight.capacity() - tight.used()));
 		CHECK(ix.apply(tx({record("Qnew", 10000)}), {}).result == verdict::accepted);
 		CHECK(!throws([&] { ix.commit(); }));
@@ -1017,7 +1017,7 @@ int main() {
 			faultfs::filesystem fs(80000);
 			faultfs::io io(fs);
 			byte_budget storage(80000);
-			strata::index::options o = keyed;
+			prospect::index::options o = keyed;
 			o.storage = &storage;
 			o.reclaim_step = 4096;
 			o.reclaim_slice = 8192;
@@ -1029,7 +1029,7 @@ int main() {
 				for (auto& c : op.doc.stored) { c = char(r()); }
 				return op;
 			};
-			auto ix = strata::index::create(io, o, uuid);
+			auto ix = prospect::index::create(io, o, uuid);
 			ix.apply(tx({big("Qold", 40000)}), {});
 			ix.commit();
 			ix.apply(tx({erase("Qold")}), {});
@@ -1047,9 +1047,9 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		byte_budget storage(1ull << 40);
-		strata::index::options o = keyed;
+		prospect::index::options o = keyed;
 		o.storage = &storage;
-		auto ix = strata::index::create(io, o, uuid);
+		auto ix = prospect::index::create(io, o, uuid);
 		fs.set_capacity(fs.used() + 3000);
 		fs.short_writes(97);
 		std::mt19937_64 r(44);
@@ -1074,7 +1074,7 @@ int main() {
 	// The same merges with an obsolete segment queued: the drain inside admission keeps the
 	// merge's reservation, and counts the freed bytes once their removal is durable
 	// (review L5, L8), so the disk never refuses.
-	const std::function<void(strata::index&)> growing = [&](strata::index& ix) {
+	const std::function<void(prospect::index&)> growing = [&](prospect::index& ix) {
 		auto shared = [] {
 			document d;
 			for (int t = 0; t < 1000; ++t) { d.terms.push_back({"t" + std::to_string(t), 0, {}}); }
@@ -1103,7 +1103,7 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		fs.short_writes(97);
-		auto ix = strata::index::create(io, keyed, uuid);
+		auto ix = prospect::index::create(io, keyed, uuid);
 		operation big = add("Qb", "b");
 		big.doc.stored.assign(2500, 'x');
 		ix.apply(tx({big, add("Qc", "c")}), {});
@@ -1121,7 +1121,7 @@ int main() {
 			ix.commit();
 		}
 		ix.close();
-		ix = strata::index::open(io, keyed);
+		ix = prospect::index::open(io, keyed);
 		CHECK(contents(ix).size() == 2);
 	}
 	CHECK(mid_file > 3);
@@ -1130,7 +1130,7 @@ int main() {
 	// returns.
 	{
 		auto run = [&](faultfs::filesystem& fs, faultfs::io& io, std::optional<std::uint64_t> room) {
-			auto ix = strata::index::create(io, keyed, uuid);
+			auto ix = prospect::index::create(io, keyed, uuid);
 			ix.apply(tx({add("Qa", "a"), add("Qb", "b"), add("Qc", "c")}), {});
 			ix.commit();
 			operation big = add("Qd", "d");
@@ -1167,7 +1167,7 @@ int main() {
 			failed += f;
 			CHECK(contents(ix) == want && ix.digest() == digest && ix.metadata().at("m").size() == 1500);
 			ix.close();
-			ix = strata::index::open(io, keyed);
+			ix = prospect::index::open(io, keyed);
 			CHECK(contents(ix) == want && ix.digest() == digest && ix.metadata().at("m").size() == 1500);
 		}
 		CHECK(failed > 20);
@@ -1177,7 +1177,7 @@ int main() {
 	// target changes, and the target stays unfenced.
 	{
 		auto build_source = [&](faultfs::filesystem& fs, faultfs::io& io) {
-			auto ix = strata::index::create(io, keyed, uuid);
+			auto ix = prospect::index::create(io, keyed, uuid);
 			for (int i = 0; i < 10; ++i) { ix.apply(tx({add("Q" + std::to_string(i), "s" + std::to_string(i))}), {}); }
 			ix.refresh();
 			for (int i = 10; i < 20; ++i) { ix.apply(tx({add("Q" + std::to_string(i), "s" + std::to_string(i))}), {}); }
@@ -1282,7 +1282,7 @@ int main() {
 			faultfs::filesystem sfs, tfs;
 			faultfs::io sio(sfs), tio(tfs);
 			auto [source, cp] = build_source(sfs, sio);
-			auto target = strata::index::create(tio, keyed, uuid);
+			auto target = prospect::index::create(tio, keyed, uuid);
 			target.apply(tx({add("Qt", "t")}), {});
 			target.commit();
 			const auto before = target.digest();
@@ -1300,18 +1300,18 @@ int main() {
 			CHECK(target.apply(tx({add("Qu", "u")}), {}).result == verdict::accepted);  // not fenced
 			target.commit();
 			target.close();
-			target = strata::index::open(tio, keyed);
+			target = prospect::index::open(tio, keyed);
 			CHECK(contents(target).size() == 2);
 		}
 		// The same checkpoint, undamaged, installs and reopens.
 		faultfs::filesystem sfs, tfs;
 		faultfs::io sio(sfs), tio(tfs);
 		auto [source, cp] = build_source(sfs, sio);
-		auto target = strata::index::create(tio, keyed, uuid);
+		auto target = prospect::index::create(tio, keyed, uuid);
 		target.install(sio, cp);
 		CHECK(target.digest() == source.digest() && target.metadata().at("m") == "v");
 		target.close();
-		target = strata::index::open(tio, keyed);
+		target = prospect::index::open(tio, keyed);
 		CHECK(target.digest() == source.digest());
 	}
 	// install's admission covers its commit's metadata file and manifest: on a disk of the
@@ -1319,7 +1319,7 @@ int main() {
 	{
 		faultfs::filesystem sfs;
 		faultfs::io sio(sfs);
-		auto source = strata::index::create(sio, keyed, uuid);
+		auto source = prospect::index::create(sio, keyed, uuid);
 		for (int s = 0; s < 3; ++s) {
 			std::vector<operation> ops;
 			for (int i = 0; i < 20; ++i) { ops.push_back(add("Q" + std::to_string(s * 20 + i), "x")); }
@@ -1346,7 +1346,7 @@ int main() {
 				byte_budget big(1ull << 40);
 				auto o = keyed;
 				o.storage = &big;
-				auto t = strata::index::create(io, o, uuid);
+				auto t = prospect::index::create(io, o, uuid);
 				t.apply(tx({add("Qt", "t")}), {});
 				t.commit();
 				capacity = big.used() + copy + slack;
@@ -1356,7 +1356,7 @@ int main() {
 			byte_budget storage(capacity);
 			auto o = keyed;
 			o.storage = &storage;
-			auto target = strata::index::create(tio, o, uuid);
+			auto target = prospect::index::create(tio, o, uuid);
 			target.apply(tx({add("Qt", "t")}), {});
 			target.commit();
 			try {
@@ -1375,7 +1375,7 @@ int main() {
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		auto ix = strata::index::create(io, keyed, uuid);
+		auto ix = prospect::index::create(io, keyed, uuid);
 		for (int i = 0; i < 6; ++i) {
 			ix.apply(tx({add("Q" + std::to_string(i), "x")}), {});
 			ix.commit();
@@ -1386,17 +1386,17 @@ int main() {
 		io.create_exclusive("seg-999.sx")->write_at(0, "orphan");
 		io.create_exclusive("manifest-1.tmp");
 		ix.close();
-		ix = strata::index(strata::index::open(io, keyed));
+		ix = prospect::index(prospect::index::open(io, keyed));
 		for (const auto& n : fs.list()) { CHECK(n != "seg-999.sx" && n != "manifest-1.tmp"); }
 		CHECK(contents(ix).size() == 6);
 		// recover --to an older retained manifest commits its content as a newer
 		// generation, so the rollback holds when the index reopens.
 		const std::uint64_t current = ix.manifest().generation;
 		ix.close();
-		ix = strata::index(strata::index::open(io, keyed, current - 2));
+		ix = prospect::index(prospect::index::open(io, keyed, current - 2));
 		CHECK(contents(ix).size() == 4 && ix.manifest().generation > current);
 		ix.close();
-		ix = strata::index(strata::index::open(io, keyed));
+		ix = prospect::index(prospect::index::open(io, keyed));
 		CHECK(contents(ix).size() == 4);
 	}
 	// A missing or changed file fails the open and changes nothing.
@@ -1404,7 +1404,7 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		{
-			auto ix = strata::index::create(io, keyed, uuid);
+			auto ix = prospect::index::create(io, keyed, uuid);
 			ix.apply(tx({add("Qa", "a")}), {});
 			ix.commit();
 		}
@@ -1415,13 +1415,13 @@ int main() {
 		}
 		const std::string kept(fs.view(seg));
 		io.remove(seg);
-		CHECK(throws([&] { strata::index::open(io, keyed); }));
+		CHECK(throws([&] { prospect::index::open(io, keyed); }));
 		CHECK(fs.list().size() == names.size() - 1);
 		auto f = io.create_exclusive(seg);
 		std::string changed = kept;
 		changed[changed.size() - 30] ^= 1;  // in the footer the manifest's CRC covers
 		f->write_at(0, changed);
-		CHECK(throws([&] { strata::index::open(io, keyed); }));
+		CHECK(throws([&] { prospect::index::open(io, keyed); }));
 	}
 	// The memory budget: permits draw and return bytes; two indexes sharing a small budget
 	// stay within it plus one transaction, flush into several segments, and reach the same
@@ -1447,8 +1447,8 @@ int main() {
 		opts.budget = &budget;
 		faultfs::filesystem fa, fb, fc, fd;
 		faultfs::io ia(fa), ib(fb), ic(fc), id(fd);
-		auto a = strata::index::create(ia, opts, uuid), b = strata::index::create(ib, opts, uuid);
-		auto ra = strata::index::create(ic, keyed, uuid), rb = strata::index::create(id, keyed, uuid);  // unbudgeted
+		auto a = prospect::index::create(ia, opts, uuid), b = prospect::index::create(ib, opts, uuid);
+		auto ra = prospect::index::create(ic, keyed, uuid), rb = prospect::index::create(id, keyed, uuid);  // unbudgeted
 		std::mt19937_64 r(4);
 		std::uint64_t worst = 0, largest = 0;
 		for (int i = 0; i < 4000; ++i) {
@@ -1524,7 +1524,7 @@ int main() {
 			opts.flush_min_docs = plain.flush_min_docs = 500;
 			faultfs::filesystem fa, fb;
 			faultfs::io ia(fa), ib(fb);
-			auto a = strata::index::create(ia, opts, uuid), ref = strata::index::create(ib, plain, uuid);
+			auto a = prospect::index::create(ia, opts, uuid), ref = prospect::index::create(ib, plain, uuid);
 			for (int i = 0; i < 6000; ++i) {
 				CHECK(a.apply(tx({rich(i)}), {}).result == verdict::accepted);
 				ref.apply(tx({rich(i)}), {});
@@ -1555,7 +1555,7 @@ int main() {
 		opts.budget = &tiny;
 		faultfs::filesystem fa, fb;
 		faultfs::io ia(fa), ib(fb);
-		auto a = strata::index::create(ia, opts, uuid), ref = strata::index::create(ib, keyed, uuid);
+		auto a = prospect::index::create(ia, opts, uuid), ref = prospect::index::create(ib, keyed, uuid);
 		for (int i = 0; i < 200; ++i) {
 			CHECK(a.apply(tx({rich(i)}), {}).result == verdict::accepted);
 			ref.apply(tx({rich(i)}), {});
@@ -1573,7 +1573,7 @@ int main() {
 		faultfs::io io(fs);
 		std::string seg_name;
 		{
-			auto ix = strata::index::create(io, keyed, uuid);
+			auto ix = prospect::index::create(io, keyed, uuid);
 			for (int i = 0; i < 400; ++i) { ix.apply(tx({replace("Q" + std::to_string(i % 150), "w" + std::to_string(i % 17))}), {}); }
 			ix.commit();
 			const auto r = ix.check();
@@ -1603,7 +1603,7 @@ int main() {
 		changed[at] = char(changed[at] ^ 0x10);
 		f->write_at(0, changed);
 		f->sync();
-		auto ix = strata::index::open(io, keyed);
+		auto ix = prospect::index::open(io, keyed);
 		CHECK(throws([&] { ix.check(); }));
 	}
 	// With auto_merge, a commit merges what its flush adds, so an index driven only by
@@ -1613,7 +1613,7 @@ int main() {
 		faultfs::io io(fs);
 		auto o = keyed;
 		o.auto_merge = true;
-		auto ix = strata::index::create(io, o, uuid);
+		auto ix = prospect::index::create(io, o, uuid);
 		for (int i = 0; i < 40; ++i) {
 			CHECK(ix.apply(tx({add("Q" + std::to_string(i), "body")}), {}).result == verdict::accepted);
 			ix.commit();
@@ -1636,14 +1636,14 @@ int main() {
 			for (auto& c : op.doc.stored) { c = char(r()); }
 			return op;
 		};
-		auto ids = [](const strata::index& ix) {
+		auto ids = [](const prospect::index& ix) {
 			std::set<std::uint64_t> out;
 			for (const auto& v : ix.segments()) { out.insert(v.id); }
 			return out;
 		};
 		// Builds a committed index with a big segment (Q0, Q1) and a small one (Q2), then
 		// deletes Q0 and Q1; returns the big segment's file name and size.
-		auto setup = [&](faultfs::io& io, strata::index& ix) {
+		auto setup = [&](faultfs::io& io, prospect::index& ix) {
 			CHECK(ix.apply(tx({big("Q0"), big("Q1")}), {}).result == verdict::accepted);
 			ix.refresh();
 			const auto first = ids(ix);
@@ -1657,7 +1657,7 @@ int main() {
 		{
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
-			auto ix = strata::index::create(io, o, uuid);
+			auto ix = prospect::index::create(io, o, uuid);
 			const auto [dead, size] = setup(io, ix);
 			CHECK(size > 80000);
 			const auto kept = ids(ix);
@@ -1678,14 +1678,14 @@ int main() {
 			auto so = o;
 			so.storage = &storage;
 			so.reclaim_slice = 0;
-			auto ix = strata::index::create(io, so, uuid);
+			auto ix = prospect::index::create(io, so, uuid);
 			const auto [dead, size] = setup(io, ix);
 			ix.commit();
 			CHECK(ix.reclaim_pending() == 1);
 			strata::byte_budget tight(storage.used() - size / 2);  // holds what is live, not the queued file
 			ix.close();
 			so.storage = &tight;
-			ix = strata::index::open(io, so);
+			ix = prospect::index::open(io, so);
 			CHECK(ix.reclaim_pending() == 1);
 			CHECK(ix.apply(tx({add("Q5", "new")}), {}).result == verdict::accepted);
 			CHECK(ix.reclaim_pending() == 0 && throws([&] { io.open_existing(dead); }));
@@ -1696,7 +1696,7 @@ int main() {
 		{
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
-			auto ix = strata::index::create(io, o, uuid);
+			auto ix = prospect::index::create(io, o, uuid);
 			setup(io, ix);
 			const auto from = fs.mutations();
 			ix.commit();
@@ -1709,7 +1709,7 @@ int main() {
 			faultfs::io io(fs);
 			std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> before, after;
 			{
-				auto ix = strata::index::create(io, o, uuid);
+				auto ix = prospect::index::create(io, o, uuid);
 				setup(io, ix);
 				before = contents(ix);  // the deletes are applied, not committed
 				fs.power_off_after(n);
@@ -1720,7 +1720,7 @@ int main() {
 				}
 			}
 			fs.crash(n);
-			auto ix = strata::index::open(io, o);
+			auto ix = prospect::index::open(io, o);
 			const auto now = contents(ix);
 			CHECK(now.size() == 3 || now == before);
 			ix.reclaim();
@@ -1747,7 +1747,7 @@ int main() {
 		faultfs::io io(fs);
 		std::uint64_t pinned, digest;
 		{
-			auto ix = strata::index::create(io, keyed, uuid);
+			auto ix = prospect::index::create(io, keyed, uuid);
 			ix.apply(tx({add("Qa", "a"), add("Qb", "b")}), {});
 			pinned = ix.checkpoint();
 			digest = ix.digest();
@@ -1762,7 +1762,7 @@ int main() {
 		};
 		flaky_io f(io);
 		f.arm(name, 2, error);  // the open's first read tracks the file; the second is retention's
-		auto ix = strata::index::open(f, keyed);
+		auto ix = prospect::index::open(f, keyed);
 		CHECK(f.fired() && on_disk() && ix.manifest().pinned == std::vector<std::uint64_t>{pinned});
 		f.arm(name, 1, error);
 		ix.apply(tx({add("Qd", "d")}), {});
@@ -1778,7 +1778,7 @@ int main() {
 		CHECK(on_disk() && manifests == 1 + keyed.retained_predecessors + 1 && ix.reclaim_pending() == 0);
 		faultfs::filesystem tfs;
 		faultfs::io tio(tfs);
-		auto target = strata::index::create(tio, keyed, uuid);
+		auto target = prospect::index::create(tio, keyed, uuid);
 		target.install(io, pinned);
 		CHECK(target.digest() == digest);
 	}
@@ -1789,7 +1789,7 @@ int main() {
 		faultfs::io io(fs);
 		std::string segment;
 		{
-			auto ix = strata::index::create(io, keyed, uuid);
+			auto ix = prospect::index::create(io, keyed, uuid);
 			ix.apply(tx({add("Qa", "a")}), {});
 			ix.commit();
 			segment = strata::index_detail::segment_name(ix.segments().at(0).id);
@@ -1801,7 +1801,7 @@ int main() {
 			flaky_io g(io);
 			g.arm(segment, 1, error, 2);
 			try {
-				strata::index::open(g, keyed);
+				prospect::index::open(g, keyed);
 			} catch (const strata::corrupt_index&) {
 				first = "corrupt";
 			} catch (const std::system_error& e) {
@@ -1811,7 +1811,7 @@ int main() {
 		CHECK(first == (error == EIO ? "corrupt" : "itself"));
 		std::string what = "none";
 		try {
-			strata::index::open(f, keyed);
+			prospect::index::open(f, keyed);
 		} catch (const strata::corrupt_index&) {
 			what = "corrupt";
 		} catch (const std::system_error& e) {
@@ -1824,7 +1824,7 @@ int main() {
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		auto ix = strata::index::create(io, keyed, uuid);
+		auto ix = prospect::index::create(io, keyed, uuid);
 		ix.apply(tx({add("Qa", "a")}), {});
 		const std::uint64_t pinned = ix.checkpoint();
 		const auto name = strata::index_detail::manifest_name(pinned);
@@ -1839,7 +1839,7 @@ int main() {
 		io.sync_directory();
 		ix.commit();
 		ix.close();
-		ix = strata::index::open(io, keyed);  // a fresh index reads the damaged manifest
+		ix = prospect::index::open(io, keyed);  // a fresh index reads the damaged manifest
 		auto strata_files = [&] {
 			std::size_t n = 0;
 			for (const auto& f : fs.list()) { n += strata::index_detail::parse_name(f).has_value(); }
@@ -1863,7 +1863,7 @@ int main() {
 		faultfs::io io(fs);
 		std::uint64_t listing;
 		{
-			auto ix = strata::index::create(io, keyed, uuid);
+			auto ix = prospect::index::create(io, keyed, uuid);
 			ix.apply(tx({add("Qa", "a")}), {});
 			const std::uint64_t pinned = ix.checkpoint();
 			for (int i = 0; i < 4; ++i) {
@@ -1882,7 +1882,7 @@ int main() {
 			CHECK(listing != 0);
 			for (const auto& n : fs.list()) { CHECK(n != strata::index_detail::manifest_name(pinned)); }
 		}
-		auto ix = strata::index::open(io, keyed, listing);
+		auto ix = prospect::index::open(io, keyed, listing);
 		for (int i = 0; i < 50; ++i) {
 			ix.apply(tx({replace("Qa", "c" + std::to_string(i))}), {});
 			ix.commit();
@@ -1898,13 +1898,13 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		byte_budget storage(1ull << 40);
-		strata::index::options o = keyed;
+		prospect::index::options o = keyed;
 		o.storage = &storage;
 		o.reclaim_slice = 0;
 		o.reclaim_step = 4096;
 		o.retained_predecessors = 0;
 		std::mt19937_64 r(14);
-		auto ix = strata::index::create(io, o, uuid);
+		auto ix = prospect::index::create(io, o, uuid);
 		operation big = add("Qold", "x");
 		big.doc.stored.resize(40000);
 		for (auto& c : big.doc.stored) { c = char(r()); }
@@ -1925,7 +1925,7 @@ int main() {
 		byte_budget tight(storage.used() + 1000);  // the merge needs the drain
 		ix.close();
 		o.storage = &tight;
-		ix = strata::index::open(io, o);
+		ix = prospect::index::open(io, o);
 		fs.add_fault({kind, 1, EIO, false});
 		try {
 			ix.merge(ids);
@@ -1942,12 +1942,12 @@ int main() {
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		strata::index::options o = keyed;
+		prospect::index::options o = keyed;
 		o.reclaim_slice = 0;
 		o.reclaim_step = 4096;
 		o.retained_predecessors = 0;
 		std::mt19937_64 r(15);
-		auto ix = strata::index::create(io, o, uuid);
+		auto ix = prospect::index::create(io, o, uuid);
 		operation big = add("Qold", "x");
 		big.doc.stored.resize(40000);
 		for (auto& c : big.doc.stored) { c = char(r()); }
@@ -1965,12 +1965,12 @@ int main() {
 	for (faultfs::op kind : {faultfs::op::truncate, faultfs::op::remove, faultfs::op::sync_directory}) {
 		std::size_t returned = 0;
 		for (std::uint64_t nth = 1; nth <= 6; ++nth) {
-			strata::index::options o = keyed;
+			prospect::index::options o = keyed;
 			o.retained_predecessors = 0;
 			o.reclaim_step = 4096;
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
-			auto ix = strata::index::create(io, o, uuid);
+			auto ix = prospect::index::create(io, o, uuid);
 			ix.apply(tx({add("Qa", std::string(40000, 'a'))}), {});
 			ix.commit();
 			ix.apply(tx({erase("Qa"), add("Qb", "b")}), {1, 1});
@@ -1992,7 +1992,7 @@ int main() {
 			CHECK(bytes < 20000);  // the 40,000-byte segment is gone
 			ix.close();
 			fs.crash(nth);
-			auto again = strata::index::open(io, o);
+			auto again = prospect::index::open(io, o);
 			CHECK(again.find_key("Qb") && !again.find_key("Qa"));
 		}
 		CHECK(returned > 0);
@@ -2002,7 +2002,7 @@ int main() {
 	for (std::uint64_t seed = 0; seed < 20; ++seed) {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		auto ix = strata::index::create(io, keyed, uuid);
+		auto ix = prospect::index::create(io, keyed, uuid);
 		for (int s = 0; s < 3; ++s) {
 			std::vector<operation> ops;
 			for (int i = 0; i < 4; ++i) { ops.push_back(add("Q" + std::to_string(s * 4 + i), "x")); }
@@ -2018,7 +2018,7 @@ int main() {
 		ix.commit();
 		ix.close();
 		fs.crash(seed);
-		CHECK(contents(strata::index::open(io, keyed)) == want);
+		CHECK(contents(prospect::index::open(io, keyed)) == want);
 	}
 	// Binding checks (review condition 4): an intact file from another generation or another
 	// index under a name the manifest gives, or a manifest resealed with entries its files
@@ -2027,7 +2027,7 @@ int main() {
 		// An index of keys Q0..Q9 with bodies of `letter`: two commits, so a segment carries
 		// two live-docs generations and the metadata two, all retained.
 		auto build = [&](faultfs::io& io, char letter, const std::array<char, 16>& id, int first_deleted) {
-			auto ix = strata::index::create(io, keyed, id);
+			auto ix = prospect::index::create(io, keyed, id);
 			std::vector<operation> ops;
 			for (int i = 0; i < 10; ++i) { ops.push_back(add("Q" + std::to_string(i), std::string(4, letter))); }
 			CHECK(ix.apply(tx(ops), {}).result == verdict::accepted);
@@ -2083,7 +2083,7 @@ int main() {
 			const auto before = snapshot_of(fs);
 			std::string got;
 			try {
-				strata::index::open(io, keyed);
+				prospect::index::open(io, keyed);
 			} catch (const std::exception& e) {
 				got = e.what();
 			}
@@ -2194,7 +2194,7 @@ int main() {
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		auto ix = strata::index::create(io, keyed, uuid);
+		auto ix = prospect::index::create(io, keyed, uuid);
 		strata::index_test_access::max_run_bytes(ix, 64 << 10);
 		CHECK(ix.apply(tx({add("Qa", "a")}), {}).result == verdict::accepted);
 		std::string text;
@@ -2224,10 +2224,10 @@ int main() {
 		for (std::uint64_t seed = 1; seed <= 3; ++seed) {
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
-			strata::index::options opts;
+			prospect::index::options opts;
 			opts.key_prefix = "Q";
 			opts.flush_threads = flush_threads;
-			auto ix = strata::index::create(io, opts, uuid);
+			auto ix = prospect::index::create(io, opts, uuid);
 			std::mt19937_64 rng(seed);
 			std::map<std::string, std::string> model;
 			auto key_of = [](std::uint64_t n) { return "Q" + std::to_string(1000 + n); };
@@ -2248,7 +2248,7 @@ int main() {
 						ix.commit();
 						if (step % 7 == 0) {
 							ix.close();
-							ix = strata::index::open(io, opts);
+							ix = prospect::index::open(io, opts);
 						}
 				}
 				for (const std::string& k : {key, key_of(rng() % 60), key_of(9999)}) {
@@ -2265,9 +2265,9 @@ int main() {
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
-		strata::index::options opts;
+		prospect::index::options opts;
 		opts.key_prefix = "Q";
-		auto ix = strata::index::create(io, opts, uuid);
+		auto ix = prospect::index::create(io, opts, uuid);
 		CHECK(ix.apply(tx({add("Qa", "alpha")}), {}).result == verdict::accepted);
 		ix.commit();
 		ix.close();

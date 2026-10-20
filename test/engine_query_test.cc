@@ -9,9 +9,9 @@
 //     up twice per segment (once for its snapshot df, once for the scorer): the same hits,
 //     scores, and counts, bit for bit; and find_term plus complete_impacts is term().
 #include "engine_query.hh"
+#include "prospect/index.hh"
+#include "prospect/writer.hh"
 #include "strata/core/faultfs.hh"
-#include "strata/search/index.hh"
-#include "strata/search/writer.hh"
 
 #include <algorithm>
 #include <cmath>
@@ -28,7 +28,7 @@ static int failures = 0;
 		if (!(cond)) { std::fprintf(stderr, "%s:%d: CHECK(%s)\n", __FILE__, __LINE__, #cond); if (++failures > 20) std::exit(1); } \
 	} while (0)
 
-using namespace strata;
+using namespace prospect;
 
 static const std::array<char, 16> uuid = {'e', 'n', 'g', 'i', 'n', 'e', 'q', 'u', 'e', 'r', 'y', 't', 'e', 's', 't', '1'};
 static const char* vocab[] = {"a", "b", "c", "d", "e", "f", "rare"};
@@ -65,7 +65,7 @@ static std::string random_query(std::mt19937_64& r) {
 	return q;
 }
 
-static std::vector<segment_snapshot> snapshot(const strata::index& ix) {
+static std::vector<segment_snapshot> snapshot(const prospect::index& ix) {
 	std::vector<segment_snapshot> out;
 	for (const auto& s : ix.segments()) { out.push_back({s.seg, s.deleted, s.dead}); }
 	return out;
@@ -82,7 +82,7 @@ struct reference_stats {
 		auto [it, fresh] = df.try_emplace(term, 0);
 		if (fresh) {
 			for (const auto& s : segs) {
-				if (auto info = s.seg->get<strata::inverted_plugin>().term(term)) { it->second += info->df; }
+				if (auto info = s.seg->get<prospect::inverted_plugin>().term(term)) { it->second += info->df; }
 			}
 		}
 		return it->second;
@@ -90,25 +90,25 @@ struct reference_stats {
 };
 
 static scorer_ptr reference_clause(const segment& seg, const std::vector<std::string>& clause, double boost, scheme sch, reference_stats& snap) {
-	std::vector<format::term_info> infos;
+	std::vector<prospect::format::term_info> infos;
 	for (const auto& t : clause) {
-		auto info = seg.get<strata::inverted_plugin>().term(t);
+		auto info = seg.get<prospect::inverted_plugin>().term(t);
 		if (!info) { return nullptr; }
 		infos.push_back(*info);
 	}
 	const bool xapian = sch == scheme::bm25_xapian;
 	if (infos.size() == 1) {
 		const auto df = snap.of(clause[0]);
-		return std::make_unique<term_scorer>(seg.get<strata::inverted_plugin>(), infos[0], xapian ? weight::bm25_xapian(snap.st, df, std::uint32_t(boost)) : weight::bm25(snap.st, df, boost));
+		return std::make_unique<term_scorer>(seg.get<prospect::inverted_plugin>(), infos[0], xapian ? weight::bm25_xapian(snap.st, df, std::uint32_t(boost)) : weight::bm25(snap.st, df, boost));
 	}
 	if (!xapian) {
 		std::vector<std::uint64_t> dfs;
 		for (const auto& t : clause) { dfs.push_back(snap.of(t)); }
-		return std::make_unique<phrase_scorer>(seg.get<strata::inverted_plugin>(), infos, std::vector<weight>{}, 0, &snap.st, dfs);
+		return std::make_unique<phrase_scorer>(seg.get<prospect::inverted_plugin>(), infos, std::vector<weight>{}, 0, &snap.st, dfs);
 	}
 	std::vector<weight> weights;
 	for (std::size_t k = 0; k < infos.size(); ++k) { weights.push_back(weight::bm25_xapian(snap.st, snap.of(clause[k]))); }
-	return std::make_unique<phrase_scorer>(seg.get<strata::inverted_plugin>(), infos, std::move(weights));
+	return std::make_unique<phrase_scorer>(seg.get<prospect::inverted_plugin>(), infos, std::move(weights));
 }
 
 static scorer_ptr reference_build(const segment& seg, const engine::parsed& q, scheme sch, reference_stats& snap) {
@@ -193,7 +193,7 @@ static void check_segment_independent(std::mt19937_64& r) {
 	faultfs::io io(fs);
 	index::options opts;
 	opts.auto_merge = false;
-	auto ix = strata::index::create(io, opts, uuid);
+	auto ix = prospect::index::create(io, opts, uuid);
 	std::vector<document> probes;
 	for (int i = 0; i < 200; ++i) {
 		document d;
@@ -246,7 +246,7 @@ static void check_interleaved(std::mt19937_64& r) {
 	faultfs::io io(fs);
 	index::options opts;
 	opts.auto_merge = false;
-	auto ix = strata::index::create(io, opts, uuid);
+	auto ix = prospect::index::create(io, opts, uuid);
 	std::vector<document> pool;
 	for (int i = 0; i < 40; ++i) { pool.push_back(random_doc(r)); }
 	for (std::size_t d = 0; d < 3000; ++d) {
@@ -293,7 +293,7 @@ int main() {
 		faultfs::io io(fs);
 		index::options opts;
 		opts.auto_merge = false;
-		auto ix = strata::index::create(io, opts, uuid);
+		auto ix = prospect::index::create(io, opts, uuid);
 		const std::size_t docs = 2000 + r() % 3000;
 		const bool deletes = round % 2 == 1;
 		std::vector<document> all;
@@ -337,12 +337,12 @@ int main() {
 		// find_term plus complete_impacts is term(), field by field.
 		for (const auto& s : segs) {
 			for (const char* t : vocab) {
-				const auto full = s.seg->get<strata::inverted_plugin>().term(t);
-				auto lazy = s.seg->get<strata::inverted_plugin>().find_term(t);
+				const auto full = s.seg->get<prospect::inverted_plugin>().term(t);
+				auto lazy = s.seg->get<prospect::inverted_plugin>().find_term(t);
 				CHECK(bool(full) == bool(lazy));
 				if (!full || !lazy) { continue; }
 				CHECK(lazy->df == full->df && lazy->cf == full->cf && lazy->flags == full->flags);
-				s.seg->get<strata::inverted_plugin>().complete_impacts(*lazy);
+				s.seg->get<prospect::inverted_plugin>().complete_impacts(*lazy);
 				CHECK(lazy->postings == full->postings && lazy->positions == full->positions && lazy->single_wdf == full->single_wdf);
 				CHECK(lazy->postings_length == full->postings_length && lazy->positions_length == full->positions_length);
 				CHECK(lazy->impacts.size() == full->impacts.size());

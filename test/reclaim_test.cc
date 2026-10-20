@@ -8,8 +8,8 @@
 //   3. The open succeeds; after reclaim() and a commit, every strata file on disk is named
 //      by a manifest on disk, and a storage budget's permit covers the bytes on disk.
 // STRATA_CRASH_POINTS sets how many crash points to cover per workload (default 400).
+#include "prospect/index.hh"
 #include "strata/core/faultfs.hh"
-#include "strata/search/index.hh"
 
 #include <cstdio>
 #include <cstdlib>
@@ -17,7 +17,7 @@
 #include <random>
 #include <set>
 
-using namespace strata;
+using namespace prospect;
 
 static const std::array<char, 16> uuid_a = {'s', 't', 'r', 'a', 't', 'a', '-', 'r', 'e', 'c', 'l', 'a', 'i', 'm'};
 
@@ -92,7 +92,7 @@ static std::string intact(faultfs::filesystem& fs, const std::string& manifest) 
 			const auto name = index_detail::segment_name(r.id);
 			const std::string_view b = fs.view(name);
 			if (b.size() != r.size) { return name + " size"; }
-			if (format::decode_footer(b).toc_crc != r.footer_crc) { return name + " footer"; }
+			if (strata::format::decode_footer(b).toc_crc != r.footer_crc) { return name + " footer"; }
 			if (r.live.generation) {
 				const auto ln = index_detail::live_name(r.id, r.live.generation);
 				const std::string_view l = fs.view(ln);
@@ -126,7 +126,7 @@ int main() {
 			o.storage = budgeted ? storage : nullptr;
 			return o;
 		};
-		auto run = [&](strata::index& ix) {
+		auto run = [&](prospect::index& ix) {
 			std::deque<std::uint64_t> pins;
 			std::uint64_t log = 0;
 			for (const auto& s : w) {
@@ -187,7 +187,7 @@ int main() {
 				if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::segment) {
 					// A segment shorter than its footer claims was truncated by reclaim().
 					try {
-						(void)format::decode_footer(fs.view(n));
+						(void)strata::format::decode_footer(fs.view(n));
 					} catch (const std::exception&) {
 						++truncations;
 					}

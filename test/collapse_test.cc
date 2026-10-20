@@ -3,7 +3,7 @@
 // bounds; binary keys keep stored order where numeric and bytes keys are canonical; shards
 // collapsed and merged equal one collapse of the union, and their count triples merge by
 // D9's rule.
-#include "strata/search/collapse.hh"
+#include "prospect/collapse.hh"
 
 #include <algorithm>
 #include <cstdio>
@@ -21,7 +21,7 @@ static int failures = 0;
 #define CHECK(cond) \
 	do { if (!(cond)) { std::fprintf(stderr, "%s:%d: CHECK(%s)\n", __FILE__, __LINE__, #cond); if (++failures > 20) std::exit(1); } } while (0)
 
-namespace co = strata::collapse;
+namespace co = prospect::collapse;
 
 namespace {
 

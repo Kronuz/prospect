@@ -28,8 +28,9 @@
 
 #include "bitpack.hh"
 #include "docset.hh"
+#include "prospect/format.hh"
+#include "prospect/strata.hh"
 #include "strata/core/reader.hh"
-#include "strata/search/format.hh"
 #include "termdict.hh"
 
 #include <algorithm>
@@ -47,7 +48,7 @@
 #include <string_view>
 #include <vector>
 
-namespace strata {
+namespace prospect {
 
 static_assert(docset::no_more_docs == no_more_docs, "the ordinal sentinel is docset's");
 
@@ -138,11 +139,17 @@ class inverted_builder;
 class inverting_buffer;
 struct inverted_plugin;
 using search_layout = layout<inverted_plugin, keys_plugin, stored_plugin>;
+
+}  // namespace prospect
+
 // Declared here, defined in reorder.hh: a translation unit that names the search layout without
 // reorder.hh fails to compile rather than take the primary's "no order source" and a different
 // index_options layout than the rest of the program.
 template <>
-struct order_source<search_layout>;
+struct strata::order_source<prospect::search_layout>;
+
+namespace prospect {
+
 using segment = basic_segment<search_layout>;
 
 // Terms, postings, positions, lengths, and norms.
@@ -1452,4 +1459,4 @@ inline void inverted_plugin::check(const reader& inverted, const core_segment& c
 	});
 }
 
-}  // namespace strata
+}  // namespace prospect

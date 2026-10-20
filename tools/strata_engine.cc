@@ -10,20 +10,20 @@
 //   strata_engine bench DIR COMMAND RUNS [bm25_xapian] < queries.txt
 //                                            per query: fastest of RUNS in-process runs, in µs,
 //                                            on a segment file or an index's segments
-//   strata_engine churn DIR < ops            the soak's op stream through strata::index (bench/soak):
+//   strata_engine churn DIR < ops            the soak's op stream through prospect::index (bench/soak):
 //                                            "P\tid\ttext" upserts, "D\tid" deletes, "C" commits and
 //                                            prints "C\tµs\tsegments", "Q\tCOMMAND\tquery" prints
 //                                            "Q\tµs\tresult"
 // Query syntax: words are optional, +word is required, -word is excluded, "a b" is a phrase.
 #include "completion/posix.h"
 #include "engine_query.hh"
+#include "prospect/check.hh"
+#include "prospect/index.hh"
+#include "prospect/search.hh"
+#include "prospect/searcher.hh"
+#include "prospect/writer.hh"
 #include "residency.hh"
 #include "strata/core/budget.hh"
-#include "strata/search/index.hh"
-#include "strata/search/check.hh"
-#include "strata/search/search.hh"
-#include "strata/search/searcher.hh"
-#include "strata/search/writer.hh"
 
 #include <algorithm>
 #include <array>
@@ -92,7 +92,7 @@ private:
 // Fills d in place (its strings and vectors keep their capacity): the key, the text,
 // which the index splits into its words at positions 1, 2, ... (split_text), and the id
 // as the stored record.
-void fill_document(strata::document& d, std::string_view key, std::string_view id, std::string_view text) {
+void fill_document(prospect::document& d, std::string_view key, std::string_view id, std::string_view text) {
 	d.key.assign(key);
 	d.terms.clear();
 	d.text.assign(text);
@@ -121,7 +121,7 @@ int index(const std::string& dir) {
 	std::filesystem::create_directories(dir);
 	std::filesystem::permissions(dir, std::filesystem::perms::group_write | std::filesystem::perms::others_write, std::filesystem::perm_options::remove);
 	kronuz::journal::PosixIO io(dir, 0600, host_io);
-	strata::index::options o;
+	prospect::index::options o;
 	o.key_prefix = "Q";
 	const char* mb = std::getenv("STRATA_BUFFER_MB");
 	o.buffer_share = (mb ? std::strtoull(mb, nullptr, 10) : 256) << 20;
@@ -139,10 +139,10 @@ int index(const std::string& dir) {
 	// STRATA_IDENTITY_SEED: segment ids from a fixed base, so runs compare byte for byte.
 	if (const char* seed = std::getenv("STRATA_IDENTITY_SEED")) { o.identity_seed = std::strtoull(seed, nullptr, 10); }
 	const std::array<char, 16> uuid{'s', 't', 'r', 'a', 't', 'a', '-', 'b', 'e', 'n', 'c', 'h'};
-	auto ix = strata::index::create(io, o, uuid);
+	auto ix = prospect::index::create(io, o, uuid);
 	warn_trust(ix);
 	// The batch's operations are reused, so their strings and vectors keep their capacity.
-	strata::transaction t;
+	prospect::transaction t;
 	std::size_t batched = 0;
 	auto apply = [&] {
 		if (!batched) { return; }
@@ -160,8 +160,8 @@ int index(const std::string& dir) {
 	for (LineReader in; in.next(line);) {
 		if (line.empty()) { continue; }
 		if (batched == t.ops.size()) { t.ops.emplace_back(); }
-		strata::operation& op = t.ops[batched++];
-		op.type = strata::operation::replace_key;
+		prospect::operation& op = t.ops[batched++];
+		op.type = prospect::operation::replace_key;
 		const auto id = id_field(line);
 		op.key.assign("Q");
 		op.key.append(id);
@@ -177,9 +177,9 @@ int index(const std::string& dir) {
 		const auto step = std::strtoull(every, nullptr, 10);
 		for (std::uint64_t i = 0; i < keys.size(); i += step, ++deleted) {
 			if (batched == t.ops.size()) { t.ops.emplace_back(); }
-			strata::operation& op = t.ops[batched++];
-			op = strata::operation{};
-			op.type = strata::operation::delete_key;
+			prospect::operation& op = t.ops[batched++];
+			op = prospect::operation{};
+			op.type = prospect::operation::delete_key;
 			op.key = keys[i];
 			if (batched == 1000) { apply(); }
 		}
@@ -195,12 +195,12 @@ int index(const std::string& dir) {
 // bisects on that many threads.
 int merge(const std::string& dir) {
 	kronuz::journal::PosixIO io(dir, 0600, host_io);
-	strata::index::options o;
+	prospect::index::options o;
 	o.key_prefix = "Q";
-	if (const char* r = std::getenv("STRATA_REORDER"); r && std::string_view(r) == "0") { o.reordering = strata::index::options::reorder_mode::off; }
+	if (const char* r = std::getenv("STRATA_REORDER"); r && std::string_view(r) == "0") { o.reordering = prospect::index::options::reorder_mode::off; }
 	if (const char* t = std::getenv("STRATA_REORDER_THREADS")) { o.reorder_settings.bisection.threads = std::uint32_t(std::max(1L, std::strtol(t, nullptr, 10))); }
 	if (const char* seed = std::getenv("STRATA_IDENTITY_SEED")) { o.identity_seed = std::strtoull(seed, nullptr, 10); }
-	auto ix = strata::index::open(io, o);
+	auto ix = prospect::index::open(io, o);
 	warn_trust(ix);
 	const auto start = std::chrono::steady_clock::now();
 	ix.force_merge(1);
@@ -211,10 +211,10 @@ int merge(const std::string& dir) {
 	return 0;
 }
 
-strata::segment open(const std::string& dir, residency::file& file) {
+prospect::segment open(const std::string& dir, residency::file& file) {
 	file = residency::file::open(dir + "/segment.sx");
 	auto bytes = file.view({0, file.size()});
-	return strata::segment(std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
+	return prospect::segment(std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size()));
 }
 
 int serve(const std::string& dir) {
@@ -222,20 +222,20 @@ int serve(const std::string& dir) {
 	std::cout.setf(std::ios::unitbuf);
 	if (!std::filesystem::exists(dir + "/segment.sx")) {  // an index of segments (Phase 3)
 		kronuz::journal::PosixIO io(dir, 0600, host_io);
-		strata::index::options o;
+		prospect::index::options o;
 		o.key_prefix = "Q";
-		auto ix = strata::index::open(io, o);
+		auto ix = prospect::index::open(io, o);
 		warn_trust(ix);
-		std::vector<strata::segment_snapshot> segs;
+		std::vector<prospect::segment_snapshot> segs;
 		for (const auto& v : ix.segments()) { segs.push_back({v.seg, v.deleted, v.dead}); }
 		for (LineReader in; in.next(line);) {
 			const std::size_t tab = line.find('\t');
-			std::cout << run(std::span<const strata::segment_snapshot>(segs), std::string_view(line.data(), tab), std::string_view(line).substr(tab + 1)) << '\n';
+			std::cout << run(std::span<const prospect::segment_snapshot>(segs), std::string_view(line.data(), tab), std::string_view(line).substr(tab + 1)) << '\n';
 		}
 		return 0;
 	}
 	residency::file file;
-	strata::segment seg = open(dir, file);
+	prospect::segment seg = open(dir, file);
 	for (LineReader in; in.next(line);) {
 		const std::size_t tab = line.find('\t');
 		std::cout << run(seg, std::string_view(line.data(), tab), std::string_view(line).substr(tab + 1)) << '\n';
@@ -245,9 +245,9 @@ int serve(const std::string& dir) {
 
 int terms(const std::string& dir) {
 	residency::file file;
-	strata::segment seg = open(dir, file);
+	prospect::segment seg = open(dir, file);
 	std::ios::sync_with_stdio(false);
-	seg.get<strata::inverted_plugin>().scan_terms([](std::string_view key, const strata::format::term_info& info) {
+	seg.get<prospect::inverted_plugin>().scan_terms([](std::string_view key, const prospect::format::term_info& info) {
 		std::cout << key << '\t' << info.df << '\n';
 		return true;
 	});
@@ -257,7 +257,7 @@ int terms(const std::string& dir) {
 // Every section's kind and length in bytes, in file order, then the file's size.
 int sections(const std::string& dir) {
 	residency::file file;
-	strata::segment seg = open(dir, file);
+	prospect::segment seg = open(dir, file);
 	for (const auto& e : seg.core().sections()) { std::cout << strata::format::name_of(e.kind) << '\t' << e.length << '\n'; }
 	std::cout << "file\t" << file.size() << '\n';
 	return 0;
@@ -268,38 +268,38 @@ int sections(const std::string& dir) {
 // (negative when prefix sharing saves more than its block headers cost).
 int dictstats(const std::string& dir) {
 	residency::file file;
-	strata::segment seg = open(dir, file);
+	prospect::segment seg = open(dir, file);
 	auto leb = [](std::uint64_t v) { std::uint64_t n = 1; while (v >= 128) { v >>= 7; ++n; } return n; };
 	std::uint64_t terms = 0, single = 0, absolute = 0, keys = 0, values = 0, flags = 0, df = 0, cf = 0, ordinal = 0, impacts = 0;
 	std::uint64_t postings_length = 0, postings_offset = 0, positions_length = 0, positions_offset = 0;
-	strata::format::term_run run;
-	seg.get<strata::inverted_plugin>().dictionary().scan("", [&](std::string_view key, std::string_view value) {
-		const auto t = strata::format::decode_term_info(value, run);
-		const bool abs = t.flags & strata::format::absolute;
+	prospect::format::term_run run;
+	seg.get<prospect::inverted_plugin>().dictionary().scan("", [&](std::string_view key, std::string_view value) {
+		const auto t = prospect::format::decode_term_info(value, run);
+		const bool abs = t.flags & prospect::format::absolute;
 		// The cursors an absolute entry stored: where its own bytes start.
-		strata::format::term_run run_before;
-		run_before.postings = (t.flags & strata::format::single_posting) ? run.postings : t.postings;
-		run_before.positions = (t.flags & strata::format::no_positions) ? run.positions : t.positions;
+		prospect::format::term_run run_before;
+		run_before.postings = (t.flags & prospect::format::single_posting) ? run.postings : t.postings;
+		run_before.positions = (t.flags & prospect::format::no_positions) ? run.positions : t.positions;
 		++terms;
 		absolute += abs;
 		keys += key.size();
 		values += value.size();
 		df += leb(std::uint64_t(t.df) << 5);
-		if (!(t.flags & strata::format::cf_is_df)) { cf += leb(t.flags & strata::format::single_posting ? t.single_wdf : t.cf); }
+		if (!(t.flags & prospect::format::cf_is_df)) { cf += leb(t.flags & prospect::format::single_posting ? t.single_wdf : t.cf); }
 		if (abs) {
 			postings_offset += leb(run_before.postings);
 			positions_offset += leb(run_before.positions);
 		}
-		if (t.flags & strata::format::single_posting) {
+		if (t.flags & prospect::format::single_posting) {
 			++single;
 			ordinal += leb(t.postings);
 		} else {
 			postings_length += leb(t.postings_length);
 		}
-		if (!(t.flags & strata::format::no_positions)) { positions_length += leb(t.positions_length); }
+		if (!(t.flags & prospect::format::no_positions)) { positions_length += leb(t.positions_length); }
 		if (t.df >= strata::format::block) {
 			std::string imp;
-			strata::format::encode_impacts(imp, t.impacts);
+			prospect::format::encode_impacts(imp, t.impacts);
 			impacts += imp.size();
 		}
 		return true;
@@ -333,11 +333,11 @@ int dictstats(const std::string& dir) {
 // with, and prints its size.
 int dictdump(const std::string& dir, const std::string& path) {
 	residency::file file;
-	strata::segment seg = open(dir, file);
+	prospect::segment seg = open(dir, file);
 	std::FILE* out = std::fopen(path.c_str(), "wb");
 	if (!out) { return 1; }
 	auto u64 = [&](std::uint64_t v) { std::fwrite(&v, 8, 1, out); };
-	seg.get<strata::inverted_plugin>().scan_terms([&](std::string_view key, const strata::format::term_info& t) {
+	seg.get<prospect::inverted_plugin>().scan_terms([&](std::string_view key, const prospect::format::term_info& t) {
 		u64(key.size());
 		std::fwrite(key.data(), 1, key.size(), out);
 		for (std::uint64_t v : {std::uint64_t(t.flags), std::uint64_t(t.df), t.cf, t.postings, t.positions, std::uint64_t(t.single_wdf), t.postings_length, t.positions_length,
@@ -375,12 +375,12 @@ int dictsim(const std::string& path) {
 		if (used[c]) { alphabet.push_back(char(c)); }
 	}
 	termdict::builder b(alphabet);
-	strata::format::term_run run;
+	prospect::format::term_run run;
 	std::uint64_t terms = 0;
 	while (auto n = u64()) {
 		key.resize(*n);
 		if (std::fread(key.data(), 1, *n, in) != *n) { break; }
-		strata::format::term_info t;
+		prospect::format::term_info t;
 		t.flags = std::uint8_t(*u64());
 		t.df = std::uint32_t(*u64());
 		t.cf = *u64();
@@ -393,7 +393,7 @@ int dictsim(const std::string& path) {
 			const std::uint64_t v = *u64();
 			t.impacts.push_back({std::uint32_t(v >> 8), std::uint8_t(v)});
 		}
-		b.add(key, strata::format::encode_term_info(t, run, b.next_is_restart()));
+		b.add(key, prospect::format::encode_term_info(t, run, b.next_is_restart()));
 		++terms;
 	}
 	std::fclose(in);
@@ -422,13 +422,13 @@ std::string query_of(const std::string& line) {
 // at a score may resolve to any of the tied documents.
 int verify_index(const std::string& dir) {
 	kronuz::journal::PosixIO io(dir, 0600, host_io);
-	strata::index::options o;
+	prospect::index::options o;
 	o.key_prefix = "Q";
-	auto ix = strata::index::open(io, o);
+	auto ix = prospect::index::open(io, o);
 	warn_trust(ix);
-	std::vector<strata::segment_snapshot> segs;
+	std::vector<prospect::segment_snapshot> segs;
 	for (const auto& v : ix.segments()) { segs.push_back({v.seg, v.deleted, v.dead}); }
-	std::span<const strata::segment_snapshot> view(segs);
+	std::span<const prospect::segment_snapshot> view(segs);
 	std::size_t queries = 0, mismatches = 0;
 	auto close = [](double a, double b) { return std::abs(a - b) <= 1e-9 * std::max(1.0, std::max(a, b)); };
 	LineReader in; for (std::string line; in.next(line);) {
@@ -436,10 +436,10 @@ int verify_index(const std::string& dir) {
 		if (q.empty()) { continue; }
 		++queries;
 		const parsed p = parse(q);
-		for (const auto scheme : {strata::scheme::bm25, strata::scheme::bm25_xapian}) {
-			strata::term_table table(view, o.key_prefix);
-			auto builder = [&](const strata::segment& seg) { return build(seg, p, scheme, &table); };
-			std::vector<strata::doc_hit> scan;
+		for (const auto scheme : {prospect::scheme::bm25, prospect::scheme::bm25_xapian}) {
+			prospect::term_table table(view, o.key_prefix);
+			auto builder = [&](const prospect::segment& seg) { return build(seg, p, scheme, &table); };
+			std::vector<prospect::doc_hit> scan;
 			for (const auto& sv : segs) {
 				auto all = builder(*sv.seg);
 				if (!all) { continue; }
@@ -449,11 +449,11 @@ int verify_index(const std::string& dir) {
 				}
 			}
 			std::sort(scan.begin(), scan.end(), [](const auto& a, const auto& b) { return a.score != b.score ? a.score > b.score : a.docid < b.docid; });
-			bool ok = strata::search_count(view, builder) == scan.size();
+			bool ok = prospect::search_count(view, builder) == scan.size();
 			for (const std::size_t k : {10u, 100u, 1000u}) {
 				for (const bool with_count : {true, false}) {
 					std::uint64_t counted = 0;
-					const auto hits = strata::search(view, builder, k, with_count ? &counted : nullptr);
+					const auto hits = prospect::search(view, builder, k, with_count ? &counted : nullptr);
 					const std::size_t n = std::min<std::size_t>(k, scan.size());
 					ok = ok && (!with_count || counted == scan.size()) && hits.size() == n;
 					for (std::size_t a = 0; ok && a < n;) {
@@ -471,7 +471,7 @@ int verify_index(const std::string& dir) {
 				}
 				if (!ok) {
 					++mismatches;
-					std::cout << "MISMATCH " << (scheme == strata::scheme::bm25 ? "bm25" : "bm25_xapian") << " k=" << k << '\t' << q << '\n';
+					std::cout << "MISMATCH " << (scheme == prospect::scheme::bm25 ? "bm25" : "bm25_xapian") << " k=" << k << '\t' << q << '\n';
 					break;
 				}
 			}
@@ -487,11 +487,11 @@ int verify_index(const std::string& dir) {
 // With STRATA_DUMP_COUNT=0, without the count (the uncounted, pruned path).
 int dump(const std::string& dir) {
 	kronuz::journal::PosixIO io(dir, 0600, host_io);
-	strata::index::options o;
+	prospect::index::options o;
 	o.key_prefix = "Q";
-	auto ix = strata::index::open(io, o);
+	auto ix = prospect::index::open(io, o);
 	warn_trust(ix);
-	std::vector<strata::segment_snapshot> segs;
+	std::vector<prospect::segment_snapshot> segs;
 	for (const auto& v : ix.segments()) { segs.push_back({v.seg, v.deleted, v.dead}); }
 	const char* count_env = std::getenv("STRATA_DUMP_COUNT");
 	const bool with_count = !count_env || std::string_view(count_env) != "0";
@@ -500,7 +500,7 @@ int dump(const std::string& dir) {
 		const std::string q = query_of(line);
 		if (q.empty()) { continue; }
 		const parsed p = parse(q);
-		for (const auto scheme : {strata::scheme::bm25, strata::scheme::bm25_xapian}) {
+		for (const auto scheme : {prospect::scheme::bm25, prospect::scheme::bm25_xapian}) {
 			for (std::size_t k : {10u, 100u, 1000u}) {
 				std::uint64_t n = 0;
 				const auto hits = search_snapshot(segs, p, k, scheme, with_count ? &n : nullptr, o.key_prefix);
@@ -516,7 +516,7 @@ int dump(const std::string& dir) {
 int verify(const std::string& dir) {
 	if (!std::filesystem::exists(dir + "/segment.sx")) { return verify_index(dir); }
 	residency::file file;
-	strata::segment seg = open(dir, file);
+	prospect::segment seg = open(dir, file);
 	std::size_t queries = 0, mismatches = 0;
 	auto close = [](double a, double b) { return std::abs(a - b) <= 1e-9 * std::max(1.0, std::max(a, b)); };
 	LineReader in; for (std::string line; in.next(line);) {
@@ -524,17 +524,17 @@ int verify(const std::string& dir) {
 		if (q.empty()) { continue; }
 		++queries;
 		const parsed p = parse(q);
-		for (const auto scheme : {strata::scheme::bm25, strata::scheme::bm25_xapian}) {
+		for (const auto scheme : {prospect::scheme::bm25, prospect::scheme::bm25_xapian}) {
 			auto all = build(seg, p, scheme);
 			if (!all) { break; }
-			std::vector<strata::hit> scan;
+			std::vector<prospect::hit> scan;
 			for (auto d = all->next(); d != strata::no_more_docs; d = all->next()) { scan.push_back({d, all->score()}); }
 			std::sort(scan.begin(), scan.end(), [](const auto& a, const auto& b) { return a.score != b.score ? a.score > b.score : a.ord < b.ord; });
 			auto counted = build(seg, p, scheme);
-			bool ok = strata::count(*counted) == scan.size();
+			bool ok = prospect::count(*counted) == scan.size();
 			for (std::size_t k : {10u, 100u, 1000u}) {
 				auto pruned = build(seg, p, scheme);
-				const auto hits = strata::top_k(seg, *pruned, k);
+				const auto hits = prospect::top_k(seg, *pruned, k);
 				const std::size_t n = std::min<std::size_t>(k, scan.size());
 				ok = ok && hits.size() == n;
 				for (std::size_t a = 0; ok && a < n;) {
@@ -556,7 +556,7 @@ int verify(const std::string& dir) {
 				}
 				if (!ok) {
 					++mismatches;
-					std::cout << "MISMATCH " << (scheme == strata::scheme::bm25 ? "bm25" : "bm25_xapian") << " k=" << k << '\t' << q << '\n';
+					std::cout << "MISMATCH " << (scheme == prospect::scheme::bm25 ? "bm25" : "bm25_xapian") << " k=" << k << '\t' << q << '\n';
 					break;
 				}
 			}
@@ -590,21 +590,21 @@ int bench_queries(int runs, Answer&& answer) {
 // A segment file (segment.sx) is searched alone; an index directory through the
 // snapshot of its segments, as serve answers, so a multi-segment index and its merged
 // form time alike.
-int bench(const std::string& dir, std::string_view command, int runs, strata::scheme scheme) {
+int bench(const std::string& dir, std::string_view command, int runs, prospect::scheme scheme) {
 	if (!std::filesystem::exists(dir + "/segment.sx")) {
 		kronuz::journal::PosixIO io(dir, 0600, host_io);
-		strata::index::options o;
+		prospect::index::options o;
 		o.key_prefix = "Q";
-		auto ix = strata::index::open(io, o);
+		auto ix = prospect::index::open(io, o);
 		warn_trust(ix);
-		std::vector<strata::segment_snapshot> segs;
+		std::vector<prospect::segment_snapshot> segs;
 		for (const auto& v : ix.segments()) { segs.push_back({v.seg, v.deleted, v.dead}); }
 		std::cerr << "bench: " << segs.size() << " segments\n";
-		const std::span<const strata::segment_snapshot> view(segs);
+		const std::span<const prospect::segment_snapshot> view(segs);
 		return bench_queries(runs, [&](std::string_view query) { return run(view, command, query, scheme, o.key_prefix); });
 	}
 	residency::file file;
-	strata::segment seg = open(dir, file);
+	prospect::segment seg = open(dir, file);
 	return bench_queries(runs, [&](std::string_view query) { return run(seg, command, query, scheme); });
 }
 
@@ -651,15 +651,15 @@ int churn(const std::string& dir) {
 	// PosixIO refuses a directory others can write; a umask of 002 leaves group write on.
 	std::filesystem::permissions(dir, std::filesystem::perms::group_write | std::filesystem::perms::others_write, std::filesystem::perm_options::remove);
 	kronuz::journal::PosixIO io(dir, 0600, host_io);
-	strata::index::options o;
+	prospect::index::options o;
 	o.key_prefix = "Q";
 	o.auto_merge = true;
 	const std::array<char, 16> uuid{'s', 't', 'r', 'a', 't', 'a', '-', 's', 'o', 'a', 'k'};
-	auto ix = strata::index::create(io, o, uuid);
+	auto ix = prospect::index::create(io, o, uuid);
 	warn_trust(ix);
 	using clock = std::chrono::steady_clock;
 	auto us = [](clock::time_point t) { return std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - t).count(); };
-	strata::transaction t;
+	prospect::transaction t;
 	auto apply = [&] {
 		if (t.ops.empty()) { return; }
 		if (ix.apply(t, {}).result != strata::verdict::accepted) { std::cerr << "rejected\n"; std::exit(1); }
@@ -672,8 +672,8 @@ int churn(const std::string& dir) {
 		const std::size_t a = l.find('\t'), b = a == std::string_view::npos ? a : l.find('\t', a + 1);
 		switch (l[0]) {
 		case 'P': {
-			strata::operation op;
-			op.type = strata::operation::replace_key;
+			prospect::operation op;
+			op.type = prospect::operation::replace_key;
 			op.key = "Q" + std::string(l.substr(a + 1, b - a - 1));
 			fill_document(op.doc, op.key, l.substr(a + 1, b - a - 1), l.substr(b + 1));
 			t.ops.push_back(std::move(op));
@@ -681,8 +681,8 @@ int churn(const std::string& dir) {
 			break;
 		}
 		case 'D': {
-			strata::operation op;
-			op.type = strata::operation::delete_key;
+			prospect::operation op;
+			op.type = prospect::operation::delete_key;
 			op.key = "Q" + std::string(l.substr(a + 1));
 			t.ops.push_back(std::move(op));
 			if (t.ops.size() == 1000) { apply(); }
@@ -698,10 +698,10 @@ int churn(const std::string& dir) {
 		case 'Q': {
 			const std::string_view command = l.substr(a + 1, b - a - 1), query = l.substr(b + 1);
 			const auto start = clock::now();
-			std::vector<strata::segment_snapshot> segs;
+			std::vector<prospect::segment_snapshot> segs;
 			for (const auto& v : ix.segments()) { segs.push_back({v.seg, v.deleted, v.dead}); }
 			// As serve answers it: weights from the snapshot's statistics, not each segment's.
-			const std::uint64_t result = run(std::span<const strata::segment_snapshot>(segs), command, query);
+			const std::uint64_t result = run(std::span<const prospect::segment_snapshot>(segs), command, query);
 			std::cout << "Q\t" << us(start) << '\t' << result << std::endl;
 			break;
 		}
@@ -724,8 +724,8 @@ int main(int argc, char** argv) {
 	if (mode == "dictdump" && argc == 4) { return dictdump(argv[2], argv[3]); }
 	if (mode == "check" && argc == 3) {
 		residency::file file;
-		strata::segment seg = open(argv[2], file);
-		strata::check_report r;
+		prospect::segment seg = open(argv[2], file);
+		prospect::check_report r;
 		strata::check_segment(seg, nullptr, r);
 		std::printf("ok: %llu documents, %llu terms, %llu postings, %llu positions, %llu stored bytes\n", (unsigned long long)r.documents, (unsigned long long)r.terms,
 			(unsigned long long)r.postings, (unsigned long long)r.positions, (unsigned long long)r.stored_bytes);
@@ -738,7 +738,7 @@ int main(int argc, char** argv) {
 	if (mode == "churn" && argc == 3) { return churn(argv[2]); }
 	if (mode == "bench" && (argc == 5 || argc == 6)) {
 		const bool xapian = argc == 6 && std::string_view(argv[5]) == "bm25_xapian";
-		return bench(argv[2], argv[3], std::atoi(argv[4]), xapian ? strata::scheme::bm25_xapian : strata::scheme::bm25);
+		return bench(argv[2], argv[3], std::atoi(argv[4]), xapian ? prospect::scheme::bm25_xapian : prospect::scheme::bm25);
 	}
 	std::cerr << "usage: strata_engine index|serve|terms|dictstats|verify|dump|check|resident|churn DIR | bench DIR COMMAND RUNS < queries\n";
 	return 2;

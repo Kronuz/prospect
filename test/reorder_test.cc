@@ -2,9 +2,9 @@
 // computed directly from the sources' live postings, with permuted sources and deletes; its
 // bytes do not depend on how many passes the memory allows; the order is one merge_segments
 // accepts, and deterministic; the fallback and cancellation hold.
+#include "prospect/index.hh"
+#include "prospect/reorder.hh"
 #include "strata/core/faultfs.hh"
-#include "strata/search/index.hh"
-#include "strata/search/reorder.hh"
 
 #include <cstdio>
 #include <cstdlib>
@@ -18,7 +18,7 @@ static int failures = 0;
 		if (!(cond)) { std::fprintf(stderr, "%s:%d: CHECK(%s)\n", __FILE__, __LINE__, #cond); if (++failures > 20) std::exit(1); } \
 	} while (0)
 
-using namespace strata;
+using namespace prospect;
 
 namespace {
 
@@ -31,7 +31,7 @@ std::vector<std::vector<std::uint32_t>> direct(std::span<const merge_source> sou
 	for (std::uint32_t r = 0; r < refs.size(); ++r) { rank[{refs[r].source, refs[r].ord}] = r; }
 	std::set<std::string> all;
 	for (const auto& s : sources) {
-		s.seg->get<strata::inverted_plugin>().scan_dictionary("", [&](std::string_view t, std::string_view) {
+		s.seg->get<prospect::inverted_plugin>().scan_dictionary("", [&](std::string_view t, std::string_view) {
 			all.insert(std::string(t));
 			return true;
 		});
@@ -41,9 +41,9 @@ std::vector<std::vector<std::uint32_t>> direct(std::span<const merge_source> sou
 	for (const auto& t : all) {
 		std::vector<std::uint32_t> holders;
 		for (std::uint32_t s = 0; s < sources.size(); ++s) {
-			auto info = sources[s].seg->get<strata::inverted_plugin>().term(t);
+			auto info = sources[s].seg->get<prospect::inverted_plugin>().term(t);
 			if (!info) { continue; }
-			postings_iterator it(sources[s].seg->get<strata::inverted_plugin>(), *info);
+			postings_iterator it(sources[s].seg->get<prospect::inverted_plugin>(), *info);
 			for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
 				if (sources[s].live(o)) { holders.push_back(rank.at({s, o})); }
 			}
@@ -81,7 +81,7 @@ int main() {
 		index::options opts;
 		opts.key_prefix = "Q";
 		opts.reorder_settings.min_df = 40;
-		auto ix = strata::index::create(io, opts, uuid);
+		auto ix = prospect::index::create(io, opts, uuid);
 		// Two topics with their own words, interleaved, so bisection has clusters to find.
 		for (int i = 0; i < 2500; ++i) {
 			transaction t;
@@ -261,9 +261,9 @@ int main() {
 			auto f = io.create_exclusive("seg-999999.fwd");
 			f->write_at(0, std::string_view("partial"));
 		}
-		{ const strata::index closed = std::move(ix); }
+		{ const prospect::index closed = std::move(ix); }
 		CHECK(has_file(io, "seg-999999.fwd"));
-		auto reopened = strata::index::open(io, opts);
+		auto reopened = prospect::index::open(io, opts);
 		CHECK(!has_file(io, "seg-999999.fwd"));
 		CHECK(reopened.segments().size() == 1);
 	}

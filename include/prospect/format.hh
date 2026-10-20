@@ -22,11 +22,13 @@
 
 // The search sections' encodings (docs/design/phase-2.md, layers.md L1): the length quantization
 // and skip data, ordinal blocks, threshold seeds, and term info, which the inverted plugin
-// writes and reads. The file's frame, section table, and structure bits are core/format.hh's.
+// writes and reads. The file's frame, section table, and structure bits are strata's
+// (strata/core/format.hh).
 
 #pragma once
 
 #include "bitpack.hh"
+#include "prospect/strata.hh"
 #include "strata/core/format.hh"
 #include "varint.hh"
 
@@ -39,7 +41,7 @@
 #include <string_view>
 #include <vector>
 
-namespace strata::format {
+namespace prospect::format {
 
 // --- document lengths in skip data ------------------------------------------------------------
 
@@ -423,4 +425,4 @@ inline std::vector<impact> competitive(const std::vector<impact>& pairs) {
 	return frontier;
 }
 
-}  // namespace strata::format
+}  // namespace prospect::format

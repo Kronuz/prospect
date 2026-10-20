@@ -2,9 +2,9 @@
 // ordinal_of(docid), absent docids inside the range included; the kind follows the order
 // written; every validation check rejects the damage it names; and a permuted segment opens,
 // pinned by test/fixtures/permuted.sx.
+#include "prospect/reader.hh"
+#include "prospect/writer.hh"
 #include "strata/core/docids.hh"
-#include "strata/search/reader.hh"
-#include "strata/search/writer.hh"
 
 #include <algorithm>
 #include <cstdio>
@@ -185,14 +185,14 @@ int main() {
 
 	// A permuted segment: the writer's permuted mode, opened as a segment, and pinned.
 	{
-		strata::segment_writer w;
+		prospect::segment_writer w;
 		w.permuted = true;
 		const char* words[] = {"alpha", "beta", "gamma"};
 		std::vector<std::uint64_t> ids(260);
 		for (std::size_t i = 0; i < ids.size(); ++i) { ids[i] = 3 * ((i * 97) % ids.size()) + 1; }  // a fixed permutation with gaps
 		std::vector<std::uint32_t> pos = {1, 4};
 		for (std::size_t i = 0; i < ids.size(); ++i) {
-			std::vector<strata::posting_input> in;
+			std::vector<prospect::posting_input> in;
 			for (std::size_t k = 0; k < 3; ++k) {
 				if ((i + k) % (k + 2) == 0) { in.push_back({words[k], 2, pos}); }
 			}
@@ -200,7 +200,7 @@ int main() {
 			w.add(ids[i], in, 4, "record " + std::to_string(ids[i]), 1 + i % 3, key);
 		}
 		const std::string bytes = w.flush({});
-		const char* path = STRATA_FIXTURES "/permuted.sx";
+		const char* path = PROSPECT_FIXTURES "/permuted.sx";
 		if (std::getenv("STRATA_WRITE_FIXTURES")) {
 			std::FILE* f = std::fopen(path, "wb");
 			std::fwrite(bytes.data(), 1, bytes.size(), f);
@@ -212,7 +212,7 @@ int main() {
 			std::fclose(f);
 		}
 		CHECK(golden == bytes);
-		const strata::segment seg(golden);
+		const prospect::segment seg(golden);
 		CHECK(!seg.core().docid_ordered());
 		CHECK(seg.core().min_docid() == 1 && seg.core().max_docid() == 3 * 259 + 1);
 		for (std::size_t i = 0; i < ids.size(); ++i) {
@@ -224,7 +224,7 @@ int main() {
 		}
 		seg.verify_all();
 		// A flush (docids increasing) still refuses an out-of-order docid.
-		strata::segment_writer flush;
+		prospect::segment_writer flush;
 		flush.add(5, {}, 0);
 		bool threw = false;
 		try {

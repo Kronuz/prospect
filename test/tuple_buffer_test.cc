@@ -2,8 +2,8 @@
 // documents give the same segment bytes, with hash collisions forced, long terms and far
 // positions in side entries, terms given whole (an explicit wdf, positionless, keys), and
 // documents left out and reordered at flush.
-#include "strata/search/tuple_buffer.hh"
-#include "strata/search/writer.hh"
+#include "prospect/tuple_buffer.hh"
+#include "prospect/writer.hh"
 
 #include <algorithm>
 #include <cstdio>
@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 
-namespace strata::detail {
+namespace prospect::detail {
 // A run entry's header decoded by the buffer's own view().
 struct tuple_buffer_test_access {
 	static std::array<std::uint64_t, 5> view(const char* p) {
@@ -24,7 +24,7 @@ struct tuple_buffer_test_access {
 		return {v.lengths[0], v.lengths[1], v.lengths[2], v.lengths[3], std::uint64_t(v.end - v.data)};
 	}
 };
-}  // namespace strata::detail
+}  // namespace prospect::detail
 
 static int failures = 0;
 #define CHECK(cond) \
@@ -42,11 +42,11 @@ struct entry {
 struct doc {
 	std::uint64_t docid = 0, version = 0;
 	std::string text, stored, key;
-	std::vector<strata::text_token> tokens;
+	std::vector<prospect::text_token> tokens;
 	std::vector<entry> terms;
 	std::uint32_t length = 0;
-	std::vector<strata::posting_input> inputs() const {
-		std::vector<strata::posting_input> in;
+	std::vector<prospect::posting_input> inputs() const {
+		std::vector<prospect::posting_input> in;
 		for (const auto& e : terms) { in.push_back({e.term, e.wdf, e.positions}); }
 		return in;
 	}
@@ -78,18 +78,18 @@ doc random_doc(std::mt19937_64& r, std::uint64_t docid) {
 }
 
 std::string reference(const std::vector<doc>& docs, const std::vector<std::size_t>& order) {
-	strata::segment_writer w;
+	prospect::segment_writer w;
 	for (std::size_t i : order) {
 		const doc& d = docs[i];
 		const auto in = d.inputs();
-		strata::detail::writer_access::add_text(w, d.docid, in, d.text, d.tokens, d.length, d.stored, d.version, d.key);
+		prospect::detail::writer_access::add_text(w, d.docid, in, d.text, d.tokens, d.length, d.stored, d.version, d.key);
 	}
 	return w.flush({1, 2, 3});
 }
 
 std::string tuples(const std::vector<doc>& docs, std::span<const strata::ordinal_t> order, std::uint64_t mask, std::size_t batch = std::size_t(1) << 20,
 	std::uint64_t run_cap = std::numeric_limits<std::uint32_t>::max()) {
-	strata::detail::tuple_buffer b;
+	prospect::detail::tuple_buffer b;
 	b.hash_mask = mask;
 	b.batch_tuples = batch;
 	b.max_run_bytes = run_cap;
@@ -97,7 +97,7 @@ std::string tuples(const std::vector<doc>& docs, std::span<const strata::ordinal
 		const auto in = d.inputs();
 		b.add(d.docid, in, d.text, d.tokens, d.length, d.stored, d.version, d.key);
 	}
-	strata::segment_writer w;
+	prospect::segment_writer w;
 	std::string file;
 	strata::string_output out(file);
 	strata::string_spill positions;
@@ -105,8 +105,8 @@ std::string tuples(const std::vector<doc>& docs, std::span<const strata::ordinal
 	return file;
 }
 
-std::string flushed(strata::detail::tuple_buffer& b) {
-	strata::segment_writer w;
+std::string flushed(prospect::detail::tuple_buffer& b) {
+	prospect::segment_writer w;
 	std::string file;
 	strata::string_output out(file);
 	strata::string_spill positions;
@@ -184,7 +184,7 @@ int main() {
 		std::mt19937_64 r(41);
 		std::vector<doc> docs;
 		for (std::uint64_t i = 0; i < 1500; ++i) { docs.push_back(random_doc(r, 1 + i)); }
-		strata::detail::tuple_buffer b;
+		prospect::detail::tuple_buffer b;
 		b.batch_tuples = batch;
 		for (const doc& d : docs) {
 			const auto in = d.inputs();
@@ -197,7 +197,7 @@ int main() {
 			const auto plan = b.plan(order);
 			auto collect = [&](std::string_view lo, std::string_view hi) {
 				std::vector<std::string> out;
-				b.each_term(lo, hi, plan, [&](std::string_view term, strata::term_postings& tp) {
+				b.each_term(lo, hi, plan, [&](std::string_view term, prospect::term_postings& tp) {
 					std::string row(term);
 					for (std::size_t i = 0; i < tp.ords.size(); ++i) { row += ":" + std::to_string(tp.ords[i]) + "," + std::to_string(tp.wdfs[i]) + "," + std::to_string(tp.counts[i]); }
 					for (auto p : tp.positions) { row += "/" + std::to_string(p); }
@@ -232,13 +232,13 @@ int main() {
 	for (std::size_t batch : {std::size_t(1) << 20, std::size_t(37)}) {
 		std::mt19937_64 r(7);
 		const std::string words[] = {"a", "of", "eightbyt", "ninebytes", std::string(254, 'm'), std::string(255, 'n'), std::string(300, 'l')};
-		strata::detail::tuple_buffer split, given;
+		prospect::detail::tuple_buffer split, given;
 		split.batch_tuples = given.batch_tuples = batch;
 		for (std::uint64_t i = 0; i < 3000; ++i) {
 			std::string text = r() % 3 ? "" : "  ";
 			for (int w = int(r() % 50); w > 0; --w) { text += words[r() % std::size(words)] + std::string(1 + r() % 2, ' '); }
 			if (r() % 2 && !text.empty()) { text.pop_back(); }
-			std::vector<strata::text_token> tokens;
+			std::vector<prospect::text_token> tokens;
 			std::uint32_t pos = 0;
 			for (std::size_t at = 0; at < text.size();) {
 				std::size_t end = text.find(' ', at);
@@ -250,8 +250,8 @@ int main() {
 			CHECK(split.add_split(1 + i, {}, text, "s", 1, key) == given.add(1 + i, {}, text, tokens, pos, "s", 1, key));
 			CHECK(split.length(strata::ordinal_t(i)) == pos);
 		}
-		auto bytes = [](strata::detail::tuple_buffer& b) {
-			strata::segment_writer w;
+		auto bytes = [](prospect::detail::tuple_buffer& b) {
+			prospect::segment_writer w;
 			std::string file;
 			strata::string_output out(file);
 			strata::string_spill positions;
@@ -263,10 +263,10 @@ int main() {
 	// scan() reports every posting with its document's positions, drained or not, and keys
 	// resolve before and after their batch drains.
 	for (std::size_t batch : {std::size_t(1) << 20, std::size_t(1)}) {
-		strata::detail::tuple_buffer b;
+		prospect::detail::tuple_buffer b;
 		b.batch_tuples = batch;
 		const std::string text = " a b a";
-		const std::vector<strata::text_token> tokens = {{1, 1, 1}, {3, 1, 2}, {5, 1, 3}};
+		const std::vector<prospect::text_token> tokens = {{1, 1, 1}, {3, 1, 2}, {5, 1, 3}};
 		b.add(7, {}, text, tokens, 3, "s", 1, "Qk");
 		CHECK(b.key(0) == "Qk");
 		b.add(8, {}, text, tokens, 3, "t", 0, "");  // drains the first when batches are 1 tuple
@@ -329,15 +329,15 @@ int main() {
 	// about 20 KiB while their bound (10 KiB) stays under 16 KiB, so the next document's early
 	// drain makes two runs, one without the cut.
 	{
-		strata::detail::tuple_buffer b, given;
+		prospect::detail::tuple_buffer b, given;
 		b.max_run_bytes = 16 << 10;
 		std::vector<std::string> names;
 		for (int i = 0; i < 500; ++i) { names.push_back(std::string(26, 'a' + i % 26) + std::to_string(1000 + i)); }
-		std::vector<strata::posting_input> wide;
+		std::vector<prospect::posting_input> wide;
 		for (const auto& n : names) { wide.push_back({n, 1, {}}); }
 		std::vector<std::uint32_t> far(4000);
 		std::iota(far.begin(), far.end(), 1u);
-		const std::vector<strata::posting_input> many = {{"p", 4000, far}};
+		const std::vector<prospect::posting_input> many = {{"p", 4000, far}};
 		for (auto* x : {&b, &given}) {
 			x->add(1, wide, "", {}, 0, "", 0, "");
 			x->add(2, many, "", {}, 0, "", 0, "");
@@ -348,12 +348,12 @@ int main() {
 	// An entry past the cap takes a run alone (CR12): a long term, many given positions, and a
 	// long word flush as with no cap.
 	{
-		strata::detail::tuple_buffer b, given;
+		prospect::detail::tuple_buffer b, given;
 		b.max_run_bytes = 4096;
 		const std::string big(5000, 'b');
 		std::vector<std::uint32_t> far(3000);
 		for (std::uint32_t i = 0; i < far.size(); ++i) { far[i] = 200 * (i + 1); }  // 2-byte deltas
-		const std::vector<strata::posting_input> k = {{"k", 1, {}}}, long_term = {{big, 1, {}}}, many = {{"p", 3000, far}};
+		const std::vector<prospect::posting_input> k = {{"k", 1, {}}}, long_term = {{big, 1, {}}}, many = {{"p", 3000, far}};
 		for (auto* x : {&b, &given}) {
 			x->add(1, k, "", {}, 0, "", 0, "");
 			x->add(2, long_term, "", {}, 0, "", 0, "");
@@ -362,13 +362,13 @@ int main() {
 			x->add(5, k, "", {}, 0, "", 0, "");
 		}
 		CHECK(b.doc_count() == 5 && flushed(b) == flushed(given));
-		strata::segment_writer w;  // and segment_writer's bytes, an encoder the buffer does not share
+		prospect::segment_writer w;  // and segment_writer's bytes, an encoder the buffer does not share
 		w.add(1, k, 0, "", 0, "");
 		w.add(2, long_term, 0, "", 0, "");
 		w.add(3, many, 0, "", 0, "");
 		const std::string split = "a " + big;
-		const std::vector<strata::text_token> words = {{0, 1, 1}, {2, 5000, 2}};
-		strata::detail::writer_access::add_text(w, 4, k, split, words, 2, "", 0, "");
+		const std::vector<prospect::text_token> words = {{0, 1, 1}, {2, 5000, 2}};
+		prospect::detail::writer_access::add_text(w, 4, k, split, words, 2, "", 0, "");
 		w.add(5, k, 0, "", 0, "");
 		CHECK(flushed(b) == w.flush({1, 2, 3}));
 	}
@@ -404,20 +404,20 @@ int main() {
 	{
 		std::vector<doc> docs(3);
 		std::vector<std::string> texts = {"a bb a ccc  dd a", " x y z x y z x y z x y z x", std::string(40, 'q') + " q " + std::string(40, 'q')};
-		strata::segment_writer split;
+		prospect::segment_writer split;
 		for (std::size_t i = 0; i < docs.size(); ++i) {
 			doc& d = docs[i];
 			d.docid = 1 + i;
 			d.text = texts[i];
 			d.key = "Q" + std::to_string(i);
-			strata::text_detail::split_words(d.text, [&](std::size_t o, std::size_t n) { d.tokens.push_back({std::uint32_t(o), std::uint32_t(n), ++d.length}); });
+			prospect::text_detail::split_words(d.text, [&](std::size_t o, std::size_t n) { d.tokens.push_back({std::uint32_t(o), std::uint32_t(n), ++d.length}); });
 			const auto in = d.inputs();
-			strata::detail::writer_access::add_split(split, d.docid, in, d.text, d.length, d.stored, d.version, d.key);
+			prospect::detail::writer_access::add_split(split, d.docid, in, d.text, d.length, d.stored, d.version, d.key);
 		}
 		const std::string expected = reference(docs, {0, 1, 2});
 		CHECK(split.flush({1, 2, 3}) == expected);
 		for (std::uint64_t far : {std::uint64_t(0), std::uint64_t(16), std::uint64_t(1) << 32}) {
-			strata::detail::tuple_buffer b;
+			prospect::detail::tuple_buffer b;
 			b.tuple_offsets = far;
 			for (const doc& d : docs) {
 				const auto in = d.inputs();
@@ -425,7 +425,7 @@ int main() {
 			}
 			CHECK(flushed(b) == expected);
 		}
-		CHECK(strata::text_detail::splittable("a b c", 1) && strata::text_detail::splittable(std::string(70000, 'w'), 10));
+		CHECK(prospect::text_detail::splittable("a b c", 1) && prospect::text_detail::splittable(std::string(70000, 'w'), 10));
 	}
 	// Section lengths past 32 bits (CR12, CR17): LEB128 round-trips at 2^32 and around it, and
 	// view() decodes an entry header with 64-bit lengths, its end within a reserved range.
@@ -433,9 +433,9 @@ int main() {
 		for (std::uint64_t v : {std::uint64_t(0xFFFFFFFF), std::uint64_t(1) << 32, (std::uint64_t(1) << 32) + 1, std::uint64_t(1) << 35, ~std::uint64_t(0)}) {
 			char buf[10];
 			char* w = buf;
-			strata::tuple_detail::put_leb(w, v);
+			prospect::tuple_detail::put_leb(w, v);
 			const char* rd = buf;
-			CHECK(strata::tuple_detail::get_leb(rd) == v && rd == w);
+			CHECK(prospect::tuple_detail::get_leb(rd) == v && rd == w);
 		}
 		const std::size_t reserved = std::size_t(1) << 35;
 		void* at = ::mmap(nullptr, reserved, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
@@ -444,12 +444,12 @@ int main() {
 			char* const base = static_cast<char*>(at);
 			char* w = base;
 			const std::uint64_t lengths[4] = {std::uint64_t(1) << 32, (std::uint64_t(1) << 32) + 1, 0xFFFFFFFF, std::uint64_t(1) << 34};
-			strata::tuple_detail::put_leb(w, 1);  // the term's size, then the term
+			prospect::tuple_detail::put_leb(w, 1);  // the term's size, then the term
 			*w++ = 'x';
-			for (int i = 0; i < 3; ++i) { strata::tuple_detail::put_leb(w, 1); }  // postings, positions, cf
+			for (int i = 0; i < 3; ++i) { prospect::tuple_detail::put_leb(w, 1); }  // postings, positions, cf
 			*w++ = char(2);
-			for (std::uint64_t l : lengths) { strata::tuple_detail::put_leb(w, l); }
-			const auto got = strata::detail::tuple_buffer_test_access::view(base);
+			for (std::uint64_t l : lengths) { prospect::tuple_detail::put_leb(w, l); }
+			const auto got = prospect::detail::tuple_buffer_test_access::view(base);
 			CHECK(got[0] == lengths[0] && got[1] == lengths[1] && got[2] == lengths[2] && got[3] == lengths[3]);
 			CHECK(got[4] == lengths[0] + lengths[1] + lengths[2] + lengths[3]);
 		}
@@ -458,16 +458,16 @@ int main() {
 	// Page and chunk sizes past the 64th allocation: the doubling's shift is capped, so
 	// UBSan sees no shift of 64 or more (CR18); a log of 70 pieces over 1 MiB, a page each.
 	{
-		using strata::tuple_detail::doubled;
+		using prospect::tuple_detail::doubled;
 		CHECK(doubled(4096, 0, 1 << 20) == 4096 && doubled(4096, 8, 1 << 20) == (1 << 20) && doubled(4096, 9, 1 << 20) == (1 << 20));
 		for (std::size_t k : {63, 64, 65, 100, 1000}) { CHECK(doubled(4096, k, std::size_t(4) << 20) == (std::size_t(4) << 20)); }
-		strata::tuple_detail::byte_log log;
+		prospect::tuple_detail::byte_log log;
 		std::uint64_t last = 0;
 		for (unsigned i = 0; i < 70; ++i) {
 			last = log.append((std::size_t(1) << 20) + 1, nullptr);
 			log.at(last)[0] = char(i);
 		}
-		CHECK(last >> strata::tuple_detail::byte_log::shift == 69 && log.at(last)[0] == char(69));
+		CHECK(last >> prospect::tuple_detail::byte_log::shift == 69 && log.at(last)[0] == char(69));
 	}
 	std::puts(failures ? "tuple_buffer: FAILED" : "tuple_buffer: ok");
 	return failures ? 1 : 0;

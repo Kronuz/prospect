@@ -2,7 +2,7 @@
 // hash, the fixed-point log and the move gain pinned against offline values and bounded
 // against the real-valued formula, and the order itself: a permutation, deterministic,
 // separating shuffled clusters, lowering the log-gap cost, and honoring cancellation.
-#include "strata/search/bisection.hh"
+#include "prospect/bisection.hh"
 
 #include <cmath>
 #include <cstdio>
@@ -16,7 +16,7 @@ static int failures = 0;
 		if (!(cond)) { std::fprintf(stderr, "%s:%d: CHECK(%s)\n", __FILE__, __LINE__, #cond); if (++failures > 20) std::exit(1); } \
 	} while (0)
 
-namespace bs = strata::bisection;
+namespace bs = prospect::bisection;
 
 namespace {
 

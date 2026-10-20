@@ -2,7 +2,7 @@
 // 10, and 100 over random multi-valued documents with missing values, mixed directions,
 // and composite keys; shards' top-k lists merge to the single-shard answer; the wire form
 // round trips and rejects malformed input; block skipping never skips a competitor.
-#include "strata/search/sortkey.hh"
+#include "prospect/sortkey.hh"
 
 #include <algorithm>
 #include <cmath>
@@ -19,7 +19,7 @@ static int failures = 0;
 #define CHECK(cond) \
 	do { if (!(cond)) { std::fprintf(stderr, "%s:%d: CHECK(%s)\n", __FILE__, __LINE__, #cond); if (++failures > 20) std::exit(1); } } while (0)
 
-namespace sk = strata::sortkey;
+namespace sk = prospect::sortkey;
 
 namespace {
 
@@ -142,7 +142,7 @@ bool rejects(std::string_view wire) {
 
 std::string be(std::uint64_t k) {
 	unsigned char buf[8];
-	strata::ordered::put_be(k, buf);
+	prospect::ordered::put_be(k, buf);
 	return std::string(reinterpret_cast<const char*>(buf), 8);
 }
 
@@ -239,7 +239,7 @@ void check_wire(std::mt19937_64& rng) {
 	CHECK(rejects(std::string("\x01\x05\x08", 3)));                                    // count past the input
 	CHECK(rejects(std::string("\x01\x01\x02\x80\x00", 5)));                            // overlong length
 	CHECK(rejects(std::string("\x01\x01\x02\x05", 4) + "ab"));                          // length past the input
-	CHECK(rejects(std::string("\x01\x01\x01", 3) + be(strata::ordered::from_f64(-1.0))));  // negative distance
+	CHECK(rejects(std::string("\x01\x01\x01", 3) + be(prospect::ordered::from_f64(-1.0))));  // negative distance
 	CHECK(rejects(std::string("\x01\x01\x01", 3) + be(0x7fffffffffffffffull)));          // -0.0
 	CHECK(rejects(std::string("\x01\x01\x01", 3) + be(0xfff8000000000000ull)));          // NaN
 	CHECK(rejects(std::string("\x01\x01\x02", 3) + std::string(9, '\xff') + '\x02'));  // varint past 64 bits

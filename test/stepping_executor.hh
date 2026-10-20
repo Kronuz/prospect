@@ -14,7 +14,7 @@
 #include <mutex>
 #include <thread>
 
-namespace strata::testing {
+namespace prospect::testing {
 
 class stepping_executor final : public executor {
 	struct entry {
@@ -139,4 +139,4 @@ private:
 	std::thread worker_;  // last: it starts once the rest exists
 };
 
-}  // namespace strata::testing
+}  // namespace prospect::testing

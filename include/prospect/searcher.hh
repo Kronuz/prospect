@@ -4,7 +4,7 @@
 // ascending).
 #pragma once
 
-#include "strata/search/search.hh"
+#include "prospect/search.hh"
 
 #include <algorithm>
 #include <cmath>
@@ -19,7 +19,7 @@
 #include <string_view>
 #include <vector>
 
-namespace strata {
+namespace prospect {
 
 // A segment as a search sees it: its deleted ordinals (bit per ordinal), or none, and how
 // many are set (index::segments gives it); unknown_dead scans the bitmap instead.
@@ -239,7 +239,7 @@ inline std::vector<doc_hit> search(std::span<const segment_snapshot> segs, const
 			}
 		}
 		if (!k) {
-			if (c.counting) { *count += strata::count(*q); }
+			if (c.counting) { *count += prospect::count(*q); }
 			continue;
 		}
 		c.begin(*s.seg);
@@ -273,4 +273,4 @@ inline std::uint64_t search_count(std::span<const segment_snapshot> segs, const 
 	return n;
 }
 
-}  // namespace strata
+}  // namespace prospect

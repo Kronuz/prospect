@@ -2,7 +2,7 @@
 // data"): each group's advance entries and each block's bytes, as file offsets.
 #pragma once
 
-#include "strata/search/reader.hh"
+#include "prospect/reader.hh"
 
 #include <cstddef>
 #include <string_view>
@@ -31,9 +31,9 @@ struct layout {
 	std::vector<block> blocks;
 };
 
-inline layout parse(std::string_view file, const strata::segment& s, const strata::format::term_info& info) {
-	namespace f = strata::format;
-	const auto& inv = s.get<strata::inverted_plugin>();
+inline layout parse(std::string_view file, const prospect::segment& s, const prospect::format::term_info& info) {
+	namespace f = prospect::format;
+	const auto& inv = s.get<prospect::inverted_plugin>();
 	const char* base = file.data();
 	const char* p = inv.postings_bytes().data() + info.postings;
 	const char* end = p + info.postings_length;

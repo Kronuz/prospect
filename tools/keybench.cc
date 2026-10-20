@@ -3,7 +3,7 @@
 // appended as a miss inside the keys' range. Best of ROUNDS, ns per lookup.
 //   keybench DIR ROUNDS [PREFIX] < keys
 // Uses only the index's public API, so the same file builds against format 12 and format 13.
-#include "strata/search/index.hh"
+#include "prospect/index.hh"
 
 #include "completion/posix.h"
 
@@ -21,10 +21,10 @@ int main(int argc, char** argv) {
 		return 2;
 	}
 	kronuz::journal::PosixIO io(argv[1], 0600, {true, true});
-	strata::index::options o;
+	prospect::index::options o;
 	o.key_prefix = argc > 3 ? argv[3] : "Q";
 	o.auto_merge = false;
-	auto ix = strata::index::open(io, o);
+	auto ix = prospect::index::open(io, o);
 	std::vector<std::string> hits, misses;
 	for (std::string line; std::getline(std::cin, line);) {
 		if (line.empty()) { continue; }

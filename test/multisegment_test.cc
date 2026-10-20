@@ -3,10 +3,10 @@
 //     holding the same documents: the same docids, scores, ties, and counts.
 //   - With deletes, pruned search across segments equals an exhaustive scan of every
 //     segment's live matches, ties by docid, and counts equal.
-#include "strata/core/faultfs.hh"
-#include "strata/search/index.hh"
-#include "strata/search/searcher.hh"
+#include "prospect/index.hh"
+#include "prospect/searcher.hh"
 #include "strata/core/budget.hh"
+#include "strata/core/faultfs.hh"
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -28,7 +28,7 @@ static int failures = 0;
 		if (!(cond)) { std::fprintf(stderr, "%s:%d: CHECK(%s)\n", __FILE__, __LINE__, #cond); if (++failures > 20) std::exit(1); } \
 	} while (0)
 
-using namespace strata;
+using namespace prospect;
 
 static const std::array<char, 16> uuid = {'m', 'u', 'l', 't', 'i', 's', 'e', 'g', 'm', 'e', 'n', 't', 't', 'e', 's', 't'};
 static const char* vocab[] = {"a", "b", "c", "d", "e", "f", "rare"};
@@ -60,8 +60,8 @@ static scorer_ptr build(const segment& seg, const query& q, const statistics& st
 		return xapian ? weight::bm25_xapian(st, df) : weight::bm25(st, df);
 	};
 	auto term = [&](const std::string& t) -> scorer_ptr {
-		auto info = seg.get<strata::inverted_plugin>().term(t);
-		return info ? std::make_unique<term_scorer>(seg.get<strata::inverted_plugin>(), *info, weight_of(t)) : nullptr;
+		auto info = seg.get<prospect::inverted_plugin>().term(t);
+		return info ? std::make_unique<term_scorer>(seg.get<prospect::inverted_plugin>(), *info, weight_of(t)) : nullptr;
 	};
 	std::vector<scorer_ptr> kids;
 	switch (q.kind) {
@@ -95,18 +95,18 @@ static scorer_ptr build(const segment& seg, const query& q, const statistics& st
 		return in;
 	}
 	default: {
-		std::vector<format::term_info> infos;
+		std::vector<prospect::format::term_info> infos;
 		std::vector<std::uint64_t> dfs;
 		std::vector<weight> ws;
 		for (auto& t : q.terms) {
-			auto info = seg.get<strata::inverted_plugin>().term(t);
+			auto info = seg.get<prospect::inverted_plugin>().term(t);
 			if (!info) { return nullptr; }
 			infos.push_back(*info);
 			dfs.push_back(snapshot_df(segs, t));
 			ws.push_back(weight_of(t));
 		}
-		if (xapian) { return std::make_unique<phrase_scorer>(seg.get<strata::inverted_plugin>(), infos, std::move(ws)); }
-		return std::make_unique<phrase_scorer>(seg.get<strata::inverted_plugin>(), infos, std::vector<weight>{}, 0, &st, dfs);
+		if (xapian) { return std::make_unique<phrase_scorer>(seg.get<prospect::inverted_plugin>(), infos, std::move(ws)); }
+		return std::make_unique<phrase_scorer>(seg.get<prospect::inverted_plugin>(), infos, std::vector<weight>{}, 0, &st, dfs);
 	}
 	}
 }
@@ -151,7 +151,7 @@ static void check_against_scan(const std::vector<doc_hit>& hits, const std::vect
 	}
 }
 
-static std::vector<segment_snapshot> snapshot(const strata::index& ix) {
+static std::vector<segment_snapshot> snapshot(const prospect::index& ix) {
 	std::vector<segment_snapshot> out;
 	for (const auto& s : ix.segments()) { out.push_back({s.seg, s.deleted, s.dead}); }
 	return out;
@@ -166,8 +166,8 @@ int main() {
 		// same transactions must reach the same digest.
 		index::options opts;
 		if (round % 3 == 2) { opts.flush_threads = 4; opts.flush_min_docs = 64; }
-		auto ix = strata::index::create(io, opts, uuid);
-		auto serial = strata::index::create(serial_io, {}, uuid);
+		auto ix = prospect::index::create(io, opts, uuid);
+		auto serial = prospect::index::create(serial_io, {}, uuid);
 		const std::size_t docs = 2000 + r() % 6000;
 		const bool deletes = round % 2 == 1;
 		segment_writer one;
@@ -373,7 +373,7 @@ int main() {
 		std::vector<std::uint64_t> deleted((seg.core().doc_count() + 63) / 64, 0);
 		for (std::uint32_t d = 0; d < 3000; d += 1 + std::uint32_t(r() % 5)) { deleted[d >> 6] |= std::uint64_t(1) << (d & 63); }
 		auto dead = [&](std::uint32_t d) { return (deleted[d >> 6] >> (d & 63)) & 1; };
-		auto phrase = [&] { return std::make_unique<phrase_scorer>(seg.get<strata::inverted_plugin>(), std::vector<format::term_info>{*seg.get<strata::inverted_plugin>().term("a"), *seg.get<strata::inverted_plugin>().term("b")}); };
+		auto phrase = [&] { return std::make_unique<phrase_scorer>(seg.get<prospect::inverted_plugin>(), std::vector<prospect::format::term_info>{*seg.get<prospect::inverted_plugin>().term("a"), *seg.get<prospect::inverted_plugin>().term("b")}); };
 		auto live_phrase = [&] { return std::make_unique<live_scorer>(phrase(), deleted); };
 		// "a b" and "c" in live documents, by brute force.
 		std::set<ordinal_t> want;
@@ -387,7 +387,7 @@ int main() {
 		}
 		std::vector<scorer_ptr> kids;
 		kids.push_back(live_phrase());
-		kids.push_back(std::make_unique<term_scorer>(seg.get<strata::inverted_plugin>(), *seg.get<strata::inverted_plugin>().term("c")));
+		kids.push_back(std::make_unique<term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term("c")));
 		conjunction_scorer both(std::move(kids));
 		CHECK(both.two_phase());
 		std::set<ordinal_t> got;
@@ -396,11 +396,11 @@ int main() {
 		// The counting copy, and count() through the wrapper.
 		// (A phrase has no counting copy; a term does, and the wrapper keeps it.)
 		CHECK(!live_phrase()->fresh());
-		auto lt = std::make_unique<live_scorer>(std::make_unique<term_scorer>(seg.get<strata::inverted_plugin>(), *seg.get<strata::inverted_plugin>().term("c")), deleted);
+		auto lt = std::make_unique<live_scorer>(std::make_unique<term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term("c")), deleted);
 		auto copy = lt->fresh();
 		CHECK(copy && count(*copy) == count(*lt));
 		// A window starting off a word boundary clears exactly the deleted ordinals in it.
-		auto all_c = std::make_unique<live_scorer>(std::make_unique<term_scorer>(seg.get<strata::inverted_plugin>(), *seg.get<strata::inverted_plugin>().term("c")), deleted);
+		auto all_c = std::make_unique<live_scorer>(std::make_unique<term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term("c")), deleted);
 		std::uint64_t bits[64] = {};
 		all_c->advance(5);
 		all_c->fill(5, 205, bits);

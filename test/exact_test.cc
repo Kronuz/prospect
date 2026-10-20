@@ -2,7 +2,7 @@
 // (Python's math.fsum algorithm), whatever the order and however they are split and
 // merged; squares enter exactly; integer sums do not overflow; infinities and NaN follow
 // IEEE addition.
-#include "strata/search/exact.hh"
+#include "prospect/exact.hh"
 
 #include <algorithm>
 #include <cmath>
@@ -58,46 +58,46 @@ int main() {
 		for (auto& x : xs) { x = random_double(spread); }
 		if (round % 5 == 0) { for (std::size_t i = 0; i < xs.size() / 2; ++i) { xs.push_back(-xs[i]); } }  // heavy cancellation
 		if (round % 7 == 0) { xs.push_back(std::numeric_limits<double>::denorm_min()); xs.push_back(-std::numeric_limits<double>::min()); }
-		strata::exact::double_sum whole;
+		prospect::exact::double_sum whole;
 		for (double x : xs) { whole.add(x); }
 		const double want = fsum(xs);
 		CHECK(same(whole.value(), want));
 		// Any order, any split into shards, merged in any order: the same bits.
 		std::shuffle(xs.begin(), xs.end(), rng);
 		const std::size_t shards = 1 + rng() % 64;
-		std::vector<strata::exact::double_sum> parts(shards);
+		std::vector<prospect::exact::double_sum> parts(shards);
 		for (double x : xs) { parts[rng() % shards].add(x); }
-		strata::exact::double_sum merged;
+		prospect::exact::double_sum merged;
 		for (auto& p : parts) { merged.merge(p); }
 		CHECK(same(merged.value(), want));
 	}
 	// Squares: x*x enters with its rounding error, so a sum of squares is exact.
 	{
-		strata::exact::double_sum squares; std::vector<double> terms;
+		prospect::exact::double_sum squares; std::vector<double> terms;
 		for (int i = 0; i < 1000; ++i) {
 			const double x = random_double(200);
 			squares.add_square(x);
 			const double high = x * x; terms.push_back(high); terms.push_back(std::fma(x, x, -high));
 		}
 		CHECK(same(squares.value(), fsum(terms)));
-		strata::exact::double_sum one; one.add_square(1.0 + std::ldexp(1.0, -52));  // 1 + 2^-51 + 2^-104
+		prospect::exact::double_sum one; one.add_square(1.0 + std::ldexp(1.0, -52));  // 1 + 2^-51 + 2^-104
 		CHECK(one.value() == 1.0 + std::ldexp(1.0, -51));
 	}
 	// Overflow to infinity, infinities and NaN, and an empty sum.
 	{
-		strata::exact::double_sum big; big.add(std::numeric_limits<double>::max()); big.add(std::numeric_limits<double>::max());
+		prospect::exact::double_sum big; big.add(std::numeric_limits<double>::max()); big.add(std::numeric_limits<double>::max());
 		CHECK(std::isinf(big.value()) && big.value() > 0);
-		strata::exact::double_sum back; back.add(std::numeric_limits<double>::max()); back.add(std::numeric_limits<double>::max()); back.add(-std::numeric_limits<double>::max());
+		prospect::exact::double_sum back; back.add(std::numeric_limits<double>::max()); back.add(std::numeric_limits<double>::max()); back.add(-std::numeric_limits<double>::max());
 		CHECK(back.value() == std::numeric_limits<double>::max());  // the intermediate overflow does not stick
-		strata::exact::double_sum inf; inf.add(1.0); inf.add(-std::numeric_limits<double>::infinity());
+		prospect::exact::double_sum inf; inf.add(1.0); inf.add(-std::numeric_limits<double>::infinity());
 		CHECK(std::isinf(inf.value()) && inf.value() < 0);
 		inf.add(std::numeric_limits<double>::infinity());
 		CHECK(std::isnan(inf.value()));
-		CHECK(strata::exact::double_sum{}.value() == 0.0);
+		CHECK(prospect::exact::double_sum{}.value() == 0.0);
 	}
 	// 128-bit integer sums past 2^63.
 	{
-		strata::exact::integer_sum s;
+		prospect::exact::integer_sum s;
 		for (int i = 0; i < 4; ++i) { s.add(std::numeric_limits<std::int64_t>::max()); }
 		CHECK(s.value == static_cast<__int128>(std::numeric_limits<std::int64_t>::max()) * 4);
 	}

@@ -35,7 +35,7 @@
 #include <cstdint>
 #include <limits>
 
-namespace strata::exact {
+namespace prospect::exact {
 
 // A signed integer sum that cannot overflow for fewer than 2^64 values.
 struct integer_sum {
@@ -135,4 +135,4 @@ private:
 	std::uint64_t nan_ = 0, positive_infinity_ = 0, negative_infinity_ = 0;
 };
 
-}  // namespace strata::exact
+}  // namespace prospect::exact

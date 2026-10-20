@@ -29,7 +29,7 @@
 #include <bit>
 #include <cstdint>
 
-namespace strata::ordered {
+namespace prospect::ordered {
 
 constexpr std::uint64_t from_i64(std::int64_t v) noexcept { return std::uint64_t(v) ^ (1ull << 63); }
 constexpr std::int64_t to_i64(std::uint64_t k) noexcept { return std::int64_t(k ^ (1ull << 63)); }
@@ -47,4 +47,4 @@ inline void put_be(std::uint64_t k, unsigned char* out) noexcept {
 	for (int i = 7; i >= 0; --i) { out[i] = static_cast<unsigned char>(k); k >>= 8; }
 }
 
-}  // namespace strata::ordered
+}  // namespace prospect::ordered

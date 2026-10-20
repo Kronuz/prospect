@@ -1,11 +1,11 @@
 // Fixtures pinning format 13's bytes and the index digest (format-13.md F22): every commit must
 // reproduce them exactly. Regenerate only for an intended format change:
 // STRATA_WRITE_FIXTURES=1 fixtures_test.
+#include "prospect/index.hh"
+#include "prospect/merge.hh"
+#include "prospect/reader.hh"
+#include "prospect/writer.hh"
 #include "strata/core/faultfs.hh"
-#include "strata/search/index.hh"
-#include "strata/search/merge.hh"
-#include "strata/search/reader.hh"
-#include "strata/search/writer.hh"
 
 #include <algorithm>
 #include <cstdio>
@@ -24,11 +24,11 @@ static int failures = 0;
 		if (!(cond)) { std::fprintf(stderr, "%s:%d: CHECK(%s)\n", __FILE__, __LINE__, #cond); ++failures; } \
 	} while (0)
 
-using namespace strata;
+using namespace prospect;
 
 // Compares bytes with the named fixture, or writes it under STRATA_WRITE_FIXTURES.
 static void pin(const std::string& name, const std::string& bytes) {
-	const std::string path = std::string(STRATA_FIXTURES) + "/" + name;
+	const std::string path = std::string(PROSPECT_FIXTURES) + "/" + name;
 	if (std::getenv("STRATA_WRITE_FIXTURES")) {
 		std::FILE* f = std::fopen(path.c_str(), "wb");
 		std::fwrite(bytes.data(), 1, bytes.size(), f);
@@ -65,8 +65,8 @@ static std::uint32_t terms_of(std::uint32_t d, std::vector<std::vector<std::uint
 // A segment of `docs` documents; stored records of `stored` bytes, keys when `keyed`.
 static std::string build(std::uint32_t docs, std::size_t stored, bool keyed, bool wide = false, std::uint32_t first = 1, std::uint32_t step = 1) {
 	segment_writer w;
-	w.builder<strata::inverted_plugin>().wide_skip_offsets = wide;
-	if (!keyed) { w.structures &= ~format::bit::keys; }  // keyless: no keys structure (F4, F9)
+	w.builder<prospect::inverted_plugin>().wide_skip_offsets = wide;
+	if (!keyed) { w.structures &= ~strata::format::bit::keys; }  // keyless: no keys structure (F4, F9)
 	std::vector<std::vector<std::uint32_t>> pos;
 	std::vector<posting_input> in;
 	for (std::uint32_t d = 0; d < docs; ++d) {
@@ -107,7 +107,7 @@ static std::uint64_t docs_if_held(const S& s) {
 	}
 	return 0;
 }
-static_assert(segment::contains<strata::inverted_plugin>() && segment::contains<strata::keys_plugin>() && segment::contains<strata::stored_plugin>());
+static_assert(segment::contains<prospect::inverted_plugin>() && segment::contains<strata::keys_plugin>() && segment::contains<strata::stored_plugin>());
 static_assert(!segment::contains<outside_plugin>());
 
 int main() {
@@ -118,7 +118,7 @@ int main() {
 	// The document profile (L12): keys and stored records, no inverted structure (F4).
 	{
 		segment_writer w;
-		w.structures = format::bit::keys | format::bit::stored;
+		w.structures = strata::format::bit::keys | strata::format::bit::stored;
 		for (std::uint32_t d = 0; d < 150; ++d) { w.add(d + 1, {}, 0, "record " + std::to_string(d), 1 + d % 3, "Q" + std::to_string(d)); }
 		pin("document.sx", w.flush(id));
 	}
@@ -138,9 +138,9 @@ int main() {
 		auto first = std::make_unique<segment>(file);
 		segment moved(std::move(*first));
 		first.reset();
-		const auto info = moved.get<strata::inverted_plugin>().term("gamma");
+		const auto info = moved.get<prospect::inverted_plugin>().term("gamma");
 		CHECK(info && info->df > 0);
-		postings_iterator it(moved.get<strata::inverted_plugin>(), *info);
+		postings_iterator it(moved.get<prospect::inverted_plugin>(), *info);
 		std::uint64_t n = 0;
 		for (auto d = it.next(); d != no_more_docs; d = it.next()) { ++n; }
 		CHECK(n == info->df);
@@ -148,9 +148,9 @@ int main() {
 		CHECK(moved.get<strata::stored_plugin>().stored(5).size() == 1000);
 		moved.verify_all();
 		// Presence is per segment (L11): this segment holds every plugin of its layout.
-		CHECK(moved.holds<strata::inverted_plugin>() && moved.holds<strata::keys_plugin>() && moved.holds<strata::stored_plugin>());
+		CHECK(moved.holds<prospect::inverted_plugin>() && moved.holds<strata::keys_plugin>() && moved.holds<strata::stored_plugin>());
 		CHECK(!moved.holds<outside_plugin>());
-		CHECK(docs_if_held<strata::inverted_plugin>(moved) == 300 && docs_if_held<outside_plugin>(moved) == 0);
+		CHECK(docs_if_held<prospect::inverted_plugin>(moved) == 300 && docs_if_held<outside_plugin>(moved) == 0);
 	}
 	// An empty flush: empty.sx is pinned, so a writer that starts refusing one fails here.
 	try {
@@ -215,7 +215,7 @@ int main() {
 	{
 		std::mt19937_64 rng(13);
 		segment_writer w;
-		w.structures &= ~format::bit::keys;
+		w.structures &= ~strata::format::bit::keys;
 		std::vector<std::string> names;
 		for (int t = 0; t < 24; ++t) { names.push_back("s" + std::to_string(t)); }
 		std::vector<std::vector<std::uint32_t>> none(names.size());
@@ -241,7 +241,7 @@ int main() {
 			for (std::size_t j = 0; j < it.seed_count(); ++j) {
 				const auto& p = it.seed_at(j);
 				char line[96];
-				std::snprintf(line, sizeof line, "%s %u %u %u %u %u\n", name.c_str(), format::seed_ks[j], p.code_wdf, unsigned(p.code), p.exact_wdf, p.exact);
+				std::snprintf(line, sizeof line, "%s %u %u %u %u %u\n", name.c_str(), prospect::format::seed_ks[j], p.code_wdf, unsigned(p.code), p.exact_wdf, p.exact);
 				text += line;
 			}
 		}
@@ -254,13 +254,13 @@ int main() {
 	{
 		auto family = [](const char* ext) {
 			std::vector<std::string> names;
-			for (const auto& e : std::filesystem::directory_iterator(STRATA_FIXTURES)) {
+			for (const auto& e : std::filesystem::directory_iterator(PROSPECT_FIXTURES)) {
 				if (e.is_regular_file() && e.path().extension() == ext) { names.push_back(e.path().filename().string()); }
 			}
 			std::sort(names.begin(), names.end());
 			std::string all;
 			for (const auto& n : names) {
-				std::ifstream in(std::string(STRATA_FIXTURES) + "/" + n, std::ios::binary);
+				std::ifstream in(std::string(PROSPECT_FIXTURES) + "/" + n, std::ios::binary);
 				const std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 				all += n + '\0' + std::to_string(bytes.size()) + '\0' + bytes;
 			}
@@ -269,9 +269,9 @@ int main() {
 		struct row {
 			unsigned long long version = 0, hash = 0;
 		};
-		const row now[2] = {{format::pre_freeze, family(".sx")}, {files::pre_freeze, family(".bin")}};
+		const row now[2] = {{strata::format::pre_freeze, family(".sx")}, {files::pre_freeze, family(".bin")}};
 		const char* names[2] = {"segments", "files"};
-		const std::string path = std::string(STRATA_FIXTURES) + "/pre_freeze.txt";
+		const std::string path = std::string(PROSPECT_FIXTURES) + "/pre_freeze.txt";
 		row was[2];
 		if (std::FILE* f = std::fopen(path.c_str(), "r")) {
 			for (auto& w : was) {

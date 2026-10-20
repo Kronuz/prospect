@@ -1,14 +1,14 @@
 // Format 13's open rules (docs/design/format-13.md T1, step 7c-1): the frozen prefix (F2),
 // F3's kinds and F5's canonical layout, F4's structure bits and presence, F6's reserved
 // words, the sink's file order, and the format-12 refusal fixtures.
+#include "prospect/check.hh"
+#include "prospect/index.hh"
+#include "prospect/merge.hh"
+#include "prospect/reader.hh"
+#include "prospect/search.hh"
+#include "prospect/searcher.hh"
+#include "prospect/writer.hh"
 #include "strata/core/faultfs.hh"
-#include "strata/search/index.hh"
-#include "strata/search/merge.hh"
-#include "strata/search/check.hh"
-#include "strata/search/reader.hh"
-#include "strata/search/search.hh"
-#include "strata/search/searcher.hh"
-#include "strata/search/writer.hh"
 
 #include <crc32c/crc32c.hh>
 #include <sys/mman.h>
@@ -50,7 +50,7 @@ const char* name(outcome o) {
 
 outcome open(const std::string& file) {
 	try {
-		strata::segment s(file);
+		prospect::segment s(file);
 		return outcome::opens;
 	} catch (const strata::corrupt_segment&) {
 		return outcome::corrupt;
@@ -63,12 +63,12 @@ outcome open(const std::string& file) {
 
 // A segment holding `structures`, keyed when they include keys.
 std::string profile_segment(std::uint64_t structures, std::uint32_t first = 1) {
-	strata::segment_writer w;
+	prospect::segment_writer w;
 	w.structures = structures;
 	const bool inverted = structures & strata::format::bit::inverted, stored = structures & strata::format::bit::stored;
 	for (std::uint32_t d = 0; d < 200; ++d) {
 		const std::vector<std::uint32_t> pos{1, 3};
-		std::vector<strata::posting_input> in;
+		std::vector<prospect::posting_input> in;
 		if (inverted) { in.push_back({d % 2 ? "odd" : "even", 2, pos}); }
 		const bool keyed = structures & strata::format::bit::keys;
 		w.add(first + d, in, inverted ? 2 + d % 9 : 0, stored ? std::string(1 + d % 5, 's') : std::string(), keyed ? 1 + d % 4 : 0,
@@ -95,11 +95,11 @@ outcome open_as(const std::string& file) {
 }
 
 std::string keyed_segment() {
-	strata::segment_writer w;
+	prospect::segment_writer w;
 	for (std::uint32_t d = 0; d < 300; ++d) {
 		const std::string key = "Q" + std::to_string(d);
 		const std::vector<std::uint32_t> pos{1, 4}, beta{7};
-		std::vector<strata::posting_input> in{{"alpha", 2, pos}};
+		std::vector<prospect::posting_input> in{{"alpha", 2, pos}};
 		if (d % 3 == 0) { in.push_back({"beta", 1, beta}); }
 		w.add(2 * d + 1, in, 3, std::string(d % 7, 'x'), 1 + d % 5, key);
 	}
@@ -197,24 +197,24 @@ std::string with_version(std::string file, std::uint32_t v) {
 
 // The docids a term query matches over an index's live documents, through the planner's
 // routing (F8): the term table resolves a key-prefixed term as a key leaf.
-std::vector<std::uint64_t> matches(const strata::index& ix, std::string_view term, std::string_view key_prefix) {
-	std::vector<strata::segment_snapshot> segs;
+std::vector<std::uint64_t> matches(const prospect::index& ix, std::string_view term, std::string_view key_prefix) {
+	std::vector<prospect::segment_snapshot> segs;
 	for (const auto& v : ix.segments()) { segs.push_back({v.seg, v.deleted, v.dead}); }
-	strata::term_table table(segs, key_prefix);
-	auto build = [&](const strata::segment& seg) -> strata::scorer_ptr {
+	prospect::term_table table(segs, key_prefix);
+	auto build = [&](const prospect::segment& seg) -> prospect::scorer_ptr {
 		const auto* info = table.info(seg, term);
 		if (!info) { return nullptr; }
-		return std::make_unique<strata::term_scorer>(seg.get<strata::inverted_plugin>(), *info);
+		return std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *info);
 	};
 	std::vector<std::uint64_t> out;
-	for (const auto& h : strata::search(segs, build, 1000)) { out.push_back(h.docid); }
+	for (const auto& h : prospect::search(segs, build, 1000)) { out.push_back(h.docid); }
 	std::sort(out.begin(), out.end());
 	return out;
 }
 
-strata::operation upsert(const std::string& key, const std::string& word) {
-	strata::operation op;
-	op.type = strata::operation::replace_key;
+prospect::operation upsert(const std::string& key, const std::string& word) {
+	prospect::operation op;
+	op.type = prospect::operation::replace_key;
 	op.key = key;
 	op.doc.key = key;
 	op.doc.terms.push_back({word, 1, {1}});
@@ -223,8 +223,8 @@ strata::operation upsert(const std::string& key, const std::string& word) {
 	return op;
 }
 
-strata::verdict::outcome apply(strata::index& ix, const strata::operation& op) {
-	strata::transaction t;
+strata::verdict::outcome apply(prospect::index& ix, const prospect::operation& op) {
+	prospect::transaction t;
 	t.ops.push_back(op);
 	return ix.apply(t, {}).result;
 }
@@ -244,7 +244,7 @@ int main() {
 	const std::string good = keyed_segment();
 	CHECK(open(good) == outcome::opens);
 	{
-		strata::segment s(good);
+		prospect::segment s(good);
 		CHECK(s.core().version() == strata::format::version && strata::format::version == strata::format::pre_freeze);
 		CHECK(s.core().structures() == (bit::inverted | bit::norms | bit::keys | bit::stored));
 		// F5's order: the streamed sections, then the pinned tail by rank.
@@ -300,7 +300,7 @@ int main() {
 		CHECK(open(good.substr(0, 10)) == outcome::corrupt);
 		// The real format-12 files: each refused as unsupported (F2).
 		for (const char* f : {"small.sx", "permuted.sx", "stored-frames.sx", "keyless.sx", "wide-skips.sx", "merge-two.sx", "merge-deletes.sx", "empty.sx"}) {
-			const std::string bytes = read_file(std::string(STRATA_FIXTURES) + "/format12/" + f);
+			const std::string bytes = read_file(std::string(PROSPECT_FIXTURES) + "/format12/" + f);
 			CHECK(!bytes.empty());
 			const auto got = open(bytes);
 			if (got != outcome::unsupported) { std::fprintf(stderr, "format12/%s: %s\n", f, name(got)); }
@@ -314,13 +314,13 @@ int main() {
 		// size the CI hosts use (16 KiB on macOS arm64). Every profile an index can write,
 		// norms absent included (F13-R36).
 		auto big = [](std::uint64_t structures) {
-			strata::segment_writer w;
+			prospect::segment_writer w;
 			w.structures = structures;
 			std::mt19937_64 r(5);
 			for (std::uint32_t d = 0; d < 20000; ++d) {
 				const std::vector<std::uint32_t> pos{1 + d % 7};
 				const std::string term = "t" + std::to_string(r() % 5000);  // outlives the posting's view
-				std::vector<strata::posting_input> in;
+				std::vector<prospect::posting_input> in;
 				if (structures & bit::inverted) { in = {{term, 1, pos}, {"all", 1, {}}}; }
 				w.add(d + 1, in, (structures & bit::inverted) ? 2 + d % 11 : 0, std::string(40 + d % 60, char('a' + d % 26)), 1 + d % 9, "Q" + std::to_string(d));
 			}
@@ -341,7 +341,7 @@ int main() {
 			CHECK(to > from);
 			if (to > from) { CHECK(::mprotect(static_cast<char*>(map) + from, to - from, PROT_NONE) == 0); }
 			{
-				strata::segment s(std::string_view(static_cast<const char*>(map), file.size()));  // a read there faults
+				prospect::segment s(std::string_view(static_cast<const char*>(map), file.size()));  // a read there faults
 				CHECK(s.core().verified_regions() == 0);
 				CHECK(s.core().doc_count() == 20000 && s.get<strata::keys_plugin>().may_hold("Q7"));
 			}
@@ -356,16 +356,16 @@ int main() {
 		// that first use as damage, not at open.
 		{
 			const std::string with = big(all), without = big(all & ~bit::norms);
-			strata::segment a(with), b(without);
-			for (strata::ordinal_t o = 0; o < 20000; o += 37) { CHECK(a.get<strata::inverted_plugin>().norm(o) == b.get<strata::inverted_plugin>().norm(o)); }
+			prospect::segment a(with), b(without);
+			for (strata::ordinal_t o = 0; o < 20000; o += 37) { CHECK(a.get<prospect::inverted_plugin>().norm(o) == b.get<prospect::inverted_plugin>().norm(o)); }
 			std::string bad = without;
 			for (const auto& e : strata::format::decode_toc(bad, strata::format::decode_footer(bad))) {
 				if (e.kind == section::lengths) { bad[e.offset + e.length / 2] ^= 1; }
 			}
-			strata::segment c(bad);
+			prospect::segment c(bad);
 			bool threw = false;
 			try {
-				(void)c.get<strata::inverted_plugin>().norm(0);
+				(void)c.get<prospect::inverted_plugin>().norm(0);
 			} catch (const strata::corrupt_segment&) {
 				threw = true;
 			}
@@ -525,9 +525,9 @@ int main() {
 	// --- F20: the manifest's structures and versions (7c-6) -----------------------------------
 	{
 		enum class verdict { opens, corrupt, unsupported, other };
-		auto open_index = [](kronuz::journal::IO& io, const strata::index::options& o) {
+		auto open_index = [](kronuz::journal::IO& io, const prospect::index::options& o) {
 			try {
-				auto ix = strata::index::open(io, o);
+				auto ix = prospect::index::open(io, o);
 				return verdict::opens;
 			} catch (const strata::unsupported_index&) {
 				return verdict::unsupported;
@@ -539,11 +539,11 @@ int main() {
 				return verdict::other;
 			}
 		};
-		strata::index::options o;
+		prospect::index::options o;
 		o.key_prefix = "Q";
 		// A committed index; returns its head manifest's generation.
 		auto make = [&](strata::faultfs::io& io) {
-			auto ix = strata::index::create(io, o, {});
+			auto ix = prospect::index::create(io, o, {});
 			CHECK(apply(ix, upsert("Q1", "w")) == strata::verdict::accepted);
 			ix.commit();
 			const auto m = ix.manifest();
@@ -601,7 +601,7 @@ int main() {
 			strata::faultfs::filesystem fs;
 			strata::faultfs::io io(fs);
 			const auto gen = make(io);
-			const std::string v1 = read_file(std::string(STRATA_FIXTURES) + "/format12/manifest.bin");
+			const std::string v1 = read_file(std::string(PROSPECT_FIXTURES) + "/format12/manifest.bin");
 			auto f = io.open_existing(strata::index_detail::manifest_name(gen));
 			f->truncate(0);
 			f->write_at(0, v1);
@@ -613,7 +613,7 @@ int main() {
 			strata::faultfs::io io_a(fs_a), io_b(fs_b);
 			std::uint64_t gen = 0;
 			{
-				auto a = strata::index::create(io_a, o, {});
+				auto a = prospect::index::create(io_a, o, {});
 				CHECK(apply(a, upsert("Q1", "w")) == strata::verdict::accepted);
 				gen = a.checkpoint();
 			}
@@ -621,7 +621,7 @@ int main() {
 				m.mask |= bit::points;
 				m.segments.back().values_generation = 1;  // a later field under it: still unsupported (F13-R42)
 			});
-			auto b = strata::index::create(io_b, o, {});
+			auto b = prospect::index::create(io_b, o, {});
 			bool unsupported = false;
 			try {
 				b.install(io_a, gen);
@@ -633,16 +633,16 @@ int main() {
 		// The segment identity (F6, F13-R41): unique across replicas, the producing term first,
 		// kept by install, and checked against the manifest's entry at open (I13).
 		{
-			auto header_id = [](const strata::index& ix, std::size_t i) {
+			auto header_id = [](const prospect::index& ix, std::size_t i) {
 				return std::string(ix.segments()[i].seg->core().section(section::header).bytes.substr(strata::format::identity_offset, 16));
 			};
-			auto entry_id = [](const strata::index& ix, std::size_t i) {
+			auto entry_id = [](const prospect::index& ix, std::size_t i) {
 				const auto& id = ix.manifest().segments[i].identity;
 				return std::string(reinterpret_cast<const char*>(id.data()), 16);
 			};
 			strata::faultfs::filesystem fs_a, fs_b;
 			strata::faultfs::io io_a(fs_a), io_b(fs_b);
-			auto a = strata::index::create(io_a, o, {});
+			auto a = prospect::index::create(io_a, o, {});
 			a.set_producer_term(7);
 			CHECK(apply(a, upsert("Q1", "w")) == strata::verdict::accepted);
 			const std::uint64_t gen = a.checkpoint();
@@ -650,7 +650,7 @@ int main() {
 			std::uint64_t term = 0;
 			std::memcpy(&term, first.data(), 8);
 			CHECK(term == 7 && entry_id(a, 0) == first);
-			auto b = strata::index::create(io_b, o, {});
+			auto b = prospect::index::create(io_b, o, {});
 			b.install(io_a, gen);
 			CHECK(b.segments().size() == 1 && header_id(b, 0) == first && entry_id(b, 0) == first);  // kept by the copy
 			// The probe's case: each replica commits one upsert of its own in the same term.
@@ -682,12 +682,12 @@ int main() {
 			strata::faultfs::io io_a(fs_a), io_b(fs_b);
 			std::uint64_t gen = 0;
 			{
-				auto a = strata::index::create(io_a, o, {});
+				auto a = prospect::index::create(io_a, o, {});
 				CHECK(apply(a, upsert("Q1", "w")) == strata::verdict::accepted);
 				gen = a.checkpoint();
 			}
 			rewrite(fs_a, io_a, gen, [&](strata::files::manifest& m) { m.attributes = {{tag, "replica"}}; });
-			auto b = strata::index::create(io_b, o, {});
+			auto b = prospect::index::create(io_b, o, {});
 			bool unsupported = false;
 			try {
 				b.install(io_a, gen);
@@ -703,7 +703,7 @@ int main() {
 			strata::faultfs::io io(fs);
 			const auto gen = make(io);
 			rewrite(fs, io, gen, [](strata::files::manifest& m) { m.attributes = {{2, "tier"}}; });
-			auto ix = strata::index::open(io, o);
+			auto ix = prospect::index::open(io, o);
 			CHECK(apply(ix, upsert("Q9", "z")) == strata::verdict::accepted);
 			ix.commit();
 			CHECK(ix.manifest().generation > gen && ix.manifest().attributes.empty());
@@ -716,12 +716,12 @@ int main() {
 			strata::faultfs::io io_a(fs_a), io_b(fs_b);
 			std::uint64_t gen = 0;
 			{
-				auto a = strata::index::create(io_a, o, {});
+				auto a = prospect::index::create(io_a, o, {});
 				CHECK(apply(a, upsert("Q1", "w")) == strata::verdict::accepted);
 				gen = a.checkpoint();
 			}
 			rewrite(fs_a, io_a, gen, [](strata::files::manifest& m) { m.configured &= ~bit::keys; });
-			auto b = strata::index::create(io_b, o, {});
+			auto b = prospect::index::create(io_b, o, {});
 			bool corrupt = false;
 			try {
 				b.install(io_a, gen);
@@ -736,13 +736,13 @@ int main() {
 	{
 		strata::faultfs::filesystem fs;
 		strata::faultfs::io io(fs);
-		strata::index::options o;
+		prospect::index::options o;
 		o.key_prefix = "Q";
 		{
-		auto ix = strata::index::create(io, o, {});
-		strata::transaction t;
-		strata::operation op;
-		op.type = strata::operation::replace_key;
+		auto ix = prospect::index::create(io, o, {});
+		prospect::transaction t;
+		prospect::operation op;
+		op.type = prospect::operation::replace_key;
 		op.key = "Q1";
 		op.doc.terms.push_back({"alpha", 1, {1}});
 		op.doc.key = "Q1";
@@ -763,7 +763,7 @@ int main() {
 		}
 		bool corrupt = false, unsupported = false;
 		try {
-			auto again = strata::index::open(io, o);
+			auto again = prospect::index::open(io, o);
 		} catch (const strata::corrupt_segment&) {
 			corrupt = true;
 		} catch (const strata::corrupt_index&) {
@@ -781,8 +781,8 @@ int main() {
 			no_norms = profile_segment(all & ~bit::norms), document = profile_segment(bit::keys | bit::stored);
 		// stored absent with its bit clear: opens, every record empty.
 		{
-			strata::segment s(no_stored);
-			CHECK(!s.holds<strata::stored_plugin>() && s.holds<strata::inverted_plugin>() && s.holds<strata::keys_plugin>());
+			prospect::segment s(no_stored);
+			CHECK(!s.holds<strata::stored_plugin>() && s.holds<prospect::inverted_plugin>() && s.holds<strata::keys_plugin>());
 			CHECK(s.core().entry(section::stored) == nullptr);
 			for (strata::ordinal_t o = 0; o < s.core().doc_count(); ++o) { CHECK(s.get<strata::stored_plugin>().stored(o).empty()); }
 			CHECK(s.get<strata::keys_plugin>().version(3) == 1 + 3 % 4);
@@ -791,13 +791,13 @@ int main() {
 		// norms absent with its bit clear: each document's from its exact length, so scores
 		// equal a segment that built them.
 		{
-			strata::segment with(full), without(no_norms);
-			CHECK(without.core().entry(section::norms) == nullptr && without.holds<strata::inverted_plugin>());
-			for (strata::ordinal_t o = 0; o < 200; ++o) { CHECK(without.get<strata::inverted_plugin>().norm(o) == with.get<strata::inverted_plugin>().norm(o)); }
+			prospect::segment with(full), without(no_norms);
+			CHECK(without.core().entry(section::norms) == nullptr && without.holds<prospect::inverted_plugin>());
+			for (strata::ordinal_t o = 0; o < 200; ++o) { CHECK(without.get<prospect::inverted_plugin>().norm(o) == with.get<prospect::inverted_plugin>().norm(o)); }
 			for (const char* t : {"odd", "even"}) {
-				const auto a = with.get<strata::inverted_plugin>().term(t), b = without.get<strata::inverted_plugin>().term(t);
+				const auto a = with.get<prospect::inverted_plugin>().term(t), b = without.get<prospect::inverted_plugin>().term(t);
 				CHECK(a && b);
-				strata::term_scorer sa(with.get<strata::inverted_plugin>(), *a), sb(without.get<strata::inverted_plugin>(), *b);
+				prospect::term_scorer sa(with.get<prospect::inverted_plugin>(), *a), sb(without.get<prospect::inverted_plugin>(), *b);
 				for (auto d = sa.next(), e = sb.next(); d != strata::no_more_docs || e != strata::no_more_docs; d = sa.next(), e = sb.next()) {
 					CHECK(d == e && sa.score() == sb.score());
 					if (d != e) { break; }
@@ -807,12 +807,12 @@ int main() {
 		// inverted absent with its bit clear, the document profile (L12): no terms, every
 		// length 0, keys and records as written; the search layout reads it too.
 		{
-			strata::segment s(document);
-			CHECK(!s.holds<strata::inverted_plugin>() && s.holds<strata::keys_plugin>() && s.holds<strata::stored_plugin>());
-			const auto& inv = s.get<strata::inverted_plugin>();
+			prospect::segment s(document);
+			CHECK(!s.holds<prospect::inverted_plugin>() && s.holds<strata::keys_plugin>() && s.holds<strata::stored_plugin>());
+			const auto& inv = s.get<prospect::inverted_plugin>();
 			CHECK(!inv.term("odd") && inv.length(7) == 0 && inv.total_length() == 0 && inv.norm(7) == 0);
 			std::size_t terms = 0;
-			inv.scan_terms([&](std::string_view, const strata::format::term_info&) { return ++terms, true; });
+			inv.scan_terms([&](std::string_view, const prospect::format::term_info&) { return ++terms, true; });
 			CHECK(terms == 0);
 			CHECK(s.get<strata::keys_plugin>().find("Q7", {}) == strata::ordinal_t(7) && s.get<strata::stored_plugin>().stored(7) == std::string(3, 's'));
 			s.verify_all();
@@ -821,7 +821,7 @@ int main() {
 			CHECK(open_as<document_segment>(full) == outcome::unsupported);
 			document_segment d(document);
 			CHECK(d.get<strata::keys_plugin>().find("Q9", {}) == strata::ordinal_t(9) && d.get<strata::stored_plugin>().stored(9).size() == 5);
-			CHECK(!d.holds<strata::inverted_plugin>());
+			CHECK(!d.holds<prospect::inverted_plugin>());
 			// A clear bit with its sections present, or a set bit with them absent: damage.
 			CHECK(open(relayout(document, [](entries&) {}, [](strata::format::footer& f) { f.structures |= bit::inverted; })) == outcome::corrupt);
 			CHECK(open(relayout(no_stored, [](entries&) {}, [](strata::format::footer& f) { f.structures |= bit::stored; })) == outcome::corrupt);
@@ -831,9 +831,9 @@ int main() {
 		// hold, and a nonzero version without a key anywhere (F9, F13-R9).
 		{
 			auto refuses = [](std::uint64_t structures, bool terms, bool record, std::uint64_t version = 0, std::string key = {}) {
-				strata::segment_writer w;
+				prospect::segment_writer w;
 				w.structures = structures;
-				std::vector<strata::posting_input> in;
+				std::vector<prospect::posting_input> in;
 				if (terms) { in.push_back({"t", 1, {}}); }
 				try {
 					w.add(1, in, 1, record ? "r" : "", version, key);
@@ -857,16 +857,16 @@ int main() {
 		// a source read as empty, terms absent as none.
 		{
 			const std::string later = profile_segment(bit::keys | bit::stored, 1001);
-			strata::segment x(no_stored), y(later);
-			const std::vector<strata::merge_source> src{{&x, nullptr}, {&y, nullptr}};
+			prospect::segment x(no_stored), y(later);
+			const std::vector<prospect::merge_source> src{{&x, nullptr}, {&y, nullptr}};
 			std::string out;
 			strata::string_output o(out);
 			strata::string_spill spill;
-			(void)strata::merge_segments(src, {}, o, spill, {});
-			strata::segment m(out);
+			(void)prospect::merge_segments(src, {}, o, spill, {});
+			prospect::segment m(out);
 			CHECK(m.core().structures() == all && m.core().doc_count() == 400);
 			CHECK(m.get<strata::stored_plugin>().stored(0).empty() && m.get<strata::stored_plugin>().stored(200) == std::string(1, 's'));
-			CHECK(m.get<strata::inverted_plugin>().term("odd")->df == 100 && m.get<strata::inverted_plugin>().length(200) == 0);
+			CHECK(m.get<prospect::inverted_plugin>().term("odd")->df == 100 && m.get<prospect::inverted_plugin>().length(200) == 0);
 			CHECK(m.get<strata::keys_plugin>().find("Q1000", {}) == strata::ordinal_t(200) && m.get<strata::keys_plugin>().version(200) == 1);
 		}
 	}
@@ -876,35 +876,35 @@ int main() {
 		// keys absent with its bit clear (the log profile): no key, every version 0.
 		const std::string log = profile_segment(bit::inverted | bit::norms | bit::stored, 1);
 		{
-			strata::segment s(log);
-			CHECK(!s.holds<strata::keys_plugin>() && s.holds<strata::inverted_plugin>());
+			prospect::segment s(log);
+			CHECK(!s.holds<strata::keys_plugin>() && s.holds<prospect::inverted_plugin>());
 			for (section k : {section::keys, section::key_index, section::versions}) { CHECK(s.core().entry(k) == nullptr); }
 			const auto& keys = s.get<strata::keys_plugin>();
 			CHECK(keys.version(5) == 0 && !keys.may_hold("Q5") && !keys.find("Q5", {}) && keys.key_count() == 0);
 			std::size_t n = 0;
 			keys.scan("", [&](std::string_view, strata::ordinal_t) { return ++n, true; });
 			CHECK(n == 0);
-			CHECK(s.get<strata::inverted_plugin>().term("odd")->df == 100);
+			CHECK(s.get<prospect::inverted_plugin>().term("odd")->df == 100);
 		}
 		// Versions near 2^64 - 1 at a width above 1: the writer writes base 0 at width 64, so
 		// the reader's range check passes (F13-R25 item 7).
 		{
-			strata::segment_writer w;
+			prospect::segment_writer w;
 			const std::uint64_t top = ~std::uint64_t(0);
 			w.add(1, {}, 0, {}, top - 2, "Q1");
 			w.add(2, {}, 0, {}, top, "Q2");
 			const std::string bytes = w.flush({});
 			CHECK(open(bytes) == outcome::opens);
-			strata::segment s(bytes);
+			prospect::segment s(bytes);
 			CHECK(s.get<strata::keys_plugin>().version(0) == top - 2 && s.get<strata::keys_plugin>().version(1) == top);
 		}
 		// check() refuses a nonzero version without a key (F13-R9), which no writer writes.
 		{
-			strata::segment_writer w;
+			prospect::segment_writer w;
 			for (std::uint64_t d = 1; d <= 10; ++d) { w.add(d, {}, 0, {}, d == 3 ? 7 : 0, d == 3 ? "Q3" : ""); }
 			const std::string good_versions = w.flush({});
-			strata::check_report r;
-			strata::check_segment(strata::segment(good_versions), nullptr, r, "Q");
+			prospect::check_report r;
+			strata::check_segment(prospect::segment(good_versions), nullptr, r, "Q");
 			std::string v;
 			strata::format::put<std::uint64_t>(v, 5);
 			v.push_back('\0');  // every document at version 5, width 0
@@ -912,8 +912,8 @@ int main() {
 			CHECK(open(bad) == outcome::opens);
 			bool threw = false;
 			try {
-				strata::check_report rr;
-				strata::check_segment(strata::segment(bad), nullptr, rr, "Q");
+				prospect::check_report rr;
+				strata::check_segment(prospect::segment(bad), nullptr, rr, "Q");
 			} catch (const strata::corrupt_segment&) {
 				threw = true;
 			}
@@ -924,19 +924,19 @@ int main() {
 		{
 			strata::faultfs::filesystem fs;
 			strata::faultfs::io io(fs);
-			auto ix = strata::index::create(io, strata::index::options{}, {});
-			strata::operation add;
-			add.type = strata::operation::add;
+			auto ix = prospect::index::create(io, prospect::index::options{}, {});
+			prospect::operation add;
+			add.type = prospect::operation::add;
 			add.doc.terms.push_back({"w", 1, {1}});
 			add.doc.length = 1;
-			strata::transaction t;
+			prospect::transaction t;
 			t.ops.push_back(add);
 			const auto v1 = ix.apply(t, {});
 			CHECK(v1.result == strata::verdict::accepted && v1.versions == std::vector<std::uint64_t>{0});
-			strata::operation replace = add;
-			replace.type = strata::operation::replace_docid;
+			prospect::operation replace = add;
+			replace.type = prospect::operation::replace_docid;
 			replace.docid = v1.docids[0];
-			strata::transaction t2;
+			prospect::transaction t2;
 			t2.ops.push_back(replace);
 			CHECK(ix.apply(t2, {}).versions == std::vector<std::uint64_t>{0});  // buffered
 			const std::uint64_t before = ix.digest();
@@ -959,10 +959,10 @@ int main() {
 	{
 		strata::faultfs::filesystem fs;
 		strata::faultfs::io io(fs);
-		strata::index::options o;
+		prospect::index::options o;
 		o.key_prefix = "Q";
 		o.auto_merge = false;
-		auto ix = strata::index::create(io, o, {});
+		auto ix = prospect::index::create(io, o, {});
 		// Stage 1: a term with the key prefix, a key without it, and a key unlike the
 		// operation's are invalid (F8; F13-R25 item 2).
 		{
@@ -970,7 +970,7 @@ int main() {
 			op.doc.terms.push_back({"Qb", 0, {}});
 			CHECK(apply(ix, op) == strata::verdict::invalid);
 			auto add = upsert("Qa", "w");
-			add.type = strata::operation::add;
+			add.type = prospect::operation::add;
 			add.doc.key = "Xa";
 			CHECK(apply(ix, add) == strata::verdict::invalid);
 			auto other = upsert("Qa", "w");
@@ -1004,8 +1004,8 @@ int main() {
 		for (int i = 0; i < 600; ++i) {
 			const std::string key = "Q" + std::to_string(r() % 120);
 			if (r() % 5 == 0) {
-				strata::operation del;
-				del.type = strata::operation::delete_key;
+				prospect::operation del;
+				del.type = prospect::operation::delete_key;
 				del.key = key;
 				(void)apply(ix, del);
 				live.erase(key);
@@ -1028,24 +1028,24 @@ int main() {
 		}
 		// The term table's df counts the segments holding a key, deleted copies included.
 		{
-			std::vector<strata::segment_snapshot> segs;
+			std::vector<prospect::segment_snapshot> segs;
 			std::uint64_t held = 0;
 			for (const auto& v : ix.segments()) {
 				segs.push_back({v.seg, v.deleted, v.dead});
 				held += v.seg->get<strata::keys_plugin>().find("Q7", {}).has_value();
 			}
-			CHECK(strata::snapshot_df(segs, "Q7", o.key_prefix) == held);
+			CHECK(prospect::snapshot_df(segs, "Q7", o.key_prefix) == held);
 		}
 		const auto report = ix.check();
 		CHECK(report.keys >= live.size() && report.terms >= 7);
 		// check() refuses a dictionary that holds a key-prefixed term.
 		{
-			strata::segment_writer w;
-			std::vector<strata::posting_input> in{{"Qx", 1, {}}};
+			prospect::segment_writer w;
+			std::vector<prospect::posting_input> in{{"Qx", 1, {}}};
 			w.add(1, in, 1);
 			const std::string bytes = w.flush({});
-			strata::segment seg(bytes);
-			strata::check_report rr;
+			prospect::segment seg(bytes);
+			prospect::check_report rr;
 			bool threw = false;
 			try {
 				strata::check_segment(seg, nullptr, rr, "Q");
@@ -1053,7 +1053,7 @@ int main() {
 				threw = true;
 			}
 			CHECK(threw);
-			strata::check_report plain;
+			prospect::check_report plain;
 			strata::check_segment(seg, nullptr, plain);  // no prefix: an ordinary term
 			CHECK(plain.terms == 1);
 		}
@@ -1061,16 +1061,16 @@ int main() {
 		// fuzz inputs are: two keys naming one ordinal, a range other than the first and last
 		// key, and a filter that misses held keys.
 		{
-			strata::segment_writer w;
+			prospect::segment_writer w;
 			for (std::uint32_t d = 0; d < 10; ++d) {
-				std::vector<strata::posting_input> in{{"w", 1, {}}};
+				std::vector<prospect::posting_input> in{{"w", 1, {}}};
 				w.add(d + 1, in, 1, {}, 0, "Q" + std::to_string(d));
 			}
 			const std::string good10 = w.flush({});
 			auto refused = [](const std::string& file) {
 				try {
-					strata::check_report rr;
-					strata::check_segment(strata::segment(file), nullptr, rr, "Q");
+					prospect::check_report rr;
+					strata::check_segment(prospect::segment(file), nullptr, rr, "Q");
 				} catch (const strata::corrupt_segment&) {
 					return true;
 				}
@@ -1084,7 +1084,7 @@ int main() {
 			const auto twice = strata::keys::encode(e);
 			CHECK(refused(with_section(with_section(good10, section::keys, twice.keys), section::key_index, twice.index)));
 			// key_index rebuilt with another maximum, or a filter over other keys.
-			const std::string index = std::string(strata::segment(good10).core().section(section::key_index).bytes);
+			const std::string index = std::string(prospect::segment(good10).core().section(section::key_index).bytes);
 			auto reindex = [&](const std::string* max, bool other_filter) {
 				const char* q = index.data();
 				const char* end = q + index.size();
@@ -1117,7 +1117,7 @@ int main() {
 			// MR1's M1: one keys byte changed so a key repeats the one before, every key still in
 			// range and filter and every ordinal distinct; only the cursor's order test refuses it.
 			// MR2: a merge of it is damage too, never std::invalid_argument.
-			const std::string kb(strata::segment(good10).core().section(section::keys).bytes);
+			const std::string kb(prospect::segment(good10).core().section(section::keys).bytes);
 			std::string repeat;
 			for (std::size_t i = 0; i < kb.size() && repeat.empty(); ++i) {
 				for (int x : {1, 2, 3}) {
@@ -1125,7 +1125,7 @@ int main() {
 					k[i] = char(k[i] ^ x);
 					const std::string file = with_section(good10, section::keys, k);
 					try {
-						strata::segment sg(file);
+						prospect::segment sg(file);
 						std::vector<std::string> got;
 						std::vector<strata::ordinal_t> ords;
 						sg.get<strata::keys_plugin>().scan("", [&](std::string_view key, strata::ordinal_t o) {
@@ -1145,15 +1145,15 @@ int main() {
 				}
 			}
 			auto merge_refused = [](const std::string& file) {
-				strata::segment sg(file);
-				const std::vector<strata::merge_source> src{{&sg, nullptr}};
+				prospect::segment sg(file);
+				const std::vector<prospect::merge_source> src{{&sg, nullptr}};
 				std::string out;
 				strata::string_output so(out);
 				strata::string_spill spill;
 				strata::merge_options mo;
 				mo.key_prefix = "Q";
 				try {
-					(void)strata::merge_segments(src, {}, so, spill, mo);
+					(void)prospect::merge_segments(src, {}, so, spill, mo);
 				} catch (const strata::corrupt_segment&) {
 					return true;
 				}
@@ -1164,14 +1164,14 @@ int main() {
 			CHECK(merge_refused(with_section(with_section(good10, section::keys, twice.keys), section::key_index, twice.index)));
 			// MR1's M3: nine keys of ten documents, key_index's count raised to 10.
 			{
-				strata::segment_writer w9;
+				prospect::segment_writer w9;
 				for (std::uint32_t d = 0; d < 10; ++d) {
-					std::vector<strata::posting_input> in{{"w", 1, {}}};
+					std::vector<prospect::posting_input> in{{"w", 1, {}}};
 					w9.add(d + 1, in, 1, {}, 0, d == 9 ? std::string() : "Q" + std::to_string(d));
 				}
 				const std::string good9 = w9.flush({});
 				CHECK(!refused(good9));
-				std::string ix9(strata::segment(good9).core().section(section::key_index).bytes);
+				std::string ix9(prospect::segment(good9).core().section(section::key_index).bytes);
 				CHECK(!ix9.empty() && ix9[0] == 9);
 				ix9[0] = 10;  // one LEB byte either way
 				CHECK(refused(with_section(good9, section::key_index, ix9)));
@@ -1179,12 +1179,12 @@ int main() {
 		}
 		// The merge's backstop refuses a key-prefixed term too, never drops it (F13-R10; CR6, M33).
 		{
-			strata::segment_writer w;
-			std::vector<strata::posting_input> in{{"Qx", 1, {}}};
+			prospect::segment_writer w;
+			std::vector<prospect::posting_input> in{{"Qx", 1, {}}};
 			w.add(1, in, 1);
 			const std::string bytes = w.flush({});
-			strata::segment seg(bytes);
-			const std::vector<strata::merge_source> src{{&seg, nullptr}};
+			prospect::segment seg(bytes);
+			const std::vector<prospect::merge_source> src{{&seg, nullptr}};
 			std::string out;
 			strata::string_output so(out);
 			strata::string_spill spill;
@@ -1192,7 +1192,7 @@ int main() {
 			mo.key_prefix = "Q";
 			bool threw = false;
 			try {
-				(void)strata::merge_segments(src, {}, so, spill, mo);
+				(void)prospect::merge_segments(src, {}, so, spill, mo);
 			} catch (const std::invalid_argument&) {
 				threw = true;
 			}
@@ -1210,9 +1210,9 @@ int main() {
 		}
 		// The writer's backstop refuses a key-prefixed term, never drops it.
 		{
-			strata::segment_writer w;
+			prospect::segment_writer w;
 			w.key_prefix = "Q";
-			std::vector<strata::posting_input> in{{"Qx", 1, {}}};
+			std::vector<prospect::posting_input> in{{"Qx", 1, {}}};
 			bool threw = false;
 			try {
 				w.add(1, in, 1);
@@ -1228,17 +1228,17 @@ int main() {
 	{
 		strata::faultfs::filesystem fs;
 		strata::faultfs::io io(fs);
-		strata::index::options o;
-		auto ix = strata::index::create(io, o, {});
-		strata::operation op;
-		op.type = strata::operation::add;
+		prospect::index::options o;
+		auto ix = prospect::index::create(io, o, {});
+		prospect::operation op;
+		op.type = prospect::operation::add;
 		op.doc.terms.push_back({"Qa", 1, {1}});
 		op.doc.terms.push_back({"w", 1, {2}});
 		op.doc.length = 2;
-		strata::operation keyed = op;
+		prospect::operation keyed = op;
 		keyed.doc.key = "Qa";
 		CHECK(apply(ix, keyed) == strata::verdict::invalid);
-		keyed.type = strata::operation::replace_docid;
+		keyed.type = prospect::operation::replace_docid;
 		keyed.docid = 1;
 		CHECK(apply(ix, keyed) == strata::verdict::invalid);
 		CHECK(apply(ix, op) == strata::verdict::accepted);
@@ -1251,16 +1251,16 @@ int main() {
 	// inverted's statistics equal its documents' (F7; CR6, M28): total, minimum, and maximum
 	// length, and most positions, at the head of term_index.
 	{
-		strata::segment_writer w;
+		prospect::segment_writer w;
 		const std::uint32_t lengths[] = {3, 7, 5};
 		const std::vector<std::uint32_t> pos[] = {{1}, {1, 2, 3, 4}, {2, 5}};
 		for (std::uint32_t d = 0; d < 3; ++d) {
-			std::vector<strata::posting_input> in{{"w", std::uint32_t(pos[d].size()), pos[d]}};
+			std::vector<prospect::posting_input> in{{"w", std::uint32_t(pos[d].size()), pos[d]}};
 			w.add(d + 1, in, lengths[d], {});
 		}
 		const std::string bytes = w.flush({});
-		strata::segment s(bytes);
-		const auto& inv = s.get<strata::inverted_plugin>();
+		prospect::segment s(bytes);
+		const auto& inv = s.get<prospect::inverted_plugin>();
 		CHECK(inv.total_length() == 15 && inv.max_positions() == 4);
 		const std::string_view head = s.core().section(section::term_index).bytes;
 		CHECK(strata::format::get<std::uint64_t>(head.data()) == 15);
@@ -1270,7 +1270,7 @@ int main() {
 
 	// The buffer and the disk estimate count a document's key as they count a term (CR12).
 	{
-		strata::document d;
+		prospect::document d;
 		d.terms.push_back({"w", 1, {}});
 		const std::uint64_t bytes = d.part_bytes(), disk = d.disk_estimate();
 		d.key = "Q" + std::string(999, 'k');
@@ -1282,20 +1282,20 @@ int main() {
 	{
 		auto held = [](std::uint64_t structures) {
 			strata::flush_charge charge(nullptr);
-			strata::segment_writer w;
+			prospect::segment_writer w;
 			w.structures = structures;
 			w.memory = &charge;
 			for (std::uint32_t d = 0; d < 20000; ++d) {
-				std::vector<strata::posting_input> in{{"w", 1, {}}};
+				std::vector<prospect::posting_input> in{{"w", 1, {}}};
 				w.add(d + 1, in, 1);
 			}
 			return charge.held();
 		};
 		const std::uint64_t all = held(bit::inverted | bit::norms | bit::keys | bit::stored), bare = held(bit::inverted | bit::norms);
 		CHECK(all >= bare + 16 * 20000);
-		strata::segment_writer w;
+		prospect::segment_writer w;
 		w.structures = bit::inverted | bit::norms;
-		std::vector<strata::posting_input> in{{"w", 1, {}}};
+		std::vector<prospect::posting_input> in{{"w", 1, {}}};
 		bool refused = false;
 		try {
 			w.add(1, in, 1, {}, 5);

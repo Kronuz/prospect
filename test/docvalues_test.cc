@@ -3,7 +3,7 @@
 // skip groups (against brute force over ordinals), single-value extraction at every
 // width, and statistics (a sum past 2^64) match the input; single-byte corruptions throw
 // corrupt_segment or decode without crashing, and truncations throw.
-#include "strata/search/docvalues.hh"
+#include "prospect/docvalues.hh"
 
 #include <algorithm>
 #include <bit>
@@ -22,7 +22,7 @@ static int failures = 0;
 #define CHECK(cond) \
 	do { if (!(cond)) { std::fprintf(stderr, "%s:%d: CHECK(%s)\n", __FILE__, __LINE__, #cond); if (++failures > 20) std::exit(1); } } while (0)
 
-namespace dv = strata::docvalues;
+namespace dv = prospect::docvalues;
 using strata::ordinal_t;
 using docs_t = std::vector<std::vector<std::uint64_t>>;
 using strings_t = std::vector<std::vector<std::string>>;
@@ -128,7 +128,7 @@ static std::string roundtrip(dv::kind k, bool multi, const docs_t& docs, std::ui
 	const auto stream = stream_of(docs);
 	__int128 sum = 0;
 	for (const auto v : stream) {
-		if (k == dv::kind::u64) { sum += static_cast<__int128>(v); } else if (k == dv::kind::i64) { sum += strata::ordered::to_i64(v); }
+		if (k == dv::kind::u64) { sum += static_cast<__int128>(v); } else if (k == dv::kind::i64) { sum += prospect::ordered::to_i64(v); }
 	}
 	const auto& s = c.stats();
 	CHECK(s.docs == present);
@@ -231,7 +231,7 @@ static void corrupt_and_truncate(const std::string& good) {
 }
 
 int main() {
-	using namespace strata::ordered;
+	using namespace prospect::ordered;
 	std::mt19937_64 rng(4);
 	constexpr auto u64_max = std::numeric_limits<std::uint64_t>::max();
 

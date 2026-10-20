@@ -41,9 +41,10 @@
 #include "fst.hh"
 #include "hashes.hh"
 #include <crc32c/crc32c.hh>
+#include "prospect/format.hh"
+#include "prospect/reader.hh"
+#include "prospect/strata.hh"
 #include "strata/core/writer.hh"
-#include "strata/search/format.hh"
-#include "strata/search/reader.hh"
 #include "termdict.hh"
 
 #include <algorithm>
@@ -62,7 +63,7 @@
 #include <utility>
 #include <vector>
 
-namespace strata {
+namespace prospect {
 
 // One term of a document being added.
 struct posting_input {
@@ -975,4 +976,4 @@ struct writer_access {
 };
 }  // namespace detail
 
-}  // namespace strata
+}  // namespace prospect

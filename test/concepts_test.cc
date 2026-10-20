@@ -1,7 +1,7 @@
 // Compile-time checks that the frozen Phase 1 contracts fit together.
+#include "prospect/reader.hh"
+#include "prospect/scorer.hh"
 #include "residency.hh"
-#include "strata/search/reader.hh"
-#include "strata/search/scorer.hh"
 
 #include <cstdio>
 
@@ -9,22 +9,22 @@
 struct constant_scorer {
 	docset::sorted_set::iterator it;
 	double weight;
-	strata::doc_t doc() const noexcept { return it.doc(); }
-	strata::doc_t next() noexcept { return it.next(); }
-	strata::doc_t advance(strata::doc_t t) noexcept { return it.advance(t); }
+	prospect::doc_t doc() const noexcept { return it.doc(); }
+	prospect::doc_t next() noexcept { return it.next(); }
+	prospect::doc_t advance(prospect::doc_t t) noexcept { return it.advance(t); }
 	std::uint64_t cost() const noexcept { return it.cost(); }
 	double score() noexcept { return weight; }
-	strata::doc_t block_end(strata::doc_t) noexcept { return strata::no_more_docs; }
-	double max_score(strata::doc_t, strata::doc_t) noexcept { return weight; }
+	prospect::doc_t block_end(prospect::doc_t) noexcept { return strata::no_more_docs; }
+	double max_score(prospect::doc_t, prospect::doc_t) noexcept { return weight; }
 };
 
-static_assert(strata::scorer<constant_scorer>);
-static_assert(!strata::scorer<docset::sorted_set::iterator>);
+static_assert(prospect::scorer<constant_scorer>);
+static_assert(!prospect::scorer<docset::sorted_set::iterator>);
 static_assert(residency::backend<residency::sync_backend>);
 
 // The layers' plugins (layers.md L4) and format 13's document profile (L12) against a stub
 // keys plugin that depends on nothing, until format 13's keys plugin exists.
-static_assert(strata::section_plugin<strata::inverted_plugin> && strata::section_plugin<strata::keys_plugin> && strata::section_plugin<strata::stored_plugin>);
+static_assert(strata::section_plugin<prospect::inverted_plugin> && strata::section_plugin<strata::keys_plugin> && strata::section_plugin<strata::stored_plugin>);
 struct stub_keys {
 	static constexpr std::string_view id = "keys";
 	static constexpr strata::format::owner owner = strata::format::owner::keys;

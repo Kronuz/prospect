@@ -9,8 +9,8 @@
 //   directory_test STATE_DIR [tmpfs]
 //   directory_test opener DIR open|create PARENT_DIR_FD   (the spawned second process)
 #include "completion/posix.h"
+#include "prospect/index.hh"
 #include "strata/core/faultfs.hh"
-#include "strata/search/index.hh"
 
 #include <fcntl.h>
 #include <spawn.h>
@@ -41,7 +41,7 @@ static int failures = 0;
 		if (!(cond)) { std::fprintf(stderr, "%s:%d: CHECK(%s)\n", __FILE__, __LINE__, #cond); if (++failures > 40) std::exit(1); } \
 	} while (0)
 
-using namespace strata;
+using namespace prospect;
 namespace fs = std::filesystem;
 
 static const std::array<char, 16> uuid_a = {'d', 'i', 'r', 'e', 'c', 't', 'o', 'r', 'y', 0, 0, 0, 0, 0, 0, 1};
@@ -242,7 +242,7 @@ int main(int argc, char** argv) {
 			}
 			{
 				kronuz::journal::PosixIO io1(dir);
-				std::optional<strata::index> held;
+				std::optional<prospect::index> held;
 				if (first == "create") {
 					held.emplace(index::create(io1, keyed(), uuid_a));
 				} else {
@@ -269,7 +269,7 @@ int main(int argc, char** argv) {
 	{
 		const fs::path dir = root / "t5b";
 		fresh(dir);
-		for (const auto& e : fs::directory_iterator(fs::path(STRATA_FIXTURES) / "pre-d2")) {
+		for (const auto& e : fs::directory_iterator(fs::path(PROSPECT_FIXTURES) / "pre-d2")) {
 			fs::copy_file(e.path(), dir / e.path().filename());
 			fs::permissions(dir / e.path().filename(), fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace);
 		}
@@ -369,7 +369,7 @@ int main(int argc, char** argv) {
 					io.replace_statfs(fake_statfs);
 					io.replace_flock(fake_flock);
 				};
-				auto warned = [&](const strata::index& ix) {
+				auto warned = [&](const prospect::index& ix) {
 					const auto& w = ix.filesystem_warning();
 					return w && w->filesystem == c.expect && !w->local && w->locked == !unsupported;
 				};
@@ -421,7 +421,7 @@ int main(int argc, char** argv) {
 			CHECK(error_of([&] { auto ix = index::open(io, policy(refuse)); }, &what) == EIO);
 			CHECK(what.find("unknown") != std::string::npos && what.find("inspect") != std::string::npos);
 			CHECK(listing(dir) == made);
-			auto warned = [&](const strata::index& ix) {
+			auto warned = [&](const prospect::index& ix) {
 				const auto& w = ix.filesystem_warning();
 				return w && w->filesystem.find("unknown") != std::string::npos && w->filesystem.find("inspect") != std::string::npos && !w->local && w->locked;
 			};
@@ -519,7 +519,7 @@ int main(int argc, char** argv) {
 				CHECK((error_of([&] { kronuz::journal::PosixIO io(dir); }) != 0) == (symlinked || shared));
 				if (symlinked) { CHECK(error_of([&] { kronuz::journal::PosixIO io(dir, 0600, {false, true}); }) != 0); }
 				if (shared) { CHECK(error_of([&] { kronuz::journal::PosixIO io(dir, 0600, {true, false}); }) != 0); }
-				auto warned = [&](const strata::index& ix) {
+				auto warned = [&](const prospect::index& ix) {
 					const auto& w = ix.directory_trust_warning();
 					return w && w->known && !w->foreign_owner && w->shared_writable;
 				};

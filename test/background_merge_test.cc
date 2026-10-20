@@ -5,8 +5,8 @@
 // merges run; the rate limit; a merge waiting for indexing-budget room; ENOSPC
 // discarding a merge, EIO fencing, and a damaged source left for heal(); merge outputs
 // published in id order; and the merge build's cancellation points.
+#include "prospect/index.hh"
 #include "strata/core/faultfs.hh"
-#include "strata/search/index.hh"
 #include "strata/core/pool_executor.hh"
 
 #include <chrono>
@@ -26,7 +26,7 @@ static int failures = 0;
 		if (!(cond)) { std::fprintf(stderr, "%s:%d: CHECK(%s)\n", __FILE__, __LINE__, #cond); if (++failures > 30) std::exit(1); } \
 	} while (0)
 
-using namespace strata;
+using namespace prospect;
 using clock_type = std::chrono::steady_clock;
 
 static const std::array<char, 16> uuid = {'s', 't', 'r', 'a', 't', 'a', '-', 't', 'e', 's', 't', '-', 'u', 'u', 'i', 'd'};
@@ -68,7 +68,7 @@ static bool throws(const std::function<void()>& f) {
 static double seconds_since(clock_type::time_point t) { return std::chrono::duration<double>(clock_type::now() - t).count(); }
 
 // docid -> (version, stored) over every live document.
-static std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> contents(const strata::index& ix) {
+static std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> contents(const prospect::index& ix) {
 	std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> out;
 	for (const auto& s : ix.segments()) {
 		for (ordinal_t o = 0; o < s.seg->core().doc_count(); ++o) {
@@ -102,8 +102,8 @@ struct background {
 	}
 	// Small tiers, so a handful of tiny segments asks for merges; `use`: merge here,
 	// otherwise inline.
-	strata::index::options options(bool use = true) {
-		strata::index::options o;
+	prospect::index::options options(bool use = true) {
+		prospect::index::options o;
 		o.key_prefix = "Q";
 		o.policy.segments_per_tier = 2;
 		o.policy.floor_bytes = 1;
@@ -118,7 +118,7 @@ static const char* name_of(std::size_t threads) { return threads == 0 ? "inline"
 
 // `segments` committed segments of `docs` documents each, every one with `bytes` random
 // stored bytes (incompressible), keys from Q<first>.
-static void fill(strata::index& ix, int segments, int docs, std::size_t bytes, std::uint64_t seed, int first = 0) {
+static void fill(prospect::index& ix, int segments, int docs, std::size_t bytes, std::uint64_t seed, int first = 0) {
 	std::mt19937_64 r(seed);
 	int n = first;
 	for (int s = 0; s < segments; ++s) {
@@ -141,7 +141,7 @@ static std::set<std::string> segment_files(const faultfs::filesystem& fs) {
 	}
 	return out;
 }
-static std::set<std::string> named_segments(const strata::index& ix) {
+static std::set<std::string> named_segments(const prospect::index& ix) {
 	std::set<std::string> named;
 	for (const auto& s : ix.manifest().segments) { named.insert(index_detail::segment_name(s.id)); }
 	return named;
@@ -210,8 +210,8 @@ static void carry_over(std::size_t threads) {
 	faultfs::io inner(fs), tio(tfs);
 	gate_io gate(inner);
 	kronuz::journal::IO& io = bg.threaded() ? static_cast<kronuz::journal::IO&>(gate) : static_cast<kronuz::journal::IO&>(inner);
-	auto ix = strata::index::create(io, bg.options(), uuid);
-	auto twin = strata::index::create(tio, bg.options(false), uuid);
+	auto ix = prospect::index::create(io, bg.options(), uuid);
+	auto twin = prospect::index::create(tio, bg.options(false), uuid);
 	auto both = [&](const transaction& t) {
 		const auto a = ix.apply(t, {}), b = twin.apply(t, {});
 		CHECK(a.result == b.result && a.docids == b.docids && a.versions == b.versions);
@@ -246,7 +246,7 @@ static void carry_over(std::size_t threads) {
 	twin.commit();
 	const auto digest = ix.digest();
 	ix.close();
-	ix = strata::index::open(io, bg.options());
+	ix = prospect::index::open(io, bg.options());
 	CHECK(ix.digest() == digest && contents(ix) == contents(twin));
 	(void)ix.check();
 }
@@ -258,7 +258,7 @@ static void id_order(std::size_t threads) {
 	background bg(threads);
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
-	auto ix = strata::index::create(io, bg.options(), uuid);
+	auto ix = prospect::index::create(io, bg.options(), uuid);
 	fill(ix, 6, 4, 300, 11);
 	ix.maybe_merge();
 	CHECK(ix.merges_pending() >= 1);
@@ -274,7 +274,7 @@ static void id_order(std::size_t threads) {
 	ix.commit();
 	const auto digest = ix.digest();
 	ix.close();
-	ix = strata::index::open(io, bg.options());
+	ix = prospect::index::open(io, bg.options());
 	CHECK(ix.digest() == digest && contents(ix).size() == 25);
 	last = 0;
 	for (const auto& s : ix.manifest().segments) {
@@ -286,7 +286,7 @@ static void id_order(std::size_t threads) {
 namespace strata {
 // Breaks an invariant no public call can: two segments out of id order.
 struct index_test_access {
-	static void swap_segments(strata::index& ix) { std::swap(ix.segs_[0], ix.segs_[1]); }
+	static void swap_segments(prospect::index& ix) { std::swap(ix.segs_[0], ix.segs_[1]); }
 };
 }  // namespace strata
 
@@ -296,7 +296,7 @@ static void order_check_fences() {
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	background bg(0);
-	auto ix = strata::index::create(io, bg.options(false), uuid);
+	auto ix = prospect::index::create(io, bg.options(false), uuid);
 	fill(ix, 2, 2, 100, 12);
 	const auto files = fs.list();
 	strata::index_test_access::swap_segments(ix);
@@ -316,11 +316,11 @@ static void order_check_fences() {
 struct twins {
 	faultfs::filesystem fs, tfs;
 	faultfs::io io{fs}, tio{tfs};
-	strata::index::options bo, to;
-	strata::index ix, twin;
+	prospect::index::options bo, to;
+	prospect::index ix, twin;
 	explicit twins(background& bg)
-		: bo(with_auto(bg.options())), to(with_auto(bg.options(false))), ix(strata::index::create(io, bo, uuid)), twin(strata::index::create(tio, to, uuid)) {}
-	static strata::index::options with_auto(strata::index::options o) {
+		: bo(with_auto(bg.options())), to(with_auto(bg.options(false))), ix(prospect::index::create(io, bo, uuid)), twin(prospect::index::create(tio, to, uuid)) {}
+	static prospect::index::options with_auto(prospect::index::options o) {
 		o.auto_merge = true;
 		return o;
 	}
@@ -386,7 +386,7 @@ static void random_schedules(std::size_t threads, std::uint64_t seed) {
 	}
 	a.fs.crash(seed);
 	a.ix.close();
-	a.ix = strata::index::open(a.io, a.bo);
+	a.ix = prospect::index::open(a.io, a.bo);
 	CHECK(a.ix.digest() == durable);
 	(void)a.ix.check();
 }
@@ -398,13 +398,13 @@ static void close_while_merging(std::size_t threads) {
 	faultfs::filesystem fa, fb, fc;
 	faultfs::io ia(fa), ib(fb), ic(fc);
 	const auto o = bg.options();
-	auto a = strata::index::create(ia, o, uuid);
-	auto b = strata::index::create(ib, o, uuid);
+	auto a = prospect::index::create(ia, o, uuid);
+	auto b = prospect::index::create(ib, o, uuid);
 	fill(a, 6, 4, 3000, 1);
 	fill(b, 6, 4, 3000, 2);
 	const auto da = a.digest(), db = b.digest();
 	{
-		auto c = strata::index::create(ic, o, uuid);
+		auto c = prospect::index::create(ic, o, uuid);
 		fill(c, 6, 4, 3000, 3);
 		c.maybe_merge();
 	}  // destroyed with its merges queued or running
@@ -416,9 +416,9 @@ static void close_while_merging(std::size_t threads) {
 	b.close();
 	a.close();
 	CHECK(seconds_since(t0) < 2.0);
-	a = strata::index::open(ia, o);
-	b = strata::index::open(ib, o);
-	auto c = strata::index::open(ic, o);
+	a = prospect::index::open(ia, o);
+	b = prospect::index::open(ib, o);
+	auto c = prospect::index::open(ic, o);
 	CHECK(a.digest() == da && b.digest() == db && contents(c).size() == 24);
 	CHECK(segment_files(fa) == named_segments(a) && segment_files(fb) == named_segments(b) && segment_files(fc) == named_segments(c));
 	CHECK(no_spills(fa) && no_spills(fb) && no_spills(fc));
@@ -434,7 +434,7 @@ static void rate_limit(std::size_t threads) {
 	background bg(threads, rate);
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
-	auto ix = strata::index::create(io, bg.options(), uuid);
+	auto ix = prospect::index::create(io, bg.options(), uuid);
 	fill(ix, 4, 4, 3000, 4);
 	const auto digest = ix.digest();
 	const auto t0 = clock_type::now();
@@ -458,7 +458,7 @@ static void memory_wait(std::size_t threads) {
 	auto o = bg.options();
 	o.budget = &memory;
 	o.merge_memory_wait = bg.threaded() ? 60'000'000'000 : 1'000'000'000;
-	auto ix = strata::index::create(io, o, uuid);
+	auto ix = prospect::index::create(io, o, uuid);
 	fill(ix, 6, 4, 3000, 9);
 	auto hog = memory.open();
 	CHECK(hog.try_grow(memory.capacity() - memory.used()));
@@ -491,7 +491,7 @@ static void space_and_faults(std::size_t threads) {
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	const auto o = bg.options();
-	auto ix = strata::index::create(io, o, uuid);
+	auto ix = prospect::index::create(io, o, uuid);
 	fill(ix, 6, 4, 3000, 5);
 	const auto digest = ix.digest();
 	const auto good = contents(ix);
@@ -523,7 +523,7 @@ static void space_and_faults(std::size_t threads) {
 	CHECK(throws([&] { ix.commit(); }));  // fenced
 	fs.clear_faults();
 	ix.close();
-	ix = strata::index::open(io, o);
+	ix = prospect::index::open(io, o);
 	CHECK(ix.digest() == committed && contents(ix).size() == 36);
 }
 
@@ -535,7 +535,7 @@ static void damaged_source(std::size_t threads) {
 	fs.map_files(false);  // media faults act on reads
 	faultfs::io io(fs);
 	const auto o = bg.options();
-	auto ix = strata::index::create(io, o, uuid);
+	auto ix = prospect::index::create(io, o, uuid);
 	fill(ix, 6, 4, 3000, 10);
 	const auto digest = ix.digest();
 	const std::uint64_t victim = ix.manifest().segments.front().id;
@@ -544,10 +544,10 @@ static void damaged_source(std::size_t threads) {
 	{
 		const segment seg(fs.view(name));
 		for (const auto& e : seg.core().sections()) {
-			if (e.kind == format::section::stored) { fs.add_media_fault(name, faultfs::media::bit_flip, e.offset + e.length / 2, e.offset + e.length / 2 + 1, 0); }
+			if (e.kind == strata::format::section::stored) { fs.add_media_fault(name, faultfs::media::bit_flip, e.offset + e.length / 2, e.offset + e.length / 2 + 1, 0); }
 		}
 	}
-	ix = strata::index::open(io, o);
+	ix = prospect::index::open(io, o);
 	ix.force_merge(1);  // the damaged one is left out; the rest merge
 	CHECK(ix.needs_heal() && ix.segments().size() == 2);
 	CHECK(ix.heal() == std::vector<std::uint64_t>{victim});  // its file reads damaged too
@@ -564,12 +564,12 @@ static void install_while_merging(std::size_t threads) {
 	faultfs::filesystem fs, sfs;
 	faultfs::io io(fs), sio(sfs);
 	const auto o = bg.options();
-	auto src = strata::index::create(sio, bg.options(false), uuid);
+	auto src = prospect::index::create(sio, bg.options(false), uuid);
 	fill(src, 2, 5, 100, 7, 1000);
 	const auto generation = src.checkpoint();
 	const auto want = src.digest();
 	const auto want_contents = contents(src);
-	auto ix = strata::index::create(io, o, uuid);
+	auto ix = prospect::index::create(io, o, uuid);
 	fill(ix, 6, 4, 3000, 8);
 	const auto files = segment_files(fs);
 	ix.maybe_merge();
@@ -585,7 +585,7 @@ static void install_while_merging(std::size_t threads) {
 	for (const auto& n : segment_files(fs)) { CHECK(files.count(n) || named.count(n)); }
 	CHECK(no_spills(fs));
 	ix.close();
-	ix = strata::index::open(io, o);
+	ix = prospect::index::open(io, o);
 	CHECK(ix.digest() == want && contents(ix) == want_contents);
 }
 
@@ -593,9 +593,9 @@ static void install_while_merging(std::size_t threads) {
 static void build_cancellation() {
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
-	strata::index::options o;
+	prospect::index::options o;
 	o.key_prefix = "Q";
-	auto ix = strata::index::create(io, o, uuid);
+	auto ix = prospect::index::create(io, o, uuid);
 	for (int s = 0; s < 2; ++s) {
 		for (int d = 0; d < 200; ++d) { CHECK(ix.apply(tx({replace("Q" + std::to_string(s * 200 + d), "t" + std::to_string(d % 50))}), {}).result == verdict::accepted); }
 		ix.refresh();

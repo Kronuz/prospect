@@ -8,10 +8,10 @@
 // recompute every checksum, so the changes reach the decoders instead of stopping at
 // verification. One base uses 64-bit skip offsets. Run with a -timeout of a few seconds
 // so a hang counts as a finding.
-#include "strata/search/check.hh"
-#include "strata/search/reader.hh"
-#include "strata/search/search.hh"
-#include "strata/search/writer.hh"
+#include "prospect/check.hh"
+#include "prospect/reader.hh"
+#include "prospect/search.hh"
+#include "prospect/writer.hh"
 
 #include <crc32c/crc32c.hh>
 #include <algorithm>
@@ -27,8 +27,8 @@ const char* const vocab[] = {"the", "of", "a", "b", "c", "rare", "bool", "weight
 // and key_index sections); permuted: the same docids in a shuffled order.
 std::string build(std::uint64_t seed, std::uint32_t docs, bool wide = false, bool keyed = false, bool permuted = false) {
 	std::mt19937_64 rng(seed);
-	strata::segment_writer w;
-	w.builder<strata::inverted_plugin>().wide_skip_offsets = wide;
+	prospect::segment_writer w;
+	w.builder<prospect::inverted_plugin>().wide_skip_offsets = wide;
 	w.permuted = permuted;
 	// The permuted base's docids come from their own generator, so the other bases keep their bytes.
 	std::vector<std::uint64_t> ids;
@@ -41,7 +41,7 @@ std::string build(std::uint64_t seed, std::uint32_t docs, bool wide = false, boo
 	std::vector<std::vector<std::uint32_t>> pos(std::size(vocab));
 	std::uint64_t docid = 1000;
 	for (std::uint32_t d = 0; d < docs; ++d) {
-		std::vector<strata::posting_input> in;
+		std::vector<prospect::posting_input> in;
 		std::uint32_t at = 0, length = 0;
 		for (std::size_t t = 0; t < std::size(vocab); ++t) {
 			const std::uint32_t density = t < 2 ? 95 : t < 5 ? 40 : t == 5 ? 2 : 30;
@@ -102,7 +102,7 @@ void refresh_toc_checksum(std::string& file) {
 	file.replace(file.size() - footer_bytes.size(), footer_bytes.size(), footer_bytes);
 }
 
-void exercise(const strata::segment& seg) {
+void exercise(const prospect::segment& seg) {
 	// Every third ordinal deleted, for find's live bits.
 	std::vector<std::uint64_t> deleted((seg.core().doc_count() + 63) / 64);
 	for (strata::ordinal_t d = 0; d < seg.core().doc_count(); d += 3) { deleted[d >> 6] |= std::uint64_t(1) << (d & 63); }
@@ -113,7 +113,7 @@ void exercise(const strata::segment& seg) {
 		(void)seg.core().ordinal_of(id);
 		(void)seg.core().ordinal_of(id + 1);
 		(void)seg.get<strata::keys_plugin>().version(d);
-		(void)seg.get<strata::inverted_plugin>().length(d);
+		(void)seg.get<prospect::inverted_plugin>().length(d);
 		(void)seg.get<strata::keys_plugin>().may_hold("Q" + std::to_string(id));
 		(void)seg.get<strata::keys_plugin>().find("Q" + std::to_string(id), {});  // decodes a key block
 		(void)seg.get<strata::keys_plugin>().find("Q" + std::to_string(id), live);
@@ -129,18 +129,18 @@ void exercise(const strata::segment& seg) {
 		for (auto c = keys.cursor(); c.next();) {}
 	}
 	try {
-		strata::check_report r;
+		prospect::check_report r;
 		strata::check_segment(seg, &deleted, r, "Q");  // every byte, every key against its range and filter (CR2)
 	} catch (const strata::corrupt_segment&) {
 		// damage found; the query paths below still run over what opened
 	}
-	std::vector<strata::format::term_info> infos;
+	std::vector<prospect::format::term_info> infos;
 	for (const char* t : vocab) {
-		auto info = seg.get<strata::inverted_plugin>().term(t);
+		auto info = seg.get<prospect::inverted_plugin>().term(t);
 		if (!info) { continue; }
 		infos.push_back(*info);
-		strata::postings_iterator it(seg.get<strata::inverted_plugin>(), *info);
-		strata::positions_reader pr(seg.get<strata::inverted_plugin>(), *info);
+		prospect::postings_iterator it(seg.get<prospect::inverted_plugin>(), *info);
+		prospect::positions_reader pr(seg.get<prospect::inverted_plugin>(), *info);
 		std::vector<std::uint32_t> got;
 		// Fence or answer (F10): every ordinal increases and stays below the count.
 		strata::ordinal_t prev = 0;
@@ -151,52 +151,52 @@ void exercise(const strata::segment& seg) {
 			first = false;
 			pr.read(it, got);
 		}
-		strata::term_scorer s(seg.get<strata::inverted_plugin>(), *info);
-		strata::top_k(seg, s, 10);
-		strata::term_scorer c(seg.get<strata::inverted_plugin>(), *info);
+		prospect::term_scorer s(seg.get<prospect::inverted_plugin>(), *info);
+		prospect::top_k(seg, s, 10);
+		prospect::term_scorer c(seg.get<prospect::inverted_plugin>(), *info);
 		std::uint64_t n = 0;
-		strata::top_k(seg, c, 100, &n);
+		prospect::top_k(seg, c, 100, &n);
 	}
-	(void)seg.get<strata::inverted_plugin>().term("absent");
+	(void)seg.get<prospect::inverted_plugin>().term("absent");
 	if (infos.size() < 3) { return; }
-	auto term = [&](std::size_t i) { return std::make_unique<strata::term_scorer>(seg.get<strata::inverted_plugin>(), infos[i % infos.size()]); };
+	auto term = [&](std::size_t i) { return std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), infos[i % infos.size()]); };
 	auto pair = [&](std::size_t i, std::size_t j) {
-		std::vector<strata::scorer_ptr> v;
+		std::vector<prospect::scorer_ptr> v;
 		v.push_back(term(i));
 		v.push_back(term(j));
 		return v;
 	};
-	strata::conjunction_scorer conj(pair(0, 1));
-	strata::top_k(seg, conj, 10);
-	strata::conjunction_scorer conj_count(pair(0, 2));
-	(void)strata::count(conj_count);
-	strata::disjunction_scorer disj(pair(1, 2));
-	strata::top_k(seg, disj, 10);
-	std::vector<strata::scorer_ptr> three;
+	prospect::conjunction_scorer conj(pair(0, 1));
+	prospect::top_k(seg, conj, 10);
+	prospect::conjunction_scorer conj_count(pair(0, 2));
+	(void)prospect::count(conj_count);
+	prospect::disjunction_scorer disj(pair(1, 2));
+	prospect::top_k(seg, disj, 10);
+	std::vector<prospect::scorer_ptr> three;
 	for (std::size_t i = 0; i < 3; ++i) { three.push_back(term(i)); }
-	strata::disjunction_scorer disj_count(std::move(three));
-	(void)strata::count(disj_count);
-	strata::exclusion_scorer excl(term(0), term(2));
-	(void)strata::count(excl);
-	strata::required_optional_scorer req(term(1), term(2));
-	strata::top_k(seg, req, 10);
-	strata::phrase_scorer phrase(seg.get<strata::inverted_plugin>(), {infos[0], infos[1 % infos.size()], infos[0]});
-	strata::top_k(seg, phrase, 10);
-	strata::phrase_scorer phrase_count(seg.get<strata::inverted_plugin>(), {infos[2 % infos.size()], infos.back()});
+	prospect::disjunction_scorer disj_count(std::move(three));
+	(void)prospect::count(disj_count);
+	prospect::exclusion_scorer excl(term(0), term(2));
+	(void)prospect::count(excl);
+	prospect::required_optional_scorer req(term(1), term(2));
+	prospect::top_k(seg, req, 10);
+	prospect::phrase_scorer phrase(seg.get<prospect::inverted_plugin>(), {infos[0], infos[1 % infos.size()], infos[0]});
+	prospect::top_k(seg, phrase, 10);
+	prospect::phrase_scorer phrase_count(seg.get<prospect::inverted_plugin>(), {infos[2 % infos.size()], infos.back()});
 	std::uint64_t n = 0;
-	strata::top_k(seg, phrase_count, 10, &n);
+	prospect::top_k(seg, phrase_count, 10, &n);
 	// Xapian-weighted phrase and NEAR, and a disjunction under pruning parents.
-	const std::vector<strata::format::term_info> two{infos[0], infos[1]};
-	const std::vector<strata::weight> weights{strata::weight::bm25(seg.get<strata::inverted_plugin>(), infos[0].df), strata::weight::bm25(seg.get<strata::inverted_plugin>(), infos[1].df)};
-	strata::phrase_scorer xapian(seg.get<strata::inverted_plugin>(), two, weights);
-	strata::top_k(seg, xapian, 10);
-	strata::phrase_scorer near(seg.get<strata::inverted_plugin>(), two, weights, 4);
-	strata::top_k(seg, near, 10, &n);
-	auto either = [&] { return std::make_unique<strata::disjunction_scorer>(pair(0, 1)); };
-	strata::exclusion_scorer either_not(either(), term(2));
-	strata::top_k(seg, either_not, 10);
-	strata::required_optional_scorer either_maybe(either(), term(2));
-	strata::top_k(seg, either_maybe, 10);
+	const std::vector<prospect::format::term_info> two{infos[0], infos[1]};
+	const std::vector<prospect::weight> weights{prospect::weight::bm25(seg.get<prospect::inverted_plugin>(), infos[0].df), prospect::weight::bm25(seg.get<prospect::inverted_plugin>(), infos[1].df)};
+	prospect::phrase_scorer xapian(seg.get<prospect::inverted_plugin>(), two, weights);
+	prospect::top_k(seg, xapian, 10);
+	prospect::phrase_scorer near(seg.get<prospect::inverted_plugin>(), two, weights, 4);
+	prospect::top_k(seg, near, 10, &n);
+	auto either = [&] { return std::make_unique<prospect::disjunction_scorer>(pair(0, 1)); };
+	prospect::exclusion_scorer either_not(either(), term(2));
+	prospect::top_k(seg, either_not, 10);
+	prospect::required_optional_scorer either_maybe(either(), term(2));
+	prospect::top_k(seg, either_maybe, 10);
 }
 
 }  // namespace
@@ -224,7 +224,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 	static const bool verdicts = std::getenv("STRATA_FUZZ_VERDICTS") != nullptr;
 	const char* verdict = "accepted";
 	try {
-		strata::segment seg(file);
+		prospect::segment seg(file);
 		exercise(seg);
 	} catch (const strata::corrupt_segment&) {
 		verdict = "corrupt_segment";

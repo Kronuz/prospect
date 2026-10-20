@@ -4,8 +4,8 @@
 //   words are optional, +word is required, -word is excluded, "a b" is a phrase.
 #pragma once
 
-#include "strata/search/search.hh"
-#include "strata/search/searcher.hh"
+#include "prospect/search.hh"
+#include "prospect/searcher.hh"
 
 #include <algorithm>
 #include <charconv>
@@ -57,40 +57,40 @@ inline parsed parse(std::string_view q) {
 // boost is how many times the clause repeats in its group (Xapian's wqf). With a term
 // table, weights are the snapshot's, not the segment's, and each term's dictionary walk
 // in each segment happens once per query (P6-3).
-inline strata::scorer_ptr clause_scorer(const strata::segment& seg, const std::vector<std::string>& clause, double boost, strata::scheme scheme, strata::term_table* table = nullptr) {
-	std::vector<strata::format::term_info> infos;
+inline prospect::scorer_ptr clause_scorer(const prospect::segment& seg, const std::vector<std::string>& clause, double boost, prospect::scheme scheme, prospect::term_table* table = nullptr) {
+	std::vector<prospect::format::term_info> infos;
 	for (const auto& t : clause) {
 		if (table) {
 			const auto* info = table->info(seg, t);
 			if (!info) { return nullptr; }
 			infos.push_back(*info);
 		} else {
-			auto info = seg.get<strata::inverted_plugin>().term(t);
+			auto info = seg.get<prospect::inverted_plugin>().term(t);
 			if (!info) { return nullptr; }
 			infos.push_back(*info);
 		}
 	}
-	const bool xapian = scheme == strata::scheme::bm25_xapian;
+	const bool xapian = scheme == prospect::scheme::bm25_xapian;
 	if (infos.size() == 1) {
 		if (table) {
 			const auto df = table->df(clause[0]);
 			const auto& st = table->stats();
-			return std::make_unique<strata::term_scorer>(seg.get<strata::inverted_plugin>(), infos[0], xapian ? strata::weight::bm25_xapian(st, df, std::uint32_t(boost)) : strata::weight::bm25(st, df, boost));
+			return std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), infos[0], xapian ? prospect::weight::bm25_xapian(st, df, std::uint32_t(boost)) : prospect::weight::bm25(st, df, boost));
 		}
-		if (xapian) { return std::make_unique<strata::term_scorer>(seg.get<strata::inverted_plugin>(), infos[0], strata::weight::bm25_xapian(seg.get<strata::inverted_plugin>(), infos[0].df, std::uint32_t(boost))); }
-		return std::make_unique<strata::term_scorer>(seg.get<strata::inverted_plugin>(), infos[0], boost);
+		if (xapian) { return std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), infos[0], prospect::weight::bm25_xapian(seg.get<prospect::inverted_plugin>(), infos[0].df, std::uint32_t(boost))); }
+		return std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), infos[0], boost);
 	}
 	if (!xapian) {
-		if (!table) { return std::make_unique<strata::phrase_scorer>(seg.get<strata::inverted_plugin>(), infos); }
+		if (!table) { return std::make_unique<prospect::phrase_scorer>(seg.get<prospect::inverted_plugin>(), infos); }
 		std::vector<std::uint64_t> dfs;
 		for (const auto& t : clause) { dfs.push_back(table->df(t)); }
-		return std::make_unique<strata::phrase_scorer>(seg.get<strata::inverted_plugin>(), infos, std::vector<strata::weight>{}, 0, &table->stats(), dfs);
+		return std::make_unique<prospect::phrase_scorer>(seg.get<prospect::inverted_plugin>(), infos, std::vector<prospect::weight>{}, 0, &table->stats(), dfs);
 	}
-	std::vector<strata::weight> weights;
+	std::vector<prospect::weight> weights;
 	for (std::size_t k = 0; k < infos.size(); ++k) {
-		weights.push_back(table ? strata::weight::bm25_xapian(table->stats(), table->df(clause[k])) : strata::weight::bm25_xapian(seg.get<strata::inverted_plugin>(), infos[k].df));
+		weights.push_back(table ? prospect::weight::bm25_xapian(table->stats(), table->df(clause[k])) : prospect::weight::bm25_xapian(seg.get<prospect::inverted_plugin>(), infos[k].df));
 	}
-	return std::make_unique<strata::phrase_scorer>(seg.get<strata::inverted_plugin>(), infos, std::move(weights));
+	return std::make_unique<prospect::phrase_scorer>(seg.get<prospect::inverted_plugin>(), infos, std::move(weights));
 }
 
 // Repeated clauses in a group merge into one with the repeat count as boost, as Lucene's
@@ -109,8 +109,8 @@ inline std::vector<std::pair<std::vector<std::string>, double>> merge_repeats(co
 	return out;
 }
 
-inline strata::scorer_ptr build(const strata::segment& seg, const parsed& q, strata::scheme scheme = strata::scheme::bm25, strata::term_table* table = nullptr) {
-	std::vector<strata::scorer_ptr> must, should, must_not;
+inline prospect::scorer_ptr build(const prospect::segment& seg, const parsed& q, prospect::scheme scheme = prospect::scheme::bm25, prospect::term_table* table = nullptr) {
+	std::vector<prospect::scorer_ptr> must, should, must_not;
 	for (const auto& [c, boost] : merge_repeats(q.must)) {
 		auto s = clause_scorer(seg, c, boost, scheme, table);
 		if (!s) { return nullptr; }
@@ -122,52 +122,52 @@ inline strata::scorer_ptr build(const strata::segment& seg, const parsed& q, str
 	for (const auto& c : q.must_not) {
 		if (auto s = clause_scorer(seg, c, 1.0, scheme, table)) { must_not.push_back(std::move(s)); }
 	}
-	auto combine = [](std::vector<strata::scorer_ptr> v, bool all) -> strata::scorer_ptr {
+	auto combine = [](std::vector<prospect::scorer_ptr> v, bool all) -> prospect::scorer_ptr {
 		if (v.empty()) { return nullptr; }
 		if (v.size() == 1) { return std::move(v[0]); }
-		if (all) { return std::make_unique<strata::conjunction_scorer>(std::move(v)); }
-		return std::make_unique<strata::disjunction_scorer>(std::move(v));
+		if (all) { return std::make_unique<prospect::conjunction_scorer>(std::move(v)); }
+		return std::make_unique<prospect::disjunction_scorer>(std::move(v));
 	};
-	strata::scorer_ptr req = combine(std::move(must), true), opt = combine(std::move(should), false);
-	strata::scorer_ptr result;
+	prospect::scorer_ptr req = combine(std::move(must), true), opt = combine(std::move(should), false);
+	prospect::scorer_ptr result;
 	if (req && opt) {
-		result = std::make_unique<strata::required_optional_scorer>(std::move(req), std::move(opt));
+		result = std::make_unique<prospect::required_optional_scorer>(std::move(req), std::move(opt));
 	} else {
 		result = req ? std::move(req) : std::move(opt);
 	}
 	// A - (B or C) as (A - B) - C: each exclusion checks one clause, without a union.
 	for (auto& ex : must_not) {
-		if (result) { result = std::make_unique<strata::exclusion_scorer>(std::move(result), std::move(ex)); }
+		if (result) { result = std::make_unique<prospect::exclusion_scorer>(std::move(result), std::move(ex)); }
 	}
 	return result;
 }
 
-inline std::uint64_t run(const strata::segment& seg, std::string_view command, std::string_view query, strata::scheme scheme = strata::scheme::bm25) {
+inline std::uint64_t run(const prospect::segment& seg, std::string_view command, std::string_view query, prospect::scheme scheme = prospect::scheme::bm25) {
 	const parsed q = parse(query);
 	const bool counting = command == "COUNT" || command.ends_with("_COUNT");
 	// A single term's count is its document frequency (one segment, no deletes).
 	if (command == "COUNT" && q.must.size() + q.should.size() == 1 && q.must_not.empty() && (q.must.empty() ? q.should[0] : q.must[0]).size() == 1) {
-		auto info = seg.get<strata::inverted_plugin>().term((q.must.empty() ? q.should[0] : q.must[0])[0]);
+		auto info = seg.get<prospect::inverted_plugin>().term((q.must.empty() ? q.should[0] : q.must[0])[0]);
 		return info ? info->df : 0;
 	}
 	auto s = build(seg, q, scheme);
 	if (!s) { return counting ? 0 : 1; }
-	if (command == "COUNT") { return strata::count(*s); }
+	if (command == "COUNT") { return prospect::count(*s); }
 	std::size_t k = 0;
 	std::from_chars(command.data() + 4, command.data() + command.size(), k);
 	std::uint64_t n = 0;
-	strata::top_k(seg, *s, k, counting ? &n : nullptr, k ? s->seed(k) : 0.0);  // a segment file has no deletes
+	prospect::top_k(seg, *s, k, counting ? &n : nullptr, k ? s->seed(k) : 0.0);  // a segment file has no deletes
 	return counting ? n : 1;
 }
 
 // The k best documents of a query over an index's segments, weighted by the snapshot's
 // statistics (D13); with count, also the number of live matches.
 // `key_prefix` is the index's: its terms are key leaves (F8).
-inline std::vector<strata::doc_hit> search_snapshot(std::span<const strata::segment_snapshot> segs, const parsed& q, std::size_t k, strata::scheme scheme = strata::scheme::bm25, std::uint64_t* count = nullptr,
+inline std::vector<prospect::doc_hit> search_snapshot(std::span<const prospect::segment_snapshot> segs, const parsed& q, std::size_t k, prospect::scheme scheme = prospect::scheme::bm25, std::uint64_t* count = nullptr,
 	std::string_view key_prefix = {}) {
-	strata::term_table table(segs, key_prefix);
-	auto builder = [&](const strata::segment& seg) { return build(seg, q, scheme, &table); };
-	return strata::search(segs, builder, k, count);
+	prospect::term_table table(segs, key_prefix);
+	auto builder = [&](const prospect::segment& seg) { return build(seg, q, scheme, &table); };
+	return prospect::search(segs, builder, k, count);
 }
 
 // The one word a query reduces to (every clause that word, nothing excluded), or null.
@@ -185,26 +185,26 @@ inline const std::string* single_term(const parsed& q) {
 
 // The number of live matches of a query over an index's segments. A single word's count
 // in a segment without deletes is its document frequency there, from the term table (P6-7).
-inline std::uint64_t count_snapshot(std::span<const strata::segment_snapshot> segs, const parsed& q, strata::scheme scheme = strata::scheme::bm25, std::string_view key_prefix = {}) {
-	strata::term_table table(segs, key_prefix);
-	auto builder = [&](const strata::segment& seg) { return build(seg, q, scheme, &table); };
+inline std::uint64_t count_snapshot(std::span<const prospect::segment_snapshot> segs, const parsed& q, prospect::scheme scheme = prospect::scheme::bm25, std::string_view key_prefix = {}) {
+	prospect::term_table table(segs, key_prefix);
+	auto builder = [&](const prospect::segment& seg) { return build(seg, q, scheme, &table); };
 	const std::string* term = single_term(q);
-	if (!term) { return strata::search_count(segs, builder); }
+	if (!term) { return prospect::search_count(segs, builder); }
 	std::uint64_t n = 0;
 	for (const auto& s : segs) {
 		if (!s.any_deleted()) {
 			n += table.df(*s.seg, *term);
 			continue;
 		}
-		const strata::segment_snapshot one[] = {s};
-		n += strata::search_count(one, builder);
+		const prospect::segment_snapshot one[] = {s};
+		n += prospect::search_count(one, builder);
 	}
 	return n;
 }
 
 // A query over an index's segments, as serve and churn answer it: the count for COUNT and
 // TOP_*_COUNT, else 1.
-inline std::uint64_t run(std::span<const strata::segment_snapshot> segs, std::string_view command, std::string_view query, strata::scheme scheme = strata::scheme::bm25,
+inline std::uint64_t run(std::span<const prospect::segment_snapshot> segs, std::string_view command, std::string_view query, prospect::scheme scheme = prospect::scheme::bm25,
 	std::string_view key_prefix = {}) {
 	const parsed q = parse(query);
 	if (command == "COUNT") { return count_snapshot(segs, q, scheme, key_prefix); }

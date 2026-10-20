@@ -1,11 +1,12 @@
 // Merging search segments: the inverted plugin's merge (the union of the inputs' dictionaries,
 // each term's live postings remapped) and merge_segments, the search layout's entry point.
-// The core's plan and the other plugins' merges are core/merge.hh's.
+// The core's plan and the other plugins' merges are strata/core/merge.hh's.
 #pragma once
 
+#include "prospect/reader.hh"
+#include "prospect/strata.hh"
+#include "prospect/writer.hh"
 #include "strata/core/merge.hh"
-#include "strata/search/reader.hh"
-#include "strata/search/writer.hh"
 
 #include <algorithm>
 #include <array>
@@ -16,7 +17,7 @@
 #include <string_view>
 #include <vector>
 
-namespace strata {
+namespace prospect {
 
 using merge_source = basic_merge_source<search_layout>;
 
@@ -117,4 +118,4 @@ inline merge_plan merge_segments(std::span<const merge_source> sources, const st
 	return detail::merge_layout(sources, segment_id, sink, positions_spill, options);
 }
 
-}  // namespace strata
+}  // namespace prospect

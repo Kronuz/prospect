@@ -3,7 +3,7 @@
 // with heavy cancellation); one partial and any split into 1 to 64 partials, merged in any
 // order or tree, render byte for byte alike; nesting 2,000 deep runs on work stacks; empty
 // inputs report empty results.
-#include "strata/search/aggregate.hh"
+#include "prospect/aggregate.hh"
 
 #include <algorithm>
 #include <array>
@@ -22,7 +22,7 @@
 #include <string_view>
 #include <vector>
 
-namespace agg = strata::aggregate;
+namespace agg = prospect::aggregate;
 
 static int failures = 0;
 #define CHECK(cond) \

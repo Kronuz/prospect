@@ -33,7 +33,7 @@
 // same documents writes. Internal to the index: its inputs are documents that passed stage 1.
 #pragma once
 
-#include "strata/search/writer.hh"
+#include "prospect/writer.hh"
 
 #include <algorithm>
 #include <array>
@@ -53,7 +53,7 @@
 #include <utility>
 #include <vector>
 
-namespace strata {
+namespace prospect {
 
 namespace tuple_detail {
 
@@ -1164,4 +1164,4 @@ private:
 };
 }  // namespace detail
 
-}  // namespace strata
+}  // namespace prospect

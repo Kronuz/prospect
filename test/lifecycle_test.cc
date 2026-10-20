@@ -14,9 +14,9 @@
 // STRATA_CRASH_POINTS sets how many crash points to cover (default 10,000), and
 // STRATA_BG_CRASH_POINTS how many with background merges (default 2,000; the gate's
 // count is 10,000, run as docs/gates/phase-3-lifecycle.md records).
-#include "strata/core/faultfs.hh"
-#include "strata/search/index.hh"
+#include "prospect/index.hh"
 #include "stepping_executor.hh"
+#include "strata/core/faultfs.hh"
 
 #include <cstdio>
 #include <cstdlib>
@@ -31,7 +31,7 @@ static int failures = 0;
 		if (!(cond)) { std::fprintf(stderr, "%s:%d: CHECK(%s)\n", __FILE__, __LINE__, #cond); if (++failures > 20) std::exit(1); } \
 	} while (0)
 
-using namespace strata;
+using namespace prospect;
 
 static const std::array<char, 16> uuid_a = {'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a'};
 static const std::array<char, 16> uuid_b = {'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b', 'b'};
@@ -44,7 +44,7 @@ struct step {
 };
 
 // Merges as a step asks; they change no verdict and no digest.
-static void run_merge(strata::index& ix, const step& s) {
+static void run_merge(prospect::index& ix, const step& s) {
 	if (s.merge_to) {
 		ix.force_merge(s.merge_to);
 	} else {
@@ -581,7 +581,7 @@ int main() {
 				} catch (const std::exception&) {
 				}
 				fs.crash(at * 41 + seed * 7919 + 3);
-				std::optional<strata::index> ix;
+				std::optional<prospect::index> ix;
 				try {
 					ix.emplace(index::open(io, keyed));
 					CHECK(ix->digest() == empty);
@@ -716,7 +716,7 @@ int main() {
 			// each release step, and with an executor, stepping it 0-3 times after each step.
 			// With `allowed`, it tracks the commit points recovery may return: the last
 			// acknowledged and any attempted after it; with `trace`, every commit point.
-			auto run_workload = [&](strata::index& ix, testing::stepping_executor* exec, std::set<point>* allowed, std::vector<point>* trace) {
+			auto run_workload = [&](prospect::index& ix, testing::stepping_executor* exec, std::set<point>* allowed, std::vector<point>* trace) {
 				std::uint64_t log = 0;
 				std::deque<std::uint64_t> pins;
 				std::mt19937_64 steps(seed * 2654435761u + 1);

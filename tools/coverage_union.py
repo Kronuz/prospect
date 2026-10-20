@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Line and branch coverage of strata's headers, unioned over every test binary.
+"""Line and branch coverage of prospect's headers, unioned over every test binary.
 
 `llvm-cov report` with several binaries keeps one binary's counters for an inline
 function that more than one of them instantiates, so a check that only one test reaches
@@ -14,9 +14,10 @@ when a build with single-byte coverage (`--confirm`, a flag per region and no
 expressions) took it; otherwise it is listed as unconfirmed and counts as uncovered.
 
   coverage_union.py LLVM_BIN PROFDATA BINARY... [--confirm PROFDATA BINARY...] [--list]
-      [--headers /include/strata/]
+      [--headers /include/prospect/]
 
-`--headers` selects the headers measured, by path fragment. `--list` prints, per header, the uncovered lines and the branch outcomes not taken.
+`--headers` selects the headers measured, by path fragment (`/include/strata/core/` for
+the core's, from the fetched strata). `--list` prints, per header, the uncovered lines and the branch outcomes not taken.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from pathlib import Path
 from typing import Any
 
 SATURATED = 1 << 62
-HEADERS = "/include/strata/"
+HEADERS = "/include/prospect/"
 
 Key = tuple[int, int, int]
 
@@ -51,7 +52,7 @@ def export(llvm: Path, profdata: str, binary: str, form: str) -> str:
     ).stdout
 
 
-def strata_header(name: str) -> str:
+def measured_header(name: str) -> str:
     return name.rsplit("/", 1)[-1] if HEADERS in name else ""
 
 
@@ -67,7 +68,7 @@ class Build:
             short = ""
             for record in export(llvm, profdata, binary, "lcov").splitlines():
                 if record.startswith("SF:"):
-                    short = strata_header(record[3:])
+                    short = measured_header(record[3:])
                 elif short and record.startswith("DA:"):
                     line, count = record[3:].split(",")[:2]
                     self.lines[short][int(line)].append(int(count))
@@ -75,7 +76,7 @@ class Build:
                 "data"
             ][0]["files"]  # decoded JSON
             for f in files:
-                short = strata_header(str(f["filename"]))
+                short = measured_header(str(f["filename"]))
                 if not short:
                     continue
                 # Branches: [line, col, end_line, end_col, true, false, file, expanded, kind].

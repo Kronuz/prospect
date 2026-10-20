@@ -8,8 +8,8 @@
 //     the read throws.
 //   - A segment damaged for good is recovered from a retained predecessor that does not
 //     name it (recover --to).
+#include "prospect/index.hh"
 #include "strata/core/faultfs.hh"
-#include "strata/search/index.hh"
 
 #include <cstdio>
 #include <cstdlib>
@@ -22,7 +22,7 @@ static int failures = 0;
 		if (!(cond)) { std::fprintf(stderr, "%s:%d: CHECK(%s)\n", __FILE__, __LINE__, #cond); if (++failures > 30) std::exit(1); } \
 	} while (0)
 
-using namespace strata;
+using namespace prospect;
 
 static const std::array<char, 16> uuid = {'s', 't', 'r', 'a', 't', 'a', '-', 'm', 'e', 'd', 'i', 'a'};
 
@@ -50,7 +50,7 @@ static transaction tx(std::vector<operation> ops) {
 
 // The digest, healing once if a search meets a damaged region; nullopt when the damage
 // is on the medium too.
-static std::optional<std::uint64_t> read_digest(strata::index& ix, bool& healed) {
+static std::optional<std::uint64_t> read_digest(prospect::index& ix, bool& healed) {
 	try {
 		return ix.digest();
 	} catch (const corrupt_segment&) {
@@ -61,12 +61,12 @@ static std::optional<std::uint64_t> read_digest(strata::index& ix, bool& healed)
 }
 
 int main() {
-	strata::index::options keyed;
+	prospect::index::options keyed;
 	keyed.key_prefix = "Q";
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	{
-		auto ix = strata::index::create(io, keyed, uuid);
+		auto ix = prospect::index::create(io, keyed, uuid);
 		for (int s = 0; s < 3; ++s) {
 			std::vector<operation> ops;
 			for (int i = 0; i < 40; ++i) {
@@ -86,7 +86,7 @@ int main() {
 	}
 	std::uint64_t reference;
 	{
-		auto ix = strata::index::open(io, keyed);
+		auto ix = prospect::index::open(io, keyed);
 		reference = ix.digest();
 	}
 	std::vector<std::string> names;
@@ -112,7 +112,7 @@ int main() {
 				fs.add_media_fault(name, kind, at, at + 1, 1);
 				try {
 					++transient;
-					auto ix = strata::index::open(io, keyed);
+					auto ix = prospect::index::open(io, keyed);
 					bool healed = false;
 					const auto d = read_digest(ix, healed);
 					CHECK(d && *d == reference);
@@ -128,7 +128,7 @@ int main() {
 				fs.add_media_fault(name, kind, at, at + 1, 0);
 				++sticky;
 				try {
-					auto ix = strata::index::open(io, keyed);
+					auto ix = prospect::index::open(io, keyed);
 					bool healed = false;
 					const auto d = read_digest(ix, healed);
 					if (!d) {
@@ -168,7 +168,7 @@ int main() {
 	{
 		std::uint64_t before;
 		{
-			auto ix = strata::index::open(io, keyed);
+			auto ix = prospect::index::open(io, keyed);
 			before = ix.manifest().generation;
 			ix.force_merge(1);
 			ix.commit();
@@ -176,14 +176,14 @@ int main() {
 		}
 		std::string merged;
 		{
-			auto ix = strata::index::open(io, keyed);
+			auto ix = prospect::index::open(io, keyed);
 			merged = index_detail::segment_name(ix.manifest().segments.at(0).id);
 		}
 		const std::uint64_t size = fs.view(merged).size();
 		fs.add_media_fault(merged, faultfs::media::bit_flip, size / 2, size / 2 + 1, 0);
 		bool head_failed = false;
 		try {
-			auto ix = strata::index::open(io, keyed);
+			auto ix = prospect::index::open(io, keyed);
 			bool healed = false;
 			head_failed = !read_digest(ix, healed);
 		} catch (const corrupt_index&) {
@@ -192,7 +192,7 @@ int main() {
 			head_failed = true;
 		}
 		CHECK(head_failed);
-		auto ix = strata::index::open(io, keyed, before);
+		auto ix = prospect::index::open(io, keyed, before);
 		CHECK(ix.digest() == reference);
 	}
 	std::printf("media: %s\n", failures ? "FAILED" : "ok");

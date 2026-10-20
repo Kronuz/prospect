@@ -26,11 +26,12 @@
 #pragma once
 
 #include "docset.hh"
+#include "prospect/strata.hh"
 #include "strata/core/format.hh"
 
 #include <concepts>
 
-namespace strata {
+namespace prospect {
 
 using docset::doc_t;
 
@@ -55,4 +56,4 @@ concept scorer = docset::doc_iterator<S> && requires(S s, const S cs, doc_t targ
 template <typename S>
 concept scored_filter = scorer<S>;
 
-}  // namespace strata
+}  // namespace prospect

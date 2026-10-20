@@ -29,7 +29,7 @@
 
 #pragma once
 
-#include "strata/search/ordered.hh"
+#include "prospect/ordered.hh"
 #include "varint.hh"
 
 #include <algorithm>
@@ -44,7 +44,7 @@
 #include <variant>
 #include <vector>
 
-namespace strata::sortkey {
+namespace prospect::sortkey {
 
 enum class direction : std::uint8_t { ascending, descending };
 
@@ -383,4 +383,4 @@ inline bool may_compete(const spec& s, const block_bounds& block, const hit* wor
 	return s.size() > 1 || !docid_ordered;
 }
 
-}  // namespace strata::sortkey
+}  // namespace prospect::sortkey

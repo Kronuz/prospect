@@ -1,7 +1,7 @@
 // Ordered keys (Phase 4, D3a): round trips and order over every type's extremes: minimum
 // and maximum integers, ±0, ±infinity, the smallest subnormals, and dates at years 1 and
 // 9999 as f64 seconds; random pairs keep their order.
-#include "strata/search/ordered.hh"
+#include "prospect/ordered.hh"
 
 #include <cmath>
 #include <cstdio>
@@ -16,7 +16,7 @@ static int failures = 0;
 	do { if (!(cond)) { std::fprintf(stderr, "%s:%d: CHECK(%s)\n", __FILE__, __LINE__, #cond); if (++failures > 20) std::exit(1); } } while (0)
 
 int main() {
-	using namespace strata::ordered;
+	using namespace prospect::ordered;
 	using lim = std::numeric_limits<std::int64_t>;
 	std::vector<std::int64_t> ints{lim::min(), lim::min() + 1, -2, -1, 0, 1, 2, lim::max() - 1, lim::max()};
 	for (std::size_t i = 0; i < ints.size(); ++i) {

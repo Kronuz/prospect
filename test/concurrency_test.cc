@@ -1,8 +1,8 @@
 // Several threads query one segment at once: lazy region verification, the term dictionary,
 // stored reads, and every scorer must be safe to share (run under TSan). Each thread's
 // answers must equal a single thread's.
-#include "strata/search/search.hh"
-#include "strata/search/writer.hh"
+#include "prospect/search.hh"
+#include "prospect/writer.hh"
 
 #include <cstdio>
 #include <cstdlib>
@@ -12,10 +12,10 @@
 int main() {
 	std::mt19937_64 rng(5);
 	const char* vocab[] = {"a", "b", "c", "d", "rare"};
-	strata::segment_writer w;
+	prospect::segment_writer w;
 	std::vector<std::vector<std::uint32_t>> pos(5);
 	for (std::uint32_t d = 0; d < 20000; ++d) {
-		std::vector<strata::posting_input> in;
+		std::vector<prospect::posting_input> in;
 		std::uint32_t at = 0, length = 0;
 		for (std::size_t t = 0; t < 5; ++t) {
 			pos[t].clear();
@@ -28,25 +28,25 @@ int main() {
 		w.add(d + 1, in, length, std::string(d % 50, 'x'));
 	}
 	const std::string file = w.flush({});
-	const strata::segment seg(file);
+	const prospect::segment seg(file);
 
 	auto run = [&](std::uint64_t& digest) {
 		digest = 0;
 		auto mix = [&](double v) { digest = digest * 1000003 + std::uint64_t(v * 1e6); };
-		std::vector<strata::format::term_info> infos;
-		for (const char* t : vocab) { infos.push_back(*seg.get<strata::inverted_plugin>().term(t)); }
+		std::vector<prospect::format::term_info> infos;
+		for (const char* t : vocab) { infos.push_back(*seg.get<prospect::inverted_plugin>().term(t)); }
 		for (std::size_t i = 0; i < infos.size(); ++i) {
-			strata::term_scorer s(seg.get<strata::inverted_plugin>(), infos[i]);
-			for (const auto& h : strata::top_k(seg, s, 10)) { mix(h.score + h.ord); }
-			std::vector<strata::scorer_ptr> v;
-			v.push_back(std::make_unique<strata::term_scorer>(seg.get<strata::inverted_plugin>(), infos[i]));
-			v.push_back(std::make_unique<strata::term_scorer>(seg.get<strata::inverted_plugin>(), infos[(i + 1) % infos.size()]));
-			strata::disjunction_scorer u(std::move(v));
+			prospect::term_scorer s(seg.get<prospect::inverted_plugin>(), infos[i]);
+			for (const auto& h : prospect::top_k(seg, s, 10)) { mix(h.score + h.ord); }
+			std::vector<prospect::scorer_ptr> v;
+			v.push_back(std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), infos[i]));
+			v.push_back(std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), infos[(i + 1) % infos.size()]));
+			prospect::disjunction_scorer u(std::move(v));
 			std::uint64_t n = 0;
-			for (const auto& h : strata::top_k(seg, u, 10, &n)) { mix(h.score + h.ord); }
+			for (const auto& h : prospect::top_k(seg, u, 10, &n)) { mix(h.score + h.ord); }
 			mix(double(n));
-			strata::phrase_scorer p(seg.get<strata::inverted_plugin>(), {infos[i], infos[(i + 1) % infos.size()]});
-			for (const auto& h : strata::top_k(seg, p, 10)) { mix(h.score + h.ord); }
+			prospect::phrase_scorer p(seg.get<prospect::inverted_plugin>(), {infos[i], infos[(i + 1) % infos.size()]});
+			for (const auto& h : prospect::top_k(seg, p, 10)) { mix(h.score + h.ord); }
 		}
 		for (strata::ordinal_t d = 0; d < seg.core().doc_count(); d += 97) { mix(double(seg.get<strata::stored_plugin>().stored(d).size())); }
 	};

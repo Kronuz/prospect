@@ -1,11 +1,11 @@
 // Format 13's postings items (docs/design/format-13.md F10, F11, F13): the advance entries
 // (M16, A3 at 128 postings), against a model of every term's postings, positions, and
 // pairs; and corrupt entries, which fence or answer with ordinals in order and in range.
-#include "strata/search/reader.hh"
-#include "strata/search/search.hh"
-#include "strata/search/searcher.hh"
-#include "strata/search/check.hh"
-#include "strata/search/writer.hh"
+#include "prospect/check.hh"
+#include "prospect/reader.hh"
+#include "prospect/search.hh"
+#include "prospect/searcher.hh"
+#include "prospect/writer.hh"
 #include "skip_layout.hh"
 
 #include <crc32c/crc32c.hh>
@@ -28,7 +28,7 @@ static int failures = 0;
 
 namespace {
 
-namespace f = strata::format;
+namespace f = prospect::format;
 using strata::ordinal_t;
 
 struct posting {
@@ -48,10 +48,10 @@ struct corpus {
 corpus build(std::uint32_t docs, std::uint64_t seed, bool wide = false, std::uint64_t first_docid = 1) {
 	std::mt19937_64 rng(seed);
 	corpus c;
-	strata::segment_writer w;
-	w.builder<strata::inverted_plugin>().wide_skip_offsets = wide;
+	prospect::segment_writer w;
+	w.builder<prospect::inverted_plugin>().wide_skip_offsets = wide;
 	for (std::uint32_t d = 0; d < docs; ++d) {
-		std::vector<strata::posting_input> in;
+		std::vector<prospect::posting_input> in;
 		std::vector<std::vector<std::uint32_t>> pos;
 		pos.reserve(8);
 		const std::uint32_t length = 1 + std::uint32_t(rng() % 300);
@@ -110,14 +110,14 @@ bool same(std::span<const f::impact> a, const std::vector<f::impact>& b) {
 }
 
 // Every read path of one term against the model.
-void check_term(const corpus& c, const strata::segment& s, const std::string& term) {
-	const auto& inv = s.get<strata::inverted_plugin>();
+void check_term(const corpus& c, const prospect::segment& s, const std::string& term) {
+	const auto& inv = s.get<prospect::inverted_plugin>();
 	const auto& ps = c.terms.at(term);
 	const auto info = *inv.term(term);
 	CHECK(info.df == ps.size());
 	{  // next(), wdf, and positions in order
-		strata::postings_iterator it(inv, info);
-		strata::positions_reader pr(inv, info);
+		prospect::postings_iterator it(inv, info);
+		prospect::positions_reader pr(inv, info);
 		std::size_t i = 0;
 		bool ok = true;
 		for (ordinal_t d = it.next(); d != strata::no_more_docs; d = it.next(), ++i) {
@@ -132,18 +132,18 @@ void check_term(const corpus& c, const strata::segment& s, const std::string& te
 	{  // advance() from a fresh iterator to every ordinal, and forward in random steps
 		bool ok = true;
 		for (ordinal_t t = 0; t < c.lengths.size() + 2; t += 1 + t % 5) {
-			strata::postings_iterator it(inv, info);
+			prospect::postings_iterator it(inv, info);
 			const auto want = std::lower_bound(ps.begin(), ps.end(), t, [](const posting& p, ordinal_t v) { return p.ord < v; });
 			const ordinal_t got = it.advance(t);
 			ok = ok && got == (want == ps.end() ? strata::no_more_docs : want->ord);
 			if (ok && want != ps.end() && !(info.flags & f::no_positions)) {
-				strata::positions_reader pr(inv, info);
+				prospect::positions_reader pr(inv, info);
 				const auto at = pr.read(it);
 				ok = std::vector<std::uint32_t>(at.begin(), at.end()) == want->positions;
 			}
 		}
 		std::mt19937 rng(7);
-		strata::postings_iterator it(inv, info);
+		prospect::postings_iterator it(inv, info);
 		for (ordinal_t t = 0; ok && t < c.lengths.size(); t += 1 + rng() % 700) {
 			const auto want = std::lower_bound(ps.begin(), ps.end(), t, [](const posting& p, ordinal_t v) { return p.ord < v; });
 			ok = it.advance(t) == (want == ps.end() ? strata::no_more_docs : want->ord) && (want == ps.end() || it.wdf() == want->wdf);
@@ -151,7 +151,7 @@ void check_term(const corpus& c, const strata::segment& s, const std::string& te
 		CHECK(ok);
 	}
 	{  // block_index_for, block_last, and the pairs of each block and group
-		strata::postings_iterator it(inv, info);
+		prospect::postings_iterator it(inv, info);
 		const std::size_t blocks = ps.size() / f::block;
 		CHECK(it.blocks() == blocks);
 		bool ok = true;
@@ -169,11 +169,11 @@ void check_term(const corpus& c, const strata::segment& s, const std::string& te
 		CHECK(ok);
 	}
 	{  // the pruned top-k against an exhaustive one
-		strata::term_scorer pruned(inv, info), all(inv, info);
-		const auto a = strata::top_k(s, pruned, 10);
-		std::vector<strata::hit> b;
+		prospect::term_scorer pruned(inv, info), all(inv, info);
+		const auto a = prospect::top_k(s, pruned, 10);
+		std::vector<prospect::hit> b;
 		for (ordinal_t d = all.next(); d != strata::no_more_docs; d = all.next()) { b.push_back({d, all.score()}); }
-		std::sort(b.begin(), b.end(), [](const strata::hit& x, const strata::hit& y) { return x.score != y.score ? x.score > y.score : x.ord < y.ord; });
+		std::sort(b.begin(), b.end(), [](const prospect::hit& x, const prospect::hit& y) { return x.score != y.score ? x.score > y.score : x.ord < y.ord; });
 		b.resize(std::min<std::size_t>(b.size(), 10));
 		bool ok = a.size() == b.size();
 		for (std::size_t i = 0; ok && i < a.size(); ++i) { ok = a[i].ord == b[i].ord && a[i].score == b[i].score; }
@@ -185,8 +185,8 @@ void check_term(const corpus& c, const strata::segment& s, const std::string& te
 // answer with ordinals increasing and below the document count, advance() at or past its
 // target, and a located block ending at or after its target and its predecessor before it.
 // Returns whether a path fenced; sets *bad when a consumer saw a wrong ordinal.
-bool walk(const strata::segment& s, const f::term_info& info, bool* bad) {
-	const auto& inv = s.get<strata::inverted_plugin>();
+bool walk(const prospect::segment& s, const f::term_info& info, bool* bad) {
+	const auto& inv = s.get<prospect::inverted_plugin>();
 	const ordinal_t n = s.core().doc_count();
 	bool fenced = false;
 	auto guard = [&](const std::function<void()>& fn) {
@@ -197,7 +197,7 @@ bool walk(const strata::segment& s, const f::term_info& info, bool* bad) {
 		}
 	};
 	guard([&] {
-		strata::postings_iterator it(inv, info);
+		prospect::postings_iterator it(inv, info);
 		ordinal_t prev = 0;
 		bool first = true;
 		for (ordinal_t d = it.next(); d != strata::no_more_docs; d = it.next()) {
@@ -208,7 +208,7 @@ bool walk(const strata::segment& s, const f::term_info& info, bool* bad) {
 	});
 	for (ordinal_t step : {1u, 97u, 1000u, 5000u}) {
 		guard([&] {
-			strata::postings_iterator it(inv, info);
+			prospect::postings_iterator it(inv, info);
 			ordinal_t prev = 0;
 			for (ordinal_t t = 0; t < n; t += step) {
 				const ordinal_t d = it.advance(t);
@@ -219,7 +219,7 @@ bool walk(const strata::segment& s, const f::term_info& info, bool* bad) {
 		});
 	}
 	guard([&] {
-		strata::postings_iterator it(inv, info);
+		prospect::postings_iterator it(inv, info);
 		for (ordinal_t t = 0; t < n; t += 13) {
 			const std::size_t b = it.block_index_for(t);
 			if (b >= it.blocks()) { continue; }
@@ -227,10 +227,10 @@ bool walk(const strata::segment& s, const f::term_info& info, bool* bad) {
 		}
 	});
 	guard([&] {
-		strata::term_scorer sc(inv, info);
-		(void)strata::top_k(s, sc, 10);
-		strata::term_scorer counted(inv, info);
-		(void)strata::count(counted);
+		prospect::term_scorer sc(inv, info);
+		(void)prospect::top_k(s, sc, 10);
+		prospect::term_scorer counted(inv, info);
+		(void)prospect::count(counted);
 	});
 	return fenced;
 }
@@ -238,11 +238,11 @@ bool walk(const strata::segment& s, const f::term_info& info, bool* bad) {
 // One damaged copy of a term: edit(file, layout), resealed. Returns whether it fenced.
 bool damaged(const corpus& c, const std::string& term, const std::function<void(std::string&, const skip_test::layout&)>& edit, bool* bad) {
 	std::string file = c.bytes;
-	strata::segment s0(file);
-	const auto info = *s0.get<strata::inverted_plugin>().term(term);
+	prospect::segment s0(file);
+	const auto info = *s0.get<prospect::inverted_plugin>().term(term);
 	edit(file, skip_test::parse(file, s0, info));
 	reseal(file);
-	strata::segment s(file);
+	prospect::segment s(file);
 	return walk(s, info, bad);
 }
 
@@ -252,18 +252,18 @@ int main() {
 	// --- F10 (M16): advance entries locate every block -----------------------------------------
 	for (const bool wide : {false, true}) {
 		const corpus c = build(20000, 11, wide);
-		strata::segment s(c.bytes);
+		prospect::segment s(c.bytes);
 		for (const auto& [term, _] : c.terms) { check_term(c, s, term); }
 		// The shapes the cases below rely on: two groups of FOR blocks, and bitset blocks.
-		const auto mid = skip_test::parse(c.bytes, s, *s.get<strata::inverted_plugin>().term("mid"));
+		const auto mid = skip_test::parse(c.bytes, s, *s.get<prospect::inverted_plugin>().term("mid"));
 		CHECK(mid.groups.size() == 2 && mid.groups[0].n == 32);
 		for (const auto& b : mid.blocks) { CHECK(b.codec == unsigned(f::block_codec::deltas)); }
-		const auto dense = skip_test::parse(c.bytes, s, *s.get<strata::inverted_plugin>().term("dense"));
+		const auto dense = skip_test::parse(c.bytes, s, *s.get<prospect::inverted_plugin>().term("dense"));
 		std::size_t bitsets = 0;
 		for (const auto& b : dense.blocks) { bitsets += b.codec == unsigned(f::block_codec::bitset); }
 		CHECK(bitsets > 0 && dense.groups[0].wf >= 1);
 		// No block is Elias-Fano: code 2 is reserved (M22), so the codec width stays within 1.
-		const auto clustered = skip_test::parse(c.bytes, s, *s.get<strata::inverted_plugin>().term("clustered"));
+		const auto clustered = skip_test::parse(c.bytes, s, *s.get<prospect::inverted_plugin>().term("clustered"));
 		for (const auto& b : clustered.blocks) { CHECK(b.codec <= f::max_block_codec); }
 		CHECK(clustered.groups[0].wf <= 1);
 		// Each group's advance entries take (n - 1) lasts and offsets and n codes at the
@@ -311,9 +311,9 @@ int main() {
 		}, &bad));
 		CHECK(!bad);
 		// Every bit of the two groups' advance entries flipped in turn: fence or answer.
-		strata::segment s0(c.bytes);
+		prospect::segment s0(c.bytes);
 		for (const char* term : {"mid", "dense", "dense0", "gaps", "clustered"}) {
-			const auto info = *s0.get<strata::inverted_plugin>().term(term);
+			const auto info = *s0.get<prospect::inverted_plugin>().term(term);
 			const auto l = skip_test::parse(c.bytes, s0, info);
 			std::size_t flips = 0, fenced = 0;
 			for (const auto& g : l.groups) {
@@ -322,7 +322,7 @@ int main() {
 					std::string file = c.bytes;
 					file[g.adv + at / 8] ^= char(1u << (at % 8));
 					reseal(file);
-					strata::segment s(file);
+					prospect::segment s(file);
 					fenced += walk(s, info, &bad);
 					++flips;
 				}
@@ -340,9 +340,9 @@ int main() {
 	{
 		std::vector<ordinal_t> ords{0};
 		for (std::size_t k = 1; k < 384; ++k) { ords.push_back(ords.back() + (k % 3 == 2 ? 3 : 1)); }
-		strata::segment_writer w;
+		prospect::segment_writer w;
 		for (ordinal_t d = 0, i = 0; d <= ords.back(); ++d) {
-			std::vector<strata::posting_input> in;
+			std::vector<prospect::posting_input> in;
 			const std::vector<std::uint32_t> none;
 			if (d == ords[i]) {
 				in.push_back({"t", 0, none});
@@ -351,8 +351,8 @@ int main() {
 			w.add(d + 1, in, 1);
 		}
 		std::string file = w.flush({});
-		strata::segment s0(file);
-		const auto info = *s0.get<strata::inverted_plugin>().term("t");
+		prospect::segment s0(file);
+		const auto info = *s0.get<prospect::inverted_plugin>().term("t");
 		const auto l = skip_test::parse(file, s0, info);
 		const auto& g = l.groups[0];
 		CHECK(l.blocks.size() == 3 && g.last + 1 == s0.core().doc_count());
@@ -366,7 +366,7 @@ int main() {
 		bits[(last - first) / 8] = char(std::uint8_t(bits[(last - first) / 8]) | 1u << ((last - first) % 8));
 		file.replace(l.blocks[1].at, bytes, bits);
 		reseal(file);
-		strata::segment s(file);
+		prospect::segment s(file);
 		bool bad = false;
 		CHECK(walk(s, info, &bad));
 		CHECK(!bad);
@@ -377,16 +377,16 @@ int main() {
 	// against FOR over plain gaps at width 2 (33): the writer keeps the bitset, which counting ORs
 	// in without decoding.
 	{
-		strata::segment_writer w;
+		prospect::segment_writer w;
 		const std::vector<std::uint32_t> none;
 		for (std::uint32_t d = 0; d < 3000; ++d) {
-			std::vector<strata::posting_input> in;
+			std::vector<prospect::posting_input> in;
 			if (d % 10 != 0) { in.push_back({"ninety", 0, none}); }
 			w.add(d + 1, in, 1);
 		}
 		const std::string bytes = w.flush({});
-		strata::segment s(bytes);
-		const auto l = skip_test::parse(bytes, s, *s.get<strata::inverted_plugin>().term("ninety"));
+		prospect::segment s(bytes);
+		const auto l = skip_test::parse(bytes, s, *s.get<prospect::inverted_plugin>().term("ninety"));
 		bool all = !l.blocks.empty();
 		for (const auto& b : l.blocks) { all = all && b.codec == unsigned(f::block_codec::bitset); }
 		CHECK(all);
@@ -397,21 +397,21 @@ int main() {
 	// codec width of 2 with that block's code 2 (Elias-Fano's) and the others' codes kept: every
 	// other byte is as written, so only the width check stands between it and a FOR decode.
 	{
-		strata::segment_writer w;
+		prospect::segment_writer w;
 		const std::vector<std::uint32_t> none;
 		std::mt19937_64 rng(2);
 		std::vector<std::string> names;
 		for (std::uint32_t t = 0; t < 24; ++t) { names.push_back("t" + std::to_string(t)); }
 		for (std::uint32_t d = 0; d < 20000; ++d) {
-			std::vector<strata::posting_input> in;
+			std::vector<prospect::posting_input> in;
 			for (std::uint32_t t = 0; t < 24; ++t) {  // term t within the first 1,000 + 250t documents
 				if (d < 1000 + 250 * t && rng() % (5 + t % 4) == 0) { in.push_back({names[t], 1, none}); }
 			}
 			w.add(d + 1, in, 1 + d % 50);
 		}
 		std::string file = w.flush({});
-		strata::segment s0(file);
-		const auto& inv0 = s0.get<strata::inverted_plugin>();
+		prospect::segment s0(file);
+		const auto& inv0 = s0.get<prospect::inverted_plugin>();
 		std::string term;
 		skip_test::layout l;
 		std::size_t target = 0;
@@ -437,11 +437,11 @@ int main() {
 				skip_test::put(file, g.adv, (g.n - 1) * (g.wl + g.wo) + 2 * i, 2, i == target ? 2 : l.blocks[i].codec);
 			}
 			reseal(file);
-			strata::segment s(file);
-			const auto info = *s.get<strata::inverted_plugin>().term(term);
+			prospect::segment s(file);
+			const auto info = *s.get<prospect::inverted_plugin>().term(term);
 			bool fenced = false;
 			try {
-				strata::postings_iterator it(s.get<strata::inverted_plugin>(), info);
+				prospect::postings_iterator it(s.get<prospect::inverted_plugin>(), info);
 				while (it.next() != strata::no_more_docs) {}
 			} catch (const strata::corrupt_segment&) {
 				fenced = true;
@@ -510,15 +510,15 @@ int main() {
 		// The stored pairs are the best dominance pairs for each preset at the segment's own
 		// statistics (E4b's seeds), and each dominates its k postings.
 		const corpus c = build(20000, 20);
-		strata::segment s(c.bytes);
-		const auto& inv = s.get<strata::inverted_plugin>();
-		const strata::statistics st(inv);
+		prospect::segment s(c.bytes);
+		const auto& inv = s.get<prospect::inverted_plugin>();
+		const prospect::statistics st(inv);
 		for (const auto& [term, ps] : c.terms) {
 			const auto info = *inv.term(term);
-			strata::postings_iterator it(inv, info);
+			prospect::postings_iterator it(inv, info);
 			const bool stored = ps.size() >= f::block && !(info.flags & f::no_wdf);
 			CHECK(it.seed_count() == (stored ? std::size_t(std::count_if(std::begin(f::seed_ks), std::end(f::seed_ks), [&](std::uint32_t k) { return k <= ps.size(); })) : 0));
-			const auto lucene = strata::weight::bm25(st, info.df), xapian = strata::weight::bm25_xapian(st, info.df);
+			const auto lucene = prospect::weight::bm25(st, info.df), xapian = prospect::weight::bm25_xapian(st, info.df);
 			for (std::size_t j = 0; j < it.seed_count(); ++j) {
 				const std::size_t k = f::seed_ks[j];
 				double best_l = 0, best_x = 0;  // over every w: the k-th shortest length among wdf >= w
@@ -543,7 +543,7 @@ int main() {
 				CHECK(by_code >= k && exact >= k);
 			}
 		}
-		strata::check_report r;
+		prospect::check_report r;
 		strata::check_segment(s, nullptr, r);
 		CHECK(r.terms == c.terms.size());
 		// The stored pairs are exactly the writer's rule: levels of wdf highest first, each k's
@@ -553,13 +553,13 @@ int main() {
 		// counts end, and the k-th shortest lands past it.
 		{
 			std::mt19937_64 rng(77);
-			strata::segment_writer w;
+			prospect::segment_writer w;
 			std::map<std::string, std::vector<std::pair<std::uint32_t, std::uint32_t>>> terms;  // (wdf, length)
 			std::vector<std::uint32_t> lengths;
 			for (std::uint32_t d = 0; d < 6000; ++d) {
 				const std::uint32_t r = std::uint32_t(rng() % 100);
 				const std::uint32_t length = r < 5 ? 65536 + std::uint32_t(rng() % 200000) : r < 8 ? 65520 + std::uint32_t(rng() % 32) : 1 + std::uint32_t(rng() % 3000);
-				std::vector<strata::posting_input> in;
+				std::vector<prospect::posting_input> in;
 				auto add = [&](const char* t, std::uint32_t wdf) {
 					in.push_back({t, wdf, {}});
 					terms[t].push_back({wdf, length});
@@ -572,8 +572,8 @@ int main() {
 				w.add(1 + d, in, length);
 			}
 			const std::string bytes = w.flush({});
-			strata::segment s2(bytes);
-			const auto& inv2 = s2.get<strata::inverted_plugin>();
+			prospect::segment s2(bytes);
+			const auto& inv2 = s2.get<prospect::inverted_plugin>();
 			std::uint64_t total = 0;
 			for (auto l : lengths) { total += l; }
 			// bm25: w / (w + 1.2·(0.25 + 0.75·len / avg)), avg = T / N here (T >= N), which orders as
@@ -620,7 +620,7 @@ int main() {
 						if (done) { break; }
 					}
 				}
-				strata::postings_iterator it(inv2, *inv2.term(term));
+				prospect::postings_iterator it(inv2, *inv2.term(term));
 				CHECK(it.seed_count() == ks);
 				for (std::size_t j = 0; j < it.seed_count(); ++j) {
 					const auto& got = it.seed_at(j);
@@ -637,10 +637,10 @@ int main() {
 		// orders as w / (w + 9 + 3·len), so wdf 3 at length 3 and wdf 2 at length 1 score 3/21
 		// both; one empty document keeps the stop rule from ending at wdf 3.
 		{
-			strata::segment_writer w;
+			prospect::segment_writer w;
 			std::uint64_t docid = 1;
 			auto doc = [&](const char* t, std::uint32_t wdf, std::uint32_t length) {
-				std::vector<strata::posting_input> in;
+				std::vector<prospect::posting_input> in;
 				if (t) { in.push_back({t, wdf, {}}); }
 				w.add(docid++, in, length);
 			};
@@ -650,18 +650,18 @@ int main() {
 			doc(nullptr, 0, 0);
 			for (int i = 0; i < 147; ++i) { doc("filler", 1, 16); }
 			const std::string bytes = w.flush({});
-			strata::segment s3(bytes);
-			const auto& inv3 = s3.get<strata::inverted_plugin>();
+			prospect::segment s3(bytes);
+			const auto& inv3 = s3.get<prospect::inverted_plugin>();
 			CHECK(inv3.doc_count() == 278 && inv3.total_length() == 2502);
-			strata::postings_iterator it(inv3, *inv3.term("tie"));
+			prospect::postings_iterator it(inv3, *inv3.term("tie"));
 			CHECK(it.seed_count() == 2);
 			CHECK(it.seed_at(0).code_wdf == 3 && it.seed_at(0).code == f::encode_length(3));
 		}
 		// check() refuses a seed that claims more than its postings hold.
 		{
 			std::string file = c.bytes;
-			const strata::segment copy(file);
-			const auto info = *copy.get<strata::inverted_plugin>().term("mid");
+			const prospect::segment copy(file);
+			const auto info = *copy.get<prospect::inverted_plugin>().term("mid");
 			const auto l = skip_test::parse(file, copy, info);
 			const char* p = file.data() + l.seeds_at;
 			(void)f::get_leb(&p, file.data() + file.size());
@@ -671,8 +671,8 @@ int main() {
 			CHECK(w < 0x7f);
 			file[l.seeds_at] = char(0x7f);  // and a wdf no posting reaches
 			reseal(file);
-			strata::segment bad(file);
-			strata::check_report r2;
+			prospect::segment bad(file);
+			prospect::check_report r2;
 			bool refused = false;
 			try {
 				strata::check_segment(bad, nullptr, r2);
@@ -685,7 +685,7 @@ int main() {
 		// Searches with seeds equal an exhaustive reference: terms and unions, k = 1, 10, 50,
 		// 100, 1,000, both presets, one segment, three, and three with deletes (seeds off).
 		const corpus parts[3] = {build(6000, 31, false, 1), build(6000, 32, false, 100000), build(6000, 33, false, 200000)};
-		std::vector<strata::segment> segs;
+		std::vector<prospect::segment> segs;
 		for (const auto& p : parts) { segs.emplace_back(p.bytes); }
 		std::vector<std::uint64_t> deleted((6000 + 63) / 64);
 		for (std::size_t d = 0; d < 6000; d += 3) { deleted[d / 64] |= std::uint64_t(1) << (d % 64); }
@@ -693,25 +693,25 @@ int main() {
 		const std::vector<query> queries = {{"dense"}, {"mid"}, {"sparse"}, {"counts"}, {"clustered"}, {"mid", "sparse"}, {"dense", "counts", "gaps"}, {"bool", "mid"}};
 		std::size_t seeded = 0, compared = 0;
 		for (const int shape : {1, 3, 4}) {  // segments, the fourth: three with deletes in the second
-			std::vector<strata::segment_snapshot> snap;
+			std::vector<prospect::segment_snapshot> snap;
 			for (int i = 0; i < std::min(shape, 3); ++i) { snap.push_back({&segs[std::size_t(i)], shape == 4 && i == 1 ? &deleted : nullptr}); }
-			strata::term_table table(snap);
-			for (const auto scheme : {strata::scheme::bm25, strata::scheme::bm25_xapian}) {
+			prospect::term_table table(snap);
+			for (const auto scheme : {prospect::scheme::bm25, prospect::scheme::bm25_xapian}) {
 				for (const auto& q : queries) {
-					auto build_q = [&](const strata::segment& seg) -> strata::scorer_ptr {
-						std::vector<strata::scorer_ptr> kids;
+					auto build_q = [&](const prospect::segment& seg) -> prospect::scorer_ptr {
+						std::vector<prospect::scorer_ptr> kids;
 						for (const auto& t : q) {
 							const auto* info = table.info(seg, t);
 							if (!info) { continue; }
-							const auto w = scheme == strata::scheme::bm25 ? strata::weight::bm25(table.stats(), table.df(t)) : strata::weight::bm25_xapian(table.stats(), table.df(t));
-							kids.push_back(std::make_unique<strata::term_scorer>(seg.get<strata::inverted_plugin>(), *info, w));
+							const auto w = scheme == prospect::scheme::bm25 ? prospect::weight::bm25(table.stats(), table.df(t)) : prospect::weight::bm25_xapian(table.stats(), table.df(t));
+							kids.push_back(std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *info, w));
 						}
 						if (kids.empty()) { return nullptr; }
 						if (kids.size() == 1) { return std::move(kids[0]); }
-						return std::make_unique<strata::disjunction_scorer>(std::move(kids));
+						return std::make_unique<prospect::disjunction_scorer>(std::move(kids));
 					};
 					for (const std::size_t k : {1u, 10u, 50u, 100u, 1000u}) {
-						std::vector<strata::doc_hit> want;
+						std::vector<prospect::doc_hit> want;
 						for (const auto& sn : snap) {
 							auto sc = build_q(*sn.seg);
 							if (!sc) { continue; }
@@ -723,7 +723,7 @@ int main() {
 						}
 						std::sort(want.begin(), want.end(), [](const auto& a, const auto& b) { return a.score != b.score ? a.score > b.score : a.docid < b.docid; });
 						want.resize(std::min(want.size(), k));
-						const auto got = strata::search(snap, build_q, k);
+						const auto got = prospect::search(snap, build_q, k);
 						bool ok = got.size() == want.size();
 						for (std::size_t i = 0; ok && i < got.size(); ++i) { ok = got[i].docid == want[i].docid && got[i].score == want[i].score; }
 						CHECK(ok);
@@ -738,21 +738,21 @@ int main() {
 		// Seeds are off in a segment with deletes: here the k-th best stored pair belongs to
 		// deleted postings, so a seeded floor would drop every live hit.
 		{
-			strata::segment_writer w;
+			prospect::segment_writer w;
 			const std::vector<std::uint32_t> none;
 			for (std::uint32_t d = 0; d < 400; ++d) {
-				std::vector<strata::posting_input> in{{"hot", d < 40 ? 50u : 1u, none}};
+				std::vector<prospect::posting_input> in{{"hot", d < 40 ? 50u : 1u, none}};
 				w.add(d + 1, in, d < 40 ? 2 : 200);
 			}
 			const std::string bytes = w.flush({});
-			strata::segment hot(bytes);
+			prospect::segment hot(bytes);
 			std::vector<std::uint64_t> gone((400 + 63) / 64);
 			for (std::size_t d = 0; d < 40; ++d) { gone[d / 64] |= std::uint64_t(1) << (d % 64); }
-			const strata::segment_snapshot one[] = {{&hot, &gone}};
-			auto b = [&](const strata::segment& seg) -> strata::scorer_ptr { return std::make_unique<strata::term_scorer>(seg.get<strata::inverted_plugin>(), *seg.get<strata::inverted_plugin>().term("hot")); };
-			strata::term_scorer probe(hot.get<strata::inverted_plugin>(), *hot.get<strata::inverted_plugin>().term("hot"));
-			CHECK(probe.seed(10) > strata::weight::bm25(hot.get<strata::inverted_plugin>(), 400)(1, 200));  // the seed comes from the deleted postings
-			const auto got = strata::search(one, b, 10);
+			const prospect::segment_snapshot one[] = {{&hot, &gone}};
+			auto b = [&](const prospect::segment& seg) -> prospect::scorer_ptr { return std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term("hot")); };
+			prospect::term_scorer probe(hot.get<prospect::inverted_plugin>(), *hot.get<prospect::inverted_plugin>().term("hot"));
+			CHECK(probe.seed(10) > prospect::weight::bm25(hot.get<prospect::inverted_plugin>(), 400)(1, 200));  // the seed comes from the deleted postings
+			const auto got = prospect::search(one, b, 10);
 			CHECK(got.size() == 10);
 			for (const auto& h : got) { CHECK(h.docid > 40); }
 		}
@@ -767,11 +767,11 @@ int main() {
 		std::vector<std::uint64_t> ids(20000);
 		for (std::uint64_t d = 0; auto& id : ids) { id = d += 1 + rng() % 5; }
 		std::shuffle(ids.begin(), ids.end(), rng);
-		strata::segment_writer w;
+		prospect::segment_writer w;
 		w.permuted = true;
 		const std::vector<std::uint32_t> none;
 		for (std::uint32_t d = 0; d < 20000; ++d) {
-			std::vector<strata::posting_input> in;
+			std::vector<prospect::posting_input> in;
 			const bool hot = (d >= 12000 && d < 12600) || (d >= 3000 && d < 3100);
 			in.push_back({"skew", hot ? 5 + std::uint32_t(rng() % 20) : 1 + std::uint32_t(rng() % 3), none});
 			if (d % 3 == 0) { in.push_back({"third", 1 + std::uint32_t(rng() % 4), none}); }
@@ -779,29 +779,29 @@ int main() {
 			w.add(ids[d], in, hot ? 20 : 10 + std::uint32_t(rng() % 3));
 		}
 		const std::string bytes = w.flush({});
-		strata::segment seg(bytes);
+		prospect::segment seg(bytes);
 		CHECK(!seg.core().docid_ordered());
-		const auto& inv = seg.get<strata::inverted_plugin>();
+		const auto& inv = seg.get<prospect::inverted_plugin>();
 		std::size_t compared = 0;
 		for (const char* term : {"skew", "third", "tie"}) {
 			const auto info = *inv.term(term);
 			for (const bool xapian : {false, true}) {
-				const auto wt = xapian ? strata::weight::bm25_xapian(inv, info.df) : strata::weight::bm25(inv, info.df);
-				std::vector<strata::doc_hit> all;
-				strata::term_scorer ref(inv, info, wt);
+				const auto wt = xapian ? prospect::weight::bm25_xapian(inv, info.df) : prospect::weight::bm25(inv, info.df);
+				std::vector<prospect::doc_hit> all;
+				prospect::term_scorer ref(inv, info, wt);
 				for (ordinal_t d = ref.next(); d != strata::no_more_docs; d = ref.next()) { all.push_back({seg.core().docid(d), ref.score()}); }
 				std::sort(all.begin(), all.end(), [](const auto& a, const auto& b) { return a.score != b.score ? a.score > b.score : a.docid < b.docid; });
 				for (const std::size_t k : {1u, 10u, 100u, 1000u}) {
 					for (const bool seeded : {false, true}) {
-						strata::term_scorer sc(inv, info, wt);
-						const auto got = strata::top_k(seg, sc, k, nullptr, seeded ? sc.seed(k) : 0.0);
+						prospect::term_scorer sc(inv, info, wt);
+						const auto got = prospect::top_k(seg, sc, k, nullptr, seeded ? sc.seed(k) : 0.0);
 						bool ok = got.size() == std::min(k, all.size());
 						for (std::size_t i = 0; ok && i < got.size(); ++i) { ok = seg.core().docid(got[i].ord) == all[i].docid && got[i].score == all[i].score; }
 						CHECK(ok);
 						++compared;
 					}
-					const strata::segment_snapshot one[] = {{&seg, nullptr}};
-					const auto got = strata::search(one, [&](const strata::segment& sg) { return std::make_unique<strata::term_scorer>(sg.get<strata::inverted_plugin>(), info, wt); }, k);
+					const prospect::segment_snapshot one[] = {{&seg, nullptr}};
+					const auto got = prospect::search(one, [&](const prospect::segment& sg) { return std::make_unique<prospect::term_scorer>(sg.get<prospect::inverted_plugin>(), info, wt); }, k);
 					bool ok = got.size() == std::min(k, all.size());
 					for (std::size_t i = 0; ok && i < got.size(); ++i) { ok = got[i].docid == all[i].docid && got[i].score == all[i].score; }
 					CHECK(ok);

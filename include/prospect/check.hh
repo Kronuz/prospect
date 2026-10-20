@@ -2,11 +2,12 @@
 // stored bytes, and keys its plugins count.
 #pragma once
 
+#include "prospect/reader.hh"
+#include "prospect/strata.hh"
 #include "strata/core/check.hh"
-#include "strata/search/reader.hh"
 
-namespace strata {
+namespace prospect {
 
 using check_report = basic_check_report<search_layout>;
 
-}  // namespace strata
+}  // namespace prospect

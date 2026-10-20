@@ -37,7 +37,7 @@
 
 #pragma once
 
-#include "strata/search/exact.hh"
+#include "prospect/exact.hh"
 
 #include <algorithm>
 #include <array>
@@ -59,7 +59,7 @@
 #include <variant>
 #include <vector>
 
-namespace strata::aggregate {
+namespace prospect::aggregate {
 
 using slot_t = std::uint32_t;
 using node_id = std::uint32_t;
@@ -906,4 +906,4 @@ inline std::string render(const request& r, const std::vector<entry>& entries) {
 	return out;
 }
 
-}  // namespace strata::aggregate
+}  // namespace prospect::aggregate

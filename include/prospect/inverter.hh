@@ -1,19 +1,19 @@
 // The search layout's inverter for the core's index: the tuple buffer (tuple_buffer.hh) behind the
-// interface core/index.hh asks of a layout's `inverter` (layers.md L10): documents inverted as they
-// are accepted at one flush thread, flushed as the segment a segment_writer would write from the
-// same documents, and digested as their records.
+// interface strata/core/index.hh asks of a layout's `inverter` (layers.md L10): documents
+// inverted as they are accepted at one flush thread, flushed as the segment a segment_writer
+// would write from the same documents, and digested as their records.
 #pragma once
 
-#include "strata/search/reader.hh"
-#include "strata/search/tuple_buffer.hh"
-#include "strata/search/writer.hh"
+#include "prospect/reader.hh"
+#include "prospect/tuple_buffer.hh"
+#include "prospect/writer.hh"
 
 #include <cstdint>
 #include <span>
 #include <string_view>
 #include <vector>
 
-namespace strata {
+namespace prospect {
 
 class inverting_buffer : public detail::tuple_buffer {
 public:
@@ -64,4 +64,4 @@ private:
 	std::vector<posting_input> terms_in_;  // add()'s scratch
 };
 
-}  // namespace strata
+}  // namespace prospect

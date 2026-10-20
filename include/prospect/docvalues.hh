@@ -42,8 +42,8 @@
 
 #include "bitpack.hh"
 #include "docset.hh"
-#include "strata/search/format.hh"
-#include "strata/search/ordered.hh"
+#include "prospect/format.hh"
+#include "prospect/ordered.hh"
 
 #include <algorithm>
 #include <cstddef>
@@ -57,7 +57,7 @@
 #include <string_view>
 #include <vector>
 
-namespace strata::docvalues {
+namespace prospect::docvalues {
 
 // Logical types; `date` encodes as f64 seconds (D3a).
 enum class kind : std::uint8_t { u64 = 0, i64 = 1, f64 = 2, bytes = 3 };
@@ -539,4 +539,4 @@ private:
 	const char* term_data_ = nullptr;
 };
 
-}  // namespace strata::docvalues
+}  // namespace prospect::docvalues

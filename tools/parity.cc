@@ -10,10 +10,10 @@
 // (reordering.md D4, graph terms of at least MIN_DF documents) and searched as one.
 //   parity CORPUS_JSON N RANK_JSONL [SEGMENTS]
 #include "analysis.hh"
-#include "strata/search/reorder.hh"
-#include "strata/search/search.hh"
-#include "strata/search/searcher.hh"
-#include "strata/search/writer.hh"
+#include "prospect/reorder.hh"
+#include "prospect/search.hh"
+#include "prospect/searcher.hh"
+#include "prospect/writer.hh"
 
 #include <cmath>
 #include <cstdio>
@@ -102,61 +102,61 @@ void count_terms(const node& n, std::map<std::string, std::uint32_t>& wqf) {
 
 // The index's statistics when searching several segments; null for one segment.
 struct snapshot_weights {
-	std::span<const strata::segment_snapshot> segs;
-	strata::statistics st;
-	strata::weight of(const std::string& term, std::uint32_t wqf) const { return strata::weight::bm25_xapian(st, strata::snapshot_df(segs, term), wqf); }
+	std::span<const prospect::segment_snapshot> segs;
+	prospect::statistics st;
+	prospect::weight of(const std::string& term, std::uint32_t wqf) const { return prospect::weight::bm25_xapian(st, prospect::snapshot_df(segs, term), wqf); }
 };
 
-strata::scorer_ptr build(const strata::segment& seg, const node& n, const std::map<std::string, std::uint32_t>& wqf, const snapshot_weights* snap = nullptr) {
+prospect::scorer_ptr build(const prospect::segment& seg, const node& n, const std::map<std::string, std::uint32_t>& wqf, const snapshot_weights* snap = nullptr) {
 	if (n.op.empty()) {
-		auto info = seg.get<strata::inverted_plugin>().term(n.term);
+		auto info = seg.get<prospect::inverted_plugin>().term(n.term);
 		if (!info) { return nullptr; }
-		return std::make_unique<strata::term_scorer>(seg.get<strata::inverted_plugin>(), *info, snap ? snap->of(n.term, wqf.at(n.term)) : strata::weight::bm25_xapian(seg.get<strata::inverted_plugin>(), info->df, wqf.at(n.term)));
+		return std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *info, snap ? snap->of(n.term, wqf.at(n.term)) : prospect::weight::bm25_xapian(seg.get<prospect::inverted_plugin>(), info->df, wqf.at(n.term)));
 	}
 	if (n.op == "PHRASE" || n.op == "NEAR") {
-		std::vector<strata::format::term_info> infos;
-		std::vector<strata::weight> weights;
+		std::vector<prospect::format::term_info> infos;
+		std::vector<prospect::weight> weights;
 		for (const auto& c : n.children) {
-			auto info = seg.get<strata::inverted_plugin>().term(c.term);
+			auto info = seg.get<prospect::inverted_plugin>().term(c.term);
 			if (!info) { return nullptr; }
 			infos.push_back(*info);
-			weights.push_back(snap ? snap->of(c.term, wqf.at(c.term)) : strata::weight::bm25_xapian(seg.get<strata::inverted_plugin>(), info->df, wqf.at(c.term)));
+			weights.push_back(snap ? snap->of(c.term, wqf.at(c.term)) : prospect::weight::bm25_xapian(seg.get<prospect::inverted_plugin>(), info->df, wqf.at(c.term)));
 		}
-		return std::make_unique<strata::phrase_scorer>(seg.get<strata::inverted_plugin>(), infos, std::move(weights), n.op == "NEAR" ? n.window : 0);
+		return std::make_unique<prospect::phrase_scorer>(seg.get<prospect::inverted_plugin>(), infos, std::move(weights), n.op == "NEAR" ? n.window : 0);
 	}
-	std::vector<strata::scorer_ptr> kids;
+	std::vector<prospect::scorer_ptr> kids;
 	for (const auto& c : n.children) { kids.push_back(build(seg, c, wqf, snap)); }
 	if (n.op == "OR") {
 		std::erase(kids, nullptr);
 		if (kids.empty()) { return nullptr; }
 		if (kids.size() == 1) { return std::move(kids[0]); }
-		return std::make_unique<strata::disjunction_scorer>(std::move(kids));
+		return std::make_unique<prospect::disjunction_scorer>(std::move(kids));
 	}
 	if (n.op == "AND") {
 		for (const auto& k : kids) {
 			if (!k) { return nullptr; }
 		}
-		return std::make_unique<strata::conjunction_scorer>(std::move(kids));
+		return std::make_unique<prospect::conjunction_scorer>(std::move(kids));
 	}
 	if (n.op == "AND_MAYBE") {
 		if (!kids[0]) { return nullptr; }
-		std::vector<strata::scorer_ptr> rest;
+		std::vector<prospect::scorer_ptr> rest;
 		for (std::size_t i = 1; i < kids.size(); ++i) {
 			if (kids[i]) { rest.push_back(std::move(kids[i])); }
 		}
 		if (rest.empty()) { return std::move(kids[0]); }
-		strata::scorer_ptr opt = rest.size() == 1 ? std::move(rest[0]) : std::make_unique<strata::disjunction_scorer>(std::move(rest));
-		return std::make_unique<strata::required_optional_scorer>(std::move(kids[0]), std::move(opt));
+		prospect::scorer_ptr opt = rest.size() == 1 ? std::move(rest[0]) : std::make_unique<prospect::disjunction_scorer>(std::move(rest));
+		return std::make_unique<prospect::required_optional_scorer>(std::move(kids[0]), std::move(opt));
 	}
 	if (n.op == "AND_NOT") {
 		if (!kids[0]) { return nullptr; }
-		std::vector<strata::scorer_ptr> rest;
+		std::vector<prospect::scorer_ptr> rest;
 		for (std::size_t i = 1; i < kids.size(); ++i) {
 			if (kids[i]) { rest.push_back(std::move(kids[i])); }
 		}
 		if (rest.empty()) { return std::move(kids[0]); }
-		strata::scorer_ptr ex = rest.size() == 1 ? std::move(rest[0]) : std::make_unique<strata::disjunction_scorer>(std::move(rest));
-		return std::make_unique<strata::exclusion_scorer>(std::move(kids[0]), std::move(ex));
+		prospect::scorer_ptr ex = rest.size() == 1 ? std::move(rest[0]) : std::make_unique<prospect::disjunction_scorer>(std::move(rest));
+		return std::make_unique<prospect::exclusion_scorer>(std::move(kids[0]), std::move(ex));
 	}
 	throw std::runtime_error("unsupported operator " + n.op);
 }
@@ -186,13 +186,13 @@ int main(int argc, char** argv) {
 	}
 	const std::size_t n = std::stoul(argv[2]);
 	std::size_t parts = argc == 5 ? std::max<std::size_t>(1, std::stoul(argv[4])) : 1;
-	std::vector<strata::segment_writer> writers(parts);
+	std::vector<prospect::segment_writer> writers(parts);
 	{
 		std::ifstream in(argv[1]);
 		std::string line;
 		analysis::term_generator g;
 		std::map<std::string, std::pair<std::uint32_t, std::vector<std::uint32_t>>> terms;
-		std::vector<strata::posting_input> postings;
+		std::vector<prospect::posting_input> postings;
 		for (std::size_t d = 0; d < n && std::getline(in, line); ++d) {
 			terms.clear();
 			std::uint32_t length = 0;
@@ -210,41 +210,41 @@ int main(int argc, char** argv) {
 	}
 	std::vector<std::string> files;
 	for (auto& w : writers) { files.push_back(w.flush({})); }
-	std::vector<strata::segment> segments;
+	std::vector<prospect::segment> segments;
 	for (const auto& f : files) { segments.emplace_back(f); }
 	if (const char* r = std::getenv("PARITY_REORDER")) {
-		std::vector<strata::merge_source> sources;
+		std::vector<prospect::merge_source> sources;
 		for (const auto& sg : segments) { sources.push_back({&sg, nullptr}); }
-		strata::reorder::settings set;
+		prospect::reorder::settings set;
 		set.min_df = std::uint32_t(std::stoul(r));
 		strata::string_scratch forward;
-		const auto order = strata::reorder::order(sources, forward, set);
+		const auto order = prospect::reorder::order(sources, forward, set);
 		std::string merged;
 		strata::string_output out(merged);
 		strata::string_spill spill;
-		(void)strata::merge_segments(sources, {}, out, spill, {.order = order});
+		(void)prospect::merge_segments(sources, {}, out, spill, {.order = order});
 		segments.clear();
 		files = {std::move(merged)};
 		segments.emplace_back(files[0]);
 		parts = 1;
 		std::cout << "reordered: " << (segments[0].core().docid_ordered() ? "no" : "yes") << "\n";
 	}
-	std::vector<strata::segment_snapshot> snaps;
+	std::vector<prospect::segment_snapshot> snaps;
 	for (const auto& s : segments) { snaps.push_back({&s, nullptr}); }
-	const snapshot_weights weights{snaps, strata::snapshot_statistics(snaps)};
+	const snapshot_weights weights{snaps, prospect::snapshot_statistics(snaps)};
 	const snapshot_weights* snap = parts > 1 ? &weights : nullptr;
-	const strata::segment& seg = segments[0];
+	const prospect::segment& seg = segments[0];
 	std::uint64_t total_docs = 0;
 	for (const auto& s : segments) { total_docs += s.core().doc_count(); }
 	// The k best across segments as hits by docid - 1 (the ordinal a docid-ordered segment gives).
 	auto search = [&](const node& q, const std::map<std::string, std::uint32_t>& wqf, std::uint64_t* count) {
-		std::vector<strata::hit> out;
+		std::vector<prospect::hit> out;
 		if (parts == 1) {
-			if (auto s = build(seg, q, wqf)) { out = strata::top_k(seg, *s, 10, count); } else if (count) { *count = 0; }
+			if (auto s = build(seg, q, wqf)) { out = prospect::top_k(seg, *s, 10, count); } else if (count) { *count = 0; }
 			for (auto& h : out) { h.ord = strata::ordinal_t(seg.core().docid(h.ord) - 1); }
 			return out;
 		}
-		auto hits = strata::search(snaps, [&](const strata::segment& sg) { return build(sg, q, wqf, snap); }, 10, count);
+		auto hits = prospect::search(snaps, [&](const prospect::segment& sg) { return build(sg, q, wqf, snap); }, 10, count);
 		for (const auto& h : hits) { out.push_back({strata::ordinal_t(h.docid - 1), h.score}); }
 		return out;
 	};
@@ -266,7 +266,7 @@ int main(int argc, char** argv) {
 		count_terms(q, wqf);
 		const std::uint64_t want_count = std::stoull(field(line, "upper"));
 		std::uint64_t got_count = 0;
-		std::vector<strata::hit> hits = search(q, wqf, &got_count);
+		std::vector<prospect::hit> hits = search(q, wqf, &got_count);
 		count_ok += got_count == want_count;
 
 		// Oracle hits: [[docid, weight, percent], ...]
@@ -276,7 +276,7 @@ int main(int argc, char** argv) {
 			std::size_t c1 = line.find(',', p), c2 = line.find(',', c1 + 1);
 			want.push_back({std::stoull(line.substr(p + 1, c1 - p - 1)), std::stod(line.substr(c1 + 1, c2 - c1 - 1))});
 		}
-		auto matches = [&](const std::vector<strata::hit>& got) {
+		auto matches = [&](const std::vector<prospect::hit>& got) {
 			bool ok = got.size() == want.size();
 			for (std::size_t i = 0; ok && i < got.size(); ++i) {
 				const double rel = std::abs(got[i].score - want[i].second) / std::max(1e-300, std::abs(want[i].second));
@@ -290,7 +290,7 @@ int main(int argc, char** argv) {
 			return ok;
 		};
 		// Counted (every match visited) and pruned (no count: thresholds skip blocks).
-		std::vector<strata::hit> pruned = search(q, wqf, nullptr);
+		std::vector<prospect::hit> pruned = search(q, wqf, nullptr);
 		const bool ok = matches(hits) && matches(pruned);
 		top_ok += ok;
 		if ((!ok || got_count != want_count) && max_rel_shown++ < 8) {

@@ -45,7 +45,7 @@
 #include <utility>
 #include <vector>
 
-namespace strata::bisection {
+namespace prospect::bisection {
 
 namespace tables {
 // round(2^16 · log2(1 + m / 1024)), m = 0..1023.
@@ -550,4 +550,4 @@ inline std::vector<std::uint32_t> order(const graph& g, const presets& p = {}, c
 	return perm;
 }
 
-}  // namespace strata::bisection
+}  // namespace prospect::bisection

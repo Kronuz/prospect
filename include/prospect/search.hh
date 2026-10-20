@@ -24,7 +24,7 @@
 
 #pragma once
 
-#include "strata/search/reader.hh"
+#include "prospect/reader.hh"
 
 #include <algorithm>
 #include <array>
@@ -39,7 +39,7 @@
 #include <utility>
 #include <vector>
 
-namespace strata {
+namespace prospect {
 
 // --- weighting ----------------------------------------------------------------------------------
 
@@ -120,7 +120,7 @@ struct top_collector;
 // further (Lucene's MathUtil.sumUpperBound).
 inline double sum_upper(double sum, std::size_t n) noexcept { return sum * (1.0 + double(2 * n) * 0x1p-53); }
 
-// The virtual scorer interface; every implementation satisfies strata::scorer.
+// The virtual scorer interface; every implementation satisfies prospect::scorer.
 struct scorer {
 	virtual ~scorer() = default;
 	virtual ordinal_t doc() const noexcept = 0;
@@ -1346,7 +1346,7 @@ inline std::uint64_t count(scorer& s);
 // of matches; a count known from statistics leaves the collection free to prune.
 inline std::vector<hit> top_k(const segment& seg, scorer& s, std::size_t k, std::uint64_t* count = nullptr, double floor = 0) {
 	if (k == 0) {
-		if (count) { *count = strata::count(s); }
+		if (count) { *count = prospect::count(s); }
 		return {};
 	}
 	auto worse = [](const hit& a, const hit& b) { return a.score != b.score ? a.score > b.score : a.ord < b.ord; };
@@ -1551,4 +1551,4 @@ inline std::optional<std::uint64_t> disjunction_scorer::exact_count() {
 	return counts[0] + counts[1] - count(and_);
 }
 
-}  // namespace strata
+}  // namespace prospect
