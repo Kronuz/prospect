@@ -178,4 +178,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(strata_engine PRIVATE strata)
   add_executable(keybench tools/keybench.cc)
   target_link_libraries(keybench PRIVATE strata)
+  # The key-value benchmark's strata driver (bench/kv, rocksdb-survey.md section 4).
+  add_executable(kv_strata bench/kv/kv_strata.cc)
+  target_link_libraries(kv_strata PRIVATE strata)
 endif()
