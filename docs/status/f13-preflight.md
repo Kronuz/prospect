@@ -23,11 +23,11 @@
 
 ## State
 
-Item 1 (seeds): built, byte-identical at 100k and 1M, and at A's time on the Mac at 1M (13
-trials pooled: builds 1.002, docid merges 1.005 of `026ee10`'s CPU; main 1.10 and 1.09). The 5M
-gate VM confirmation is running. Item 2 (attribution): plan written, a counting build of main
-with the counters ported (`.scratch/wt-cnt`), a profile build, and the level-1 positional
-offset's scratch build (`.scratch/wt-pos`) ready.
+Done, both items. Seeds: byte-identical (then reproducible across platforms by exact integer
+comparisons, pre_freeze 0x80000008), at A's time at 1M (builds 1.002, docid merges 1.005 of
+`026ee10`'s CPU over 13 trials; main 1.10 and 1.09), 14 cycles per posting at 5M against 68.
+Attribution: every class classified and ranked by expected gain; two format-free prototypes
+measured (counted unions 2.1 to 2.75 times faster, intersection_union 1.14 to 1.22).
 
 ## Done
 
@@ -68,11 +68,13 @@ offset's scratch build (`.scratch/wt-pos`) ready.
 - The owner's decision (no freeze until the first release): the attribution ranked by expected
   gain, each cause a format change now, later, or format-free (7b3bcca).
 
-## Next
+- K2 at 5M (gate VM, four sessions, the last gated on host load): build pairs C/A 0.970, 0.962,
+  1.045, 1.075 (mean 1.012, noise about the effect's size); the cleanest docid merge pair 1.002;
+  in situ the new seeds take 14.1 cycles per posting of the 5M merge (2.1% of its CPU) against
+  67.7. Merge peak RSS +99 MB (4.83 against 4.74 GiB). VM cleaned: 11,088,744,448 bytes free.
 
-1. The 5M confirmation's numbers: sessions 1 to 3 and the in-situ run were disturbed by host
-   load (other sessions' tests, host load to 100); the final session gates each step on the
-   host's load under 3 and logs the highest seen (`.scratch/vm/steps.log`).
+1. For the lead: whether the 5M build pairs need a quieter host to read below the ±8% noise
+   (the 1M run level and the in-situ counts are the evidence offered).
 2. For the lead: rows 2 and 3's prototypes are ready to become a workstream (format-free, after
    the freeze); FQ3's offset goes to the architect with C2.
 

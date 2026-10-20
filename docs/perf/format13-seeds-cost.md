@@ -152,3 +152,77 @@ now exact (`294fd85`):
 - `format::pre_freeze` 0x80000008 (C17): fixtures re-pinned, the prefix CRC (`0x6b637f48`) and
   the T7 reordering hash (`0x7e6f1ad2a99f9b80`) re-pinned; `digest.txt` unchanged. ctest 39/39
   (macOS x86_64, Apple clang, Release). CI not waited on.
+
+## 5M on the gate VM
+
+Binaries: A = `026ee10`, C = `0d1b3ad` (C2's writer; the exact comparisons of `294fd85` cost the
+same, per the microbenchmark), clang 18, Release, built on the VM. The 5M gate corpus, one thread,
+256 MB buffer, no merges, `/usr/bin/time -v`. The host is shared and the VM's time moves with the
+host's load, so four sessions ran; the first three were disturbed (another session's builds in the
+VM, host load to 100; system time 6 to 35 s per run where an undisturbed run has 4 to 5 s), and the
+last gated every step on the host's 1-minute load below 3 (the highest seen during a step 3.4 to
+6.4, `.scratch/vm/steps.log`), with the page cache dropped before each merge.
+
+| Session | Build pair (CPU s, user + sys) | C/A | Docid merge pair (CPU s) | C/A |
+|---|---|---|---|---|
+| 2 (VM load gated, host not) | A 138.6, C 134.5 | 0.970 | C 228.6 first, A 177.3 (C's merge 33.9 s system) | order-confounded |
+| 2 | C 135.2, A 140.6 | 0.962 | | |
+| Final (host gated) | A 122.7, C 128.2 | 1.045 | A 146.7, C (instrumented) 158.2 | 1.078 (C 12.8 s system) |
+| Final | C 126.6, A 117.8 | 1.075 | C 138.0, A 137.8 | **1.002** |
+
+The four build pairs average 1.012 (geometric) with a spread of ±8% per pair, so the 5M run neither
+confirms nor refutes 1.03 at the pair level: the VM's noise under a shared host is about the size
+of the effect. The cleanest merge pair (same session, page cache dropped, both under the gate) is
+1.002. The 1M run level (13 trials) is the evidence for K2; at 5M the robust measure is the in-situ
+cycle count, which does not depend on the host's load as much as wall and CPU time do:
+
+| 5M docid merge (565.7M postings in skip-block terms, 103,578 terms) | Cycles | Per posting | Share of the merge's CPU |
+|---|---:|---:|---:|
+| Old `seeds_of` (wt-p, the disturbed session) | 38.3 G | 67.7 | about 10% (the gate's profile: 11.5%) |
+| New `seeds_of` (wt-q2, the final session) | 7.96 G | 14.1 | 2.1% (3.3 s of 158 s) |
+
+So at 5M the seeds take 14 cycles per posting, as at 1M (15), against 68: the 1.09 docid merge and
+the 1.08 to 1.12 builds of `format13-gate-vm.md`'s row 3 lose their seeds term, and what is left
+of it (about 2%) is offset by the shared length gather.
+
+## Before and after
+
+| Measure | Main (B) | This branch (C) | Source |
+|---|---:|---:|---|
+| `seeds_of`, cycles per posting, 1M build | 59 | 15.0 | in situ (`wt-p`, `wt-q2`) |
+| `seeds_of`, cycles per posting, 5M docid merge | 67.7 | 14.1 | in situ, gate VM |
+| `seeds_of`, share of build CPU, 1M | 9.7% | 2.3% | in situ |
+| `seeds_of`, share of merge CPU, 1M / 5M | 9.4% / about 10% | 2.7% / 2.1% | in situ |
+| 1M build CPU against `026ee10` (13 trials pooled) | 1.103 [1.080–1.127] | 1.002 [0.961–1.045] | Mac, A/A 0.995 [0.950–1.041] |
+| 1M docid merge CPU against `026ee10` | 1.085 [1.063–1.107] | 1.005 [0.953–1.059] | Mac, A/A 0.988 [0.951–1.026] |
+| 5M build CPU against `026ee10` | 1.08, 1.12 (gate) | 0.96 to 1.08 per pair, mean 1.012 | gate VM, noisy |
+| 5M docid merge CPU against `026ee10` | 1.093 (gate) | 1.002 (cleanest pair) | gate VM |
+| Peak RSS, 1M build (MiB, mean) | 807 | 776 to 794 (A 767 to 791) | Mac, noisy to ±10% |
+| Peak RSS, 5M build / docid merge | 573 MiB / 4.75 GiB (gate) | 571.6 MiB / 4.83 GiB (A 573.4 MiB, 4.74 GiB) | gate VM |
+| Segment bytes | | identical (C1, C2); version and prefix CRC only (exact seeds) | `cmp` |
+
+The merge's peak grows by about 100 MB at 5M (2%): the split pass holds a term's wdf-1 lengths and
+its (wdf, length) pairs (12 bytes per posting of the largest term, about 60 MB for a 5M-posting
+term) beside the gathered lengths. Cost in money is small either way: the old writer's extra
+2.4 µs per document indexed and 3.3 µs per document merged (the gate's figures) came to about 3.4
+core-hours per billion documents written once and merged three times, roughly $0.15 at $0.045 per
+vCPU-hour; this removes most of it. What it buys is T5's indexing ratio.
+
+## Phase times
+
+| Phase | Wall |
+|---|---|
+| Reading, plans | 20:26 to 20:28 |
+| Builds A, B | 5 min |
+| Instrumented profile, 1M build and merge | 2 runs, about 1 min each (waits for holds) |
+| Microbenchmark iterations (seven variants) | about 40 min |
+| C1, C2 builds and tests | about 10 min |
+| Identity 100k and 1M (B and C, three layouts) | 1 min and 8 min (C2 4 min) |
+| 1M timing, two sessions (one aborted) | 24 min and 25 min |
+| Gate VM: sync and builds | 4 s and 3 min |
+| Gate VM: four sessions and the in-situ run | 21, 17, 14, 17 min, and 98 min gated (52 min of it waiting for the host) |
+| Reproducible seeds: code, re-pin, ctest | about 25 min (ctest 121 s) |
+
+The gate VM has 11,088,744,448 bytes free afterwards (12,086,738,944 before; this work's sources,
+builds, and indexes are removed, its 320 KB of logs kept in `~/bench/results/f13p/` and copied to
+`.scratch/vm/results/`; the rest of the difference is another session's files).
