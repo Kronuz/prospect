@@ -199,6 +199,7 @@ int merge(const std::string& dir) {
 	o.key_prefix = "Q";
 	if (const char* r = std::getenv("STRATA_REORDER"); r && std::string_view(r) == "0") { o.reordering = strata::index::options::reorder_mode::off; }
 	if (const char* t = std::getenv("STRATA_REORDER_THREADS")) { o.reorder_settings.bisection.threads = std::uint32_t(std::max(1L, std::strtol(t, nullptr, 10))); }
+	if (const char* seed = std::getenv("STRATA_IDENTITY_SEED")) { o.identity_seed = std::strtoull(seed, nullptr, 10); }
 	auto ix = strata::index::open(io, o);
 	warn_trust(ix);
 	const auto start = std::chrono::steady_clock::now();

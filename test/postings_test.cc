@@ -9,6 +9,8 @@
 #include "skip_layout.hh"
 
 #include <crc32c/crc32c.hh>
+#include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -544,6 +546,117 @@ int main() {
 		strata::check_report r;
 		strata::check_segment(s, nullptr, r);
 		CHECK(r.terms == c.terms.size());
+		// The stored pairs are exactly the writer's rule: levels of wdf highest first, each k's
+		// k-th shortest at a level, the first strictly best kept (scores compared as exact
+		// rationals, ties to the higher wdf), stopping where no lower wdf can beat every best at
+		// the segment's shortest length. Lengths reach past 65,536, where the writer's exact
+		// counts end, and the k-th shortest lands past it.
+		{
+			std::mt19937_64 rng(77);
+			strata::segment_writer w;
+			std::map<std::string, std::vector<std::pair<std::uint32_t, std::uint32_t>>> terms;  // (wdf, length)
+			std::vector<std::uint32_t> lengths;
+			for (std::uint32_t d = 0; d < 6000; ++d) {
+				const std::uint32_t r = std::uint32_t(rng() % 100);
+				const std::uint32_t length = r < 5 ? 65536 + std::uint32_t(rng() % 200000) : r < 8 ? 65520 + std::uint32_t(rng() % 32) : 1 + std::uint32_t(rng() % 3000);
+				std::vector<strata::posting_input> in;
+				auto add = [&](const char* t, std::uint32_t wdf) {
+					in.push_back({t, wdf, {}});
+					terms[t].push_back({wdf, length});
+				};
+				add("all", 1 + std::uint32_t(rng() % 3));
+				if (length >= 65520) { add("long", 1 + std::uint32_t(rng() % 2)); }  // the k-th shortest past the cap
+				if (rng() % 3 == 0) { add("skewed", rng() % 50 == 0 ? 1 + std::uint32_t(rng() % 70000) : 1 + std::uint32_t(rng() % 4)); }
+				if (rng() % 2 == 0) { add("zeros", std::uint32_t(rng() % 3)); }
+				lengths.push_back(length);
+				w.add(1 + d, in, length);
+			}
+			const std::string bytes = w.flush({});
+			strata::segment s2(bytes);
+			const auto& inv2 = s2.get<strata::inverted_plugin>();
+			std::uint64_t total = 0;
+			for (auto l : lengths) { total += l; }
+			// bm25: w / (w + 1.2·(0.25 + 0.75·len / avg)), avg = T / N here (T >= N), which orders as
+			// w / (w + (T + 3·len·N)); bm25_xapian: w / (w + 0.5 + 0.5·max(len / avg, 0.5)), as
+			// w / (w + 2T + max(2·len·N, T)). One score beats another when w1·n2 > w2·n1.
+			using u128 = unsigned __int128;
+			const u128 T = total, N = lengths.size();
+			CHECK(total >= lengths.size());
+			auto n_lucene = [&](std::uint32_t l) { return T + 3 * u128(f::decode_length(f::encode_length(l))) * N; };
+			auto n_xapian = [&](std::uint32_t l) { return 2 * T + std::max(2 * u128(l) * N, T); };
+			auto beats = [](std::uint32_t w1, u128 n1, std::uint32_t w2, u128 n2) { return w2 == 0 || u128(w1) * n2 > u128(w2) * n1; };
+			const std::uint32_t shortest = *std::min_element(lengths.begin(), lengths.end());
+			for (const auto& [term, ps] : terms) {
+				std::vector<std::uint32_t> levels;
+				for (const auto& p : ps) { levels.push_back(p.first); }
+				std::sort(levels.begin(), levels.end(), std::greater<>());
+				levels.erase(std::unique(levels.begin(), levels.end()), levels.end());
+				std::array<f::seed_pairs, 3> want{};
+				std::uint32_t bw_l[3] = {}, bw_x[3] = {};
+				u128 bn_l[3] = {}, bn_x[3] = {};
+				const std::size_t ks = std::size_t(std::count_if(std::begin(f::seed_ks), std::end(f::seed_ks), [&](std::uint32_t k) { return k <= ps.size(); }));
+				for (std::size_t li = 0; li < levels.size() && levels[li] > 0; ++li) {
+					const std::uint32_t lw = levels[li];
+					std::vector<std::uint32_t> lens;
+					for (const auto& p : ps) {
+						if (p.first >= lw) { lens.push_back(p.second); }
+					}
+					bool full = true;
+					for (std::size_t j = 0; j < ks; ++j) {
+						const std::size_t k = f::seed_ks[j];
+						if (lens.size() < k) {
+							full = false;
+							continue;
+						}
+						std::nth_element(lens.begin(), lens.begin() + std::ptrdiff_t(k - 1), lens.end());
+						const std::uint32_t l = lens[k - 1];
+						if (beats(lw, n_lucene(l), bw_l[j], bn_l[j])) { bw_l[j] = lw, bn_l[j] = n_lucene(l), want[j].code_wdf = lw, want[j].code = f::encode_length(l); }
+						if (beats(lw, n_xapian(l), bw_x[j], bn_x[j])) { bw_x[j] = lw, bn_x[j] = n_xapian(l), want[j].exact_wdf = lw, want[j].exact = l; }
+					}
+					if (full && li + 1 < levels.size()) {
+						const std::uint32_t next = levels[li + 1];
+						bool done = true;
+						for (std::size_t j = 0; j < ks; ++j) { done = done && !beats(next, n_lucene(shortest), bw_l[j], bn_l[j]) && !beats(next, n_xapian(shortest), bw_x[j], bn_x[j]); }
+						if (done) { break; }
+					}
+				}
+				strata::postings_iterator it(inv2, *inv2.term(term));
+				CHECK(it.seed_count() == ks);
+				for (std::size_t j = 0; j < it.seed_count(); ++j) {
+					const auto& got = it.seed_at(j);
+					CHECK(got.code_wdf == want[j].code_wdf && got.code == want[j].code && got.exact_wdf == want[j].exact_wdf && got.exact == want[j].exact);
+				}
+			}
+			// "long"'s 100th shortest is past the cap; "skewed" has a wdf past 65,536 (the sort).
+			std::size_t below = 0, high = 0;
+			for (const auto& p : terms["long"]) { below += p.second < 65536; }
+			for (const auto& p : terms["skewed"]) { high += p.first > 65536; }
+			CHECK(terms["long"].size() >= 128 && below < 100 && high > 0);
+		}
+		// An exact tie keeps the higher wdf. Average length 9 (2,502 over 278 documents): bm25
+		// orders as w / (w + 9 + 3·len), so wdf 3 at length 3 and wdf 2 at length 1 score 3/21
+		// both; one empty document keeps the stop rule from ending at wdf 3.
+		{
+			strata::segment_writer w;
+			std::uint64_t docid = 1;
+			auto doc = [&](const char* t, std::uint32_t wdf, std::uint32_t length) {
+				std::vector<strata::posting_input> in;
+				if (t) { in.push_back({t, wdf, {}}); }
+				w.add(docid++, in, length);
+			};
+			for (int i = 0; i < 10; ++i) { doc("tie", 3, 3); }
+			for (int i = 0; i < 10; ++i) { doc("tie", 2, 1); }
+			for (int i = 0; i < 110; ++i) { doc("tie", 1, 1); }
+			doc(nullptr, 0, 0);
+			for (int i = 0; i < 147; ++i) { doc("filler", 1, 16); }
+			const std::string bytes = w.flush({});
+			strata::segment s3(bytes);
+			const auto& inv3 = s3.get<strata::inverted_plugin>();
+			CHECK(inv3.doc_count() == 278 && inv3.total_length() == 2502);
+			strata::postings_iterator it(inv3, *inv3.term("tie"));
+			CHECK(it.seed_count() == 2);
+			CHECK(it.seed_at(0).code_wdf == 3 && it.seed_at(0).code == f::encode_length(3));
+		}
 		// check() refuses a seed that claims more than its postings hold.
 		{
 			std::string file = c.bytes;
