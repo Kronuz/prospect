@@ -982,17 +982,12 @@ private:
 		return d;
 	}
 
-	// The window from d and both sides' bounds over it: to the end of the required side's
-	// block or the optional side's, or to just before the optional side's next match, where
-	// it adds nothing (Lucene's advanceShallow).
+	// The window from d to the end of the required side's block, and both sides' bounds over
+	// it; the optional side adds nothing when its next match lies past it (Lucene's
+	// getMaxScore). Lucene also ends a window at the optional side's block, which measured
+	// slower here: more windows, each bounded again.
 	void open_window(ordinal_t d) {
-		ordinal_t end = req_->block_end(d);
-		if (opt_started_ && opt_->doc() > d) {
-			end = std::min(end, opt_->doc() - 1);
-		} else {
-			end = std::min(end, opt_->block_end(d));
-		}
-		window_end_ = std::min(end, no_more_docs - 1);
+		window_end_ = std::min(req_->block_end(d), no_more_docs - 1);
 		req_bound_ = req_->max_score(d, window_end_);
 		opt_bound_ = opt_started_ && opt_->doc() > window_end_ ? 0.0 : opt_->max_score(d, window_end_);
 	}
