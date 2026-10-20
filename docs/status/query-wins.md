@@ -22,29 +22,37 @@
 
 ## State
 
-Code, tests, revert checks, and mutants done (Q3); identity, parity, sanitizers, and the A/B
-wait on the host (strict holds from 07:16).
+Done; not merged. Q1 to Q5 met (`docs/perf/query-wins.md`). Branch pushed; CI dispatched on
+the final head.
 
 ## Done
 
 - `5bcc81a` search: counted unions prune; required plus optional skips blocks (rows 1 and 3,
   NOTICE and the Apache License for the Lucene port, search_test's scoring tally).
 - `c507f2a` strata_engine: verify checks the uncounted search too; `STRATA_DUMP_COUNT=0`.
-- Q3: with row 1 reverted, search_test's tally check fails (4 of 4: two segments, k 10 and
-  100); with row 3 reverted, likewise (4 of 4). Mutants caught: M1 (`count(*copy)` as
-  `copy->cost()`), M1b (count also inline), M3 (window skip on the required bound alone),
-  M3b (leapfrog past the window when the required side competes alone), M3c (`>=` in the
-  optional bound's zero case).
-- Full Release suite: 39 of 39 pass (macOS x86_64).
-- Pushed; CI run 39438785455 (push of `c507f2a`).
+- `3b5a311` search: required plus optional windows are the required side's blocks. Lucene's
+  finer windows (either side's block end) measured slower: intersection_union `TOP_1000`
+  1.063 [1.020-1.107], `TOP_10` 0.904 against the prototype's 0.820.
+- Q1: dumps identical to main with and without a count (both presets, k 10, 100, 1,000) at
+  100k and 1M, merged and reordered, and on nine 100k segments; verify 0 mismatches on each.
+- Q2: parity 419 of 419 in one segment, four, and reordered; worst error 3.87e-16.
+- Q3: each row reverted fails search_test's tally check (4 of 4); five mutants caught
+  (M1, M1b, M3, M3b, M3c), rerun on `3b5a311`.
+- Q4: ASan and UBSan (Homebrew LLVM, `-O1`): search, exact, multisegment, engine_query, and
+  verify over the gate queries at 100k (one and nine segments) clean; CI's linux-asan-ubsan
+  green on `c507f2a` and `3b5a311`.
+- Q5: 1M reordered, 16 rounds, A/A first, both presets: no row lost. `TOP_100_COUNT` union of
+  3 terms 0.461 and 0.390 (bm25, bm25_xapian), more than 3 0.345 and 0.291; intersection_union
+  `TOP_10` 0.859 and 0.764, `TOP_100` 0.890 and 0.848, `TOP_100_COUNT` 0.878 and 0.837,
+  `TOP_1000` 0.997 and 1.000.
+- CI: run 39438785455 (`c507f2a`) all eight jobs green; run 39448276304 (`3b5a311`) seven of
+  eight green when last read, linux-tsan running.
 
 ## Next
 
-1. Indexes (100k, 1M; merged and reordered) from main's binary (`.scratch/build_idx.sh`).
-2. Identity (`.scratch/identity.sh`): dumps with and without a count, both presets; verify.
-3. Parity against the oracle ranks (one segment, four, reordered).
-4. ASan and UBSan locally (CI's sanitizer job too).
-5. A/A then A/B at 1M reordered, both presets (`.scratch/session.sh`), light hold.
+1. The lead: review and merge `perf/query-wins`; confirm on the gate VM at 5M if wanted.
+2. Follow-ups the attribution names, not in scope here: row 2 (fused FOR decode into window
+   bits), row 5's counting rule for conjunctions, row 7 (exclude by window bits).
 
 ## Blocked on
 
