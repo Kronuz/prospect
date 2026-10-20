@@ -226,10 +226,12 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(strata_engine PRIVATE strata)
   add_executable(keybench tools/keybench.cc)
   target_link_libraries(keybench PRIVATE strata)
-  # The key-value benchmark's strata driver (bench/kv, rocksdb-survey.md section 4).
-  # basic_index<document_layout> does not compile on main yet (the core reaches inverted's
-  # parts), so the driver runs search_layout with keys and stored records only.
+  # The key-value benchmark's strata driver (bench/kv, rocksdb-survey.md section 4): the document
+  # layout on strata::core alone; kv_strata_search is the search layout holding keys and stored
+  # records only, which the first quick-tier report measured.
   add_executable(kv_strata bench/kv/kv_strata.cc)
-  target_link_libraries(kv_strata PRIVATE strata)
-  target_compile_definitions(kv_strata PRIVATE KV_SEARCH_LAYOUT)
+  target_link_libraries(kv_strata PRIVATE strata::core)
+  add_executable(kv_strata_search bench/kv/kv_strata.cc)
+  target_link_libraries(kv_strata_search PRIVATE strata)
+  target_compile_definitions(kv_strata_search PRIVATE KV_SEARCH_LAYOUT)
 endif()
