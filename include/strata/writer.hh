@@ -756,6 +756,23 @@ private:
 		return out;
 	}
 
+	// The presets' seed scores compared exactly, in integers, so every build picks the same pairs
+	// (no libm, no contraction). Each preset scores w / (w + K(len)) times a positive constant,
+	// and K is a positive multiple of norm() below: bm25 (k1 1.2, b 0.75, avg max(1, T / N)),
+	// T + 3·len·N; bm25_xapian (k1 1, b 0.5, min_normlen 0.5, avg T / N or 1), 2T + max(2·len·N, T).
+	struct seed_rule {
+		using u128 = unsigned __int128;
+		u128 lt = 1, ln = 1, xt = 1, xn = 1;
+		seed_rule(std::uint64_t docs, std::uint64_t total) {
+			if (docs && total >= docs) { lt = total, ln = docs; }
+			if (docs && total) { xt = total, xn = docs; }
+		}
+		u128 lucene(std::uint8_t code) const noexcept { return lt + 3 * u128(format::decode_length(code)) * ln; }
+		u128 xapian(std::uint32_t len) const noexcept { return 2 * xt + std::max(2 * u128(len) * xn, xt); }
+		// w1 / (w1 + n1) > w2 / (w2 + n2), for w > 0 and n > 0.
+		static bool above(std::uint32_t w1, u128 n1, std::uint32_t w2, u128 n2) noexcept { return u128(w1) * n2 > u128(w2) * n1; }
+	};
+
 	// F13 (M20): for each stored k, the pair (w, the k-th shortest length with wdf >= w) each preset
 	// scores highest at this segment's statistics, levels of wdf highest first until no lower wdf
 	// can beat every best at the shortest length. A level's k-th shortest depends on no order, so it
@@ -763,8 +780,7 @@ private:
 	std::array<format::seed_pairs, 3> seeds_of(const std::uint32_t* lengths, const std::vector<std::uint32_t>& wdfs) {
 		std::array<format::seed_pairs, 3> out{};
 		const std::size_t df = wdfs.size();
-		const strata::statistics st(lengths_.size(), total_length_);
-		const weight lucene = weight::bm25(st, 1), xapian = weight::bm25_xapian(st, 1);
+		const seed_rule rule(lengths_.size(), total_length_);
 		if (seed_exact_.empty()) {
 			seed_exact_.assign(seed_cap + 1, 0);
 			seed_block_.assign((seed_cap >> 4) + 1, 0);
@@ -806,9 +822,9 @@ private:
 		}
 		if (ones) { seed_levels_.push_back({1, std::uint32_t(rest + ones)}); }
 		const std::size_t ks = std::size_t(std::count_if(std::begin(format::seed_ks), std::end(format::seed_ks), [&](std::uint32_t k) { return k <= df; }));
-		const std::uint32_t shortest = seed_shortest_;
-		const std::uint8_t shortest_code = format::encode_length(shortest);
-		double best_lucene[3] = {-1, -1, -1}, best_xapian[3] = {-1, -1, -1};
+		const auto shortest_lucene = rule.lucene(format::encode_length(seed_shortest_)), shortest_xapian = rule.xapian(seed_shortest_);
+		std::uint32_t best_lucene_w[3] = {}, best_xapian_w[3] = {};  // 0: none yet
+		seed_rule::u128 best_lucene_n[3] = {}, best_xapian_n[3] = {};
 		// Each k's k-th shortest length so far, and the postings at or below it; none until the
 		// first full level. Lengths from seed_cap on are counted together, and kept in seed_long_.
 		constexpr std::uint32_t none = std::numeric_limits<std::uint32_t>::max();
@@ -867,13 +883,13 @@ private:
 				}
 				kth[j] = l, at_most[j] = p;
 				const std::uint8_t code = format::encode_length(l);
-				if (const double f = lucene.by_norm(w, code); f > best_lucene[j]) {
-					best_lucene[j] = f;
+				if (const auto n = rule.lucene(code); !best_lucene_w[j] || seed_rule::above(w, n, best_lucene_w[j], best_lucene_n[j])) {
+					best_lucene_w[j] = w, best_lucene_n[j] = n;
 					out[j].code_wdf = w;
 					out[j].code = code;
 				}
-				if (const double f = xapian(w, l); f > best_xapian[j]) {
-					best_xapian[j] = f;
+				if (const auto n = rule.xapian(l); !best_xapian_w[j] || seed_rule::above(w, n, best_xapian_w[j], best_xapian_n[j])) {
+					best_xapian_w[j] = w, best_xapian_n[j] = n;
 					out[j].exact_wdf = w;
 					out[j].exact = l;
 				}
@@ -881,7 +897,10 @@ private:
 			if (full && li + 1 < seed_levels_.size()) {
 				const std::uint32_t next = seed_levels_[li + 1].first;
 				bool done = true;
-				for (std::size_t j = 0; j < ks; ++j) { done = done && lucene.by_norm(next, shortest_code) <= best_lucene[j] && xapian(next, shortest) <= best_xapian[j]; }
+				for (std::size_t j = 0; j < ks; ++j) {
+					done = done && !seed_rule::above(next, shortest_lucene, best_lucene_w[j], best_lucene_n[j]) &&
+						!seed_rule::above(next, shortest_xapian, best_xapian_w[j], best_xapian_n[j]);
+				}
 				if (done) { break; }
 			}
 		}

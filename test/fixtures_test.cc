@@ -14,6 +14,7 @@
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -207,6 +208,45 @@ int main() {
 		char text[32];
 		std::snprintf(text, sizeof text, "%016llx\n", static_cast<unsigned long long>(digest));
 		pin("digest.txt", text);
+	}
+	// F13 (M20): the seed pairs of a fixed corpus, pinned (seeds.txt) so every platform writes the
+	// same pairs. The average length is exactly 5, which makes exact ties between levels (the
+	// durability review's replay, DM-R51), and lengths and wdfs vary per term.
+	{
+		std::mt19937_64 rng(13);
+		segment_writer w;
+		w.structures &= ~format::bit::keys;
+		std::vector<std::string> names;
+		for (int t = 0; t < 24; ++t) { names.push_back("s" + std::to_string(t)); }
+		std::vector<std::vector<std::uint32_t>> none(names.size());
+		for (std::uint32_t d = 0; d < 6000; ++d) {
+			const std::uint32_t delta = std::uint32_t(rng() % 5);
+			const std::uint32_t length = d % 2 ? 5 - delta : 5 + delta;  // pairs average 5
+			std::vector<posting_input> in;
+			for (std::size_t t = 0; t < names.size(); ++t) {
+				if (rng() % (t + 2) != 0) { continue; }
+				const std::uint32_t top = std::uint32_t(1 + t % 6);
+				in.push_back({names[t], std::uint32_t(1 + rng() % top), none[t]});
+			}
+			w.add(1 + d, in, length);
+		}
+		const std::string bytes = w.flush(id);
+		const segment seg(bytes);
+		const auto& inv = seg.get<inverted_plugin>();
+		std::string text;
+		for (const auto& name : names) {
+			const auto info = inv.term(name);
+			if (!info) { continue; }
+			postings_iterator it(inv, *info);
+			for (std::size_t j = 0; j < it.seed_count(); ++j) {
+				const auto& p = it.seed_at(j);
+				char line[96];
+				std::snprintf(line, sizeof line, "%s %u %u %u %u %u\n", name.c_str(), format::seed_ks[j], p.code_wdf, unsigned(p.code), p.exact_wdf, p.exact);
+				text += line;
+			}
+		}
+		CHECK(!text.empty());
+		pin("seeds.txt", text);
 	}
 	// C17: each family's bytes change only with its pre-freeze version. pre_freeze.txt pins
 	// both versions beside a hash of the family's fixtures (the segments' .sx, the files'

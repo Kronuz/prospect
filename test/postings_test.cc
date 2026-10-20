@@ -546,9 +546,10 @@ int main() {
 		strata::check_segment(s, nullptr, r);
 		CHECK(r.terms == c.terms.size());
 		// The stored pairs are exactly the writer's rule: levels of wdf highest first, each k's
-		// k-th shortest at a level, the first strictly best kept, stopping where no lower wdf can
-		// beat every best at the segment's shortest length. Lengths reach past 65,536, where the
-		// writer's exact counts end, and the k-th shortest lands past it.
+		// k-th shortest at a level, the first strictly best kept (scores compared as exact
+		// rationals, ties to the higher wdf), stopping where no lower wdf can beat every best at
+		// the segment's shortest length. Lengths reach past 65,536, where the writer's exact
+		// counts end, and the k-th shortest lands past it.
 		{
 			std::mt19937_64 rng(77);
 			strata::segment_writer w;
@@ -574,8 +575,15 @@ int main() {
 			const auto& inv2 = s2.get<strata::inverted_plugin>();
 			std::uint64_t total = 0;
 			for (auto l : lengths) { total += l; }
-			const strata::statistics st2(lengths.size(), total);
-			const auto lucene = strata::weight::bm25(st2, 1), xapian = strata::weight::bm25_xapian(st2, 1);
+			// bm25: w / (w + 1.2·(0.25 + 0.75·len / avg)), avg = T / N here (T >= N), which orders as
+			// w / (w + (T + 3·len·N)); bm25_xapian: w / (w + 0.5 + 0.5·max(len / avg, 0.5)), as
+			// w / (w + 2T + max(2·len·N, T)). One score beats another when w1·n2 > w2·n1.
+			using u128 = unsigned __int128;
+			const u128 T = total, N = lengths.size();
+			CHECK(total >= lengths.size());
+			auto n_lucene = [&](std::uint32_t l) { return T + 3 * u128(f::decode_length(f::encode_length(l))) * N; };
+			auto n_xapian = [&](std::uint32_t l) { return 2 * T + std::max(2 * u128(l) * N, T); };
+			auto beats = [](std::uint32_t w1, u128 n1, std::uint32_t w2, u128 n2) { return w2 == 0 || u128(w1) * n2 > u128(w2) * n1; };
 			const std::uint32_t shortest = *std::min_element(lengths.begin(), lengths.end());
 			for (const auto& [term, ps] : terms) {
 				std::vector<std::uint32_t> levels;
@@ -583,7 +591,8 @@ int main() {
 				std::sort(levels.begin(), levels.end(), std::greater<>());
 				levels.erase(std::unique(levels.begin(), levels.end()), levels.end());
 				std::array<f::seed_pairs, 3> want{};
-				double best_l[3] = {-1, -1, -1}, best_x[3] = {-1, -1, -1};
+				std::uint32_t bw_l[3] = {}, bw_x[3] = {};
+				u128 bn_l[3] = {}, bn_x[3] = {};
 				const std::size_t ks = std::size_t(std::count_if(std::begin(f::seed_ks), std::end(f::seed_ks), [&](std::uint32_t k) { return k <= ps.size(); }));
 				for (std::size_t li = 0; li < levels.size() && levels[li] > 0; ++li) {
 					const std::uint32_t lw = levels[li];
@@ -600,13 +609,13 @@ int main() {
 						}
 						std::nth_element(lens.begin(), lens.begin() + std::ptrdiff_t(k - 1), lens.end());
 						const std::uint32_t l = lens[k - 1];
-						if (const double v = lucene.by_norm(lw, f::encode_length(l)); v > best_l[j]) { best_l[j] = v, want[j].code_wdf = lw, want[j].code = f::encode_length(l); }
-						if (const double v = xapian(lw, l); v > best_x[j]) { best_x[j] = v, want[j].exact_wdf = lw, want[j].exact = l; }
+						if (beats(lw, n_lucene(l), bw_l[j], bn_l[j])) { bw_l[j] = lw, bn_l[j] = n_lucene(l), want[j].code_wdf = lw, want[j].code = f::encode_length(l); }
+						if (beats(lw, n_xapian(l), bw_x[j], bn_x[j])) { bw_x[j] = lw, bn_x[j] = n_xapian(l), want[j].exact_wdf = lw, want[j].exact = l; }
 					}
 					if (full && li + 1 < levels.size()) {
 						const std::uint32_t next = levels[li + 1];
 						bool done = true;
-						for (std::size_t j = 0; j < ks; ++j) { done = done && lucene.by_norm(next, f::encode_length(shortest)) <= best_l[j] && xapian(next, shortest) <= best_x[j]; }
+						for (std::size_t j = 0; j < ks; ++j) { done = done && !beats(next, n_lucene(shortest), bw_l[j], bn_l[j]) && !beats(next, n_xapian(shortest), bw_x[j], bn_x[j]); }
 						if (done) { break; }
 					}
 				}
