@@ -1,7 +1,7 @@
 # Phase 0 baselines
 
 Provisional: these runs shared the host with other builds. Every row is re-run on a
-quiet host before it gates anything, as [BENCHMARKS.md](../../docs/BENCHMARKS.md)
+quiet host before it gates anything, as [BENCHMARKS.md](https://github.com/Kronuz/strata/blob/main/docs/BENCHMARKS.md)
 requires.
 
 ## Environment
