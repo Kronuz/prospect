@@ -1,9 +1,11 @@
-# Format 13's remaining query losses, attributed before the freeze
+# Format 13's remaining query losses, attributed
 
 At 5M on the gate VM, strata (main, reordered) loses rows to every baseline
-(`format13-gate-vm.md`, row 4b). The lead's ruling of 2026-10-19 (F13-R45): before the freeze,
-each loss is attributed, and each format-dependent cause gets its place in format 13. This file
-does the attribution, class by class.
+(`format13-gate-vm.md`, row 4b). This file attributes each loss class with counters, profiles,
+and prototypes. The owner's decision of 2026-10-20 (PLAN): no format freeze until the first
+release; format 13 stays a rolling pre-release format, and a format change lands as any change
+does, on proof. So each cause is classified as a format change now (when it wins), a format change
+later, or format-free, and the verdict ranks them by expected gain.
 
 ## Plan (written before the runs)
 
@@ -34,8 +36,9 @@ does the attribution, class by class.
   5. FQ3: the positional walk's share of phrase time from the counters and the profile, and a
      scratch build that stores a level-1 positional offset, timed against main on phrases.
 - **Classification.** Format-dependent when closing the loss needs bytes, a layout, or a reserved
-  place the frozen format must carry; format-free when an algorithm change over format 13's bytes
-  closes it. Each row names the place (or "none") and the expected gain with its source.
+  place; format-free when an algorithm change over format 13's bytes closes it. Each row names the
+  place (or "none") and the expected gain with its source. (Revised after the owner's decision of
+  2026-10-20: format-dependent causes are a format change now, if it wins, or later.)
 
 ## Setup
 
@@ -206,33 +209,31 @@ was ported.
    - `COUNT` intersections of three or more (1.09, 1.25): class 1's per-block costs (`fill` 37%,
      `block_at` 11%, `load_next_block` 9%); format-free.
 
-## Verdict
+## Verdict, ranked by expected gain
 
-| Loss class (5M ratio, strata over the engine) | Cause (1M counters and profile) | Format-dependent? | Place it needs in format 13 | Expected gain (source) |
-|---|---|---|---|---|
-| Counted unions > 3 terms, `COUNT` (Lucene 2.30, `-bp` 2.77) | FOR blocks decoded to ordinals then set bit by bit (54%), per-block entry checks and loads (22%) | No | None (a writer bias toward bitsets is a rule over format 13's codes) | At most about 1.4 times from the per-block share; more only from a fused FOR-to-bits decode (profile shares; not measured) |
-| `TOP_100_COUNT` unions ≥ 3 terms (Tantivy 1.71, 1.97; Lucene 1.09, `-bp` 1.16) | Counting disabled pruning: every match scored (992k per query) | No | None | **0.478 and 0.364** of main's time (measured, 1M) → about 0.72 to 0.82 of Tantivy's |
-| intersection_union (`-bp` 1.11 to 1.41; Tantivy 1.08 to 1.24) | Every required document scored; no block skip, no switch to a conjunction | No | None | **0.82 to 0.88** at `TOP_10`, `TOP_100`, `TOP_100_COUNT` (measured); `TOP_1000` needs the windowed MaxScore (not measured) |
-| Phrases (Tantivy 1.10 to 1.21) | Intersection 21%, position reads 21%, matching 16%, verification 3.7%, FQ3's walk 2.1% | **FQ3's part only** | A per-group offset of the positional deltas in level 1 (carried now, or later under an F23 bit by rule 3) | **1% to 2%** (measured: 0.988 `COUNT`, 0.983 `TOP_1000`) for +0.044% of the segment; the rest format-free, not measured |
-| Intersections `TOP_1000`, `TOP_100_COUNT` (Tantivy 1.15, 1.18) | Per-match loop and `advance`; collector truncation 14% | No | None | About 14% at `TOP_1000` from the collector (profile); counting rule as row 2 (not measured) |
-| Negations (Tantivy 1.10, 1.27) | One excluded-side advance per candidate | No | None | Not measured |
-| two-phase-critic (Tantivy 1.21 to 1.30) | A phrase of two stopwords: 22k position blocks per query | FQ3's part only | As phrases | As phrases |
-| PISA unions 2–3 terms `TOP_10` (1.39) | Block-max over 40-posting blocks, quantized scores, BMW | **Yes** | F12 partitions (skip flags bit 3) and P20 quantized impacts (bit 11, kind 21): both reserved | Not measurable before the structures exist (`phase-3-ratchets.md` attributes PISA's lead to them) |
-| PISA unions `TOP_100`, `TOP_1000` (to 2.40) | PISA's k = 10 seed is unsafe at k = 100 and 1,000 | — | — | Not comparable |
-| PISA intersections `TOP_100`, `TOP_1000` (1.25 to 1.44) | Quantized integer scores; strata's per-match cost (row 5) | Partly | P20 quantized impacts (bit 11, reserved) | Row 5's for the format-free part |
-| PISA `TOP_100_COUNT` (1.43 to 1.80) | PISA counts and ranks nothing | — | — | Not comparable |
-| PISA `COUNT` intersections ≥ 3 (1.09, 1.25) | Row 1's per-block costs | No | None | As row 1 |
+Measured gains first (1M prototypes, run level, A/A first), then estimates from profile shares.
+"Format change now" would need the change to win its rows (D14's 0.97 with no row lost); none
+here does, so none is proposed now.
 
-**What format 13 must reserve or carry before the freeze.** Nothing new is required by these losses:
-every format-dependent cause found already has its place (F12's partitions at skip flags bit 3,
-P20's quantized impacts at bit 11 and kind 21), except FQ3's positional offset. That one is worth
-1% to 2% of phrase time for 0.044% of the segment; it can be carried now as a level-1 field (the
-measured layout: one more offset per group, the deltas located without walking the impact lists)
-or added later under an F23 structure bit, since rule 3 lets an added structure change how its
-owner's sections decode in segments that set it. That choice is C2's (the architect's ruling on
-FQ3). The largest losses (counted unions, intersection_union) are format-free and two of them
-are measured: about 2.1 to 2.7 times faster counted unions and 1.14 to 1.22 times faster
-intersection_union top-k.
+| Rank | Loss class (5M, strata over the engine) | Cause (1M counters and profile) | Kind | Place or mechanism | Expected gain (source) |
+|---:|---|---|---|---|---|
+| 1 | `TOP_100_COUNT` unions ≥ 3 terms (Tantivy 1.71, 1.97; Lucene 1.09, `-bp` 1.16) | Counting turned pruning off: every match scored (992k per four-term query) | Format-free | Count from window bits filled by separate iterators; prune scoring as top-k does | **2.09 and 2.75 times faster** (0.478, 0.364; measured) → about 0.82 and 0.72 of Tantivy's time |
+| 2 | Counted unions > 3 terms, `COUNT` (Lucene 2.30, `-bp` 2.77) | FOR blocks decoded to ordinals then set bit by bit (54%); per-block entry checks and loads (22%) | Format-free | Decode FOR straight into window bits; check entries per window; a writer rule biased toward bitsets (Lucene's: smaller than FOR at one more bit), over format 13's existing codes | Up to about 1.4 times from the per-block share alone; more from the fused decode (profile; **not measured**). The largest remaining gap |
+| 3 | intersection_union (`-bp` 1.11 to 1.41; Tantivy 1.08 to 1.24) | Every required document scored: no block skip, no switch to a conjunction | Format-free | Lucene's `ReqOptSumScorer` rules (measured); then windowed MaxScore over both sides for `TOP_1000` | **1.14 to 1.22 times faster** at `TOP_10`, `TOP_100`, `TOP_100_COUNT` (measured); `TOP_1000` unmoved |
+| 4 | PISA: unions of 2 and 3 terms at `TOP_10` (1.39); intersections at `TOP_100`, `TOP_1000` (1.25 to 1.44) | Block-max over 40-posting blocks, quantized integer scores, block-max WAND; for intersections also row 5's per-match costs | Format change later | F12's variable block-max partitions (skip flags bit 3) and P20's quantized impacts (bit 11, kind 21), each its own design and proof | Not measurable until built; `phase-3-ratchets.md` attributes PISA's lead to them |
+| 5 | Intersections `TOP_1000`, `TOP_100_COUNT` (Tantivy 1.15, 1.18) | Per-match loop and `advance`; the collector's truncation 14% (docid reads for ties) | Format-free | A threshold-filtered collector resolving ties only for the final k; row 1's counting rule for conjunctions | About 14% at `TOP_1000` (profile; not measured) |
+| 6 | Phrases (Tantivy 1.10 to 1.21); the two-phase-critic (1.21 to 1.30) | Intersection 21%, position reads 21%, matching 16%, verification 3.7%, FQ3's impact-list walk 2.1% | Format change later (FQ3's part); the rest format-free | A per-group offset of the positional deltas in level 1 (FQ3, measured), best bundled with the next postings layout change (F12's partitions change that walk anyway); verify position blocks per group, the matching loop | FQ3: **1% to 2%** (0.988 `COUNT`, 0.983 `TOP_1000`; below the 0.97 win line) for +0.044% of the segment; the rest not measured |
+| 7 | Negations (Tantivy 1.10, two-term `TOP_100_COUNT` 1.27) | One excluded-side advance per candidate | Format-free | Exclude by window bits, as `count()` does | Not measured |
+| — | PISA unions at `TOP_100`, `TOP_1000` (to 2.40); PISA `TOP_100_COUNT` (1.43 to 1.80) | PISA's k = 10 seed is unsafe at k = 100 and 1,000; PISA's `TOP_100_COUNT` ranks nothing | Not comparable | — | — |
+| — | PISA `COUNT` intersections ≥ 3 (1.09, 1.25) | Row 2's per-block costs | Format-free | As row 2 | As row 2 |
+
+**Where the next work goes.** Rows 1 and 3 are measured and format-free: their prototypes
+(`format13-loss-attribution-ff.patch`) are ready to become a workstream, with the proof every change
+needs (verify, parity, a revert check, a run-level benchmark with no row lost). Row 2 is the largest
+remaining gap and needs a prototype first. No format change is proposed now: the only measured one,
+FQ3's level-1 offset, saves 1% to 2% of phrase time, below the win line, and is best folded into
+the next postings layout change. PISA's lead (row 4) is the format change later that matters most,
+through F12's partitions and P20's quantized impacts.
 
 ## Not run
 
