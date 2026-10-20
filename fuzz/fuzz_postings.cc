@@ -9,6 +9,7 @@
 #include "strata/search.hh"
 #include "strata/writer.hh"
 
+#include <crc32c/crc32c.hh>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -44,7 +45,7 @@ void reseal(std::string& file) {
 	const std::string toc_bytes = f::encode_toc(toc);
 	file.replace(footer.toc_offset, toc_bytes.size(), toc_bytes);
 	auto ft = footer;
-	ft.toc_crc = hashes::crc32c(toc_bytes.data(), toc_bytes.size());
+	ft.toc_crc = ::kronuz::crc32c::crc32c(toc_bytes.data(), toc_bytes.size());
 	const std::string footer_bytes = f::encode_footer(ft);
 	file.replace(file.size() - footer_bytes.size(), footer_bytes.size(), footer_bytes);
 }

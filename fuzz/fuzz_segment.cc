@@ -13,6 +13,7 @@
 #include "strata/search.hh"
 #include "strata/writer.hh"
 
+#include <crc32c/crc32c.hh>
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -78,7 +79,7 @@ const std::string& base(unsigned which) {
 // sections hold.
 void refresh_checksums(std::string& file) {
 	if (file.size() >= strata::format::prefix_size) {
-		const std::uint32_t crc = hashes::crc32c(file.data(), 12);
+		const std::uint32_t crc = ::kronuz::crc32c::crc32c(file.data(), 12);
 		std::memcpy(file.data() + 12, &crc, 4);
 	}
 	const auto footer = strata::format::decode_footer(file);
@@ -87,7 +88,7 @@ void refresh_checksums(std::string& file) {
 	const std::string toc_bytes = strata::format::encode_toc(toc);
 	file.replace(footer.toc_offset, toc_bytes.size(), toc_bytes);
 	auto f = footer;
-	f.toc_crc = hashes::crc32c(toc_bytes.data(), toc_bytes.size());
+	f.toc_crc = ::kronuz::crc32c::crc32c(toc_bytes.data(), toc_bytes.size());
 	const std::string footer_bytes = strata::format::encode_footer(f);
 	file.replace(file.size() - footer_bytes.size(), footer_bytes.size(), footer_bytes);
 }
@@ -96,7 +97,7 @@ void refresh_checksums(std::string& file) {
 // (duplicate, overlapping, or out-of-range sections) reaches the reader's table checks.
 void refresh_toc_checksum(std::string& file) {
 	auto f = strata::format::decode_footer(file);
-	f.toc_crc = hashes::crc32c(file.data() + f.toc_offset, f.toc_length);
+	f.toc_crc = ::kronuz::crc32c::crc32c(file.data() + f.toc_offset, f.toc_length);
 	const std::string footer_bytes = strata::format::encode_footer(f);
 	file.replace(file.size() - footer_bytes.size(), footer_bytes.size(), footer_bytes);
 }

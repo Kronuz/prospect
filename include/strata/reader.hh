@@ -31,6 +31,7 @@
 #include "docset.hh"
 #include "fusefilter.hh"
 #include "hashes.hh"
+#include <crc32c/crc32c.hh>
 #include "residency.hh"
 #include "strata/docids.hh"
 #include "strata/format.hh"
@@ -218,7 +219,7 @@ public:
 				std::vector<std::uint32_t>().swap(e.region_crcs);
 			}
 			if (c == format::check::pinned) {
-				if (hashes::crc32c(file.data() + e.offset, e.length) != e.crc) { corrupt("section checksum"); }
+				if (::kronuz::crc32c::crc32c(file.data() + e.offset, e.length) != e.crc) { corrupt("section checksum"); }
 			}
 			if (e.kind == format::section::docids) { docids_ = file.substr(e.offset, e.length); }
 			if (e.kind == format::section::stats) { stats_ = file.substr(e.offset, e.length); }
@@ -568,7 +569,7 @@ struct inverted_plugin {
 			auto& st = state_->lengths_state;
 			if (st.load(std::memory_order_acquire) == 0) {
 				const unsigned w = std::uint8_t(lengths_[0]);
-				const bool good = hashes::crc32c(lengths_.data(), lengths_.size()) == lengths_crc_ && w <= 32 &&
+				const bool good = ::kronuz::crc32c::crc32c(lengths_.data(), lengths_.size()) == lengths_crc_ && w <= 32 &&
 					lengths_.size() == 1 + (doc_count_ + 127) / 128 * bitpack::packed_bytes(w);
 				state_->length_width.store(std::uint8_t(w), std::memory_order_relaxed);
 				st.store(good ? 1 : 2, std::memory_order_release);
@@ -590,7 +591,7 @@ struct inverted_plugin {
 			state_->pinned_index = std::move(tables.index);
 			state_->owned_lengths.assign(1, '\0');  // width 0
 			lengths_ = state_->owned_lengths;
-			lengths_crc_ = hashes::crc32c(lengths_.data(), lengths_.size());
+			lengths_crc_ = ::kronuz::crc32c::crc32c(lengths_.data(), lengths_.size());
 			dict_.emplace(state_->owned_blocks, state_->pinned_index);
 		}
 		// Heap-held, so the dictionary's verifier context survives moving the segment.

@@ -27,7 +27,7 @@
 #pragma once
 
 #include "bitpack.hh"
-#include "crc32c.hh"
+#include <crc32c/crc32c.hh>
 #include "termdict.hh"
 #include "varint.hh"
 
@@ -240,7 +240,7 @@ inline std::uint64_t get_leb(const char** p, const char* end) {
 inline std::uint32_t read_version(std::string_view file) {
 	if (file.size() < prefix_size || std::memcmp(file.data(), header_magic, 8) != 0) { corrupt("header magic"); }
 	const std::uint32_t v = get<std::uint32_t>(file.data() + 8);
-	if (hashes::crc32c(file.data(), 12) == get<std::uint32_t>(file.data() + 12)) {
+	if (::kronuz::crc32c::crc32c(file.data(), 12) == get<std::uint32_t>(file.data() + 12)) {
 		if (v < min_read_version || v > version) { throw unsupported_segment("format version " + std::to_string(v)); }
 		return v;
 	}
@@ -262,7 +262,7 @@ struct section_entry {
 inline std::string encode_header(const std::array<std::uint8_t, 16>& segment_id) {
 	std::string h(header_magic, 8);
 	put<std::uint32_t>(h, version);
-	put<std::uint32_t>(h, hashes::crc32c(h.data(), h.size()));
+	put<std::uint32_t>(h, ::kronuz::crc32c::crc32c(h.data(), h.size()));
 	put<std::uint32_t>(h, 0);
 	h.append(reinterpret_cast<const char*>(segment_id.data()), 16);
 	return h;
@@ -270,10 +270,10 @@ inline std::string encode_header(const std::array<std::uint8_t, 16>& segment_id)
 
 // The section's CRC and its region CRCs over bytes.
 inline section_entry describe(section kind, std::uint64_t offset, std::string_view bytes, std::uint8_t region_shift = default_region_shift) {
-	section_entry e{kind, offset, bytes.size(), hashes::crc32c(bytes.data(), bytes.size()), {}, region_shift};
+	section_entry e{kind, offset, bytes.size(), ::kronuz::crc32c::crc32c(bytes.data(), bytes.size()), {}, region_shift};
 	const std::size_t size = e.region_size();
 	for (std::size_t at = 0; at < bytes.size(); at += size) {
-		e.region_crcs.push_back(hashes::crc32c(bytes.data() + at, std::min(size, bytes.size() - at)));
+		e.region_crcs.push_back(::kronuz::crc32c::crc32c(bytes.data() + at, std::min(size, bytes.size() - at)));
 	}
 	return e;
 }
@@ -313,7 +313,7 @@ inline std::string encode_footer(const footer& f) {
 	put<std::uint64_t>(out, f.min_docid);
 	put<std::uint64_t>(out, f.max_docid);
 	put<std::uint64_t>(out, f.structures);  // bits 0 to 31, then 32 to 63 (F13-R40)
-	put<std::uint32_t>(out, hashes::crc32c(out.data(), out.size()));
+	put<std::uint32_t>(out, ::kronuz::crc32c::crc32c(out.data(), out.size()));
 	out.append(footer_magic, 4);
 	return out;
 }
@@ -324,7 +324,7 @@ inline footer decode_footer(std::string_view file) {
 	if (file.size() < header_size + footer_size) { corrupt("file too small"); }
 	const char* p = file.data() + file.size() - footer_size;
 	if (std::memcmp(p + 52, footer_magic, 4) != 0) { corrupt("footer magic"); }
-	if (hashes::crc32c(p, 48) != get<std::uint32_t>(p + 48)) { corrupt("footer checksum"); }
+	if (::kronuz::crc32c::crc32c(p, 48) != get<std::uint32_t>(p + 48)) { corrupt("footer checksum"); }
 	footer f{get<std::uint64_t>(p), get<std::uint64_t>(p + 8), get<std::uint32_t>(p + 16), get<std::uint32_t>(p + 20),
 		get<std::uint64_t>(p + 24), get<std::uint64_t>(p + 32), get<std::uint64_t>(p + 40)};
 	const std::uint64_t body = file.size() - footer_size;
@@ -337,7 +337,7 @@ inline footer decode_footer(std::string_view file) {
 // the previous one's aligned end, and the table at the last one's aligned end.
 inline std::vector<section_entry> decode_toc(std::string_view file, const footer& f) {
 	std::string_view t = file.substr(f.toc_offset, f.toc_length);
-	if (hashes::crc32c(t.data(), t.size()) != f.toc_crc) { corrupt("table of contents checksum"); }
+	if (::kronuz::crc32c::crc32c(t.data(), t.size()) != f.toc_crc) { corrupt("table of contents checksum"); }
 	const char* p = t.data();
 	const char* end = p + t.size();
 	auto need = [&](std::size_t n) {

@@ -43,6 +43,7 @@
 #include "fst.hh"
 #include "fusefilter.hh"
 #include "hashes.hh"
+#include <crc32c/crc32c.hh>
 #include "strata/budget.hh"
 #include "strata/docids.hh"
 #include "strata/reader.hh"
@@ -125,7 +126,7 @@ inline void finish_segment(section_sink& sink, std::span<const std::uint64_t> do
 	f.toc_offset = o.size();
 	std::string toc_bytes = format::encode_toc(sink.toc());
 	f.toc_length = toc_bytes.size();
-	f.toc_crc = hashes::crc32c(toc_bytes.data(), toc_bytes.size());
+	f.toc_crc = ::kronuz::crc32c::crc32c(toc_bytes.data(), toc_bytes.size());
 	f.doc_count = std::uint32_t(docids.size());
 	f.min_docid = docids.empty() ? 0 : *std::min_element(docids.begin(), docids.end());
 	f.max_docid = docids.empty() ? 0 : *std::max_element(docids.begin(), docids.end());

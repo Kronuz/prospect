@@ -12,9 +12,10 @@ FetchContent_Declare(bitpack GIT_REPOSITORY https://github.com/Kronuz/bitpack.gi
 FetchContent_Declare(fst GIT_REPOSITORY https://github.com/Kronuz/fst.git GIT_TAG 24da59a9e3d7225865335dcdc71ddeb2e1cb66ec)
 FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG bbb2e14aecb0fe49bcfac2685d64408ef6177c23)
 FetchContent_Declare(hashes GIT_REPOSITORY https://github.com/Kronuz/hashes.git GIT_TAG 7ab0c23325debfbaf4104044987ba6583d14808f)
+FetchContent_Declare(crc32c GIT_REPOSITORY https://github.com/Kronuz/crc32c.git GIT_TAG 04737c35c6b22f6edf4942757c7b2da084f7bd81)
 FetchContent_Declare(termdict GIT_REPOSITORY https://github.com/Kronuz/termdict.git GIT_TAG eaf83b33621b54ea388b30b189e0cd5fd806e861)
 FetchContent_Declare(varint GIT_REPOSITORY https://github.com/Kronuz/varint.git GIT_TAG 21af82a64fd5860d14d5ec9591bec2ffd5d662d1)
-FetchContent_Declare(residency GIT_REPOSITORY https://github.com/Kronuz/residency.git GIT_TAG 4a7b816ed504133e5c2d35e35267e50173865905)
+FetchContent_Declare(residency GIT_REPOSITORY https://github.com/Kronuz/residency.git GIT_TAG cdc5236dec435bdc453f69f1e9d7cbfdb353bbdf)
 FetchContent_Declare(unicode GIT_REPOSITORY https://github.com/Kronuz/unicode.git GIT_TAG c93026cedf9124421886d449528dd6edb16e5ed3)
 FetchContent_Declare(snowball GIT_REPOSITORY https://github.com/Kronuz/snowball.git GIT_TAG 570a0b78fc2967f9ec6a0ec005547d20fcf32b61)
 FetchContent_Declare(analysis GIT_REPOSITORY https://github.com/Kronuz/analysis.git GIT_TAG a0825b1a376754d4718ac6dd89b7b31c6dd96738)
@@ -30,12 +31,12 @@ FetchContent_Declare(fusefilter GIT_REPOSITORY https://github.com/Kronuz/fusefil
 FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG 773454495e73361d231ec4dc59ad72b9b8f6163d)
 # Background merges' default threaded executor: one pool per node, a task group per index.
 FetchContent_Declare(threadpool GIT_REPOSITORY https://github.com/Kronuz/threadpool.git GIT_TAG 628679a2e27b563cf2709a6f35f98f1657baf7b3)
-FetchContent_MakeAvailable(docset bitpack fst task hashes residency varint termdict unicode snowball analysis compressors fusefilter completion threadpool)
+FetchContent_MakeAvailable(docset bitpack fst task hashes crc32c residency varint termdict unicode snowball analysis compressors fusefilter completion threadpool)
 
 add_library(strata INTERFACE)
 target_include_directories(strata INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(strata INTERFACE cxx_std_20)
-target_link_libraries(strata INTERFACE docset::docset bitpack::bitpack fst::fst task::task hashes::hashes residency::residency varint::varint termdict::termdict analysis::analysis compressors::compressors fusefilter::fusefilter completion::completion threadpool::threadpool)
+target_link_libraries(strata INTERFACE docset::docset bitpack::bitpack fst::fst task::task hashes::hashes crc32c::crc32c residency::residency varint::varint termdict::termdict analysis::analysis compressors::compressors fusefilter::fusefilter completion::completion threadpool::threadpool)
 add_library(strata::strata ALIAS strata)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)

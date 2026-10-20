@@ -341,7 +341,7 @@ Reused Kronuz libraries:
 | `metrics` (today `completion/metrics.h`) | Counters and duration histograms |
 | `ledger` (planned extraction) | The node-wide indexing memory budget and storage admission |
 | `varint` | Every scalar integer and length-prefixed string in segment, manifest, and RPC formats |
-| CRC32C (today `journal/codec.h`) | One checksum implementation, moved into `hashes` with hardware acceleration rather than copied |
+| `crc32c` | The one CRC-32C implementation (hardware-accelerated); journal, residency and the segment format all use it |
 | `string-similarity` | Edit distances: the reference in `automata` tests and the ranking of fuzzy candidates. It gains Xapian's distance (adjacent transpositions, over code points) |
 | `endian` | Byte order in on-disk formats |
 | `compressors` | zstd for stored records |

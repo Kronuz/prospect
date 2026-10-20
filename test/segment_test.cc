@@ -5,6 +5,7 @@
 #include "strata/writer.hh"
 #include "skip_layout.hh"
 
+#include <crc32c/crc32c.hh>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -34,7 +35,7 @@ static void reseal(std::string& file) {
 	const std::string toc_bytes = strata::format::encode_toc(toc);
 	file.replace(footer.toc_offset, toc_bytes.size(), toc_bytes);
 	auto f = footer;
-	f.toc_crc = hashes::crc32c(toc_bytes.data(), toc_bytes.size());
+	f.toc_crc = ::kronuz::crc32c::crc32c(toc_bytes.data(), toc_bytes.size());
 	const std::string footer_bytes = strata::format::encode_footer(f);
 	file.replace(file.size() - footer_bytes.size(), footer_bytes.size(), footer_bytes);
 }
@@ -59,7 +60,7 @@ static std::string with_sections(const std::string& file, const std::map<strata:
 	const std::string toc_bytes = strata::format::encode_toc(toc);
 	f.toc_offset = out.size();
 	f.toc_length = toc_bytes.size();
-	f.toc_crc = hashes::crc32c(toc_bytes.data(), toc_bytes.size());
+	f.toc_crc = ::kronuz::crc32c::crc32c(toc_bytes.data(), toc_bytes.size());
 	out += toc_bytes;
 	if (edit) { edit(f); }
 	return out + strata::format::encode_footer(f);

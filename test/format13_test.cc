@@ -10,6 +10,7 @@
 #include "strata/searcher.hh"
 #include "strata/writer.hh"
 
+#include <crc32c/crc32c.hh>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -130,7 +131,7 @@ std::string relayout(const std::string& file, const std::function<void(entries&)
 	const std::string t = strata::format::encode_toc(toc);
 	f.toc_offset = out.size();
 	f.toc_length = t.size();
-	f.toc_crc = hashes::crc32c(t.data(), t.size());
+	f.toc_crc = ::kronuz::crc32c::crc32c(t.data(), t.size());
 	out += t;
 	if (footer) { footer(f); }
 	return out + strata::format::encode_footer(f);
@@ -162,7 +163,7 @@ std::string later_release(const std::string& file, std::optional<std::pair<secti
 	const std::string t = toc ? toc(es) : strata::format::encode_toc(es);
 	f.toc_offset = out.size();
 	f.toc_length = t.size();
-	f.toc_crc = hashes::crc32c(t.data(), t.size());
+	f.toc_crc = ::kronuz::crc32c::crc32c(t.data(), t.size());
 	f.structures = structures;
 	return out + t + strata::format::encode_footer(f);
 }
@@ -182,14 +183,14 @@ std::string with_section(const std::string& file, section kind, const std::strin
 	const std::string t = strata::format::encode_toc(toc);
 	f.toc_offset = out.size();
 	f.toc_length = t.size();
-	f.toc_crc = hashes::crc32c(t.data(), t.size());
+	f.toc_crc = ::kronuz::crc32c::crc32c(t.data(), t.size());
 	return out + t + strata::format::encode_footer(f);
 }
 
 // The file with its prefix's version set to v and the prefix CRC recomputed.
 std::string with_version(std::string file, std::uint32_t v) {
 	std::memcpy(file.data() + 8, &v, 4);
-	const std::uint32_t crc = hashes::crc32c(file.data(), 12);
+	const std::uint32_t crc = ::kronuz::crc32c::crc32c(file.data(), 12);
 	std::memcpy(file.data() + 12, &crc, 4);
 	return file;
 }
@@ -406,7 +407,7 @@ int main() {
 			t[3].offset -= 8;
 			const std::string tb = strata::format::encode_toc(t);
 			bad.replace(f.toc_offset, tb.size(), tb);
-			f.toc_crc = hashes::crc32c(tb.data(), tb.size());
+			f.toc_crc = ::kronuz::crc32c::crc32c(tb.data(), tb.size());
 			const std::string fb = strata::format::encode_footer(f);
 			bad.replace(bad.size() - fb.size(), fb.size(), fb);
 			CHECK(open(bad) == outcome::corrupt);
@@ -422,7 +423,7 @@ int main() {
 			std::string file = good;
 			const std::size_t at = file.size() - strata::format::footer_size;
 			file[at + byte] = 1;
-			const std::uint32_t crc = hashes::crc32c(file.data() + at, 48);
+			const std::uint32_t crc = ::kronuz::crc32c::crc32c(file.data() + at, 48);
 			std::memcpy(file.data() + at + 48, &crc, 4);
 			CHECK(open(file) == outcome::unsupported);
 		}
