@@ -1,0 +1,13 @@
+strata
+Copyright (c) 2026 Germán Méndez Bravo. MIT License (LICENSE).
+
+The pruning of required_optional_scorer in include/strata/search.hh is ported from
+Apache Lucene 10.4.0 (org.apache.lucene.search.ReqOptSumScorer), licensed under the
+Apache License, Version 2.0 (LICENSES/Apache-2.0.txt), and changed to fit strata's
+scorers. Lucene's notice:
+
+  Apache Lucene
+  Copyright 2001-2025 The Apache Software Foundation
+
+  This product includes software developed at
+  The Apache Software Foundation (http://www.apache.org/).

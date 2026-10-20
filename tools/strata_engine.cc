@@ -418,8 +418,8 @@ std::string query_of(const std::string& line) {
 // summation order can perturb near-equal scores).
 // verify over an index's segments (T8, C14's form): for each query and both scoring
 // schemes, an exhaustive scan of every live document with the snapshot's statistics,
-// against the pruned multi-segment search at k = 10, 100, and 1000 and its count. Ties at
-// a score may resolve to any of the tied documents.
+// against the pruned multi-segment search at k = 10, 100, and 1000, counted and not. Ties
+// at a score may resolve to any of the tied documents.
 int verify_index(const std::string& dir) {
 	kronuz::journal::PosixIO io(dir, 0600, host_io);
 	strata::index::options o;
@@ -450,21 +450,24 @@ int verify_index(const std::string& dir) {
 			}
 			std::sort(scan.begin(), scan.end(), [](const auto& a, const auto& b) { return a.score != b.score ? a.score > b.score : a.docid < b.docid; });
 			bool ok = strata::search_count(view, builder) == scan.size();
-			for (std::size_t k : {10u, 100u, 1000u}) {
-				std::uint64_t counted = 0;
-				const auto hits = strata::search(view, builder, k, &counted);
-				const std::size_t n = std::min<std::size_t>(k, scan.size());
-				ok = ok && counted == scan.size() && hits.size() == n;
-				for (std::size_t a = 0; ok && a < n;) {
-					std::size_t b = a + 1;
-					while (b < n && close(scan[b].score, scan[a].score)) { ++b; }
-					std::vector<std::uint64_t> tied, got;
-					for (std::size_t i = a; i < scan.size() && close(scan[i].score, scan[a].score); ++i) { tied.push_back(scan[i].docid); }
-					for (std::size_t i = a; i > 0 && close(scan[i - 1].score, scan[a].score); --i) { tied.push_back(scan[i - 1].docid); }
-					for (std::size_t i = a; i < b; ++i) { ok = ok && close(hits[i].score, scan[i].score); got.push_back(hits[i].docid); }
-					std::sort(tied.begin(), tied.end()); std::sort(got.begin(), got.end());
-					ok = ok && std::adjacent_find(got.begin(), got.end()) == got.end() && std::includes(tied.begin(), tied.end(), got.begin(), got.end());
-					a = b;
+			for (const std::size_t k : {10u, 100u, 1000u}) {
+				for (const bool with_count : {true, false}) {
+					std::uint64_t counted = 0;
+					const auto hits = strata::search(view, builder, k, with_count ? &counted : nullptr);
+					const std::size_t n = std::min<std::size_t>(k, scan.size());
+					ok = ok && (!with_count || counted == scan.size()) && hits.size() == n;
+					for (std::size_t a = 0; ok && a < n;) {
+						std::size_t b = a + 1;
+						while (b < n && close(scan[b].score, scan[a].score)) { ++b; }
+						std::vector<std::uint64_t> tied, got;
+						for (std::size_t i = a; i < scan.size() && close(scan[i].score, scan[a].score); ++i) { tied.push_back(scan[i].docid); }
+						for (std::size_t i = a; i > 0 && close(scan[i - 1].score, scan[a].score); --i) { tied.push_back(scan[i - 1].docid); }
+						for (std::size_t i = a; i < b; ++i) { ok = ok && close(hits[i].score, scan[i].score); got.push_back(hits[i].docid); }
+						std::sort(tied.begin(), tied.end()); std::sort(got.begin(), got.end());
+						ok = ok && std::adjacent_find(got.begin(), got.end()) == got.end() && std::includes(tied.begin(), tied.end(), got.begin(), got.end());
+						a = b;
+					}
+					if (!ok) { break; }
 				}
 				if (!ok) {
 					++mismatches;
@@ -481,6 +484,7 @@ int verify_index(const std::string& dir) {
 // Every query's top k at k = 10, 100, and 1,000 under both schemes, as docids and exact
 // scores (%a), with the live count: two indexes of the same documents print the same lines
 // whatever their segments' order (reordering.md D5, the scale check).
+// With STRATA_DUMP_COUNT=0, without the count (the uncounted, pruned path).
 int dump(const std::string& dir) {
 	kronuz::journal::PosixIO io(dir, 0600, host_io);
 	strata::index::options o;
@@ -489,6 +493,8 @@ int dump(const std::string& dir) {
 	warn_trust(ix);
 	std::vector<strata::segment_snapshot> segs;
 	for (const auto& v : ix.segments()) { segs.push_back({v.seg, v.deleted, v.dead}); }
+	const char* count_env = std::getenv("STRATA_DUMP_COUNT");
+	const bool with_count = !count_env || std::string_view(count_env) != "0";
 	LineReader in;
 	for (std::string line; in.next(line);) {
 		const std::string q = query_of(line);
@@ -497,7 +503,7 @@ int dump(const std::string& dir) {
 		for (const auto scheme : {strata::scheme::bm25, strata::scheme::bm25_xapian}) {
 			for (std::size_t k : {10u, 100u, 1000u}) {
 				std::uint64_t n = 0;
-				const auto hits = search_snapshot(segs, p, k, scheme, &n, o.key_prefix);
+				const auto hits = search_snapshot(segs, p, k, scheme, with_count ? &n : nullptr, o.key_prefix);
 				std::printf("%s\t%d\t%zu\t%llu", q.c_str(), int(scheme), k, (unsigned long long)n);
 				for (const auto& h : hits) { std::printf(" %llu:%a", (unsigned long long)h.docid, h.score); }
 				std::printf("\n");

@@ -20,6 +20,35 @@ static int failures = 0;
 
 using strata::ordinal_t;
 
+// Forwards to a scorer, tallying score() calls; windows score through score(), so every
+// posting scored counts.
+class scoring_tally final : public strata::scorer {
+public:
+	scoring_tally(strata::scorer_ptr inner, std::size_t& tally) : inner_(std::move(inner)), tally_(&tally) {}
+	ordinal_t doc() const noexcept override { return inner_->doc(); }
+	ordinal_t next() override { return inner_->next(); }
+	ordinal_t advance(ordinal_t t) override { return inner_->advance(t); }
+	std::uint64_t cost() const noexcept override { return inner_->cost(); }
+	double score() override {
+		++*tally_;
+		return inner_->score();
+	}
+	double max_score(ordinal_t from, ordinal_t upto) override { return inner_->max_score(from, upto); }
+	ordinal_t block_end(ordinal_t t) override { return inner_->block_end(t); }
+	double max_score_total() const noexcept override { return inner_->max_score_total(); }
+	void set_min_competitive_score(double s) override { inner_->set_min_competitive_score(s); }
+	std::optional<std::uint64_t> exact_count() override { return inner_->exact_count(); }
+	std::unique_ptr<strata::scorer> fresh() const override {
+		auto f = inner_->fresh();
+		return f ? std::make_unique<scoring_tally>(std::move(f), *tally_) : nullptr;
+	}
+	void fill(ordinal_t base, ordinal_t end, std::uint64_t* bits) override { inner_->fill(base, end, bits); }
+
+private:
+	strata::scorer_ptr inner_;
+	std::size_t* tally_;
+};
+
 struct doc_model {
 	std::vector<std::string> tokens;  // position i + 1 holds tokens[i]
 };
@@ -559,6 +588,63 @@ int main() {
 		strata::phrase_scorer near(seg.get<strata::inverted_plugin>(), infos, {strata::weight::bm25(seg.get<strata::inverted_plugin>(), 300), strata::weight::bm25(seg.get<strata::inverted_plugin>(), 300)}, 5);
 		std::uint64_t n = 1;
 		CHECK(strata::top_k(seg, near, 10, &n).empty() && n == 0);
+	}
+	// Pruning work: a counted union of four clauses counts every match but scores only what
+	// can compete, and required plus optional skips required documents that cannot compete
+	// without the optional side; hits and counts equal an exhaustive scan's, in a
+	// docid-ordered and a reordered segment.
+	for (const bool permuted : {false, true}) {
+		std::mt19937_64 r(23);
+		const std::uint32_t n = 100000;
+		const std::vector<std::pair<std::string, std::uint32_t>> density = {{"r", 1}, {"o", 2}, {"c1", 40}, {"c2", 40}, {"c3", 40}, {"q", 50}};
+		strata::segment_writer w;
+		w.permuted = permuted;
+		for (std::uint32_t d = 0; d < n; ++d) {
+			std::vector<strata::posting_input> in;
+			for (const auto& [t, pct] : density) {
+				if (r() % 100 < pct) { in.push_back({t, t == "q" ? 1u : 1 + std::uint32_t(r() % 4), {}}); }
+			}
+			std::sort(in.begin(), in.end(), [](const auto& a, const auto& b) { return a.term < b.term; });
+			w.add(permuted ? 1 + (std::uint64_t(d) * 7919) % n : d + 1, in, 10);
+		}
+		const std::string file = w.flush({});
+		const strata::segment seg(file);
+		CHECK(seg.core().docid_ordered() == !permuted);
+		const auto& inv = seg.get<strata::inverted_plugin>();
+		std::size_t scored = 0;
+		auto term = [&](const char* t, bool tally) -> strata::scorer_ptr {
+			strata::scorer_ptr s = std::make_unique<strata::term_scorer>(inv, *inv.term(t));
+			if (tally) { s = std::make_unique<scoring_tally>(std::move(s), scored); }
+			return s;
+		};
+		// The exhaustive scan's matches; hits must be its best k, ties by docid.
+		auto check_hits = [&](strata::scorer_ptr scan, const std::vector<strata::hit>& hits, std::size_t k) {
+			std::vector<strata::hit> all;
+			for (auto d = scan->next(); d != strata::no_more_docs; d = scan->next()) { all.push_back({d, scan->score()}); }
+			std::sort(all.begin(), all.end(), [&](const auto& a, const auto& b) { return a.score != b.score ? a.score > b.score : seg.core().docid(a.ord) < seg.core().docid(b.ord); });
+			CHECK(hits.size() == std::min(k, all.size()));
+			for (std::size_t i = 0; i < hits.size() && i < all.size(); ++i) { CHECK(hits[i].ord == all[i].ord && hits[i].score == all[i].score); }
+			return all.size();
+		};
+		auto any_of4 = [&](bool tally) -> strata::scorer_ptr {
+			std::vector<strata::scorer_ptr> kids;
+			for (const char* t : {"r", "c1", "c2", "c3"}) { kids.push_back(term(t, tally)); }
+			return std::make_unique<strata::disjunction_scorer>(std::move(kids));
+		};
+		auto req_opt = [&](bool tally) -> strata::scorer_ptr { return std::make_unique<strata::required_optional_scorer>(term("q", tally), term("o", false)); };
+		for (std::size_t k : {10u, 100u}) {
+			scored = 0;
+			auto q = any_of4(true);
+			std::uint64_t counted = 0;
+			const auto hits = strata::top_k(seg, *q, k, &counted);
+			const std::size_t matches = check_hits(any_of4(false), hits, k);
+			CHECK(counted == matches);
+			CHECK(scored * 2 < matches);  // not every match scored
+			scored = 0;
+			auto p = req_opt(true);
+			const std::size_t required = check_hits(req_opt(false), strata::top_k(seg, *p, k), k);
+			CHECK(scored * 2 < required);  // not every required document scored
+		}
 	}
 	std::printf("search: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
