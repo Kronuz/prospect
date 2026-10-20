@@ -179,6 +179,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(keybench tools/keybench.cc)
   target_link_libraries(keybench PRIVATE strata)
   # The key-value benchmark's strata driver (bench/kv, rocksdb-survey.md section 4).
+  # basic_index<document_layout> does not compile on main yet (the core reaches inverted's
+  # parts), so the driver runs search_layout with keys and stored records only.
   add_executable(kv_strata bench/kv/kv_strata.cc)
   target_link_libraries(kv_strata PRIVATE strata)
+  target_compile_definitions(kv_strata PRIVATE KV_SEARCH_LAYOUT)
 endif()
