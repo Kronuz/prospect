@@ -756,11 +756,10 @@ private:
 		return out;
 	}
 
-	// F13 (M20): for each stored k, among the pairs (w, the k-th shortest length of the postings
-	// with wdf >= w), the one each preset scores highest at this segment's statistics. Levels of
-	// wdf are visited highest first, until no lower wdf can beat every best at the segment's
-	// shortest length. A level's k-th shortest depends on no order, so it is read from counts of
-	// lengths, exact and per 16, which the levels fill as they are visited.
+	// F13 (M20): for each stored k, the pair (w, the k-th shortest length with wdf >= w) each preset
+	// scores highest at this segment's statistics, levels of wdf highest first until no lower wdf
+	// can beat every best at the shortest length. A level's k-th shortest depends on no order, so it
+	// is read from exact and per-16 length counts that the levels fill.
 	std::array<format::seed_pairs, 3> seeds_of(const std::uint32_t* lengths, const std::vector<std::uint32_t>& wdfs) {
 		std::array<format::seed_pairs, 3> out{};
 		const std::size_t df = wdfs.size();
