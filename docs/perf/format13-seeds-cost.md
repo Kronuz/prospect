@@ -120,3 +120,35 @@ against it: the long list's rank (`k - p` for `k - p - 1`), the downward step's 
 upward scan's `<`, and the at-or-below count's `<=` all fail it; two survivors are equivalent
 (the block skip's `>=` as `>`, which only steps one block in lengths, and a cap of 65,528, which
 only sends more lengths to the exact list).
+
+## Reproducible seeds (the lead's decision, 2026-10-20)
+
+The durability review's replay (DM-R51) found 8 of 37.7M seed comparisons flip between x86-64
+and arm64: the writer compared floating-point BM25 scores, and arm64 contracts multiply-adds
+where x86-64's baseline cannot, and `log` is not correctly rounded across libms. The choice is
+now exact (`294fd85`):
+
+- Each preset's score is w / (w + K(len)) times a positive constant (idf, and k1 + 1 for
+  `bm25_xapian`), and K is a positive multiple of an integer: `bm25` (k1 1.2, b 0.75, average
+  max(1, T / N)) of T + 3·len·N; `bm25_xapian` (k1 1, b 0.5, min_normlen 0.5, average T / N, or
+  1 when T is 0) of 2T + max(2·len·N, T). So w1 / (w1 + n1) > w2 / (w2 + n2) exactly when
+  w1·n2 > w2·n1, which the writer evaluates in unsigned 128-bit integers (w below 2^32, n below
+  2^67). No libm call, no floating point, no contraction; ties keep the higher wdf, as before.
+- Safety does not depend on the choice: every stored pair is a dominance pair (at least k
+  postings with wdf ≥ w and length ≤ l), and the query side scores it with its own statistics
+  and the 2^-40 margin, so no seed exceeds a true k-th score.
+- Pruning power: on x86-64 the exact rule picks the floating-point rule's pairs for all 15,642
+  terms of a 1M flush and all 43,043 of the 1M docid merge (the microbenchmark's `exact-rule`
+  variant against the old writer, 0 mismatches), and 1M flushed segments built by `59d9d08` and
+  `294fd85` differ only in bytes 8 to 15 (the version and its prefix CRC): every seed byte and
+  every section is the same, so query time cannot move. A run-level A/B would compare identical
+  postings and is not run. Cost: 62.1 against 62.3 cycles per posting in that variant, within
+  noise; the comparisons are per level, not per posting.
+- Pins: `fixtures_test` writes a fixed corpus (6,000 documents, average length exactly 5, 24
+  terms) and pins its 52 seed pairs in `test/fixtures/seeds.txt`, so CI's arm64 jobs (Linux and
+  macOS) check the same pairs; `postings_test` pins an exact tie (average length 9, wdf 3 at
+  length 3 against wdf 2 at length 1, 3/21 each) to the higher wdf, and its exact-rule case
+  now uses the rational comparison. A mutant comparing with `>=` fails the tie case.
+- `format::pre_freeze` 0x80000008 (C17): fixtures re-pinned, the prefix CRC (`0x6b637f48`) and
+  the T7 reordering hash (`0x7e6f1ad2a99f9b80`) re-pinned; `digest.txt` unchanged. ctest 39/39
+  (macOS x86_64, Apple clang, Release). CI not waited on.
