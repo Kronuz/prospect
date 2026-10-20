@@ -125,6 +125,30 @@ pairs, so their intervals are not established, but the index builds agree in bot
 CPU time, and the docid merge's CPU moves by the same share. C3's figure is therefore a loss on the
 indexing axis of about 10% at 5M; the attribution is below (Row 3's profile).
 
+**The profile.** `perf record -e cpu-clock -F 999` (no PMU in the guest) over a 1M flushed build
+and its docid merge per side, light hold (`prof/`): `inverted_builder::seeds_of`, M20's writer, is
+11.3% of B's build samples (2,331 of 20,607) and 11.5% of its merge's (2,219 of 19,333); A has no
+such function. B's builds take 2,370 samples more than A's (18,237) and its merges 2,564 more
+(16,769): the seeds are 98% of the build's difference and 87% of the merge's. The 1M docid merges
+took 24.1 s (A) and 27.8 s (B) under the profiler. FQ4's reading (linear, nothing superlinear)
+holds; the constant is what costs.
+
+**Against format 12** (T5's guard, indexing at most 1.03 of format 12's time), the same 5M
+build alternating F12 and B, warm corpus, after the rows above:
+
+| Pair | F12 wall (CPU) | B wall (CPU) | B/F12 | F12 peak RSS | B peak RSS |
+|---|---|---|---|---|---|
+| 1 | 133.4 s (133.1 s) | 144.1 s (143.9 s) | 1.080 | 604.6 MiB | 576.8 MiB |
+| 2 | 131.5 s (131.2 s) | 139.2 s (138.9 s) | 1.059 | 604.6 MiB | 576.8 MiB |
+
+A (format 13 without the query items) sits with format 12 (130.6 s mean against 132.4 s), so the
+format is neutral and the query items' writer costs 7 to 10%: T5's indexing guard misses by
+about 4 to 5 points at 5M. It is writer-side work, not bytes: a cheaper `seeds_of` that writes the
+same pairs leaves the format as it freezes. In cost terms the loss is small: about 2.4 µs of CPU
+per document indexed and 3.3 µs per document per docid merge, so a billion documents written once
+and merged three times pay about 3.4 core-hours more, roughly $0.15 at $0.045 per vCPU-hour. It
+is the ratio that matters, against the indexing ratchet.
+
 ### Row 4a: B against A at the run level (T4's guard)
 
 `session.sh` (`ab-run-level.md`): an A/A of eight rounds, then the A/B of eight, on S′ (361 gate
@@ -177,3 +201,59 @@ Run level, every class and stratum row (125; PISA 100), against the same trials'
 | Lucene 10.4.0 `-bp` | 54 | 17 | intersection_union at every command but `COUNT`, 1.11 to 1.41 times slower; union:num_tokens_>3 `COUNT` 2.77 and `TOP_100_COUNT` 1.16; intersection:num_tokens_3 `TOP_100_COUNT` 1.11 |
 | Tantivy 0.26 | 27 | 32 | phrases at every command, 1.10 to 1.21; intersections at `TOP_1000` 1.15 (two terms 1.17, more than three 1.25) and `TOP_100_COUNT` 1.18; counted unions of three or more terms at `TOP_100_COUNT` 1.71 and 1.97; intersection_union at `TOP_100`, `TOP_1000`, and `TOP_100_COUNT` 1.08 to 1.24; negated `TOP_1000` 1.10 and two-term negations at `TOP_100_COUNT` 1.27; two-phase-critic 1.21 to 1.30 |
 | PISA 0.8.2 (the 60 comparable rows: terms, intersections, unions) | 10 | 27 | unions of two and three terms and intersections at the top-k commands: unions 1.39 (`TOP_10`) to 2.40 (`TOP_1000`), intersections 1.25 to 1.44 at `TOP_100` and `TOP_1000`, `TOP_100_COUNT` 1.43 to 1.80; `COUNT` intersections of three or more 1.09 and 1.25. Wins: frequent terms at every top-k command (0.18 to 0.54), unions of more than three terms at `TOP_10` and `TOP_100` (0.65, 0.72), and `COUNT` unions (0.18 to 0.57) |
+
+Merged (docid order), the same method; phases 263 s and 255 s (`bm25`), 316 s and 301 s
+(`bm25_xapian`):
+
+| Session | Wins / losses (125 rows) | A/A band, widest | term:frequent `TOP_10` | term:frequent `TOP_1000` | union `TOP_10` | union `TOP_1000` | intersection `TOP_10` | `COUNT` union:num_tokens_>3 | phrase `TOP_1000` | term:rare `TOP_10` |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Merged `bm25` | 9 / 0 | 0.793–1.348 | 0.710 win | 0.796 | 0.923 | 0.936 | 0.972 | 0.976 | 1.025 [1.003–1.047] | 1.081 [1.015–1.151], A/A to 1.080 |
+| Merged `bm25_xapian` | 10 / 0 | 0.743–1.475 | 0.639 win | 0.886 win | 0.962 | 0.942 | 0.991 | 0.963 | 1.033 [1.019–1.048], A/A to 1.216 | 1.021 |
+
+**Reading (4a).** B loses no row against A in any of the four sessions (C1's identity holds in
+every round), with 9 to 31 wins, the frequent terms the largest (0.39 to 0.71 at `TOP_10`). The
+merged sessions' A/A bands are wider (to 1.35 and 1.48), so fewer rows clear them. Two leans recur,
+each "neither" in every session:
+1. **Phrases, 1.5% to 3.3% slower** at `TOP_1000` (1.015, 1.025, 0.989, 1.033). It fits FQ3 item
+   2's mechanism: the positional deltas are found by stepping over a group's impact lists, so a
+   phrase now parses them.
+2. **Rare terms and terms' `COUNT`, up to 1.09 and 1.15 by ratio, but tenths of a microsecond:**
+   rare terms' median `TOP_10` is 2.4 µs (A) against 2.6 µs (B) reordered and 1.9 against 2.4 µs
+   merged; terms' `COUNT` 0.8 against 0.9 µs, at the timer's 0.1 µs resolution. A fixed cost per
+   query of about 0.2 to 0.5 µs (FQ7's every-scorer-first `search()` is the candidate), visible only
+   where a query costs a few microseconds.
+
+### Row 5: format 13's owed rows
+
+**The merged index's single terms, F12 against B** (the C16 note's `TOP_10` 1.016 and `TOP_100`
+1.021 at 1M on `format13-on-main`): `session.sh` with `TOP_10` and `TOP_100` only, the 200
+stratified terms and S′'s 361 queries, eight rounds each, F12's fresh merged 5M index against B's;
+phases 72 s and 68 s (`bm25`), 83 s and 80 s (`bm25_xapian`). Counts and results equal format 12's
+in every round.
+
+| Row (B/F12 [95% over runs]; A/A band) | `bm25` | `bm25_xapian` |
+|---|---|---|
+| Wins / losses (50 rows) | 16 / 0 | 15 / 0 |
+| term `TOP_10` | 0.833 [0.817–0.850] win | 0.841 [0.833–0.850] win |
+| term `TOP_100` | 0.802 [0.780–0.823] win | 0.836 [0.804–0.869] win |
+| term:frequent `TOP_10` / `TOP_100` | 0.689 / 0.748 win | 0.668 / 0.756 win |
+| term:rare `TOP_10` / `TOP_100` | 1.019 / 1.017 (A/A to 1.03, 1.11) | 1.026 [1.003–1.049] / 1.029 [1.008–1.050] (A/A 1.000–1.000, 0.970–1.021) |
+| Terms set, query level, `TOP_10` / `TOP_100` | 0.804 / 0.836 | 0.786 / 0.853 |
+
+The owed row is closed at 5M: format 13 with the query items is 1.20 to 1.25 times faster than
+format 12 on the merged index's single terms at both commands and presets. Rare terms stay the one
+lean (1.7% to 2.9% slower, "neither"; the fixed per-query cost of row 4a, item 2).
+
+**Peak memory.**
+
+| Measure | F12 | A | B | B against F12 |
+|---|---:|---:|---:|---|
+| Indexing peak RSS, 5M flushed build (MiB; each run) | 604.5, 604.6, 604.6 | 572.0, 573.5 | 573.3, 573.5, 576.8, 576.8 | 4.6% to 5.2% smaller |
+| Docid merge peak RSS, 16 segments to one | 4.79 GiB | 4.74 GiB | 4.75 GiB | 0.8% smaller |
+| Reordering merge peak RSS | | 4.76 GiB | 4.85 GiB | (B 1.9% larger than A) |
+| Serving memory, merged (`serve_mem.py`, 962 queries × `TOP_10`, `COUNT`, `TOP_1000`, page cache dropped; three rounds, order alternating) | 581 MB (8 anonymous, 573 to 574 mapped) | | 581 MB (8, 573) | equal at 1 MB resolution |
+
+T10's serving row passes (equal to format 12's in one session). The 1M note's indexing peak RSS of
+1.056 against format 12 (with auto merges, on macOS) does not appear at 5M on Linux: format 13's
+flushed builds peak 5% lower, before and after the query items. That build has no merges; the
+merges' peaks are within 2% across F12, A, and B.
