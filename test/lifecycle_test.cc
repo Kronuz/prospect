@@ -15,7 +15,7 @@
 // STRATA_BG_CRASH_POINTS how many with background merges (default 2,000; the gate's
 // count is 10,000, run as docs/gates/phase-3-lifecycle.md records).
 #include "strata/core/faultfs.hh"
-#include "strata/core/index.hh"
+#include "strata/search/index.hh"
 #include "stepping_executor.hh"
 
 #include <cstdio>

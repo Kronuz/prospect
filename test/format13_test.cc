@@ -2,13 +2,13 @@
 // F3's kinds and F5's canonical layout, F4's structure bits and presence, F6's reserved
 // words, the sink's file order, and the format-12 refusal fixtures.
 #include "strata/core/faultfs.hh"
-#include "strata/core/index.hh"
-#include "strata/core/merge.hh"
-#include "strata/core/check.hh"
-#include "strata/core/reader.hh"
+#include "strata/search/index.hh"
+#include "strata/search/merge.hh"
+#include "strata/search/check.hh"
+#include "strata/search/reader.hh"
 #include "strata/search/search.hh"
 #include "strata/search/searcher.hh"
-#include "strata/core/writer.hh"
+#include "strata/search/writer.hh"
 
 #include <crc32c/crc32c.hh>
 #include <sys/mman.h>

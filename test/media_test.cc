@@ -9,7 +9,7 @@
 //   - A segment damaged for good is recovered from a retained predecessor that does not
 //     name it (recover --to).
 #include "strata/core/faultfs.hh"
-#include "strata/core/index.hh"
+#include "strata/search/index.hh"
 
 #include <cstdio>
 #include <cstdlib>

@@ -3,7 +3,7 @@
 // bytes do not depend on how many passes the memory allows; the order is one merge_segments
 // accepts, and deterministic; the fallback and cancellation hold.
 #include "strata/core/faultfs.hh"
-#include "strata/core/index.hh"
+#include "strata/search/index.hh"
 #include "strata/search/reorder.hh"
 
 #include <cstdio>

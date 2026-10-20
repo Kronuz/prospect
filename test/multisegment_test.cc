@@ -4,7 +4,7 @@
 //   - With deletes, pruned search across segments equals an exhaustive scan of every
 //     segment's live matches, ties by docid, and counts equal.
 #include "strata/core/faultfs.hh"
-#include "strata/core/index.hh"
+#include "strata/search/index.hh"
 #include "strata/search/searcher.hh"
 #include "strata/core/budget.hh"
 #include <algorithm>

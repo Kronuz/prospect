@@ -1,8 +1,8 @@
 // Segment writer and reader against a naive model: postings, advance, block_end,
 // impact bounds, lengths, and corrupt files (every truncation, random corruption).
-#include "strata/core/reader.hh"
+#include "strata/search/reader.hh"
 #include "strata/search/search.hh"
-#include "strata/core/writer.hh"
+#include "strata/search/writer.hh"
 #include "skip_layout.hh"
 
 #include <crc32c/crc32c.hh>
@@ -345,7 +345,7 @@ int main() {
 	// Wide skip offsets and pair lists with wdf past 255 read back like the narrow ones.
 	for (bool wide : {false, true}) {
 		strata::segment_writer w;
-		w.wide_skip_offsets = wide;
+		w.builder<strata::inverted_plugin>().wide_skip_offsets = wide;
 		std::vector<std::uint32_t> p{1};
 		for (std::uint32_t d = 0; d < 5000; ++d) {
 			std::vector<std::uint32_t> pos;
@@ -912,7 +912,7 @@ int main() {
 	// Reading a document whose index wraps fences; no read returns other positions.
 	{
 		strata::segment_writer w;
-		w.wide_skip_offsets = true;
+		w.builder<strata::inverted_plugin>().wide_skip_offsets = true;
 		for (std::uint32_t d = 0; d < 300; ++d) {
 			std::vector<std::uint32_t> pos{d + 1};  // each document's one position is distinct
 			std::vector<strata::posting_input> in{{"p", 1, pos}};

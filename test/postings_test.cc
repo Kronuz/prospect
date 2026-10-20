@@ -1,11 +1,11 @@
 // Format 13's postings items (docs/design/format-13.md F10, F11, F13): the advance entries
 // (M16, A3 at 128 postings), against a model of every term's postings, positions, and
 // pairs; and corrupt entries, which fence or answer with ordinals in order and in range.
-#include "strata/core/reader.hh"
+#include "strata/search/reader.hh"
 #include "strata/search/search.hh"
 #include "strata/search/searcher.hh"
-#include "strata/core/check.hh"
-#include "strata/core/writer.hh"
+#include "strata/search/check.hh"
+#include "strata/search/writer.hh"
 #include "skip_layout.hh"
 
 #include <crc32c/crc32c.hh>
@@ -49,7 +49,7 @@ corpus build(std::uint32_t docs, std::uint64_t seed, bool wide = false, std::uin
 	std::mt19937_64 rng(seed);
 	corpus c;
 	strata::segment_writer w;
-	w.wide_skip_offsets = wide;
+	w.builder<strata::inverted_plugin>().wide_skip_offsets = wide;
 	for (std::uint32_t d = 0; d < docs; ++d) {
 		std::vector<strata::posting_input> in;
 		std::vector<std::vector<std::uint32_t>> pos;

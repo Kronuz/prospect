@@ -1,6 +1,6 @@
 // Compile-time checks that the frozen Phase 1 contracts fit together.
 #include "residency.hh"
-#include "strata/core/reader.hh"
+#include "strata/search/reader.hh"
 #include "strata/search/scorer.hh"
 
 #include <cstdio>

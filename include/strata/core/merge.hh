@@ -31,7 +31,6 @@ struct basic_merge_source {
 	const std::vector<std::uint64_t>* deleted = nullptr;  // bit per ordinal; null: none deleted
 	bool live(ordinal_t o) const { return live_bits{deleted ? deleted->data() : nullptr}.live(o); }
 };
-using merge_source = basic_merge_source<search_layout>;
 
 // A document of a merge's sources: which source, and its ordinal there.
 struct merge_ref {
@@ -77,88 +76,6 @@ struct merge_context {
 		if (memory) { memory->grow(n); }
 	}
 };
-
-// Terms: the union of the inputs' dictionaries in order, one cursor per input (a cursor
-// holds one dictionary block, not the dictionary), each term's live postings remapped.
-inline built inverted_plugin::merge(const merge_context& m, std::span<const reader* const> in, section_sink& sink) {
-	inverted_builder b;
-	b.memory = m.memory;
-	b.key_prefix = m.key_prefix;
-	b.norms = (m.structures & format::bit::norms) != 0;
-	for (const auto& src : m.order) { (void)b.begin(in[src.source]->length(src.ord)); }
-	std::deque<reader::term_cursor> terms;
-	std::vector<bool> more(in.size());
-	for (std::size_t s = 0; s < in.size(); ++s) { more[s] = terms.emplace_back(*in[s]).next(); }
-	// The dictionary's alphabet: every byte the inputs' dictionaries use.
-	std::array<bool, 256> used{};
-	for (const reader* r : in) {
-		for (char c : r->dictionary().alphabet_bytes()) { used[std::uint8_t(c)] = true; }
-	}
-	std::string alphabet;
-	for (unsigned c = 0; c < 256; ++c) {
-		if (used[c]) { alphabet.push_back(char(c)); }
-	}
-	std::string current;
-	struct posting {
-		ordinal_t ord;
-		std::uint32_t wdf;
-		std::vector<std::uint32_t> positions;  // absolute
-	};
-	std::vector<posting> postings;
-	std::uint64_t charged = 0;  // the per-term postings' high-water mark
-	b.finish(sink, sink.held(), alphabet, [&](term_postings& tp) -> std::optional<std::string_view> {
-		for (;;) {
-			m.check();
-			// The smallest term not yet merged.
-			std::optional<std::string_view> next;
-			for (std::size_t s = 0; s < in.size(); ++s) {
-				if (more[s] && (!next || terms[s].term() < *next)) { next = terms[s].term(); }
-			}
-			if (!next) { return std::nullopt; }
-			current = *next;
-			postings.clear();
-			for (std::size_t s = 0; s < in.size(); ++s) {
-				if (!more[s] || terms[s].term() != current) { continue; }
-				const format::term_info info = terms[s].info();
-				more[s] = terms[s].next();
-				postings_iterator it(*in[s], info);
-				positions_reader pr(*in[s], info);
-				for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
-					if (!m.inputs[s].live(o)) { continue; }
-					const auto p = pr.read(it);
-					postings.push_back({m.inputs[s].new_ordinal[o], it.wdf(), std::vector<std::uint32_t>(p.begin(), p.end())});
-				}
-			}
-			if (postings.empty()) { continue; }  // only deleted documents held it
-			if (m.memory) {
-				std::uint64_t now = postings.capacity() * sizeof(posting);
-				for (const auto& p : postings) { now += p.positions.capacity() * sizeof(std::uint32_t); }
-				if (now > charged) {
-					m.memory->grow(now - charged);
-					charged = now;
-				}
-			}
-			std::sort(postings.begin(), postings.end(), [](const posting& a, const posting& b) { return a.ord < b.ord; });
-			tp.clear();
-			for (const auto& p : postings) {
-				if (!p.positions.empty()) { tp.any_positions = true; }
-				tp.ords.push_back(p.ord);
-				tp.wdfs.push_back(p.wdf);
-				tp.counts.push_back(std::uint32_t(p.positions.size()));
-				tp.cf += p.wdf;
-				if (p.wdf) { tp.all_zero_wdf = false; }
-				if (p.positions.size() != p.wdf) { tp.counts_are_wdf = false; }
-				std::uint32_t prev = 0;
-				for (auto q : p.positions) {
-					tp.positions.push_back(q - prev);
-					prev = q;
-				}
-			}
-			return std::string_view(current);
-		}
-	});
-	return {format::bit::inverted | (b.norms ? format::bit::norms : 0)};
-}
 
 // Rebuilt per new ordinal: its docid, its input's version, and its key.
 inline built keys_plugin::merge(const merge_context& m, std::span<const reader* const> in, section_sink& sink) {
@@ -231,6 +148,7 @@ inline built stored_plugin::merge(const merge_context& m, std::span<const reader
 template <class Layout>
 struct order_source {
 	static constexpr bool exists = false;
+	struct settings {};  // the index options' share of it
 };
 
 // How a merge runs (L6, F13-R11): designated initializers only, in declaration order, so a
@@ -372,20 +290,5 @@ merge_plan merge_layout(std::span<const basic_merge_source<layout<Entries...>>> 
 }
 
 }  // namespace detail
-
-// Writes the merge of `sources` to sink (positions through spill). Each live document keeps
-// its key, from the keys reader; `key_prefix` is the index's, for the inverted builder's
-// backstop (F8). Throws std::logic_error if
-// two live documents share a docid. With `cancel`, it throws task::cancelled when asked.
-// Stored records are read a frame at a time per source; out of docid order, `records`
-// (when given) takes each source's live records, every frame decoded once, and the output
-// reads them from there (reordering review, P1-R4 (b)).
-// The output is in docid order, unless `order` gives it: [new ordinal] = the source
-// document, every live document exactly once (std::invalid_argument otherwise). Without
-// `order`, a single source whose ordinals are not in docid order keeps its order.
-inline merge_plan merge_segments(std::span<const merge_source> sources, const std::array<std::uint8_t, 16>& segment_id, output& sink, spill& positions_spill,
-	const merge_options& options = {}) {
-	return detail::merge_layout(sources, segment_id, sink, positions_spill, options);
-}
 
 }  // namespace strata

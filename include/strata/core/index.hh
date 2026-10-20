@@ -13,8 +13,6 @@
 #include "strata/core/merge_policy.hh"
 #include "strata/core/rate_limiter.hh"
 #include "strata/core/reader.hh"
-#include "strata/search/reorder.hh"
-#include "strata/search/tuple_buffer.hh"
 #include "strata/core/writer.hh"
 
 #include "completion/io.h"
@@ -51,7 +49,6 @@ struct basic_operation {
 	basic_document<Layout> doc;                    // add, replace_*
 	std::string meta_key, meta_value;              // set_meta, delete_meta
 };
-using operation = basic_operation<search_layout>;
 
 template <class Layout>
 struct basic_transaction {
@@ -59,7 +56,6 @@ struct basic_transaction {
 	std::optional<std::uint64_t> expected_schema;  // the schema version it was built against
 	std::optional<std::uint64_t> set_schema;       // the schema version it sets
 };
-using transaction = basic_transaction<search_layout>;
 
 // Apply's answer. A rejected transaction left no trace.
 struct verdict {
@@ -277,7 +273,50 @@ private:
 
 }  // namespace index_detail
 
-struct index_options {
+namespace detail {
+// The buffer of a layout with no inverter: documents wait whole in `buffer_`, whatever the flush
+// threads (layers.md L10). Its members exist so the index compiles one way; none runs.
+struct no_inverter {
+	static constexpr std::uint64_t run_cap = ~std::uint64_t(0);
+	flush_charge* memory = nullptr;
+	std::uint64_t max_run_bytes = run_cap;
+	std::size_t doc_count() const noexcept { return 0; }
+	std::uint64_t docid(ordinal_t) const noexcept { return 0; }
+	std::uint64_t version(ordinal_t) const noexcept { return 0; }
+	std::string_view key(ordinal_t) const noexcept { return {}; }
+	template <class Doc>
+	ordinal_t add(std::uint64_t, std::uint64_t, std::string_view, const Doc&) { return 0; }
+	template <class Transaction>
+	bool fits(const Transaction&) const noexcept { return true; }
+	template <class Sink, class Spill>
+	void flush(const std::array<std::uint8_t, 16>&, std::span<const ordinal_t>, const builder_settings&, Sink&, Spill&) {}
+	template <class Dead, class DocumentRecord, class Emit>
+	void digest(format::structure_bits, Dead&&, DocumentRecord&&, Emit&&) const {}
+};
+template <class E>
+concept has_inverter = requires { typename E::inverter; };
+template <class E>
+struct inverter_of_entry {
+	using type = typename E::inverter;
+};
+// The first layout entry's `inverter`, the buffer that inverts documents as they arrive at one
+// flush thread; none: no_inverter.
+template <class... Entries>
+struct first_inverter {
+	using type = no_inverter;
+};
+template <class E, class... Entries>
+struct first_inverter<E, Entries...> {
+	using type = typename std::conditional_t<has_inverter<E>, inverter_of_entry<E>, first_inverter<Entries...>>::type;
+};
+template <class Layout>
+struct layout_inverter;
+template <class... Entries>
+struct layout_inverter<layout<Entries...>> : first_inverter<Entries...> {};
+}  // namespace detail
+
+template <class Layout>
+struct basic_index_options {
 	std::string key_prefix;                 // the host's key-term prefix (Xapiand's "Q"); empty: no keys
 	std::size_t retained_predecessors = 2;  // manifests kept behind the current one (I14)
 	// The node's indexing budget, if any, and this index's share of it: the buffer flushes
@@ -318,7 +357,7 @@ struct index_options {
 	enum class reorder_mode { off, force_merge, merges };
 	reorder_mode reordering = reorder_mode::force_merge;
 	std::uint64_t reorder_min_docs = 262144;
-	strata::reorder::settings reorder_settings;
+	typename order_source<Layout>::settings reorder_settings;  // the layout's order source's, if it has one
 	// The seed of the segments' identities (F13-R41); none: a random one per open. Tests that
 	// compare two indexes' files give both the same seed.
 	std::optional<std::uint64_t> identity_seed;
@@ -358,11 +397,13 @@ struct directory_trust_warning {
 template <class Layout>
 class basic_index {
 public:
-	using options = index_options;
+	using options = basic_index_options<Layout>;
 	using document = basic_document<Layout>;
 	using operation = basic_operation<Layout>;
 	using transaction = basic_transaction<Layout>;
 	using segment = basic_segment<Layout>;
+	// The buffer that inverts documents as they arrive, if the layout has one (search's).
+	using inverter = typename detail::layout_inverter<Layout>::type;
 
 	// Creates an empty index and commits its first manifest, in an empty directory or over
 	// what an interrupted create left (removed first); any other strata file is refused.
@@ -686,28 +727,24 @@ public:
 			for (ordinal_t o = 0; o < core.doc_count(); ++o) {
 				if (live(o)) { document_record(core.docid(o), s.seg.template get<keys_plugin>().version(o), key_of[o]); }
 			}
-			if (configured & inverted_plugin::structure) { inverted_plugin::records(s.seg.template get<inverted_plugin>(), core, live, emit); }
-			if (configured & stored_plugin::structure) { stored_plugin::records(s.seg.template get<stored_plugin>(), core, live, emit); }
+			for_each_entry<Layout>([&]<class E>(std::type_identity<E>) {
+				if constexpr (requires { E::records(s.seg.template get<E>(), core, live, emit); }) {
+					if (configured & E::structure) { E::records(s.seg.template get<E>(), core, live, emit); }
+				}
+			});
 		}
 		if (active_) {  // the inverter's buffer: the same records as its documents' (F21)
 			const auto& a = *active_;
-			for (ordinal_t o = 0; o < a.buf.doc_count(); ++o) {
-				if (a.is_dead(o)) { continue; }
-				document_record(a.buf.docid(o), a.buf.version(o), a.buf.key(o));
-				if (configured & inverted_plugin::structure) { inverted_plugin::length_record(a.buf.docid(o), a.buf.length(o), emit); }
-				if (configured & stored_plugin::structure) { stored_plugin::record(a.buf.docid(o), a.buf.stored(o), emit); }
-			}
-			if (configured & inverted_plugin::structure) {
-				a.buf.scan([&](std::string_view term, ordinal_t o, std::uint32_t wdf, std::span<const std::uint32_t> positions) {
-					if (!a.is_dead(o)) { inverted_plugin::posting_record(a.buf.docid(o), term, wdf, positions, emit); }
-				});
-			}
+			a.buf.digest(configured, [&](ordinal_t o) { return a.is_dead(o); }, document_record, emit);
 		}
 		for (const auto& b : buffer_) {
 			if (b.dead) { continue; }
 			document_record(b.docid, b.version, b.doc.key);
-			if (configured & inverted_plugin::structure) { inverted_plugin::records(b.docid, b.doc, emit); }
-			if (configured & stored_plugin::structure) { stored_plugin::records(b.docid, b.doc, emit); }
+			for_each_entry<Layout>([&]<class E>(std::type_identity<E>) {
+				if constexpr (requires { typename E::part; E::records(b.docid, static_cast<const typename E::part&>(b.doc), emit); }) {
+					if (configured & E::structure) { E::records(b.docid, static_cast<const typename E::part&>(b.doc), emit); }
+				}
+			});
 		}
 		digest_record last('L');
 		last.u64(m_.last_docid);
@@ -730,8 +767,8 @@ public:
 
 	// Checks every segment whole (check_segment) and the digest's invariants: one live copy
 	// per docid and per key, every docid at or below lastdocid. Throws at the first problem.
-	check_report check() const {
-		check_report r;
+	basic_check_report<Layout> check() const {
+		basic_check_report<Layout> r;
 		for (const auto& s : segs_) { check_segment(s->seg, &s->deleted, r, m_.key_prefix); }
 		(void)digest();
 		return r;
@@ -937,7 +974,7 @@ private:
 	// Documents inverted on arrival, and what the flush needs to write them in docid order.
 	struct active_buffer {
 		flush_charge held;  // what the buffer allocated: charge() draws it on permit_ (D17)
-		detail::tuple_buffer buf;
+		inverter buf;
 		std::vector<std::uint64_t> dead;  // bit per ordinal: replaced or deleted while buffered
 		std::uint64_t dead_count = 0, prev_docid = 0;
 		bool ordered = true;  // docids increase with ordinals
@@ -1045,7 +1082,7 @@ private:
 			job->reserved += s->ref.size + 18 * docs + 16 * (docs / format::block + 1);
 			live_docs += docs - s->dead;
 		}
-		using mode = index_options::reorder_mode;
+		using mode = typename options::reorder_mode;
 		job->reorder = (opts_.reordering == mode::force_merge && forced) || (opts_.reordering == mode::merges && (forced || live_docs >= opts_.reorder_min_docs));
 		if (job->sources.empty()) { return; }
 		if (storage_permit_) {
@@ -1070,7 +1107,7 @@ private:
 		byte_budget* budget;
 		std::uint64_t memory_wait;
 		std::string key_prefix;
-		strata::reorder::settings reorder;
+		typename order_source<Layout>::settings reorder;
 		format::structure_bits structures;  // the index's configured bits (F4)
 	};
 
@@ -1808,7 +1845,9 @@ private:
 				pending_docs_.push_back({docid, version, key ? std::string_view(o.doc.key) : std::string_view(), &o.doc});
 			} else {
 				buffer_.push_back({docid, version, o.doc});
-				if (document& d = buffer_.back().doc; d.split_text) { d.length = std::uint32_t(text_detail::count_words(d.text).words); }  // split at flush
+				for_each_entry<Layout>([&]<class E>(std::type_identity<E>) {
+					if constexpr (requires(typename E::part& p) { E::buffered(p); }) { E::buffered(static_cast<typename E::part&>(buffer_.back().doc)); }
+				});
 				buffer_bytes_ += doc_bytes(buffer_.back().doc);
 			}
 			undo_.push_back({undo_step::buffer_push});
@@ -1855,7 +1894,7 @@ private:
 
 	// --- the buffer -------------------------------------------------------------------------
 
-	bool inverting() const noexcept { return opts_.flush_threads <= 1; }
+	bool inverting() const noexcept { return !std::is_same_v<inverter, detail::no_inverter> && opts_.flush_threads <= 1; }
 	std::size_t active_count() const noexcept { return active_ ? active_->buf.doc_count() : 0; }
 	// Buffered documents, dead ones included; a document's buffer index is its ordinal in active_.
 	std::size_t buffer_size() const noexcept { return inverting() ? active_count() + pending_docs_.size() : buffer_.size(); }
@@ -1892,11 +1931,7 @@ private:
 			}
 			auto& a = *active_;
 			for (const pending_doc& p : pending_docs_) {
-				terms_in_.clear();
-				for (const auto& t : p.doc->terms) { terms_in_.push_back({t.term, t.wdf, t.positions}); }
-				const document& d = *p.doc;
-				const ordinal_t ord = d.split_text ? a.buf.add_split(p.docid, terms_in_, d.text, d.stored, p.version, p.key)
-												   : a.buf.add(p.docid, terms_in_, d.text, d.tokens, d.length, d.stored, p.version, p.key);
+				const ordinal_t ord = a.buf.add(p.docid, p.version, p.key, *p.doc);
 				if (ord && p.docid <= a.prev_docid) { a.ordered = false; }
 				a.prev_docid = p.docid;
 				if (p.dead) { a.set_dead(ord, true); }
@@ -1912,9 +1947,7 @@ private:
 	// Whether the transaction's documents fit the active buffer's 32-bit structures.
 	bool fits(const transaction& t) const noexcept {
 		if (!active_) { return true; }
-		std::size_t entries = 0;
-		for (const auto& o : t.ops) { entries += o.doc.terms.size() + (o.doc.split_text ? o.doc.text.size() / 2 + 1 : o.doc.tokens.size()); }
-		return active_->buf.fits(t.ops.size(), entries);
+		return active_->buf.fits(t);
 	}
 
 	void clear_buffer() {
@@ -1961,10 +1994,6 @@ private:
 		}
 		const std::uint64_t id = m_.next_segment++;  // never reused, even after a failure
 		const std::array<std::uint8_t, 16> header = new_identity();
-		segment_writer encoder;
-		encoder.memory = &run;
-		encoder.key_prefix = m_.key_prefix;
-		encoder.structures = configured_structures();
 		// The segment goes to its file as it is written. ENOSPC removes the partial file and
 		// keeps the buffer, as write_unsynced does.
 		const std::string name = index_detail::segment_name(id);
@@ -1972,7 +2001,7 @@ private:
 		index_detail::file_sink sink(*file);
 		try {
 			detail::chunked_spill positions(&run);
-			a.buf.flush(header, order, encoder, sink, positions);
+			a.buf.flush(header, order, builder_settings{&run, nullptr, m_.key_prefix, configured_structures()}, sink, positions);
 			sink.finish();
 		} catch (const std::system_error& e) {
 			if (e.code().value() != ENOSPC) { throw; }
@@ -2028,20 +2057,13 @@ private:
 					const std::size_t begin = docs.size() * k / runs, end = docs.size() * (k + 1) / runs;
 					flush_charge charge(opts_.budget);  // on the run's own thread
 					{
-						segment_writer w;
+						basic_segment_writer<Layout> w;
 						if (opts_.budget) { w.memory = &charge; }
 						w.key_prefix = m_.key_prefix;
 						w.structures = configured_structures();
-						std::vector<posting_input> in;
 						for (std::size_t i = begin; i < end; ++i) {
 							const buffered* b = docs[i];
-							in.clear();
-							for (const auto& t : b->doc.terms) { in.push_back({t.term, t.wdf, t.positions}); }
-							if (b->doc.split_text) {
-								detail::writer_access::add_split(w, b->docid, in, b->doc.text, b->doc.length, b->doc.stored, b->version, b->doc.key);
-							} else {
-								detail::writer_access::add_text(w, b->docid, in, b->doc.text, b->doc.tokens, b->doc.length, b->doc.stored, b->version, b->doc.key);
-							}
+							w.add({b->docid, b->version, b->doc.key}, b->doc, true);
 						}
 						outputs[k] = w.flush(identities[k]);
 					}
@@ -2140,7 +2162,7 @@ private:
 		for (auto& s : segs_) {
 			if (!s->ref.live.generation) {
 				s->ref.live_count = s->seg.core().doc_count();
-				s->ref.live_length = s->seg.template get<inverted_plugin>().total_length();
+				s->ref.live_length = s->seg.total_length();
 			}
 		}
 		if (md) {
@@ -2164,7 +2186,7 @@ private:
 			next.max_version = std::max(next.max_version, v);
 			next.segments.push_back(s->ref);
 			next.doc_count += s->ref.doc_count;
-			next.total_length += s->seg.template get<inverted_plugin>().total_length();
+			next.total_length += s->seg.total_length();
 			next.live_count += s->ref.live_count;
 			next.live_length += s->ref.live_length;
 		}
@@ -2189,7 +2211,7 @@ private:
 	std::uint64_t live_length(const open_segment& s) const {
 		std::uint64_t n = 0;
 		for (ordinal_t o = 0; o < s.seg.core().doc_count(); ++o) {
-			if (!((s.deleted[o >> 6] >> (o & 63)) & 1)) { n += s.seg.template get<inverted_plugin>().length(o); }
+			if (!((s.deleted[o >> 6] >> (o & 63)) & 1)) { n += s.seg.length(o); }
 		}
 		return n;
 	}
@@ -2573,8 +2595,7 @@ private:
 	std::vector<buffered> buffer_;
 	std::unique_ptr<active_buffer> active_;
 	std::vector<pending_doc> pending_docs_;  // the transaction's documents, inverted once it is accepted
-	std::vector<posting_input> terms_in_;  // inversion's scratch
-	std::uint64_t max_run_bytes_ = detail::tuple_buffer::run_cap;  // a run's bytes at most; tests lower it (index_test_access)
+	std::uint64_t max_run_bytes_ = inverter::run_cap;  // a run's bytes at most; tests lower it (index_test_access)
 	index_detail::hash_slots buffer_docids_;  // docid -> buffer index (ordinal in active_), the docid as its hash
 	index_detail::hash_slots key_slots_;      // the version map: a key -> its live copy's buffer index, its bytes read from the buffer
 	std::map<std::string, std::string> meta_;
@@ -2603,6 +2624,5 @@ private:
 	bool fenced_ = false;
 	std::uint64_t producer_term_ = 0, identity_base_ = 0, identities_ = 0;
 };
-using index = basic_index<search_layout>;
 
 }  // namespace strata

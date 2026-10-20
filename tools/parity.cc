@@ -13,7 +13,7 @@
 #include "strata/search/reorder.hh"
 #include "strata/search/search.hh"
 #include "strata/search/searcher.hh"
-#include "strata/core/writer.hh"
+#include "strata/search/writer.hh"
 
 #include <cmath>
 #include <cstdio>

@@ -33,7 +33,7 @@
 // same documents writes. Internal to the index: its inputs are documents that passed stage 1.
 #pragma once
 
-#include "strata/core/writer.hh"
+#include "strata/search/writer.hh"
 
 #include <algorithm>
 #include <array>

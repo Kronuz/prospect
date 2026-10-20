@@ -2,7 +2,7 @@
 // explicit docids, replayed positions, commits surviving crashes, fencing, ENOSPC
 // recovery, retention, and fail-closed opens.
 #include "strata/core/faultfs.hh"
-#include "strata/core/index.hh"
+#include "strata/search/index.hh"
 
 #include <cstdio>
 #include <cstdlib>

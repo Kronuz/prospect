@@ -26,13 +26,13 @@
 #pragma once
 
 #include "docset.hh"
+#include "strata/core/format.hh"
 
 #include <concepts>
 
 namespace strata {
 
 using docset::doc_t;
-using docset::no_more_docs;
 
 // A scorer iterates docs like docset::doc_iterator and adds:
 //   score()           the current doc's score (valid after next/advance returned a doc)

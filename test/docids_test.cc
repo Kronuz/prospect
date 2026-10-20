@@ -3,8 +3,8 @@
 // written; every validation check rejects the damage it names; and a permuted segment opens,
 // pinned by test/fixtures/permuted.sx.
 #include "strata/core/docids.hh"
-#include "strata/core/reader.hh"
-#include "strata/core/writer.hh"
+#include "strata/search/reader.hh"
+#include "strata/search/writer.hh"
 
 #include <algorithm>
 #include <cstdio>

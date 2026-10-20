@@ -42,7 +42,7 @@
 
 #include "bitpack.hh"
 #include "docset.hh"
-#include "strata/core/format.hh"
+#include "strata/search/format.hh"
 #include "strata/search/ordered.hh"
 
 #include <algorithm>

@@ -9,7 +9,7 @@
 //     and do not trend upward.
 // STRATA_CHURN_CYCLES sets the number of churn cycles (default 8).
 #include "strata/core/faultfs.hh"
-#include "strata/core/index.hh"
+#include "strata/search/index.hh"
 #include "strata/search/searcher.hh"
 
 #include <algorithm>

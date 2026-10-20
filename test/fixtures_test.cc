@@ -2,10 +2,10 @@
 // reproduce them exactly. Regenerate only for an intended format change:
 // STRATA_WRITE_FIXTURES=1 fixtures_test.
 #include "strata/core/faultfs.hh"
-#include "strata/core/index.hh"
-#include "strata/core/merge.hh"
-#include "strata/core/reader.hh"
-#include "strata/core/writer.hh"
+#include "strata/search/index.hh"
+#include "strata/search/merge.hh"
+#include "strata/search/reader.hh"
+#include "strata/search/writer.hh"
 
 #include <algorithm>
 #include <cstdio>
@@ -65,7 +65,7 @@ static std::uint32_t terms_of(std::uint32_t d, std::vector<std::vector<std::uint
 // A segment of `docs` documents; stored records of `stored` bytes, keys when `keyed`.
 static std::string build(std::uint32_t docs, std::size_t stored, bool keyed, bool wide = false, std::uint32_t first = 1, std::uint32_t step = 1) {
 	segment_writer w;
-	w.wide_skip_offsets = wide;
+	w.builder<strata::inverted_plugin>().wide_skip_offsets = wide;
 	if (!keyed) { w.structures &= ~format::bit::keys; }  // keyless: no keys structure (F4, F9)
 	std::vector<std::vector<std::uint32_t>> pos;
 	std::vector<posting_input> in;

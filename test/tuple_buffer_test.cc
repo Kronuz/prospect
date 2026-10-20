@@ -3,7 +3,7 @@
 // positions in side entries, terms given whole (an explicit wdf, positionless, keys), and
 // documents left out and reordered at flush.
 #include "strata/search/tuple_buffer.hh"
-#include "strata/core/writer.hh"
+#include "strata/search/writer.hh"
 
 #include <algorithm>
 #include <cstdio>

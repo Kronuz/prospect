@@ -8,10 +8,10 @@
 // recompute every checksum, so the changes reach the decoders instead of stopping at
 // verification. One base uses 64-bit skip offsets. Run with a -timeout of a few seconds
 // so a hang counts as a finding.
-#include "strata/core/check.hh"
-#include "strata/core/reader.hh"
+#include "strata/search/check.hh"
+#include "strata/search/reader.hh"
 #include "strata/search/search.hh"
-#include "strata/core/writer.hh"
+#include "strata/search/writer.hh"
 
 #include <crc32c/crc32c.hh>
 #include <algorithm>
@@ -28,7 +28,7 @@ const char* const vocab[] = {"the", "of", "a", "b", "c", "rare", "bool", "weight
 std::string build(std::uint64_t seed, std::uint32_t docs, bool wide = false, bool keyed = false, bool permuted = false) {
 	std::mt19937_64 rng(seed);
 	strata::segment_writer w;
-	w.wide_skip_offsets = wide;
+	w.builder<strata::inverted_plugin>().wide_skip_offsets = wide;
 	w.permuted = permuted;
 	// The permuted base's docids come from their own generator, so the other bases keep their bytes.
 	std::vector<std::uint64_t> ids;

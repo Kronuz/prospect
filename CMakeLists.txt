@@ -33,10 +33,30 @@ FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/complet
 FetchContent_Declare(threadpool GIT_REPOSITORY https://github.com/Kronuz/threadpool.git GIT_TAG 628679a2e27b563cf2709a6f35f98f1657baf7b3)
 FetchContent_MakeAvailable(docset bitpack fst task hashes crc32c residency varint termdict unicode snowball analysis compressors fusefilter completion threadpool)
 
+# Two targets in one repository (docs/design/core-split.md). strata::core is the lifecycle (index,
+# segments, manifests, merges, checkpoints, budgets, files), the keys and stored sections, and the
+# document layout; it includes and links nothing from search. strata::search is the inverted
+# plugin, postings, scoring, queries, and the search layout, on top of core. strata::strata is both.
+#
+# Core's include root holds include/strata/core alone, linked into a directory of the build tree, so
+# a core consumer cannot reach a search header at all.
+set(STRATA_CORE_ROOT "${CMAKE_CURRENT_BINARY_DIR}/strata-core-root")
+file(MAKE_DIRECTORY "${STRATA_CORE_ROOT}/strata")
+file(CREATE_LINK "${CMAKE_CURRENT_SOURCE_DIR}/include/strata/core" "${STRATA_CORE_ROOT}/strata/core" SYMBOLIC)
+add_library(strata_core INTERFACE)
+target_include_directories(strata_core INTERFACE "${STRATA_CORE_ROOT}")
+target_compile_features(strata_core INTERFACE cxx_std_20)
+target_link_libraries(strata_core INTERFACE hashes::hashes crc32c::crc32c residency::residency varint::varint termdict::termdict fusefilter::fusefilter compressors::compressors completion::completion task::task threadpool::threadpool)
+add_library(strata::core ALIAS strata_core)
+
+add_library(strata_search INTERFACE)
+target_include_directories(strata_search INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(strata_search INTERFACE strata::core docset::docset bitpack::bitpack fst::fst analysis::analysis)
+add_library(strata::search ALIAS strata_search)
+
+# The whole engine: what the tools, tests, and benchmarks link.
 add_library(strata INTERFACE)
-target_include_directories(strata INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_compile_features(strata INTERFACE cxx_std_20)
-target_link_libraries(strata INTERFACE docset::docset bitpack::bitpack fst::fst task::task hashes::hashes crc32c::crc32c residency::residency varint::varint termdict::termdict analysis::analysis compressors::compressors fusefilter::fusefilter completion::completion threadpool::threadpool)
+target_link_libraries(strata INTERFACE strata::search)
 add_library(strata::strata ALIAS strata)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)

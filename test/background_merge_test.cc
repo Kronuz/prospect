@@ -6,7 +6,7 @@
 // discarding a merge, EIO fencing, and a damaged source left for heal(); merge outputs
 // published in id order; and the merge build's cancellation points.
 #include "strata/core/faultfs.hh"
-#include "strata/core/index.hh"
+#include "strata/search/index.hh"
 #include "strata/core/pool_executor.hh"
 
 #include <chrono>

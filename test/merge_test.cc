@@ -2,8 +2,8 @@
 // bytes as one flush of its live documents in docid order; and the result answers as the
 // sources did.
 #include "strata/core/faultfs.hh"
-#include "strata/core/index.hh"
-#include "strata/core/merge.hh"
+#include "strata/search/index.hh"
+#include "strata/search/merge.hh"
 #include "strata/core/merge_policy.hh"
 
 #include <algorithm>

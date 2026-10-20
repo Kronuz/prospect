@@ -10,8 +10,8 @@
 //     scores, and counts, bit for bit; and find_term plus complete_impacts is term().
 #include "engine_query.hh"
 #include "strata/core/faultfs.hh"
-#include "strata/core/index.hh"
-#include "strata/core/writer.hh"
+#include "strata/search/index.hh"
+#include "strata/search/writer.hh"
 
 #include <algorithm>
 #include <cmath>

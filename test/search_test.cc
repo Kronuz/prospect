@@ -2,7 +2,7 @@
 // exclusion, and phrases; match sets, scores, top-k, and counts.
 #include "strata/search/search.hh"
 #include "strata/search/searcher.hh"
-#include "strata/core/writer.hh"
+#include "strata/search/writer.hh"
 
 #include <cmath>
 #include <cstdio>

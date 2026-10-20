@@ -2,7 +2,7 @@
 // stored reads, and every scorer must be safe to share (run under TSan). Each thread's
 // answers must equal a single thread's.
 #include "strata/search/search.hh"
-#include "strata/core/writer.hh"
+#include "strata/search/writer.hh"
 
 #include <cstdio>
 #include <cstdlib>
