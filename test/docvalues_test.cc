@@ -3,7 +3,7 @@
 // skip groups (against brute force over ordinals), single-value extraction at every
 // width, and statistics (a sum past 2^64) match the input; single-byte corruptions throw
 // corrupt_segment or decode without crashing, and truncations throw.
-#include "strata/docvalues.hh"
+#include "strata/search/docvalues.hh"
 
 #include <algorithm>
 #include <bit>

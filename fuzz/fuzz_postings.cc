@@ -4,10 +4,10 @@
 // and every read path must fence (corrupt_segment) or answer with ordinals increasing and
 // below the document count, advance() at or past its target. Inputs are bounded: at most
 // 6,000 documents and 64 flips. Aborts on a wrong answer, so a finding is a crash.
-#include "strata/reader.hh"
-#include "strata/check.hh"
-#include "strata/search.hh"
-#include "strata/writer.hh"
+#include "strata/core/reader.hh"
+#include "strata/core/check.hh"
+#include "strata/search/search.hh"
+#include "strata/core/writer.hh"
 
 #include <crc32c/crc32c.hh>
 #include <cstdio>

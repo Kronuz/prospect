@@ -2,9 +2,9 @@
 // ordinal_of(docid), absent docids inside the range included; the kind follows the order
 // written; every validation check rejects the damage it names; and a permuted segment opens,
 // pinned by test/fixtures/permuted.sx.
-#include "strata/docids.hh"
-#include "strata/reader.hh"
-#include "strata/writer.hh"
+#include "strata/core/docids.hh"
+#include "strata/core/reader.hh"
+#include "strata/core/writer.hh"
 
 #include <algorithm>
 #include <cstdio>

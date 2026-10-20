@@ -2,9 +2,9 @@
 // computed directly from the sources' live postings, with permuted sources and deletes; its
 // bytes do not depend on how many passes the memory allows; the order is one merge_segments
 // accepts, and deterministic; the fallback and cancellation hold.
-#include "strata/faultfs.hh"
-#include "strata/index.hh"
-#include "strata/reorder.hh"
+#include "strata/core/faultfs.hh"
+#include "strata/core/index.hh"
+#include "strata/search/reorder.hh"
 
 #include <cstdio>
 #include <cstdlib>

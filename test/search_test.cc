@@ -1,8 +1,8 @@
 // Scorers against a brute-force evaluator: disjunction, conjunction, required-plus-optional,
 // exclusion, and phrases; match sets, scores, top-k, and counts.
-#include "strata/search.hh"
-#include "strata/searcher.hh"
-#include "strata/writer.hh"
+#include "strata/search/search.hh"
+#include "strata/search/searcher.hh"
+#include "strata/core/writer.hh"
 
 #include <cmath>
 #include <cstdio>

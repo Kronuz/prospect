@@ -1,11 +1,11 @@
 // Fixtures pinning format 13's bytes and the index digest (format-13.md F22): every commit must
 // reproduce them exactly. Regenerate only for an intended format change:
 // STRATA_WRITE_FIXTURES=1 fixtures_test.
-#include "strata/faultfs.hh"
-#include "strata/index.hh"
-#include "strata/merge.hh"
-#include "strata/reader.hh"
-#include "strata/writer.hh"
+#include "strata/core/faultfs.hh"
+#include "strata/core/index.hh"
+#include "strata/core/merge.hh"
+#include "strata/core/reader.hh"
+#include "strata/core/writer.hh"
 
 #include <algorithm>
 #include <cstdio>

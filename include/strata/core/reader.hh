@@ -33,10 +33,10 @@
 #include "hashes.hh"
 #include <crc32c/crc32c.hh>
 #include "residency.hh"
-#include "strata/docids.hh"
-#include "strata/format.hh"
-#include "strata/keys.hh"
-#include "strata/section_io.hh"
+#include "strata/core/docids.hh"
+#include "strata/core/format.hh"
+#include "strata/core/keys.hh"
+#include "strata/core/section_io.hh"
 #include "termdict.hh"
 
 #include <algorithm>

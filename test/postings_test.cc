@@ -1,11 +1,11 @@
 // Format 13's postings items (docs/design/format-13.md F10, F11, F13): the advance entries
 // (M16, A3 at 128 postings), against a model of every term's postings, positions, and
 // pairs; and corrupt entries, which fence or answer with ordinals in order and in range.
-#include "strata/reader.hh"
-#include "strata/search.hh"
-#include "strata/searcher.hh"
-#include "strata/check.hh"
-#include "strata/writer.hh"
+#include "strata/core/reader.hh"
+#include "strata/search/search.hh"
+#include "strata/search/searcher.hh"
+#include "strata/core/check.hh"
+#include "strata/core/writer.hh"
 #include "skip_layout.hh"
 
 #include <crc32c/crc32c.hh>

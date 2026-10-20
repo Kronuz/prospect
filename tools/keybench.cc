@@ -3,7 +3,7 @@
 // appended as a miss inside the keys' range. Best of ROUNDS, ns per lookup.
 //   keybench DIR ROUNDS [PREFIX] < keys
 // Uses only the index's public API, so the same file builds against format 12 and format 13.
-#include "strata/index.hh"
+#include "strata/core/index.hh"
 
 #include "completion/posix.h"
 

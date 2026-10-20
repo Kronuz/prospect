@@ -6,7 +6,7 @@
 // with the writer's steps at chosen points. The clock is manual: sleep_until() advances it.
 #pragma once
 
-#include "strata/executor.hh"
+#include "strata/core/executor.hh"
 
 #include <condition_variable>
 #include <deque>

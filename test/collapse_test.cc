@@ -3,7 +3,7 @@
 // bounds; binary keys keep stored order where numeric and bytes keys are canonical; shards
 // collapsed and merged equal one collapse of the union, and their count triples merge by
 // D9's rule.
-#include "strata/collapse.hh"
+#include "strata/search/collapse.hh"
 
 #include <algorithm>
 #include <cstdio>

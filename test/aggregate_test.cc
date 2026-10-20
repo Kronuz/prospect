@@ -3,7 +3,7 @@
 // with heavy cancellation); one partial and any split into 1 to 64 partials, merged in any
 // order or tree, render byte for byte alike; nesting 2,000 deep runs on work stacks; empty
 // inputs report empty results.
-#include "strata/aggregate.hh"
+#include "strata/search/aggregate.hh"
 
 #include <algorithm>
 #include <array>

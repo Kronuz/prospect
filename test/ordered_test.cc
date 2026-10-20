@@ -1,7 +1,7 @@
 // Ordered keys (Phase 4, D3a): round trips and order over every type's extremes: minimum
 // and maximum integers, ±0, ±infinity, the smallest subnormals, and dates at years 1 and
 // 9999 as f64 seconds; random pairs keep their order.
-#include "strata/ordered.hh"
+#include "strata/search/ordered.hh"
 
 #include <cmath>
 #include <cstdio>

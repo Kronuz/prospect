@@ -42,8 +42,8 @@
 
 #include "bitpack.hh"
 #include "docset.hh"
-#include "strata/format.hh"
-#include "strata/ordered.hh"
+#include "strata/core/format.hh"
+#include "strata/search/ordered.hh"
 
 #include <algorithm>
 #include <cstddef>

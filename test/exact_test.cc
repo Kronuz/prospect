@@ -2,7 +2,7 @@
 // (Python's math.fsum algorithm), whatever the order and however they are split and
 // merged; squares enter exactly; integer sums do not overflow; infinities and NaN follow
 // IEEE addition.
-#include "strata/exact.hh"
+#include "strata/search/exact.hh"
 
 #include <algorithm>
 #include <cmath>

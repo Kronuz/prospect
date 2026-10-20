@@ -2,8 +2,8 @@
 // its df, a conjunction its cheapest child, a disjunction the sum of its children, the
 // required-plus-optional and exclusion scorers their required side, a phrase its rarest
 // term; and every cost bounds the number of matches from above, which the planners rely on.
-#include "strata/search.hh"
-#include "strata/writer.hh"
+#include "strata/search/search.hh"
+#include "strata/core/writer.hh"
 
 #include <algorithm>
 #include <cstdio>

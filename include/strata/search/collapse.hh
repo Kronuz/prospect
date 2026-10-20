@@ -28,7 +28,7 @@
 
 #pragma once
 
-#include "strata/ordered.hh"
+#include "strata/search/ordered.hh"
 #include "varint.hh"
 
 #include <algorithm>

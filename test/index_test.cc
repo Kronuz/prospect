@@ -1,8 +1,8 @@
 // The index on faultfs: keys and versions, replace and delete, atomic transactions,
 // explicit docids, replayed positions, commits surviving crashes, fencing, ENOSPC
 // recovery, retention, and fail-closed opens.
-#include "strata/faultfs.hh"
-#include "strata/index.hh"
+#include "strata/core/faultfs.hh"
+#include "strata/core/index.hh"
 
 #include <cstdio>
 #include <cstdlib>

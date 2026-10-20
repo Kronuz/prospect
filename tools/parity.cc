@@ -10,10 +10,10 @@
 // (reordering.md D4, graph terms of at least MIN_DF documents) and searched as one.
 //   parity CORPUS_JSON N RANK_JSONL [SEGMENTS]
 #include "analysis.hh"
-#include "strata/reorder.hh"
-#include "strata/search.hh"
-#include "strata/searcher.hh"
-#include "strata/writer.hh"
+#include "strata/search/reorder.hh"
+#include "strata/search/search.hh"
+#include "strata/search/searcher.hh"
+#include "strata/core/writer.hh"
 
 #include <cmath>
 #include <cstdio>

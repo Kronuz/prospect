@@ -2,7 +2,7 @@
 // structure decoded, rather than only what queries happen to read.
 #pragma once
 
-#include "strata/reader.hh"
+#include "strata/core/reader.hh"
 
 #include <cstdint>
 #include <utility>

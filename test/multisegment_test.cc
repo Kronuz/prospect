@@ -3,10 +3,10 @@
 //     holding the same documents: the same docids, scores, ties, and counts.
 //   - With deletes, pruned search across segments equals an exhaustive scan of every
 //     segment's live matches, ties by docid, and counts equal.
-#include "strata/faultfs.hh"
-#include "strata/index.hh"
-#include "strata/searcher.hh"
-#include "strata/budget.hh"
+#include "strata/core/faultfs.hh"
+#include "strata/core/index.hh"
+#include "strata/search/searcher.hh"
+#include "strata/core/budget.hh"
 #include <algorithm>
 #include <bit>
 #include <cmath>

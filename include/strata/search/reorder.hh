@@ -3,8 +3,8 @@
 // order merge_segments writes. Documents are numbered by rank: their place in docid order.
 #pragma once
 
-#include "strata/bisection.hh"
-#include "strata/merge.hh"
+#include "strata/search/bisection.hh"
+#include "strata/core/merge.hh"
 
 #include <algorithm>
 #include <cstdint>

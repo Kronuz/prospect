@@ -2,7 +2,7 @@
 // 10, and 100 over random multi-valued documents with missing values, mixed directions,
 // and composite keys; shards' top-k lists merge to the single-shard answer; the wire form
 // round trips and rejects malformed input; block skipping never skips a competitor.
-#include "strata/sortkey.hh"
+#include "strata/search/sortkey.hh"
 
 #include <algorithm>
 #include <cmath>

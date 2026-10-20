@@ -9,9 +9,9 @@
 //     up twice per segment (once for its snapshot df, once for the scorer): the same hits,
 //     scores, and counts, bit for bit; and find_term plus complete_impacts is term().
 #include "engine_query.hh"
-#include "strata/faultfs.hh"
-#include "strata/index.hh"
-#include "strata/writer.hh"
+#include "strata/core/faultfs.hh"
+#include "strata/core/index.hh"
+#include "strata/core/writer.hh"
 
 #include <algorithm>
 #include <cmath>

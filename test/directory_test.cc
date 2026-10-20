@@ -9,8 +9,8 @@
 //   directory_test STATE_DIR [tmpfs]
 //   directory_test opener DIR open|create PARENT_DIR_FD   (the spawned second process)
 #include "completion/posix.h"
-#include "strata/faultfs.hh"
-#include "strata/index.hh"
+#include "strata/core/faultfs.hh"
+#include "strata/core/index.hh"
 
 #include <fcntl.h>
 #include <spawn.h>

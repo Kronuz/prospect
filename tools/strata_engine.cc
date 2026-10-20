@@ -18,12 +18,12 @@
 #include "completion/posix.h"
 #include "engine_query.hh"
 #include "residency.hh"
-#include "strata/budget.hh"
-#include "strata/index.hh"
-#include "strata/check.hh"
-#include "strata/search.hh"
-#include "strata/searcher.hh"
-#include "strata/writer.hh"
+#include "strata/core/budget.hh"
+#include "strata/core/index.hh"
+#include "strata/core/check.hh"
+#include "strata/search/search.hh"
+#include "strata/search/searcher.hh"
+#include "strata/core/writer.hh"
 
 #include <algorithm>
 #include <array>

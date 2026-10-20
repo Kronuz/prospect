@@ -4,7 +4,7 @@
 // ascending).
 #pragma once
 
-#include "strata/search.hh"
+#include "strata/search/search.hh"
 
 #include <algorithm>
 #include <cmath>

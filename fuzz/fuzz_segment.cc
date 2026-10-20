@@ -8,10 +8,10 @@
 // recompute every checksum, so the changes reach the decoders instead of stopping at
 // verification. One base uses 64-bit skip offsets. Run with a -timeout of a few seconds
 // so a hang counts as a finding.
-#include "strata/check.hh"
-#include "strata/reader.hh"
-#include "strata/search.hh"
-#include "strata/writer.hh"
+#include "strata/core/check.hh"
+#include "strata/core/reader.hh"
+#include "strata/search/search.hh"
+#include "strata/core/writer.hh"
 
 #include <crc32c/crc32c.hh>
 #include <algorithm>

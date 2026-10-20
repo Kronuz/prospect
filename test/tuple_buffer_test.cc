@@ -2,8 +2,8 @@
 // documents give the same segment bytes, with hash collisions forced, long terms and far
 // positions in side entries, terms given whole (an explicit wdf, positionless, keys), and
 // documents left out and reordered at flush.
-#include "strata/tuple_buffer.hh"
-#include "strata/writer.hh"
+#include "strata/search/tuple_buffer.hh"
+#include "strata/core/writer.hh"
 
 #include <algorithm>
 #include <cstdio>

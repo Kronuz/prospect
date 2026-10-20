@@ -8,8 +8,8 @@
 //     the read throws.
 //   - A segment damaged for good is recovered from a retained predecessor that does not
 //     name it (recover --to).
-#include "strata/faultfs.hh"
-#include "strata/index.hh"
+#include "strata/core/faultfs.hh"
+#include "strata/core/index.hh"
 
 #include <cstdio>
 #include <cstdlib>

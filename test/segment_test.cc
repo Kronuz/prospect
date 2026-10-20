@@ -1,8 +1,8 @@
 // Segment writer and reader against a naive model: postings, advance, block_end,
 // impact bounds, lengths, and corrupt files (every truncation, random corruption).
-#include "strata/reader.hh"
-#include "strata/search.hh"
-#include "strata/writer.hh"
+#include "strata/core/reader.hh"
+#include "strata/search/search.hh"
+#include "strata/core/writer.hh"
 #include "skip_layout.hh"
 
 #include <crc32c/crc32c.hh>

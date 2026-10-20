@@ -1,14 +1,14 @@
 // Format 13's open rules (docs/design/format-13.md T1, step 7c-1): the frozen prefix (F2),
 // F3's kinds and F5's canonical layout, F4's structure bits and presence, F6's reserved
 // words, the sink's file order, and the format-12 refusal fixtures.
-#include "strata/faultfs.hh"
-#include "strata/index.hh"
-#include "strata/merge.hh"
-#include "strata/check.hh"
-#include "strata/reader.hh"
-#include "strata/search.hh"
-#include "strata/searcher.hh"
-#include "strata/writer.hh"
+#include "strata/core/faultfs.hh"
+#include "strata/core/index.hh"
+#include "strata/core/merge.hh"
+#include "strata/core/check.hh"
+#include "strata/core/reader.hh"
+#include "strata/search/search.hh"
+#include "strata/search/searcher.hh"
+#include "strata/core/writer.hh"
 
 #include <crc32c/crc32c.hh>
 #include <sys/mman.h>

@@ -2,7 +2,7 @@
 // data"): each group's advance entries and each block's bytes, as file offsets.
 #pragma once
 
-#include "strata/reader.hh"
+#include "strata/core/reader.hh"
 
 #include <cstddef>
 #include <string_view>

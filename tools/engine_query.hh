@@ -4,8 +4,8 @@
 //   words are optional, +word is required, -word is excluded, "a b" is a phrase.
 #pragma once
 
-#include "strata/search.hh"
-#include "strata/searcher.hh"
+#include "strata/search/search.hh"
+#include "strata/search/searcher.hh"
 
 #include <algorithm>
 #include <charconv>

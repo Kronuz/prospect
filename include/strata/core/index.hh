@@ -5,17 +5,17 @@
 // manifest and fails closed when a file it names is missing or differs.
 #pragma once
 
-#include "strata/budget.hh"
-#include "strata/check.hh"
-#include "strata/executor.hh"
-#include "strata/files.hh"
-#include "strata/merge.hh"
-#include "strata/merge_policy.hh"
-#include "strata/rate_limiter.hh"
-#include "strata/reader.hh"
-#include "strata/reorder.hh"
-#include "strata/tuple_buffer.hh"
-#include "strata/writer.hh"
+#include "strata/core/budget.hh"
+#include "strata/core/check.hh"
+#include "strata/core/executor.hh"
+#include "strata/core/files.hh"
+#include "strata/core/merge.hh"
+#include "strata/core/merge_policy.hh"
+#include "strata/core/rate_limiter.hh"
+#include "strata/core/reader.hh"
+#include "strata/search/reorder.hh"
+#include "strata/search/tuple_buffer.hh"
+#include "strata/core/writer.hh"
 
 #include "completion/io.h"
 #include "hashes.hh"

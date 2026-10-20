@@ -8,9 +8,9 @@
 //     and the deleted fraction stay bounded against a fresh index of the same documents,
 //     and do not trend upward.
 // STRATA_CHURN_CYCLES sets the number of churn cycles (default 8).
-#include "strata/faultfs.hh"
-#include "strata/index.hh"
-#include "strata/searcher.hh"
+#include "strata/core/faultfs.hh"
+#include "strata/core/index.hh"
+#include "strata/search/searcher.hh"
 
 #include <algorithm>
 #include <cstdio>

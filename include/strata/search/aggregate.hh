@@ -37,7 +37,7 @@
 
 #pragma once
 
-#include "strata/exact.hh"
+#include "strata/search/exact.hh"
 
 #include <algorithm>
 #include <array>

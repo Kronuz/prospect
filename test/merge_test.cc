@@ -1,10 +1,10 @@
 // Merges: the merge of an index's segments, after deletes and replacements, is the same
 // bytes as one flush of its live documents in docid order; and the result answers as the
 // sources did.
-#include "strata/faultfs.hh"
-#include "strata/index.hh"
-#include "strata/merge.hh"
-#include "strata/merge_policy.hh"
+#include "strata/core/faultfs.hh"
+#include "strata/core/index.hh"
+#include "strata/core/merge.hh"
+#include "strata/core/merge_policy.hh"
 
 #include <algorithm>
 #include <bit>

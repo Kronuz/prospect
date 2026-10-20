@@ -7,8 +7,8 @@
 // the same documents would.
 #pragma once
 
-#include "strata/reader.hh"
-#include "strata/writer.hh"
+#include "strata/core/reader.hh"
+#include "strata/core/writer.hh"
 #include "task.hh"
 
 #include <algorithm>

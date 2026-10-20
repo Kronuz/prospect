@@ -8,8 +8,8 @@
 //   3. The open succeeds; after reclaim() and a commit, every strata file on disk is named
 //      by a manifest on disk, and a storage budget's permit covers the bytes on disk.
 // STRATA_CRASH_POINTS sets how many crash points to cover per workload (default 400).
-#include "strata/faultfs.hh"
-#include "strata/index.hh"
+#include "strata/core/faultfs.hh"
+#include "strata/core/index.hh"
 
 #include <cstdio>
 #include <cstdlib>
