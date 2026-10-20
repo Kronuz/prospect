@@ -58,10 +58,21 @@ offset's scratch build (`.scratch/wt-pos`) ready.
   to 8 on the host, 6 to 35 s of system time per run); its user times are kept in
   `.scratch/vm-session1.txt` only.
 
+- Reproducible seeds (the lead's decision, 2026-10-20): 294fd85 (exact 128-bit integer
+  comparisons, pre_freeze 0x80000008, fixtures, prefix CRC, T7 hash re-pinned, seeds.txt pinned
+  for arm64 CI), ff00722 (an exact tie pinned to the higher wdf; the `>=` mutant fails it).
+  Pairs equal the floating-point rule's for every term of a 1M flush and merge on x86-64; 1M
+  segments differ from 59d9d08's only in the version and prefix CRC, so no query A/B is needed.
+  ctest 39/39 (macOS x86_64, Release, nice 19, 4 jobs). One slip: the ctest run may have
+  overlapped the first minutes of a strict hold (detent-publication-qualification, 05:54).
+- The owner's decision (no freeze until the first release): the attribution ranked by expected
+  gain, each cause a format change now, later, or format-free (7b3bcca).
+
 ## Next
 
-1. The 5M confirmation's numbers (gate VM, session 2 running; it waits for the VM's load to fall
-   below 1.5 before each step).
+1. The 5M confirmation's numbers: sessions 1 to 3 and the in-situ run were disturbed by host
+   load (other sessions' tests, host load to 100); the final session gates each step on the
+   host's load under 3 and logs the highest seen (`.scratch/vm/steps.log`).
 2. For the lead: rows 2 and 3's prototypes are ready to become a workstream (format-free, after
    the freeze); FQ3's offset goes to the architect with C2.
 
