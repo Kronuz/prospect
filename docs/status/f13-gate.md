@@ -10,7 +10,7 @@
 
 ## State
 
-Reordered layout in progress: A's reordering merge done, B's running (strict hold).
+Reordered layout done (rows 1 to 4); merged layout in progress: B merged and F12 merged built, row 5's format-12 sessions running.
 
 ## Done
 
@@ -19,11 +19,24 @@ Reordered layout in progress: A's reordering merge done, B's running (strict hol
   harness with all six engines, `bench/quick/engines_ab.py` scoring through `ab.py --aa`.
 - 5M flushed indexes (16 segments, 256 MB buffer): A 132.6 s, 572 MiB peak; B 143.7 s, 573 MiB.
 - A's reordering merge: 1,063 s, 4.76 GiB peak RSS; postings 845,553,044 bytes.
+- B's reordering merge: 1,055 s, 4.85 GiB; postings 843,636,006 (9.96 MB over keyed `-bp`'s
+  `.doc`), whole file 2,525,610,636 (0.67% under keyed `-bp`'s).
+- Identity, reordered: dumps identical with and without a count, verify and the probe's verify 0
+  mismatches of 1,162.
+- Run-level A/B, reordered: 31 wins / 0 losses (`bm25`), 22 / 0 (`bm25_xapian`).
+- Harness, B reordered against Lucene, Lucene `-bp`, Tantivy, PISA: five trials of S′, scored at
+  the run level (`docs/perf/format13-gate-vm.md`, row 4b). Reordered indexes then removed.
+- F12 (69a3f8c) 5M index 218 s (cold corpus, sys 74 s), 605 MiB peak; docid merge 185 s,
+  4.79 GiB; its merged segment is not byte-identical to the engine's older format-12 index
+  (2,500 bytes apart, postings equal in size), so row 5 uses this fresh one.
+- B merged: index 143.5 s (warm corpus), 574 MiB; docid merge 155 s, 4.75 GiB; postings
+  1,005,615,335, whole 2,755,978,368.
 
 ## Next
 
-1. Builds of A, B, F12 and the review's `probe_search` for A and B.
-2. Reordered indexes of A and B; rows 1 to 4 on them; then the merged layout; then row 5.
+1. Row 5: format 12 against B on the merged index (`TOP_10`, `TOP_100`), serving memory.
+2. A merged (after removing F12's index for space); identity and A/B sessions on merged.
+3. A warm-up check of the harness (20 s against D17's 5 s) for the JVM baselines.
 
 ## Blocked on
 
