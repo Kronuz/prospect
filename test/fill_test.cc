@@ -24,6 +24,15 @@ static int failures = 0;
 		if (!(cond)) { std::fprintf(stderr, "%s:%d: CHECK(%s)\n", __FILE__, __LINE__, #cond); if (++failures > 20) std::exit(1); } \
 	} while (0)
 
+namespace prospect {
+struct fill_test_access {
+	static bool scratch_clear(const postings_iterator& it) {
+		for (auto w : it.word_sum_) { if (w) { return false; } }
+		return true;
+	}
+};
+}  // namespace prospect
+
 namespace {
 
 namespace f = prospect::format;
@@ -37,11 +46,15 @@ constexpr ordinal_t docs = 40000;
 std::string build(const std::map<std::string, ords_t>& terms) {
 	prospect::segment_writer w;
 	std::map<std::string, std::size_t> at;
+	std::mt19937_64 wdfs(9);
 	for (ordinal_t d = 0; d < docs; ++d) {
 		std::vector<prospect::posting_input> in;
 		for (const auto& [t, o] : terms) {
 			auto& i = at[t];
-			if (i < o.size() && o[i] == d) { in.push_back({t, 1, {}}), ++i; }
+			if (i < o.size() && o[i] == d) {
+				// "bigwdf" has wdfs of about 30 bits, so its blocks are large enough to hold a crafted one.
+				in.push_back({t, t == "bigwdf" ? 1 + std::uint32_t(wdfs() >> 34) : 1, {}}), ++i;
+			}
 		}
 		w.add(1 + d, in, 1);
 	}
@@ -278,6 +291,33 @@ ords_t run_edges_term() {
 	return o;
 }
 
+// A damaged copy walked the way count() does (aligned windows) and in 700-ordinal windows from
+// each posting: whether it fenced. The window's guard words and the scatter scratch must be
+// untouched whatever happens.
+bool walk_copy(const std::string& bad, const std::string& term) {
+	try {
+		prospect::segment sb(bad);
+		const auto& inv = sb.get<prospect::inverted_plugin>();
+		const auto info = *inv.term(term);
+		for (const ordinal_t len : {4096u, 700u}) {
+			prospect::postings_iterator it(inv, info);
+			window w;
+			for (ordinal_t d = it.next(); d != no_more_docs;) {
+				const ordinal_t base = len == 4096 ? d & ~ordinal_t(4095) : d, end = base + len;
+				w.clear();
+				it.fill(base, end, w.bits);
+				CHECK(w.guarded());
+				CHECK(prospect::fill_test_access::scratch_clear(it));
+				d = it.doc();
+				if (d != no_more_docs && d < end) { CHECK(false); break; }
+			}
+		}
+		return false;
+	} catch (const strata::corrupt_segment&) {
+		return true;
+	}
+}
+
 int main_body() {
 	std::mt19937_64 rng(2026);
 	std::map<std::string, ords_t> terms;
@@ -293,6 +333,7 @@ int main_body() {
 	}
 	terms["runs"] = runs_term(rng);
 	terms["wordy"] = wordy_term(rng);
+	terms["bigwdf"] = random_term(rng, 0.2);
 	terms["wrap"] = wrap_term();
 	terms["run_edges"] = run_edges_term();
 	{  // medium density with a dense stretch, an empty stretch, and a sparse tail
@@ -351,29 +392,50 @@ int main_body() {
 				}
 			}
 			reseal(bad);
-			try {
-				prospect::segment sb(bad);
-				const auto& inv = sb.get<prospect::inverted_plugin>();
-				const auto info = *inv.term(term);
-				for (const ordinal_t len : {4096u, 700u}) {
-					prospect::postings_iterator it(inv, info);
-					window w;
-					for (ordinal_t d = it.next(); d != no_more_docs;) {
-						const ordinal_t base = len == 4096 ? d & ~ordinal_t(4095) : d, end = base + len;
-						w.clear();
-						it.fill(base, end, w.bits);
-						CHECK(w.guarded());
-						d = it.doc();
-						if (d != no_more_docs && d < end) { CHECK(false); break; }
-					}
-				}
-				++answered;
-			} catch (const strata::corrupt_segment&) {
-				++fenced;
-			}
+			++(walk_copy(bad, term) ? fenced : answered);
 		}
 	}
 	CHECK(fenced > 100 && answered > 100);
+
+	// --- crafted blocks that pass the last-ordinal check only by wrapping ---------------------------
+	// Two checks keep the fused unpack from wrapping: widths of at most 25 bits, and an entry's last
+	// above the one before it. Without either, a block can sum to the entry's last mod 2^32 with its
+	// leading ordinals far outside the window. Each copy must fence (and, if a check is removed, the
+	// assert in scatter or the guard words catch the write).
+	{
+		const auto info0 = *s.get<prospect::inverted_plugin>().term("bigwdf");
+		const auto layout = skip_test::parse(file, s, info0);
+		std::size_t wide = 0, flat = 0;
+		for (std::size_t c = 2; c < layout.blocks.size(); ++c) {
+			const auto& b = layout.blocks[c];
+			const auto& g = layout.groups[c / 32];
+			const std::size_t i = c % 32;
+			if (b.codec != unsigned(f::block_codec::deltas) || b.bytes < 1 + 16 * 32) { continue; }
+			{  // (a) width 32: gaps 2^31 and 2^31 + D - 128 sum, with 128 more, to D mod 2^32
+				std::uint32_t in[f::block] = {};
+				in[0] = 0x80000000u;
+				in[1] = 0x80000000u + std::uint32_t(b.last - layout.blocks[c - 1].last) - f::block;
+				std::string bad = file;
+				bad[b.at] = char(32);
+				bitpack::pack(in, 32, reinterpret_cast<std::uint8_t*>(&bad[b.at + 1]));
+				reseal(bad);
+				CHECK(walk_copy(bad, "bigwdf"));
+				++wide;
+			}
+			if (i + 1 < g.n) {  // (b) entry c's last equal to c - 1's, 128 gaps of 2^25 summing to 0 mod 2^32
+				std::uint32_t in[f::block];
+				std::fill(in, in + f::block, (1u << 25) - 1);
+				std::string bad = file;
+				skip_test::put(bad, g.adv, g.bit_last(i), g.wl, layout.blocks[c - 1].last - g.base);
+				bad[b.at] = char(25);
+				bitpack::pack(in, 25, reinterpret_cast<std::uint8_t*>(&bad[b.at + 1]));
+				reseal(bad);
+				CHECK(walk_copy(bad, "bigwdf"));
+				++flat;
+			}
+		}
+		CHECK(wide >= 10 && flat >= 10);
+	}
 	std::printf("fill%s: %zu damaged copies fenced, %zu answered\n", prospect::fill_fast ? "" : " (fast paths off)", fenced, answered);
 	return 0;
 }

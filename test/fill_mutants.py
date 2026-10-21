@@ -47,6 +47,8 @@ FIRST_SCATTER = """		std::uint64_t c = 0;
 MUTANTS = [
     ("walk: a block ending at the window's end is taken", "entries", "if (next.last >= end) { return; }", "if (next.last > end) { return; }", "fill_test"),
     ("walk: the cached entry is filed under the wrong block", "entries", "checked_b_ = next_block_;\n				if (next.last", "checked_b_ = next_block_ - 1;\n				if (next.last", "fill_test"),
+    ("walk: an entry's last need not rise", "entries", "last > gr.last || last <= r.last || start >= stop", "last > gr.last || start >= stop", "fill_test"),
+    ("fused unpack: widths up to 32 bits", "wrap", "|| width > 25 ||", "|| width > 32 ||", "fill_test"),
     ("step-1 run: last bit missing", "range", "set_range(r.base + 1 - base, r.last - base, bits);", "set_range(r.base + 1 - base, r.last - base - 1, bits);", "fill_test"),
     ("step-1 run: last word overwrites", "range", "bits[wh] |= mh;", "bits[wh] = mh;", "fill_test"),
     ("scatter: the first 64-bit sum with a zero for untouched", "wrap", OLD_SCATTER, FIRST_SCATTER, "fill_test"),

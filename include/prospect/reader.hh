@@ -584,6 +584,7 @@ inline constexpr auto bit_masks = [] {
 // block reads its group's advance entries without checking them, and a block's entry is
 // checked when the block is decoded.
 class postings_iterator {
+	friend struct fill_test_access;  // test/fill_test.cc checks the scatter scratch
 public:
 	postings_iterator(const inverted_plugin::reader& seg, const format::term_info& info) : seg_(&seg), info_(info), df_(info.df) {
 		if (info.flags & format::single_posting) {
@@ -1191,6 +1192,7 @@ private:
 
 	// ORs a checked FOR block lying wholly inside the window [base, base + 4096) into bits.
 	void fill_for(const block_ref& r, ordinal_t base, std::uint64_t* bits) {
+		assert(r.last > r.base);
 		const std::uint8_t* in = reinterpret_cast<const std::uint8_t*>(blocks_begin_ + r.offset);
 		if (std::uint64_t(r.base) + 1 < base) { corrupt("ordinal block span"); }
 		const std::uint8_t head = in[0];

@@ -360,7 +360,13 @@ canary words on both sides, half the windows pre-filled with other clauses' bits
    sparse tail, which makes the first version's 64-bit sum wrap to zero at that bit.
 6. Fast path against fallback: both builds check the same terms against the same model, so they agree
    with each other.
-7. Damaged copies (1,280 per build; 1,044 fenced, 236 answered): a random byte or bit in a random
+7. Crafted blocks (review CR1): on a term with ~30-bit wdfs, whose blocks are big enough, a width-32
+   block whose gaps sum to the entry's last mod 2^32 with its leading ordinals far outside the window,
+   and an entry whose last equals the one before it with 128 gaps of 2^25 - 1 summing to 0 mod 2^32;
+   each must fence, and without the width limit or the rising check the assert (or a guard word)
+   fails. After every fill of a damaged copy the scatter scratch (`word_sum_`) must be all zero
+   (review CR4).
+8. Damaged copies (1,280 per build; 1,044 fenced, 236 answered): a random byte or bit in a random
    block of eight terms, or a random advance entry (last, offset, codec), resealed so the checksums
    pass. Each fill must fence (`corrupt_segment`) or answer, with the guard words untouched.
 
@@ -376,12 +382,14 @@ index, engine_query, postings, segment) pass in a Debug build with the asserts o
 engine's `dump` is byte-identical to main's at 1M merged and reordered.
 
 **Mutants** (`test/fill_mutants.py BUILD_DIR`: one at a time, header restored after each; run
-against `fill_test`, the fallback's against `fill_slow_test`). All 13 caught:
+against `fill_test`, the fallback's against `fill_slow_test`). All 15 caught:
 
 | Path | Mutant | Caught by |
 |---|---|---|
 | Entry walk | a block ending at the window's end is taken | window sweep (bit set at `end`) |
 | Entry walk | cached entry filed under the wrong block | fence on a valid index |
+| Entry walk | an entry's last need not rise (review CR1) | crafted entry pair, assert in `fill_for` |
+| Fused unpack | widths up to 32 bits, not 25 (review CR1) | crafted width-32 block, assert in `scatter` |
 | Step-1 range | last bit missing | windows against the model |
 | Step-1 range | last word overwritten, not OR'd | pre-filled windows |
 | Scatter, dense | the first 64-bit sum with zero for untouched | the wrap term, windows |
