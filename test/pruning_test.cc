@@ -31,10 +31,12 @@ public:
 		: docs_(std::move(docs)), bound_(bound), cost_(cost), terms_(terms) {}
 	ordinal_t doc() const noexcept override { return i_ < docs_.size() ? docs_[i_].first : no_more_docs; }
 	ordinal_t next() override {
-		++i_;
+		if (started_) { ++i_; }
+		started_ = true;
 		return settle();
 	}
 	ordinal_t advance(ordinal_t t) override {
+		started_ = true;
 		while (i_ < docs_.size() && docs_[i_].first < t) { ++i_; }
 		return settle();
 	}
@@ -62,7 +64,8 @@ private:
 	std::vector<std::pair<ordinal_t, double>> docs_;
 	double bound_;
 	std::uint64_t cost_;
-	std::size_t terms_, i_ = std::size_t(-1);
+	std::size_t terms_, i_ = 0;
+	bool started_ = false;
 };
 
 using docs_t = std::vector<std::pair<ordinal_t, double>>;
