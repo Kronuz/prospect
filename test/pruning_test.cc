@@ -216,6 +216,37 @@ int main() {
 		CHECK(competed > 10000);
 		CHECK(pruned > 1000);
 	}
+	// The margin scales with the leaf count. One leaf of 1.0 and n - 1 just over half its ulp: summed
+	// in the given order each rounds up, in cost order they gather first, so the score outruns the
+	// bound by about (n - 1) / 2 ulp. For s across the range where the optional side first gets a
+	// minimum, the minimum plus the required score must stay below s, exactly (two-sum).
+	for (std::size_t n : {2u, 3u, 4u, 16u, 64u, 1024u}) {
+		std::vector<double> a(n, 1.001 * 0x1p-53);
+		std::vector<std::uint64_t> cost(n, 1);
+		a[0] = 1.0;
+		cost[0] = n + 1;  // the big leaf is last in cost order
+		auto probe = conjunction(a, cost, {0});
+		const double R = probe->max_score_total();
+		probe->next();
+		const double r = probe->score();
+		CHECK(n == 2 || r > R);
+		auto opt = std::make_unique<fake_scorer>(docs_t{}, 0.25, 1);
+		fake_scorer* opt_ptr = opt.get();
+		prospect::required_optional_scorer q(conjunction(a, cost, {0}), std::move(opt));
+		const double ulp = std::nextafter(R, inf) - R;
+		std::size_t handed = 0;
+		for (std::size_t k = 0; k < 8 * n + 32; ++k) {
+			const double s = R + double(k) * ulp;
+			opt_ptr->min_ = 0;
+			q.set_min_competitive_score(s);
+			const double m = opt_ptr->min_;
+			if (!(m > 0)) { continue; }
+			++handed;
+			const double hi = r + m, bb = hi - r, lo = (r - (hi - bb)) + (m - bb);  // two-sum: hi + lo == r + m
+			CHECK((hi - s) + lo < 0);                                               // r + m < s exactly
+		}
+		CHECK(handed > 4 * n);
+	}
 	// Random leaves, orders and boundaries: nothing that exceeds s is ever lost. The boundary is
 	// each document's own sum, one step below it (it competes) and the sum itself (it does not).
 	std::mt19937_64 rng(7);

@@ -20,6 +20,10 @@ Ledger of numbers: `docs/perf/pruning-floors.md`.
 - Timing at 1M reordered, both presets, 12 rounds: both changes hold.
 - Required-side minimum takes the same margin; mirrored crafted test, identity, ctest, timing in the perf doc.
 
+- Review (docs/reviews/pruning-floors.md, approve with conditions): CR1 margin test at n = 2..1024
+  (fails on the quarter-margin mutant); CR3 `score_terms` pure virtual; CR5 documented at `top_k` and
+  pinned by a counted-floor-above-best test; CR2 comment reworded.
+
 ## Next
 
 Review, then land. Open: a 1-3% slowdown on classes neither change reaches (layout suspected).

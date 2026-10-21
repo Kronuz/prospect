@@ -136,7 +136,8 @@ struct scorer {
 	// An upper bound on every score this scorer returns.
 	virtual double max_score_total() const noexcept = 0;
 	// An upper bound on the number of leaf scores score() adds, in any order (1 for a term).
-	virtual std::size_t score_terms() const noexcept { return 1; }
+	// Pure, so a composite cannot inherit a one-leaf margin by forgetting it.
+	virtual std::size_t score_terms() const noexcept = 0;
 	// Only documents scoring above `s` are wanted from now on; scorers may skip the rest.
 	virtual void set_min_competitive_score(double s) { (void)s; }
 	// An upper bound on score() for the current document, cheaper than score().
@@ -344,6 +345,7 @@ public:
 	void set_min_competitive_score(double s) override { min_ = s; }
 	ordinal_t block_end(ordinal_t t) override { return it_.block_end(t); }
 	double max_score_total() const noexcept override { return total_bound_; }
+	std::size_t score_terms() const noexcept override { return 1; }
 	std::optional<std::uint64_t> exact_count() override { return it_.cost(); }  // one segment, no deletes
 	bool matches_all() const noexcept override { return it_.cost() == seg_->doc_count(); }
 	std::unique_ptr<scorer> fresh() const override { return std::make_unique<term_scorer>(*seg_, it_.info(), weight_); }
@@ -971,8 +973,8 @@ private:
 	// O((n 2^-53)^2)) <= R + n 2^-52 s, since R <= s here. The margin of (n + 2) 2^-52 s covers
 	// that, the half ulp of s - R and the half ulp of the second subtraction (each at most
 	// 2^-53 s), with one 2^-52 s to spare; nextafter makes the result strictly lower. So
-	// x <= result implies x + y < s and the document cannot compete. Past 2^20 leaves the
-	// second-order term is no longer covered: no minimum.
+	// x <= result implies x + y < s and the document cannot compete. The second-order
+	// term stays covered to about 2^26 leaves; past 2^20 there is no minimum (only pruning lost).
 	static double side_minimum(double s, double R, std::size_t n) noexcept {
 		if (n > (std::size_t(1) << 20)) { return 0.0; }
 		const double t = s - R;
@@ -1393,8 +1395,8 @@ inline std::vector<hit> top_k(const segment& seg, scorer& s, std::size_t k, std:
 		}
 	}
 	// A floor (a strictly lower bound on the k-th score, from other segments) prunes from
-	// the start, and no hit at or below it is kept; counting prunes only where it is apart
-	// from scoring.
+	// the start, and no hit at or below it is kept (a counted query too, where it counts apart
+	// from scoring, so a floor above the k-th loses hits); the count stays exact.
 	if (count && !s.counts_apart()) { floor = 0; }
 	if (floor > 0 && !count) { s.set_min_competitive_score(floor); }
 	top_collector c(k, count != nullptr);
