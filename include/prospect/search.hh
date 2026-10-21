@@ -135,6 +135,9 @@ struct scorer {
 	virtual ordinal_t block_end(ordinal_t target) = 0;
 	// An upper bound on every score this scorer returns.
 	virtual double max_score_total() const noexcept = 0;
+	// An upper bound on the number of leaf scores score() adds, in any order (1 for a term).
+	// Pure, so a composite cannot inherit a one-leaf margin by forgetting it.
+	virtual std::size_t score_terms() const noexcept = 0;
 	// Only documents scoring above `s` are wanted from now on; scorers may skip the rest.
 	virtual void set_min_competitive_score(double s) { (void)s; }
 	// An upper bound on score() for the current document, cheaper than score().
@@ -167,6 +170,8 @@ struct scorer {
 	virtual bool matches() { return true; }
 	// Collects the k best hits itself (bulk scoring); false when the generic loop must.
 	virtual bool collect_top_k(top_collector& c) { (void)c; return false; }
+	// Whether collect_top_k counts apart from scoring, so a threshold seed may prune while counting.
+	virtual bool counts_apart() const noexcept { return false; }
 	// A strict lower bound on the k-th best score among this segment's matches, from stored
 	// threshold seeds (F13); 0 for none. Valid only where every match is live.
 	virtual double seed(std::size_t k) { (void)k; return 0.0; }
@@ -313,6 +318,13 @@ private:
 
 using scorer_ptr = std::unique_ptr<scorer>;
 
+// The leaf scores a sum over `children` adds (see scorer::score_terms).
+inline std::size_t terms_total(const std::vector<scorer_ptr>& children) noexcept {
+	std::size_t n = 0;
+	for (const auto& c : children) { n += c->score_terms(); }
+	return n;
+}
+
 class term_scorer final : public scorer {
 public:
 	term_scorer(const inverted_plugin::reader& seg, const format::term_info& info, double boost = 1.0)
@@ -333,6 +345,7 @@ public:
 	void set_min_competitive_score(double s) override { min_ = s; }
 	ordinal_t block_end(ordinal_t t) override { return it_.block_end(t); }
 	double max_score_total() const noexcept override { return total_bound_; }
+	std::size_t score_terms() const noexcept override { return 1; }
 	std::optional<std::uint64_t> exact_count() override { return it_.cost(); }  // one segment, no deletes
 	bool matches_all() const noexcept override { return it_.cost() == seg_->doc_count(); }
 	std::unique_ptr<scorer> fresh() const override { return std::make_unique<term_scorer>(*seg_, it_.info(), weight_); }
@@ -665,6 +678,7 @@ public:
 	}
 	ordinal_t block_end(ordinal_t t) override { return children_[0]->block_end(t); }
 	double max_score_total() const noexcept override { return bound_; }
+	std::size_t score_terms() const noexcept override { return terms_total(children_); }
 	std::unique_ptr<scorer> fresh() const override {
 		std::vector<scorer_ptr> kids;
 		for (const auto& c : children_) {
@@ -834,6 +848,7 @@ public:
 		return e;
 	}
 	double max_score_total() const noexcept override { return bound_; }
+	std::size_t score_terms() const noexcept override { return terms_total(children_); }
 
 	// A clause matching every document makes the union all of them; two clauses with known
 	// counts give |A| + |B| - |A and B|, counted on fresh copies.
@@ -841,6 +856,7 @@ public:
 
 	// Block-max MaxScore over windows of 4,096 ordinals (see the definition).
 	bool collect_top_k(top_collector& c) override;
+	bool counts_apart() const noexcept override { return true; }
 	// A match scores the sum of its clauses' non-negative scores, at least any one's (F13).
 	double seed(std::size_t k) override {
 		double s = 0.0;
@@ -933,10 +949,14 @@ public:
 	double max_score(ordinal_t from, ordinal_t upto) override { return req_->max_score(from, upto) + opt_->max_score(from, upto); }
 	ordinal_t block_end(ordinal_t t) override { return req_->block_end(t); }
 	double max_score_total() const noexcept override { return req_->max_score_total() + opt_->max_score_total(); }
+	std::size_t score_terms() const noexcept override { return req_->score_terms() + opt_->score_terms(); }
 	void set_min_competitive_score(double s) override {
 		min_ = s;
-		// Rounded down, so the required side's minimum never exceeds the exact difference.
-		req_->set_min_competitive_score(std::nextafter(s - opt_->max_score_total(), -std::numeric_limits<double>::infinity()));
+		// Each side's minimum is s less the other's bound, lowered by a margin (see below).
+		if (const double m = side_minimum(s, opt_->max_score_total(), opt_->score_terms()); m > 0) { req_->set_min_competitive_score(m); }
+		// A required side that cannot compete alone makes the optional side required: it gets
+		// the difference as its own minimum, and a union there prunes its cheap clauses.
+		if (const double m = side_minimum(s, req_->max_score_total(), req_->score_terms()); m > 0) { opt_->set_min_competitive_score(m); }
 	}
 	std::optional<std::uint64_t> exact_count() override { return req_->exact_count(); }  // the optional side never filters
 	std::unique_ptr<scorer> fresh() const override {
@@ -946,6 +966,22 @@ public:
 	}
 
 private:
+	// The minimum for one side's score x given the other's bound R (the floating-point sum of
+	// its n leaf bounds): 0 for none. A document competes when fl(x + y) > s, which needs
+	// x + y > s exactly (rounding is monotone and s is a double), so x > s - y. The other side's
+	// score y sums the same leaves as R in another order, so y <= R (1 + 2 (n-1) 2^-53 +
+	// O((n 2^-53)^2)) <= R + n 2^-52 s, since R <= s here. The margin of (n + 2) 2^-52 s covers
+	// that, the half ulp of s - R and the half ulp of the second subtraction (each at most
+	// 2^-53 s), with one 2^-52 s to spare; nextafter makes the result strictly lower. So
+	// x <= result implies x + y < s and the document cannot compete. The second-order
+	// term stays covered to about 2^26 leaves; past 2^20 there is no minimum (only pruning lost).
+	static double side_minimum(double s, double R, std::size_t n) noexcept {
+		if (n > (std::size_t(1) << 20)) { return 0.0; }
+		const double t = s - R;
+		if (!(t > 0)) { return 0.0; }
+		return std::nextafter(t - double(n + 2) * 0x1p-52 * s, -std::numeric_limits<double>::infinity());
+	}
+
 	// The optional side's first match at or after d, positioning it there.
 	ordinal_t optional_at(ordinal_t d) {
 		if (opt_started_ && opt_->doc() >= d) { return opt_->doc(); }
@@ -1011,6 +1047,7 @@ public:
 	double max_score(ordinal_t from, ordinal_t upto) override { return in_->max_score(from, upto); }
 	ordinal_t block_end(ordinal_t t) override { return in_->block_end(t); }
 	double max_score_total() const noexcept override { return in_->max_score_total(); }
+	std::size_t score_terms() const noexcept override { return in_->score_terms(); }
 	void set_min_competitive_score(double s) override { in_->set_min_competitive_score(s); }
 	double current_bound() override { return in_->current_bound(); }
 	// |include| - |include and exclude| for a term minus a term.
@@ -1156,6 +1193,7 @@ public:
 	void set_min_competitive_score(double s) override { min_ = s; }
 	ordinal_t block_end(ordinal_t t) override { return terms_[lead_]->block_end(t); }
 	double max_score_total() const noexcept override { return bound_; }
+	std::size_t score_terms() const noexcept override { return std::max<std::size_t>(1, slots_.size()); }
 
 private:
 	struct slot {
@@ -1357,9 +1395,10 @@ inline std::vector<hit> top_k(const segment& seg, scorer& s, std::size_t k, std:
 		}
 	}
 	// A floor (a strictly lower bound on the k-th score, from other segments) prunes from
-	// the start, and no hit at or below it is kept; counting never prunes.
-	if (count) { floor = 0; }
-	if (floor > 0) { s.set_min_competitive_score(floor); }
+	// the start, and no hit at or below it is kept (a counted query too, where it counts apart
+	// from scoring, so a floor above the k-th loses hits); the count stays exact.
+	if (count && !s.counts_apart()) { floor = 0; }
+	if (floor > 0 && !count) { s.set_min_competitive_score(floor); }
 	top_collector c(k, count != nullptr);
 	if (floor > 0) { c.seed(floor); }
 	if (!seg.core().docid_ordered()) {  // ties read docids, and the threshold stays below the k-th score

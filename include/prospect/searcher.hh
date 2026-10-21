@@ -55,6 +55,7 @@ public:
 	double max_score(ordinal_t from, ordinal_t upto) override { return inner_->max_score(from, upto); }
 	ordinal_t block_end(ordinal_t t) override { return inner_->block_end(t); }
 	double max_score_total() const noexcept override { return inner_->max_score_total(); }
+	std::size_t score_terms() const noexcept override { return inner_->score_terms(); }
 	void set_min_competitive_score(double s) override { inner_->set_min_competitive_score(s); }
 	double current_bound() override { return inner_->current_bound(); }
 	std::unique_ptr<scorer> fresh() const override {

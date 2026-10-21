@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <limits>
 #include <map>
 #include <random>
@@ -36,6 +37,7 @@ public:
 	double max_score(ordinal_t from, ordinal_t upto) override { return inner_->max_score(from, upto); }
 	ordinal_t block_end(ordinal_t t) override { return inner_->block_end(t); }
 	double max_score_total() const noexcept override { return inner_->max_score_total(); }
+	std::size_t score_terms() const noexcept override { return inner_->score_terms(); }
 	void set_min_competitive_score(double s) override { inner_->set_min_competitive_score(s); }
 	std::optional<std::uint64_t> exact_count() override { return inner_->exact_count(); }
 	std::unique_ptr<prospect::scorer> fresh() const override {
@@ -640,6 +642,28 @@ int main() {
 			const std::size_t matches = check_hits(any_of4(false), hits, k);
 			CHECK(counted == matches);
 			CHECK(scored * 2 < matches);  // not every match scored
+			// A counted query keeps a floor (a strict lower bound on the k-th score, as a threshold
+			// seed gives): it still counts every match, keeps the same hits, and scores fewer.
+			{
+				const std::size_t unfloored = scored;
+				std::vector<double> all_scores;
+				auto scan = any_of4(false);
+				for (auto d = scan->next(); d != strata::no_more_docs; d = scan->next()) { all_scores.push_back(scan->score()); }
+				std::sort(all_scores.begin(), all_scores.end(), std::greater<>());
+				const double floor = std::nextafter(all_scores[k - 1], -std::numeric_limits<double>::infinity());
+				scored = 0;
+				auto qf = any_of4(true);
+				std::uint64_t counted_floor = 0;
+				const auto floored = prospect::top_k(seg, *qf, k, &counted_floor, floor);
+				check_hits(any_of4(false), floored, k);
+				CHECK(counted_floor == matches);
+				CHECK(scored < unfloored);
+				// The floor binds counted queries as uncounted: at the best score, no hit enters, and
+				// the count is still exact.
+				auto qa = any_of4(false);
+				std::uint64_t counted_all = 0;
+				CHECK(prospect::top_k(seg, *qa, k, &counted_all, all_scores[0]).empty() && counted_all == matches);
+			}
 			scored = 0;
 			auto p = req_opt(true);
 			const std::size_t required = check_hits(req_opt(false), prospect::top_k(seg, *p, k), k);
