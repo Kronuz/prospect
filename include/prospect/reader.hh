@@ -37,6 +37,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <cassert>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -563,11 +564,27 @@ static_assert(sizeof(document) == sizeof(detail::document_fields), "doc_bytes at
 static_assert(std::is_nothrow_move_constructible_v<segment>);
 
 
+// fill's fast paths (step-1 ranges, fused unpack, summed-mask scatter) are on; a build defining
+// PROSPECT_FILL_SLOW turns them off so tests can check the fallback agrees with them.
+#ifdef PROSPECT_FILL_SLOW
+inline constexpr bool fill_fast = false;
+#else
+inline constexpr bool fill_fast = true;
+#endif
+
+// 1 << i, a load instead of a variable shift.
+inline constexpr auto bit_masks = [] {
+	std::array<std::uint64_t, 64> t{};
+	for (unsigned i = 0; i < 64; ++i) { t[i] = std::uint64_t(1) << i; }
+	return t;
+}();
+
 // Iterates one term's postings: ordinals in increasing order with their wdf. Satisfies
 // docset::doc_iterator; scorers build on it. Skip data is read in place (F10): locating a
 // block reads its group's advance entries without checking them, and a block's entry is
 // checked when the block is decoded.
 class postings_iterator {
+	friend struct fill_test_access;  // test/fill_test.cc checks the scatter scratch
 public:
 	postings_iterator(const inverted_plugin::reader& seg, const format::term_info& info) : seg_(&seg), info_(info), df_(info.df) {
 		if (info.flags & format::single_posting) {
@@ -833,27 +850,26 @@ public:
 	// Sets bit (d - base) for every posting d in [doc(), end), then stops at the first
 	// posting >= end (see scorer::fill).
 	void fill(ordinal_t base, ordinal_t end, std::uint64_t* bits) {
+		assert(end - base <= 4096 && base <= end);
 		if (!started_ && next() == no_more_docs) { return; }
+		assert(base <= doc_);
 		while (doc_ < end) {
 			std::size_t i = pos_;
 			ords();
 			const std::size_t stop = buf_ords_[buf_len_ - 1] < end ? buf_len_ : std::size_t(std::lower_bound(buf_ords_ + pos_, buf_ords_ + buf_len_, end) - buf_ords_);
-			for (; i < stop; ++i) {
-				const ordinal_t d = buf_ords_[i] - base;
-				bits[d >> 6] |= std::uint64_t(1) << (d & 63);
+			if (i < stop) {
+				std::uint32_t o[format::block];
+				for (std::size_t k = i; k < stop; ++k) { o[k - i] = buf_ords_[k] - base; }
+				scatter(o, stop - i, bits);
+				i = stop;
 			}
 			if (i < buf_len_) {
 				pos_ = i;
 				doc_ = buf_ords_[i];
 				return;
 			}
-			// Whole bitset blocks inside the window are OR'd in without decoding.
-			while (next_block_ < blocks_) {
-				const block_ref r = block_at(next_block_);
-				if (r.codec != format::block_codec::bitset || r.last >= end) { break; }
-				or_bitset(r, base, bits);
-				++next_block_;
-			}
+			// Whole blocks inside the window go straight into its bits, without decoding to ordinals.
+			fill_blocks(base, end, bits);
 			pos_ = buf_len_ - 1;
 			if (load_next_block() == no_more_docs) { return; }
 		}
@@ -1112,23 +1128,141 @@ private:
 	void or_bitset(const block_ref& r, ordinal_t base, std::uint64_t* bits) {
 		const ordinal_t first = r.base + 1;
 		if (first < base) { corrupt("bitset block span"); }
-		const std::uint64_t span = std::uint64_t(r.last) - first + 1, bytes = (span + 7) / 8;
+		const std::uint64_t span = std::uint64_t(r.last) - first + 1, bytes = (span + 7) / 8, words = (bytes + 7) / 8;
 		const char* p = blocks_begin_ + r.offset;
 		if (bytes > r.bytes) { corrupt("bitset block bounds"); }
 		need(p, r.bytes);
-		const std::uint64_t at = first - base;
+		const std::uint64_t at = first - base, full = std::min<std::uint64_t>(words, r.bytes / 8);
+		assert(at + span <= 4096);
 		const unsigned shift = unsigned(at % 64);
+		std::uint64_t* out = bits + at / 64;
+		std::uint64_t carry = 0;  // the previous word's bits shifted past its word
 		std::size_t n = 0;
-		for (std::uint64_t w = 0; w * 8 < bytes; ++w) {
+		for (std::uint64_t w = 0; w < words; ++w) {
 			std::uint64_t word = 0;
-			std::memcpy(&word, p + w * 8, std::min<std::uint64_t>(8, bytes - w * 8));
-			if ((w + 1) * 64 > span) { word &= span % 64 ? (std::uint64_t(1) << (span % 64)) - 1 : ~std::uint64_t(0); }
+			if (w < full) {
+				std::memcpy(&word, p + w * 8, 8);  // inside the block, whose wdfs follow the bitset
+			} else {
+				std::memcpy(&word, p + w * 8, std::size_t(bytes - w * 8));
+			}
+			if (w + 1 == words && span % 64) { word &= (std::uint64_t(1) << (span % 64)) - 1; }
 			n += std::size_t(std::popcount(word));
-			const std::uint64_t k = at / 64 + w;
-			bits[k] |= word << shift;
-			if (shift && (word >> (64 - shift))) { bits[k + 1] |= word >> (64 - shift); }
+			out[w] |= (word << shift) | carry;
+			carry = shift ? word >> (64 - shift) : 0;
 		}
+		if (carry) { out[words] |= carry; }
 		if (n != format::block) { corrupt("bitset block count"); }
+	}
+
+	// Blocks from next_block_ whose last ordinal is below end, straight into the window's bits:
+	// a bitset block is OR'd in, a FOR block is unpacked and scattered without an ordinal array
+	// or a per-posting read-modify-write. Entries are walked a group at a time from the first,
+	// checked (F10), instead of locating each block anew. The block holding end is left to
+	// load_next_block, with its entry already checked.
+	// Bounds: every write lands in the window's 64 words because a block taken has last < end
+	// (end <= base + 4,096) and first > its entry's base >= base (or_bitset and fill_for check
+	// it), and its ordinals are verified to end at last and rise (decode_gaps; the fused unpack's
+	// widths of at most 25 bits cannot wrap). Asserts state this and cost nothing in release.
+	void fill_blocks(ordinal_t base, ordinal_t end, std::uint64_t* bits) {
+		while (next_block_ > 0 && next_block_ < blocks_) {
+			block_ref r = block_at(next_block_);
+			if (r.last >= end) { return; }
+			const group& gr = group_at(next_block_ / format::skip::group_blocks);
+			const std::uint64_t group_bytes = gr.blocks_end - gr.blocks_begin;
+			std::size_t i = next_block_ % format::skip::group_blocks;
+			for (;;) {
+				need(blocks_begin_ + r.offset, r.bytes);
+				if (r.codec == format::block_codec::bitset) {
+					or_bitset(r, base, bits);
+				} else {
+					fill_for(r, base, bits);
+				}
+				++next_block_;
+				if (++i == gr.n) { break; }
+				const std::uint64_t last = entry_last(gr, i), start = r.offset + r.bytes - gr.blocks_begin, stop = i + 1 < gr.n ? entry_offset(gr, i + 1) : group_bytes;
+				if (last > gr.last || last <= r.last || start >= stop || stop > group_bytes) { corrupt("advance entry"); }
+				const block_ref next{ordinal_t(last), r.last, gr.blocks_begin + start, stop - start, format::block_codec(entry_codec(gr, i))};
+				checked_ = next;
+				checked_b_ = next_block_;
+				if (next.last >= end) { return; }
+				r = next;
+			}
+		}
+	}
+
+	// ORs a checked FOR block lying wholly inside the window [base, base + 4096) into bits.
+	void fill_for(const block_ref& r, ordinal_t base, std::uint64_t* bits) {
+		assert(r.last > r.base);
+		const std::uint8_t* in = reinterpret_cast<const std::uint8_t*>(blocks_begin_ + r.offset);
+		if (std::uint64_t(r.base) + 1 < base) { corrupt("ordinal block span"); }
+		const std::uint8_t head = in[0];
+		const unsigned width = head & 0x3f;
+		// A constant block of step 1 is a run of 128 consecutive ordinals: a range of bits.
+		if (fill_fast && head == bitpack::constant_flag && r.bytes >= 5 && r.last - r.base == format::block && !std::memcmp(in + 1, "\0\0\0\0", 4)) {
+			if (!(info_.flags & format::no_wdf) && r.bytes == 5) { corrupt("wdf block"); }
+			set_range(r.base + 1 - base, r.last - base, bits);
+			return;
+		}
+		std::uint32_t o[format::block];
+		std::size_t used;
+		if ((head & (bitpack::exceptions_flag | bitpack::constant_flag)) || width > 25 || !fill_fast || r.bytes < 1 + bitpack::packed_bytes(width)) {
+			// Constant, exceptional, or wide blocks decode to ordinals first.
+			used = format::decode_gaps(in, r.bytes, r.base, r.last, false, o);
+			if (!used) { corrupt("ordinal block"); }
+			for (std::size_t i = 0; i < format::block; ++i) { o[i] -= base; }
+		} else {
+			used = 1 + bitpack::packed_bytes(width);
+			bitpack::unpack_delta(in + 1, width, r.base - base, o);
+			for (std::size_t i = 0; i < format::block; ++i) { o[i] += std::uint32_t(i + 1); }
+			if (o[format::block - 1] != r.last - base) { corrupt("ordinal block"); }
+		}
+		if (!(info_.flags & format::no_wdf) && used >= r.bytes) { corrupt("wdf block"); }
+		scatter(o, format::block, bits);
+	}
+
+	// Sets bits lo..hi, both inside the window.
+	static void set_range(std::uint32_t lo, std::uint32_t hi, std::uint64_t* bits) noexcept {
+		assert(lo <= hi && hi < 4096);
+		const std::uint32_t wl = lo >> 6, wh = hi >> 6;
+		const std::uint64_t ml = ~std::uint64_t(0) << (lo & 63), mh = ~std::uint64_t(0) >> (63 - (hi & 63));
+		if (wl == wh) {
+			bits[wl] |= ml & mh;
+			return;
+		}
+		bits[wl] |= ml;
+		for (std::uint32_t w = wl + 1; w < wh; ++w) { bits[w] = ~std::uint64_t(0); }
+		bits[wh] |= mh;
+	}
+
+	// Sets bit o[i] for i < n: the o[i] increase and the last is below 4,096. Postings close
+	// together share words, and consecutive read-modify-writes of one word wait on each other, so
+	// a dense run sums a mask per posting (32-bit words: the sum is positive and never wraps) into
+	// the slot of its word. A word's total is the sum at its last posting less the sum before its
+	// first; slots are zero until written, so untouched words add nothing. A sparse run sets its
+	// bits directly.
+	void scatter(const std::uint32_t* o, std::size_t n, std::uint64_t* bits) {
+		assert(n && o[0] <= o[n - 1] && o[n - 1] < 4096);
+		if (fill_fast && o[n - 1] - o[0] == n - 1) {  // consecutive
+			set_range(o[0], o[n - 1], bits);
+			return;
+		}
+		if (!fill_fast || n < 16 || o[n - 1] - o[0] >= 768) {
+			for (std::size_t i = 0; i < n; ++i) { bits[o[i] >> 6] |= bit_masks[o[i] & 63]; }
+			return;
+		}
+		std::uint64_t c = 0;
+		for (std::size_t i = 0; i < n; ++i) {
+			const std::uint32_t d = o[i];
+			c += bit_masks[d & 31];
+			word_sum_[d >> 5] = c;
+		}
+		std::uint64_t prev = 0;
+		for (std::uint32_t w = o[0] >> 5, hi = o[n - 1] >> 5; w <= hi; ++w) {
+			const std::uint64_t x = word_sum_[w], delta = (x - prev) & -std::uint64_t(x != 0);
+			bits[w >> 1] |= delta << (32 * (w & 1));
+			prev += delta;
+			word_sum_[w] = 0;
+		}
 	}
 
 	// The current block's ordinals, expanding a bitset block on first use.
@@ -1229,6 +1363,7 @@ private:
 	bool with_positions_ = false, with_counts_ = false;
 	ordinal_t buf_ords_[format::block] = {};
 	std::uint64_t bits_[64] = {};  // the current bitset block while bits_pending_
+	std::uint64_t word_sum_[128] = {};  // scatter's running mask sums by 32-bit word, zero between calls
 	ordinal_t bits_first_ = 0, bits_doc0_ = 0, bits_last_ = 0;
 	bool bits_pending_ = false;  // buf_ords_ not yet expanded from bits_
 	mutable std::uint32_t buf_wdfs_[format::block] = {};
