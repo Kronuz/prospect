@@ -37,6 +37,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <cassert>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -563,6 +564,14 @@ static_assert(sizeof(document) == sizeof(detail::document_fields), "doc_bytes at
 static_assert(std::is_nothrow_move_constructible_v<segment>);
 
 
+// fill's fast paths (step-1 ranges, fused unpack, summed-mask scatter) are on; a build defining
+// PROSPECT_FILL_SLOW turns them off so tests can check the fallback agrees with them.
+#ifdef PROSPECT_FILL_SLOW
+inline constexpr bool fill_fast = false;
+#else
+inline constexpr bool fill_fast = true;
+#endif
+
 // 1 << i, a load instead of a variable shift.
 inline constexpr auto bit_masks = [] {
 	std::array<std::uint64_t, 64> t{};
@@ -840,7 +849,9 @@ public:
 	// Sets bit (d - base) for every posting d in [doc(), end), then stops at the first
 	// posting >= end (see scorer::fill).
 	void fill(ordinal_t base, ordinal_t end, std::uint64_t* bits) {
+		assert(end - base <= 4096 && base <= end);
 		if (!started_ && next() == no_more_docs) { return; }
+		assert(base <= doc_);
 		while (doc_ < end) {
 			std::size_t i = pos_;
 			ords();
@@ -1121,6 +1132,7 @@ private:
 		if (bytes > r.bytes) { corrupt("bitset block bounds"); }
 		need(p, r.bytes);
 		const std::uint64_t at = first - base, full = std::min<std::uint64_t>(words, r.bytes / 8);
+		assert(at + span <= 4096);
 		const unsigned shift = unsigned(at % 64);
 		std::uint64_t* out = bits + at / 64;
 		std::uint64_t carry = 0;  // the previous word's bits shifted past its word
@@ -1146,6 +1158,10 @@ private:
 	// or a per-posting read-modify-write. Entries are walked a group at a time from the first,
 	// checked (F10), instead of locating each block anew. The block holding end is left to
 	// load_next_block, with its entry already checked.
+	// Bounds: every write lands in the window's 64 words because a block taken has last < end
+	// (end <= base + 4,096) and first > its entry's base >= base (or_bitset and fill_for check
+	// it), and its ordinals are verified to end at last and rise (decode_gaps; the fused unpack's
+	// widths of at most 25 bits cannot wrap). Asserts state this and cost nothing in release.
 	void fill_blocks(ordinal_t base, ordinal_t end, std::uint64_t* bits) {
 		while (next_block_ > 0 && next_block_ < blocks_) {
 			block_ref r = block_at(next_block_);
@@ -1180,14 +1196,14 @@ private:
 		const std::uint8_t head = in[0];
 		const unsigned width = head & 0x3f;
 		// A constant block of step 1 is a run of 128 consecutive ordinals: a range of bits.
-		if (head == bitpack::constant_flag && r.bytes >= 5 && r.last - r.base == format::block && !std::memcmp(in + 1, "\0\0\0\0", 4)) {
+		if (fill_fast && head == bitpack::constant_flag && r.bytes >= 5 && r.last - r.base == format::block && !std::memcmp(in + 1, "\0\0\0\0", 4)) {
 			if (!(info_.flags & format::no_wdf) && r.bytes == 5) { corrupt("wdf block"); }
 			set_range(r.base + 1 - base, r.last - base, bits);
 			return;
 		}
 		std::uint32_t o[format::block];
 		std::size_t used;
-		if ((head & (bitpack::exceptions_flag | bitpack::constant_flag)) || width > 25 || r.bytes < 1 + bitpack::packed_bytes(width)) {
+		if ((head & (bitpack::exceptions_flag | bitpack::constant_flag)) || width > 25 || !fill_fast || r.bytes < 1 + bitpack::packed_bytes(width)) {
 			// Constant, exceptional, or wide blocks decode to ordinals first.
 			used = format::decode_gaps(in, r.bytes, r.base, r.last, false, o);
 			if (!used) { corrupt("ordinal block"); }
@@ -1204,6 +1220,7 @@ private:
 
 	// Sets bits lo..hi, both inside the window.
 	static void set_range(std::uint32_t lo, std::uint32_t hi, std::uint64_t* bits) noexcept {
+		assert(lo <= hi && hi < 4096);
 		const std::uint32_t wl = lo >> 6, wh = hi >> 6;
 		const std::uint64_t ml = ~std::uint64_t(0) << (lo & 63), mh = ~std::uint64_t(0) >> (63 - (hi & 63));
 		if (wl == wh) {
@@ -1222,11 +1239,12 @@ private:
 	// first; slots are zero until written, so untouched words add nothing. A sparse run sets its
 	// bits directly.
 	void scatter(const std::uint32_t* o, std::size_t n, std::uint64_t* bits) {
-		if (o[n - 1] - o[0] == n - 1) {  // consecutive
+		assert(n && o[0] <= o[n - 1] && o[n - 1] < 4096);
+		if (fill_fast && o[n - 1] - o[0] == n - 1) {  // consecutive
 			set_range(o[0], o[n - 1], bits);
 			return;
 		}
-		if (n < 16 || o[n - 1] - o[0] >= 768) {
+		if (!fill_fast || n < 16 || o[n - 1] - o[0] >= 768) {
 			for (std::size_t i = 0; i < n; ++i) { bits[o[i] >> 6] |= bit_masks[o[i] & 63]; }
 			return;
 		}

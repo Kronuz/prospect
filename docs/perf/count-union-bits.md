@@ -337,16 +337,78 @@ a mix, and the class is 20 of the gate's 962 queries and one of the five command
 bm25_xapian, neither outside its band. The value
 is the benchmark row (the largest remaining search gap), not CPU spend.
 
-## Next, if built
+## Productionizing: tests, bounds, mutants
 
-1. Measure on the gate VM (Linux, FreeBSD) and an arm64 host before landing; the 768-bit and
-   16-posting thresholds and the 32-bit word sums were tuned on this x86_64 host.
-2. A differential unit test of `fill` against `next()` over every block kind and window
-   alignment (wide widths need a segment over 2^25 ordinals' gaps; the fast-paths-off build stands
-   in for that here), and the ASan, UBSan, and TSan CI.
-3. Move `word_sum_` to a `thread_local` to take the 1,024 bytes off each iterator.
-4. What is left in B's profile (`or_bitset`, the entry walk in `fill_blocks`, the crossing
-   block) is spread across four items of 14% to 20% each; the next step is per-clause window
-   fusion (OR the clauses' windows with the bits in registers), not another per-block change.
-5. A 5M run of the class on the gate VM to confirm the projected 1.21× Lucene and 1.46× `-bp`.
+Added on the same branch; no change to what the prototype does in a release build.
 
+**Tests** (`test/fill_test.cc`, ctest `fill`; built a second time with `PROSPECT_FILL_SLOW` as
+`fill_slow_test`, ctest `fill_slow`, which turns the fast paths off at compile time so every FOR
+block goes through `decode_gaps` and the per-bit scatter). Ten terms of explicit shapes over 40,000
+documents, each term's windows checked against a model of its ordinals, window bits guarded by
+canary words on both sides, half the windows pre-filled with other clauses' bits (fill ORs):
+1. Windows of 4,096, 4,000, 1,024, 300, 64, and 1 ordinal from three starting offsets (blocks
+   straddling every window edge), count()'s aligned walk, and random interleavings of fill and
+   `next()` (the postings after a fill are the model's).
+2. A window whose end sweeps 70 ordinals either side of a block's last ordinal, started inside the
+   block before.
+3. Step-1 runs of random length starting and ending anywhere in a word, and six placed ones (3,990,
+   8,197, 12,287, 16,447, 20,416, 24,676) across window edges after a filler block: 49 constant
+   blocks.
+4. Bitset blocks (a term at 80%, 249 of them) and a term with bitset, FOR, and sparse stretches.
+5. Full 64-bit words: every word one of empty, full, lone bit 0, lone bit 63, both, or random; and a
+   fixed case per window of a FOR block holding a full word, a lone bit 0 of the next word, then a
+   sparse tail, which makes the first version's 64-bit sum wrap to zero at that bit.
+6. Fast path against fallback: both builds check the same terms against the same model, so they agree
+   with each other.
+7. Damaged copies (1,280 per build; 1,044 fenced, 236 answered): a random byte or bit in a random
+   block of eight terms, or a random advance entry (last, offset, codec), resealed so the checksums
+   pass. Each fill must fence (`corrupt_segment`) or answer, with the guard words untouched.
+
+**Bounds: asserts, not clamps.** Every write lands in the window's 64 words because a block taken
+has `last < end <= base + 4096`, its first ordinal is above `base` (checked in `or_bitset` and
+`fill_for`), and its ordinals are verified to rise and end at `last` (`decode_gaps`, or the fused
+unpack's `o[127]` check with widths of at most 25 bits, which cannot wrap). A clamp or a compare
+per block would be a cost on the hot path for a state the checks already exclude, so `fill`,
+`scatter`, `set_range`, and `or_bitset` assert it instead: free in release, on in Debug and
+sanitizer builds and unconditionally in `fill_test` (`#undef NDEBUG`). The damaged-copy runs found
+no assert and no guard word touched; the suites that call `fill` (search, multisegment, exact,
+index, engine_query, postings, segment) pass in a Debug build with the asserts on, and the Debug
+engine's `dump` is byte-identical to main's at 1M merged and reordered.
+
+**Mutants** (`test/fill_mutants.py BUILD_DIR`: one at a time, header restored after each; run
+against `fill_test`, the fallback's against `fill_slow_test`). All 13 caught:
+
+| Path | Mutant | Caught by |
+|---|---|---|
+| Entry walk | a block ending at the window's end is taken | window sweep (bit set at `end`) |
+| Entry walk | cached entry filed under the wrong block | fence on a valid index |
+| Step-1 range | last bit missing | windows against the model |
+| Step-1 range | last word overwritten, not OR'd | pre-filled windows |
+| Scatter, dense | the first 64-bit sum with zero for untouched | the wrap term, windows |
+| Scatter, dense | word total not taken from the sum before it | windows |
+| Scatter, sparse | bit index off by one | windows |
+| Scatter, consecutive | run loses its last bit | windows |
+| Bitset | shifted-out bits dropped | windows |
+| Bitset | last word not masked to the span | fence on a valid index |
+| Crossing block | base rounded down to a word | assert |
+| Fused unpack | ramp one short | fence on a valid index |
+| Fallback | ordinals not made relative to the window | assert (`fill_slow_test`) |
+
+**Identity, again, on the final code**: 100k merged, reordered, and flushed (4 segments), and 1M
+merged and reordered: `dump` counted and uncounted byte-identical to main's (5,772 lines each),
+`verify` 962 queries, 0 mismatches; 26 + 4 ctest suites pass in Release (all but the crash-point
+runs), including `fill`, `fill_slow`, `concurrency`, and `churn`.
+
+**`word_sum_` stays per iterator** (1,024 bytes). A `thread_local` would take it off each iterator
+at the price of a TLS access per scatter on the hot path, which could only lose time; no run was
+spent on it.
+
+## Next
+
+1. The gate VM's rows on Linux and FreeBSD, and an arm64 host: the 768-bit and 16-posting thresholds
+   and the 32-bit word sums were tuned on this x86_64 host (CI covers their correctness, not their
+   speed).
+2. What is left in B's profile (`or_bitset`, the entry walk in `fill_blocks`, the crossing block) is
+   spread across four items of 14% to 20% each; the next step is per-clause window fusion (OR the
+   clauses' windows with the bits in registers), not another per-block change.
+3. A 5M run of the class on the gate VM to confirm the projected 1.21× Lucene and 1.46× `-bp`.
