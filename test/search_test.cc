@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <limits>
 #include <map>
 #include <random>
@@ -640,6 +641,23 @@ int main() {
 			const std::size_t matches = check_hits(any_of4(false), hits, k);
 			CHECK(counted == matches);
 			CHECK(scored * 2 < matches);  // not every match scored
+			// A counted query keeps a floor (a strict lower bound on the k-th score, as a threshold
+			// seed gives): it still counts every match, keeps the same hits, and scores fewer.
+			{
+				const std::size_t unfloored = scored;
+				std::vector<double> all_scores;
+				auto scan = any_of4(false);
+				for (auto d = scan->next(); d != strata::no_more_docs; d = scan->next()) { all_scores.push_back(scan->score()); }
+				std::sort(all_scores.begin(), all_scores.end(), std::greater<>());
+				const double floor = std::nextafter(all_scores[k - 1], -std::numeric_limits<double>::infinity());
+				scored = 0;
+				auto qf = any_of4(true);
+				std::uint64_t counted_floor = 0;
+				const auto floored = prospect::top_k(seg, *qf, k, &counted_floor, floor);
+				check_hits(any_of4(false), floored, k);
+				CHECK(counted_floor == matches);
+				CHECK(scored < unfloored);
+			}
 			scored = 0;
 			auto p = req_opt(true);
 			const std::size_t required = check_hits(req_opt(false), prospect::top_k(seg, *p, k), k);
