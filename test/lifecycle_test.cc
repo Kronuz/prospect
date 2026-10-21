@@ -707,7 +707,6 @@ int main() {
 					o.policy.floor_bytes = 1;
 					o.background = env.exec.get();
 					o.rate = env.rate.get();
-					o.merge_memory_wait = 50'000'000;
 				}
 				return o;
 			};

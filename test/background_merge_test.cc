@@ -2,13 +2,14 @@
 // one (Kronuz/threadpool task groups, one and two threads): deletes and replaces racing a
 // running merge carry over once, against an inline-merging twin's digest; seeded random
 // schedules with a power loss while merges run; close, destruction, and install while
-// merges run; the rate limit; a merge waiting for indexing-budget room; ENOSPC
+// merges run; the rate limit; merges that never wait for indexing-budget room; ENOSPC
 // discarding a merge, EIO fencing, and a damaged source left for heal(); merge outputs
 // published in id order; and the merge build's cancellation points.
 #include "prospect/index.hh"
 #include "strata/core/faultfs.hh"
 #include "strata/core/pool_executor.hh"
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -447,39 +448,50 @@ static void rate_limit(std::size_t threads) {
 	if (took < 0.9 * n / double(rate)) { std::fprintf(stderr, "  rate (%s): %.0f bytes in %.3f s\n", name_of(threads), n, took); }
 }
 
-// A merge waits for room on the indexing budget while flushes go on (they draw past it);
-// once room returns it runs. On the inline executor nothing frees room meanwhile, so it
-// waits out merge_memory_wait on the executor's clock, then draws past the budget.
-static void memory_wait(std::size_t threads) {
+// The executor of one run, counting the merges' sleeps.
+class counting_executor final : public strata::executor {
+public:
+	explicit counting_executor(strata::executor& inner) : inner_(&inner) {}
+	std::unique_ptr<group> open() override { return inner_->open(); }
+	std::uint64_t now() override { return inner_->now(); }
+	bool sleep_until(std::uint64_t t, const task::cancel_token& stop) override {
+		sleeps_.fetch_add(1);
+		return inner_->sleep_until(t, stop);
+	}
+	bool checkpoint(const task::cancel_token& stop) override { return inner_->checkpoint(stop); }
+	std::uint64_t sleeps() const { return sleeps_.load(); }
+
+private:
+	strata::executor* inner_;
+	std::atomic<std::uint64_t> sleeps_{0};
+};
+
+// Other holders of the indexing budget hold all of it: a merge still runs at once, drawing
+// past the capacity, while flushes go on (they draw past it too). It waits for none of them
+// (strata main 6e13416 removed merge_memory_wait).
+static void memory_held(std::size_t threads) {
 	background bg(threads);
+	counting_executor counted(*bg.exec);
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	byte_budget memory(4 << 20);
 	auto o = bg.options();
+	o.background = &counted;
 	o.budget = &memory;
-	o.merge_memory_wait = bg.threaded() ? 60'000'000'000 : 1'000'000'000;
 	auto ix = prospect::index::create(io, o, uuid);
 	fill(ix, 6, 4, 3000, 9);
 	auto hog = memory.open();
 	CHECK(hog.try_grow(memory.capacity() - memory.used()));
-	const std::uint64_t v0 = bg.exec->now();
 	ix.maybe_merge();
 	CHECK(ix.merges_pending() >= 1);
-	if (bg.threaded()) {
-		std::this_thread::sleep_for(std::chrono::milliseconds(200));
-		ix.apply(tx({replace("Q1000", "flushed while the merge waits")}), {});
-		ix.refresh();  // flushes past the budget, and publishes nothing: the merge waits
-		CHECK(ix.merges_pending() >= 1 && contents(ix).count(25));
-		hog.settle();
-		ix.wait_merges();
-	} else {
-		ix.wait_merges();
-		CHECK(bg.exec->now() - v0 >= o.merge_memory_wait);
-		hog.settle();
-		ix.apply(tx({replace("Q1000", "flushed after")}), {});
-		ix.refresh();
-	}
-	CHECK(ix.merges_pending() == 0 && ix.segments().size() < 7 && contents(ix).size() == 25);
+	ix.apply(tx({replace("Q1000", "flushed while the merge runs")}), {});
+	ix.refresh();
+	ix.wait_merges();
+	CHECK(counted.sleeps() == 0);
+	CHECK(ix.merges_pending() == 0 && ix.segments().size() < 7 && contents(ix).count(25));
+	CHECK(memory.peak() > memory.capacity());
+	hog.settle();
+	CHECK(contents(ix).size() == 25);
 	CHECK(memory.used() < (1 << 20));  // the merges' charges settled at publication
 }
 
@@ -660,7 +672,7 @@ int main() {
 		for (std::uint64_t seed = 1; seed <= 6; ++seed) { random_schedules(threads, seed); }
 		close_while_merging(threads);
 		rate_limit(threads);
-		memory_wait(threads);
+		memory_held(threads);
 		space_and_faults(threads);
 		damaged_source(threads);
 		install_while_merging(threads);
