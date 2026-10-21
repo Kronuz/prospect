@@ -261,8 +261,9 @@ int main() {
 
 	// --- F2: the prefix ------------------------------------------------------------------
 	{
-		// The prefix CRC of version 13, from the bytes.
-		CHECK(strata::format::get<std::uint32_t>(good.data() + 12) == 0x4ff2df7bu);
+		// The prefix CRC of the version written (format 14's first pre-freeze, 0x80000009), from
+		// the bytes.
+		CHECK(strata::format::get<std::uint32_t>(good.data() + 12) == 0xb626d5f0u);
 		CHECK(strata::format::read_version(good) == strata::format::pre_freeze);
 		// The magic wrong: damage.
 		for (std::size_t at = 0; at < 8; ++at) {
