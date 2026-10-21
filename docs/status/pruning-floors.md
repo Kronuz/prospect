@@ -18,6 +18,7 @@ Ledger of numbers: `docs/perf/pruning-floors.md`.
   flushed and 1M merged, reordered: identical, 0 mismatches.
 - ctest Release 39/39; ASan+UBSan 39/39; reverts and two mutants caught.
 - Timing at 1M reordered, both presets, 12 rounds: both changes hold.
+- Required-side minimum takes the same margin; mirrored crafted test, identity, ctest, timing in the perf doc.
 
 ## Next
 

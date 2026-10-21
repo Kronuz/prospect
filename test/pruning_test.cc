@@ -152,6 +152,70 @@ int main() {
 		CHECK(got.size() < od.size());  // the decoys never come back
 		CHECK(opt_ptr->skipped >= 5);   // the optional side pruned them itself
 	}
+	// The required side's minimum has the same exposure from the optional side: here the optional
+	// score outruns its bound by an ulp, and the required score x sits just below fl(s - R).
+	{
+		const std::vector<double> a = {0.4439043102930863, 0.9861849833692796, 0.5855642789889313};
+		const std::vector<std::uint64_t> cost = {30, 20, 10};
+		const double x = 0.6607442951957146, s = 2.6763978678470117;
+		auto probe = conjunction(a, cost, {0});
+		const double R = probe->max_score_total();
+		probe->next();
+		const double y = probe->score();
+		CHECK(y > R);
+		CHECK(x + y > s);
+		CHECK(x <= std::nextafter(s - R, -inf));  // a bare step below s - R would drop it
+		auto req = std::make_unique<fake_scorer>(docs_t{{3, x}}, x, 1);
+		fake_scorer* req_ptr = req.get();
+		prospect::required_optional_scorer q(std::move(req), conjunction(a, cost, {3}));
+		const auto got = run(q, s);
+		CHECK(got.size() == 1 && got.count(3) && got.at(3) == x + y);
+		CHECK(req_ptr->minimums == 1);
+	}
+	// The same across the boundary and at random, with the roles swapped.
+	{
+		std::mt19937_64 rng(11);
+		std::size_t competed = 0, pruned = 0;
+		for (int trial = 0; trial < 20000; ++trial) {
+			const std::size_t n = 1 + rng() % 5;
+			std::vector<double> a(n);
+			std::vector<std::uint64_t> cost(n);
+			for (auto& v : a) { v = std::ldexp(1.0 + double(rng() % 100000) / 100000.0, int(rng() % 4) - 2); }
+			for (auto& c : cost) { c = 1 + rng() % 8; }
+			const std::size_t ndocs = 1 + rng() % 12;
+			std::vector<ordinal_t> at;
+			docs_t rd;
+			for (std::size_t i = 0; i < ndocs; ++i) {
+				at.push_back(ordinal_t(i * 2));
+				rd.push_back({ordinal_t(i * 2), std::ldexp(double(1 + rng() % 4000) / 1000.0, -int(rng() % 4))});
+			}
+			auto probe = conjunction(a, cost, {0});
+			probe->next();
+			const double y = probe->score();
+			const std::size_t pick = rng() % ndocs;
+			double s = y + rd[pick].second;
+			switch (rng() % 3) {
+				case 0: s = std::nextafter(s, -inf); break;
+				case 1: break;
+				default: s = std::nextafter(std::nextafter(s, inf), inf); break;
+			}
+			double bound = 0;
+			for (auto& p : rd) { bound = std::max(bound, p.second); }
+			auto req = std::make_unique<fake_scorer>(rd, bound, 1);
+			fake_scorer* req_ptr = req.get();
+			prospect::required_optional_scorer q(std::move(req), conjunction(a, cost, at));
+			const auto got = run(q, s);
+			for (const auto& [ord, xs] : rd) {
+				if (xs + y > s) {
+					++competed;
+					CHECK(got.count(ord) && got.at(ord) == xs + y);
+				}
+			}
+			pruned += req_ptr->skipped;
+		}
+		CHECK(competed > 10000);
+		CHECK(pruned > 1000);
+	}
 	// Random leaves, orders and boundaries: nothing that exceeds s is ever lost. The boundary is
 	// each document's own sum, one step below it (it competes) and the sum itself (it does not).
 	std::mt19937_64 rng(7);

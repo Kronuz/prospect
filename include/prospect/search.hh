@@ -950,11 +950,11 @@ public:
 	std::size_t score_terms() const noexcept override { return req_->score_terms() + opt_->score_terms(); }
 	void set_min_competitive_score(double s) override {
 		min_ = s;
-		// Rounded down, so the required side's minimum never exceeds the exact difference.
-		req_->set_min_competitive_score(std::nextafter(s - opt_->max_score_total(), -std::numeric_limits<double>::infinity()));
+		// Each side's minimum is s less the other's bound, lowered by a margin (see below).
+		if (const double m = side_minimum(s, opt_->max_score_total(), opt_->score_terms()); m > 0) { req_->set_min_competitive_score(m); }
 		// A required side that cannot compete alone makes the optional side required: it gets
 		// the difference as its own minimum, and a union there prunes its cheap clauses.
-		if (const double m = optional_minimum(s, req_->max_score_total(), req_->score_terms()); m > 0) { opt_->set_min_competitive_score(m); }
+		if (const double m = side_minimum(s, req_->max_score_total(), req_->score_terms()); m > 0) { opt_->set_min_competitive_score(m); }
 	}
 	std::optional<std::uint64_t> exact_count() override { return req_->exact_count(); }  // the optional side never filters
 	std::unique_ptr<scorer> fresh() const override {
@@ -964,16 +964,16 @@ public:
 	}
 
 private:
-	// The minimum for the optional side given the required side's bound R (the floating-point
-	// sum of its n leaf bounds): 0 for none. A document competes when fl(r + o) > s, which
-	// needs r + o > s exactly (rounding is monotone and s is a double), so o > s - r. The
-	// required score r sums the same leaves as R in another order, so r <= R (1 + 2 (n-1) 2^-53
-	// + O((n 2^-53)^2)) <= R + n 2^-52 s, since R <= s here. The margin of (n + 2) 2^-52 s
-	// covers that, the half ulp of s - R and the half ulp of the second subtraction (each at
-	// most half an ulp of s, itself at most 2^-53 s), with one 2^-52 s to spare; nextafter makes
-	// the result strictly lower. So o <= result implies r + o < s and the document cannot
-	// compete. Past 2^20 leaves the second-order term is no longer covered: no minimum.
-	static double optional_minimum(double s, double R, std::size_t n) noexcept {
+	// The minimum for one side's score x given the other's bound R (the floating-point sum of
+	// its n leaf bounds): 0 for none. A document competes when fl(x + y) > s, which needs
+	// x + y > s exactly (rounding is monotone and s is a double), so x > s - y. The other side's
+	// score y sums the same leaves as R in another order, so y <= R (1 + 2 (n-1) 2^-53 +
+	// O((n 2^-53)^2)) <= R + n 2^-52 s, since R <= s here. The margin of (n + 2) 2^-52 s covers
+	// that, the half ulp of s - R and the half ulp of the second subtraction (each at most
+	// 2^-53 s), with one 2^-52 s to spare; nextafter makes the result strictly lower. So
+	// x <= result implies x + y < s and the document cannot compete. Past 2^20 leaves the
+	// second-order term is no longer covered: no minimum.
+	static double side_minimum(double s, double R, std::size_t n) noexcept {
 		if (n > (std::size_t(1) << 20)) { return 0.0; }
 		const double t = s - R;
 		if (!(t > 0)) { return 0.0; }

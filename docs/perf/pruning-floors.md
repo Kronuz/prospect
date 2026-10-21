@@ -31,8 +31,16 @@ summation, so the argument holds for each. `test/pruning_test.cc` builds the cas
 or no margin drops a competing document; it also sweeps `o` across the boundary and runs 20,000
 random trials against a brute-force sum.
 
-(The existing required-side minimum, `s - opt max` rounded down once, has the same exposure to the
-optional side's summation order; not changed here.)
+The required side's minimum (`s` less the optional bound) had the same exposure to the optional
+side's summation order, and now takes the same margin (`side_minimum`); the mirrored test fails
+with the old line (one rounding step, no margin).
+
+Re-run after that change (dump and verify identical on 100k merged, reordered, 4-segment flushed
+and 1M reordered; ctest 39/39): 12 rounds, intersection_union queries only (40), 1M reordered.
+Ratios over main, new against the branch before it (bm25 / bm25_xapian), A/A in the same rotation:
+`TOP_10` 0.924 / 0.857 against 0.887 / 0.854 (A/A 1.035 / 1.002); `TOP_100` 0.927 / 0.911 against
+0.930 / 0.936; `TOP_100_COUNT` 0.952 / 0.931 against 0.954 / 0.944. The margin on the required
+side changes no row beyond the A/A band.
 
 ## Identity
 
