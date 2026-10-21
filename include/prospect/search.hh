@@ -937,6 +937,11 @@ public:
 		min_ = s;
 		// Rounded down, so the required side's minimum never exceeds the exact difference.
 		req_->set_min_competitive_score(std::nextafter(s - opt_->max_score_total(), -std::numeric_limits<double>::infinity()));
+		// A required side that cannot compete alone makes the optional side required: it gets
+		// the difference as its own minimum, and a union there prunes its cheap clauses.
+		if (sum_upper(req_->max_score_total(), 2) <= s) {
+			opt_->set_min_competitive_score(std::nextafter(s - req_->max_score_total() - s * 0x1p-52, -std::numeric_limits<double>::infinity()));
+		}
 	}
 	std::optional<std::uint64_t> exact_count() override { return req_->exact_count(); }  // the optional side never filters
 	std::unique_ptr<scorer> fresh() const override {
