@@ -8,19 +8,20 @@ documents are scored).
 
 ## State
 
-Code and tests written, not yet built (strict host hold by explore-retention until 23:41).
+Built, verified, measured; waiting for the review (it changes which documents are scored).
+Ledger of numbers: `docs/perf/pruning-floors.md`.
 
 ## Done
 
-- Both changes ported; the optional minimum now carries a margin that scales with the
-  required side's leaf count (`scorer::score_terms`), argued in `optional_minimum`.
-- `test/pruning_test.cc` (crafted boundary, ulp sweep, 20k randomized trials) and a counted-floor
-  case in `test/search_test.cc`.
+- 337f1ce both changes plus tests; eaa7c0d fake scorer fix.
+- Identity (dump counted/uncounted, verify) for req, topk and both on 100k merged, reordered, 4-segment
+  flushed and 1M merged, reordered: identical, 0 mismatches.
+- ctest Release 39/39; ASan+UBSan 39/39; reverts and two mutants caught.
+- Timing at 1M reordered, both presets, 12 rounds: both changes hold.
 
 ## Next
 
-Build main and variants under `quiet run`; identity (dump, verify), multi-segment run, ctest,
-ASan+UBSan, mutants, A/A then A/B timing at 1M reordered.
+Review, then land. Open: a 1-3% slowdown on classes neither change reaches (layout suspected).
 
 ## Blocked on
 
