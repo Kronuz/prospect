@@ -167,6 +167,8 @@ struct scorer {
 	virtual bool matches() { return true; }
 	// Collects the k best hits itself (bulk scoring); false when the generic loop must.
 	virtual bool collect_top_k(top_collector& c) { (void)c; return false; }
+	// Whether collect_top_k counts apart from scoring, so a threshold seed may prune while counting.
+	virtual bool counts_apart() const noexcept { return false; }
 	// A strict lower bound on the k-th best score among this segment's matches, from stored
 	// threshold seeds (F13); 0 for none. Valid only where every match is live.
 	virtual double seed(std::size_t k) { (void)k; return 0.0; }
@@ -841,6 +843,7 @@ public:
 
 	// Block-max MaxScore over windows of 4,096 ordinals (see the definition).
 	bool collect_top_k(top_collector& c) override;
+	bool counts_apart() const noexcept override { return true; }
 	// A match scores the sum of its clauses' non-negative scores, at least any one's (F13).
 	double seed(std::size_t k) override {
 		double s = 0.0;
@@ -1358,8 +1361,8 @@ inline std::vector<hit> top_k(const segment& seg, scorer& s, std::size_t k, std:
 	}
 	// A floor (a strictly lower bound on the k-th score, from other segments) prunes from
 	// the start, and no hit at or below it is kept; counting never prunes.
-	if (count) { floor = 0; }
-	if (floor > 0) { s.set_min_competitive_score(floor); }
+	if (count && !s.counts_apart()) { floor = 0; }
+	if (floor > 0 && !count) { s.set_min_competitive_score(floor); }
 	top_collector c(k, count != nullptr);
 	if (floor > 0) { c.seed(floor); }
 	if (!seg.core().docid_ordered()) {  // ties read docids, and the threshold stays below the k-th score
