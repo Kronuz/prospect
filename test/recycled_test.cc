@@ -75,14 +75,29 @@ void in_thread(F f) {
 }
 }  // namespace
 
+// TSan's runtime defines the replaceable operators itself, so the counts can't be taken there.
+#if defined(__SANITIZE_THREAD__)
+#define RECYCLED_TEST_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define RECYCLED_TEST_TSAN 1
+#endif
+#endif
+
+#ifndef RECYCLED_TEST_TSAN
 void* operator new(std::size_t n) { return take(n); }
 void* operator new[](std::size_t n) { return take(n); }
 void operator delete(void* p) noexcept { give(p); }
 void operator delete(void* p, std::size_t) noexcept { give(p); }
 void operator delete[](void* p) noexcept { give(p); }
 void operator delete[](void* p, std::size_t) noexcept { give(p); }
+#endif
 
 int main() {
+#ifdef RECYCLED_TEST_TSAN
+	std::printf("recycled: SKIP under TSan (no allocation counts)\n");
+	return 77;
+#endif
 	// One size is tracked at a time: blob's, then throwing's.
 	tracked_size = sizeof(blob);
 	const std::size_t kept = prospect::recycle_blocks ? 8 : 0;
