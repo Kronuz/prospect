@@ -14,32 +14,34 @@ import sys
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 header = os.path.join(root, "include/prospect/reader.hh")
 
-OLD_SCATTER = """		std::uint64_t c = 0;
+OLD_SCATTER = """		std::uint64_t sums[25] = {};
+		const std::uint32_t w0 = o[0] >> 5;
+		std::uint64_t c = 0;
 		for (std::size_t i = 0; i < n; ++i) {
 			const std::uint32_t d = o[i];
 			c += bit_masks[d & 31];
-			word_sum_[d >> 5] = c;
+			sums[(d >> 5) - w0] = c;
 		}
 		std::uint64_t prev = 0;
-		for (std::uint32_t w = o[0] >> 5, hi = o[n - 1] >> 5; w <= hi; ++w) {
-			const std::uint64_t x = word_sum_[w], delta = (x - prev) & -std::uint64_t(x != 0);
-			bits[w >> 1] |= delta << (32 * (w & 1));
+		for (std::uint32_t k = 0, hi = (o[n - 1] >> 5) - w0; k <= hi; ++k) {
+			const std::uint64_t x = sums[k], delta = (x - prev) & -std::uint64_t(x != 0);
+			bits[(w0 + k) >> 1] |= delta << (32 * ((w0 + k) & 1));
 			prev += delta;
-			word_sum_[w] = 0;
 		}
 """
-FIRST_SCATTER = """		std::uint64_t c = 0;
+FIRST_SCATTER = """		std::uint64_t sums[25] = {};
+		const std::uint32_t w0 = o[0] >> 6;
+		std::uint64_t c = 0;
 		for (std::size_t i = 0; i < n; ++i) {
 			const std::uint32_t d = o[i];
 			c += bit_masks[d & 63];
-			word_sum_[d >> 6] = c;
+			sums[(d >> 6) - w0] = c;
 		}
 		std::uint64_t prev = 0;
-		for (std::uint32_t w = o[0] >> 6, hi = o[n - 1] >> 6; w <= hi; ++w) {
-			const std::uint64_t x = word_sum_[w], delta = (x - prev) & -std::uint64_t(x != 0);
-			bits[w] |= delta;
+		for (std::uint32_t k = 0, hi = (o[n - 1] >> 6) - w0; k <= hi; ++k) {
+			const std::uint64_t x = sums[k], delta = (x - prev) & -std::uint64_t(x != 0);
+			bits[w0 + k] |= delta;
 			prev += delta;
-			word_sum_[w] = 0;
 		}
 """
 
@@ -52,7 +54,8 @@ MUTANTS = [
     ("step-1 run: last bit missing", "range", "set_range(r.base + 1 - base, r.last - base, bits);", "set_range(r.base + 1 - base, r.last - base - 1, bits);", "fill_test"),
     ("step-1 run: last word overwrites", "range", "bits[wh] |= mh;", "bits[wh] = mh;", "fill_test"),
     ("scatter: the first 64-bit sum with a zero for untouched", "wrap", OLD_SCATTER, FIRST_SCATTER, "fill_test"),
-    ("scatter: a word's total is not taken from the sum before it", "sum", "			prev += delta;\n			word_sum_[w] = 0;", "			word_sum_[w] = 0;", "fill_test"),
+    ("scatter: a word's total is not taken from the sum before it", "sum", "			prev += delta;\n", "", "fill_test"),
+    ("scatter: the sums go back into the iterator", "size", "	ordinal_t bits_first_ = 0, bits_doc0_ = 0, bits_last_ = 0;\n", "	std::uint64_t word_sum_[128] = {};\n	ordinal_t bits_first_ = 0, bits_doc0_ = 0, bits_last_ = 0;\n", "fill_test"),
     ("scatter: sparse bits shifted", "sparse", "bits[o[i] >> 6] |= bit_masks[o[i] & 63];", "bits[o[i] >> 6] |= bit_masks[(o[i] + 1) & 63];", "fill_test"),
     ("scatter: a consecutive run loses its last bit", "consecutive", "set_range(o[0], o[n - 1], bits);", "set_range(o[0], o[n - 1] - (n > 1), bits);", "fill_test"),
     ("bitset: the shifted-out bits are dropped", "bitset", "carry = shift ? word >> (64 - shift) : 0;", "carry = 0;", "fill_test"),

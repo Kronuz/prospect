@@ -634,7 +634,6 @@ private:
 // block reads its group's advance entries without checking them, and a block's entry is
 // checked when the block is decoded.
 class postings_iterator : public recycled<postings_iterator> {
-	friend struct fill_test_access;  // test/fill_test.cc checks the scatter scratch
 public:
 	postings_iterator(const inverted_plugin::reader& seg, const format::term_info& info) : seg_(&seg), info_(info), df_(info.df) {
 		if (info.flags & format::single_posting) {
@@ -1289,9 +1288,9 @@ private:
 	// together share words, and consecutive read-modify-writes of one word wait on each other, so
 	// a dense run sums a mask per posting (32-bit words: the sum is positive and never wraps) into
 	// the slot of its word. A word's total is the sum at its last posting less the sum before its
-	// first; slots are zero until written, so untouched words add nothing. A sparse run sets its
-	// bits directly.
-	void scatter(const std::uint32_t* o, std::size_t n, std::uint64_t* bits) {
+	// first; slots start at zero, so untouched words add nothing. A sparse run sets its bits
+	// directly.
+	static void scatter(const std::uint32_t* o, std::size_t n, std::uint64_t* bits) noexcept {
 		assert(n && o[0] <= o[n - 1] && o[n - 1] < 4096);
 		if (fill_fast && o[n - 1] - o[0] == n - 1) {  // consecutive
 			set_range(o[0], o[n - 1], bits);
@@ -1301,18 +1300,20 @@ private:
 			for (std::size_t i = 0; i < n; ++i) { bits[o[i] >> 6] |= bit_masks[o[i] & 63]; }
 			return;
 		}
+		// A span under 768 bits touches at most 25 words.
+		std::uint64_t sums[25] = {};
+		const std::uint32_t w0 = o[0] >> 5;
 		std::uint64_t c = 0;
 		for (std::size_t i = 0; i < n; ++i) {
 			const std::uint32_t d = o[i];
 			c += bit_masks[d & 31];
-			word_sum_[d >> 5] = c;
+			sums[(d >> 5) - w0] = c;
 		}
 		std::uint64_t prev = 0;
-		for (std::uint32_t w = o[0] >> 5, hi = o[n - 1] >> 5; w <= hi; ++w) {
-			const std::uint64_t x = word_sum_[w], delta = (x - prev) & -std::uint64_t(x != 0);
-			bits[w >> 1] |= delta << (32 * (w & 1));
+		for (std::uint32_t k = 0, hi = (o[n - 1] >> 5) - w0; k <= hi; ++k) {
+			const std::uint64_t x = sums[k], delta = (x - prev) & -std::uint64_t(x != 0);
+			bits[(w0 + k) >> 1] |= delta << (32 * ((w0 + k) & 1));
 			prev += delta;
-			word_sum_[w] = 0;
 		}
 	}
 
@@ -1414,7 +1415,6 @@ private:
 	bool with_positions_ = false, with_counts_ = false;
 	ordinal_t buf_ords_[format::block] = {};
 	std::uint64_t bits_[64] = {};  // the current bitset block while bits_pending_
-	std::uint64_t word_sum_[128] = {};  // scatter's running mask sums by 32-bit word, zero between calls
 	ordinal_t bits_first_ = 0, bits_doc0_ = 0, bits_last_ = 0;
 	bool bits_pending_ = false;  // buf_ords_ not yet expanded from bits_
 	mutable std::uint32_t buf_wdfs_[format::block] = {};

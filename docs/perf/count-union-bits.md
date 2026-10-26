@@ -71,8 +71,8 @@ its bits:
 
 Correctness stays where it was: every check `block_at` and `decode_gaps` made is made (the wide
 and exceptional paths call `decode_gaps` itself), `need()` verifies each block's bytes before they
-are read. Memory: `word_sum_` adds 1,024 bytes to each `postings_iterator` (a union of four terms
-holds four); nothing is allocated. Disk and indexing: the writer is untouched; an index rebuilt
+are read. Memory: the scatter's sums are a 200-byte stack array inside `scatter`; nothing is held by the
+iterator and nothing is allocated (`docs/status/word-sum-memory.md`). Disk and indexing: the writer is untouched; an index rebuilt
 with B is byte-identical to A's (100k, 4 flushed segments, `cmp`), and `fixtures_test` passes.
 
 ## What the class reads
@@ -407,9 +407,8 @@ merged and reordered: `dump` counted and uncounted byte-identical to main's (5,7
 `verify` 962 queries, 0 mismatches; 26 + 4 ctest suites pass in Release (all but the crash-point
 runs), including `fill`, `fill_slow`, `concurrency`, and `churn`.
 
-**`word_sum_` stays per iterator** (1,024 bytes). A `thread_local` would take it off each iterator
-at the price of a TLS access per scatter on the hot path, which could only lose time; no run was
-spent on it.
+**The scatter's sums are on the stack** (review CR3): a span under 768 bits touches at most 25 32-bit words, so
+`scatter` zeroes 25 slots per call instead of every iterator holding 128 zeroed slots (`docs/status/word-sum-memory.md`).
 
 ## Next
 

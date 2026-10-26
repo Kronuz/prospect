@@ -24,15 +24,6 @@ static int failures = 0;
 		if (!(cond)) { std::fprintf(stderr, "%s:%d: CHECK(%s)\n", __FILE__, __LINE__, #cond); if (++failures > 20) std::exit(1); } \
 	} while (0)
 
-namespace prospect {
-struct fill_test_access {
-	static bool scratch_clear(const postings_iterator& it) {
-		for (auto w : it.word_sum_) { if (w) { return false; } }
-		return true;
-	}
-};
-}  // namespace prospect
-
 namespace {
 
 namespace f = prospect::format;
@@ -292,8 +283,7 @@ ords_t run_edges_term() {
 }
 
 // A damaged copy walked the way count() does (aligned windows) and in 700-ordinal windows from
-// each posting: whether it fenced. The window's guard words and the scatter scratch must be
-// untouched whatever happens.
+// each posting: whether it fenced. The window's guard words must be untouched whatever happens.
 bool walk_copy(const std::string& bad, const std::string& term) {
 	try {
 		prospect::segment sb(bad);
@@ -307,7 +297,6 @@ bool walk_copy(const std::string& bad, const std::string& term) {
 				w.clear();
 				it.fill(base, end, w.bits);
 				CHECK(w.guarded());
-				CHECK(prospect::fill_test_access::scratch_clear(it));
 				d = it.doc();
 				if (d != no_more_docs && d < end) { CHECK(false); break; }
 			}
@@ -319,6 +308,8 @@ bool walk_copy(const std::string& bad, const std::string& term) {
 }
 
 int main_body() {
+	// The scatter's sums live on the stack: a member array would return 1 KB to every iterator.
+	CHECK(sizeof(prospect::postings_iterator) < 3600);
 	std::mt19937_64 rng(2026);
 	std::map<std::string, ords_t> terms;
 	terms["mid"] = random_term(rng, 0.2);          // FOR blocks, gaps of a few
