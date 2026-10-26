@@ -85,8 +85,8 @@ against variants with the A/A, `stg.sh` the ablation, `bench_query.rs` the Tanti
 
 # Round 2 (`perf/phrases`): what reaches Tantivy
 
-Branch `perf/phrases` from `explore/phrases` (0555d10). The explorer's `PHR_*` macros are removed
-(its numbers above stand); the harness is `bench/quick/phrases-explore/{abx.sh,score.py}`
+Branch `perf/phrases` from `explore/phrases` (0555d10). The explorer's `PHR_*` macros and the scripts that
+needed them (`abm.sh`, `stg.sh`) are removed (its numbers above stand); the harness is `bench/quick/phrases-explore/{abx.sh,score.py}`
 (`abx.sh OUT ROUNDS "CMDS" name=bin ...` interleaves every variant per round, rotating the order,
 best of 3 per query; `score.py OUT A B` gives the geometric mean B/A with a bootstrap interval,
 per-round ratios, sums and result mismatches). The Tantivy 0.26 index and `bench_query` are
@@ -148,3 +148,106 @@ with an A/A in the same rotation:
    at most the smaller count) skips the position reads of candidates that cannot compete.
 4. E4, a pair/bigram posting prototype for the long candidate lists, with its disk cost; only if
    1 to 3 leave the long tail as the loss.
+
+## 5. Experiments (round 2)
+
+Every row: `dump` of the 962 queries (counted and uncounted, both schemes, k of 10, 100, 1000) byte
+identical to main on 100k flushed, 100k merged, 1M merged and 1M reordered (5,772 lines each),
+`verify` 962 queries 0 mismatches on 100k merged and 1M reordered, all 39 ctest targets pass.
+Timing: `quiet strict`, `bench/quick/phrases-explore/abx.sh`, 8 interleaved rounds (the order
+rotated each round), best of 3 per query, the 300 gate phrases on the 1M reordered index; B/A is the
+geometric mean over queries of B's best over A's with a bootstrap interval over queries; the A/A
+is main against itself in the same rotation. Each row's A is the state before it.
+
+| # | Hypothesis | Change | B/A `COUNT` [95%] | B/A `TOP_10` [95%] | A/A (`COUNT`, `TOP_10`) | Verdict |
+|---|---|---|---|---|---|---|
+| E1 | The build and teardown of a short query (27 to 30% of it, 50 allocations of 19.6 KB) is dominated by the large per-query objects | `postings_iterator`, `positions_reader`, `phrase_scorer` recycled through a per-thread stack of 8 blocks; constructor vectors reserved | 0.977 [0.975, 0.980] | 0.981 [0.979, 0.983] | 0.998, 0.998 | win: 5.3% on the shortest fifth (bucket 1), 1% on the longest |
+| E2 | `phrase_freq` pays vector assigns and an insertion sort per candidate; the position tail grows a vector by doubling | a two-slot `pair_match` with no ordering vectors; the tail cache reserved to a block | 0.969 [0.966, 0.972] | 0.973 [0.971, 0.977] | 1.000, 1.001 | win: 3% in every fifth |
+| E3 | Candidates that cannot beat the k-th score need no position reads: the phrase frequency is at most the smallest term count, already decoded | `can_compete` before `phrase_freq` when a minimum competitive score is set (Lucene mode bounds by the smallest count; Xapian mode computes the exact score, which positions do not change) | 1.010 [1.009, 1.012] (no pruning, no change) | 0.883 [0.858, 0.906] | 1.007, 1.002 | win for `TOP_k`: fifths 0.97, 0.94, 0.90, 0.88, 0.73 |
+| E4 | Each phrase scorer builds four 256-entry weight tables; one is enough | `bm25_idf` for the per-term idf, no default-member table | 0.998 [0.996, 1.000] | 0.986 [0.984, 0.987] | 0.986, 0.996 | loser (inside the A/A drift; 1.8% on the shortest fifth against an A/A of 1.3%); removed |
+| E5 | `position_index` pays an overflow test per summed count | one 64-bit sum, one test | 0.992 [0.990, 0.994] | 0.987 [0.985, 0.988] | 0.997, 0.998 | marginal win, 0.5 to 1%; kept because the loop is simpler |
+
+Not tried, with the reason: the pair/bigram posting prototype (section 7) is a format change; a
+second dictionary-walk or term-info sharing pass (the 41 small allocations that remain cost about
+6% of a short query by the profile, and no single site is more than a fifth of that).
+
+## 6. The result against Tantivy
+
+The landing version (E1, E2, E3, E5) against main d6f15d6 and Tantivy 0.26, 8 rounds, A/A in the
+same rotation, the 300 gate phrases (`phrases` row of the table is the B/A over main):
+
+| Command | B/A over main [95%] | A/A | main / Tantivy | this branch / Tantivy [95%] |
+|---|---|---|---|---|
+| `COUNT` | 0.946 [0.941, 0.951] | 1.012 | 1.425 | 1.348 [1.318, 1.377] |
+| `TOP_10` | 0.823 [0.800, 0.843] | 0.998 | 1.357 | 1.116 [1.066, 1.166] |
+| `TOP_100` | 0.906 [0.892, 0.919] | 0.992 | 1.405 | 1.273 [1.237, 1.309] |
+| `TOP_1000` | 0.944 [0.939, 0.950] | 0.999 | 1.403 | 1.325 [1.297, 1.354] |
+| `TOP_100_COUNT` | 0.946 [0.943, 0.950] | 1.006 | 1.400 | 1.325 [1.299, 1.356] |
+
+The target (at most 1.0 on `COUNT` and `TOP_10`) is not met: `COUNT` is 5% faster and still 1.35
+times Tantivy; `TOP_10` is 18% faster and 1.12 times. By sums of time `COUNT` is 109.2 ms against
+Tantivy's 92.2 (1.18).
+
+Other axes. Time elsewhere (all 962 gate queries, 6 rounds, main = 1): `COUNT` 0.968 [0.966,
+0.970], `TOP_10` 0.940, `TOP_100` 0.978, A/A 1.003, 0.993, 1.005; by class the intersections are
+0.988, the unions 0.986, the negations 0.983 (`COUNT`), none above the A/A band. Memory: maximum
+resident set 99.91 MB against 99.93 MB on the 300-phrase run, peak footprint +20 KB; the
+recycling stacks hold at most 8 blocks of 4.4 KB, 1.2 KB and 2.6 KB per thread (66 KB). Disk: no
+format change, identical. Indexing and merge throughput: not touched by the changes except that
+merge uses the same iterators; merging the 100k flushed index, six alternating runs, 7.95 s main
+against 7.80 s here (median, all runs 7.56 to 8.06 s). Platforms: measured on this Intel Mac
+(macOS 15.6, AppleClang 17) only; the Linux, FreeBSD and arm64 hosts are not measured (they are
+the lead's), and the thread-local stack is the one change that depends on the platform's
+allocator, so those runs are needed before landing.
+
+What it saves: per query, `COUNT` goes from 375 to 364 microseconds on average (112.5 and 109.2
+ms for the 300), `TOP_10` from 341 to 277 (102.3 and 83.2 ms). A million phrase queries a day
+save 11 CPU-seconds as `COUNT` or 64 CPU-seconds as `TOP_10`; at a few cents per core-hour that
+is far below a cent a day. The saving is negligible in dollars or power at any plausible query
+rate; the value is the benchmark ratio.
+
+## 7. What would reach Tantivy: the pair posting, measured as an estimate
+
+No trim in sections 5 and 6 changes the shape: the loss is a constant factor on every query, and
+the changes recovered about a quarter of it for `COUNT` and two thirds for `TOP_10`. What remains
+for `COUNT` is spread over the same areas as before (postings navigation near parity with
+Tantivy's; the build and teardown; the phrase body; 41 small allocations; `verify`), each worth a
+few percent. Neither Tantivy nor Lucene rejects a candidate before it reads positions, so there is
+no cheaper necessary test to copy; the only way to avoid the reads is to not have the candidates,
+which is a pair (bigram) posting: a posting list per adjacent pair of terms, holding the phrase
+frequency as its wdf, so a two-term phrase is one list (its `COUNT` is the list's df, its score
+needs no positions) and a longer phrase intersects the pair lists of its adjacent terms before
+reading any position.
+
+Cost, counted on the 1M corpus (`.scratch/bigram.cc`, the first million documents, 295 M tokens,
+36.6 M distinct adjacent pairs, 244 M (document, pair) postings in all). Indexing only the pairs
+whose both terms are frequent keeps the lists long and the dictionary small:
+
+| Both terms with df at least | Pair lists | Postings | At about 0.9 byte a posting | Share of the 576 MB segment | Gate phrases covered |
+|---|---|---|---|---|---|
+| 30,000 (3%) | 316 k | 76 M | 68 MB plus the dictionary | about +12% | 24 of 300 (8%) |
+| 10,000 (1%) | 2.1 M | 125 M | 113 MB plus the dictionary | about +21% | 74 of 300 (25%) |
+| 3,000 (0.3%) | 6.7 M | 169 M | 152 MB plus the dictionary | about +30% | 139 of 300 (46%) |
+
+Bound on the benefit (not a measurement): if a covered phrase's `COUNT` costs the 3 microseconds of
+a one-term lookup, the `COUNT` geometric mean against Tantivy goes from 1.35 to 0.86 (df 30,000),
+0.40 (df 10,000), 0.16 (df 3,000). The geometric mean reaches 1.0 when about 30% of the queries
+are covered at half of Tantivy's time, so the 1% threshold (+21% disk) is about where `COUNT`
+reaches parity on this phrase set, and the set is real-query derived, so the share covered is
+workload dependent. The uncovered phrases (a rare term with anything) stay at the ratios of
+section 6, which is where most of the geometric mean sits.
+
+Not prototyped: it is a writer, merge, inverter and reader change with deletes and reordering
+interacting with a second postings family, so it needs fixtures, byte identity, decoder fuzzing
+and a decoder-safety review before it lands, and its indexing cost (a pair is known only once a
+term's df is) is unmeasured. It trades about +12% to +21% disk against Tantivy's 658 MB for the
+phrase row, so it is the lead's and the architect's decision whether a phrase row justifies it.
+
+## What is left (Next)
+
+1. The pair posting above, if the disk is acceptable; it is the only item found that reaches 1.0.
+2. Without a format change, a second pass over the build (41 small allocations, about 6% of a
+   short query; `term_info` copies its `impacts` vector four times per term) and over `verify`
+   (3.6% of a short query), each worth 1 to 3%.
+3. Measure the landing version on Linux, FreeBSD and arm64 (the thread-local block stack and the
+   allocator it avoids are platform dependent).
