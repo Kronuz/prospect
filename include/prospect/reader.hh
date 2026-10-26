@@ -1514,6 +1514,7 @@ private:
 			if (tail_p_ == nullptr) {
 				need(tail_, std::uint64_t(end_ - tail_));
 				tail_p_ = tail_;
+				tail_values_.reserve(std::min<std::uint64_t>(format::block, std::uint64_t(end_ - tail_)));  // fewer than a block's positions
 			}
 			tail_values_.push_back(std::uint32_t(format::get_leb(&tail_p_, end_)));
 		}

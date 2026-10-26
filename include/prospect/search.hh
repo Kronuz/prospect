@@ -1266,6 +1266,7 @@ private:
 	std::uint32_t phrase_freq(bool all) {
 		if (window_) { return near_freq(); }
 		for (std::size_t u = 0; u < terms_.size(); ++u) { counts_[u] = readers_[u]->count(*terms_[u]); }
+		if (!all && slots_.size() == 2) { return pair_match(); }
 		order_.assign(slots_.begin(), slots_.end());
 		for (std::size_t i = 1; i < order_.size(); ++i) {  // insertion sort: a handful of slots
 			for (std::size_t j = i; j > 0 && counts_[order_[j].term] < counts_[order_[j - 1].term]; --j) { std::swap(order_[j], order_[j - 1]); }
@@ -1310,6 +1311,28 @@ private:
 			candidates_.resize(keep);
 		}
 		return std::uint32_t(candidates_.size());
+	}
+
+	// phrase_freq(false) for two slots: the slot whose term has fewer positions leads (the first on
+	// a tie), and the other term's positions are read when the lead has a candidate.
+	std::uint32_t pair_match() {
+		const slot& a = counts_[slots_[1].term] < counts_[slots_[0].term] ? slots_[1] : slots_[0];
+		const slot& b = &a == &slots_[0] ? slots_[1] : slots_[0];
+		std::span<const std::uint32_t> pos;
+		std::size_t j = 0;
+		bool read = false;
+		for (const std::uint32_t p : positions(a.term)) {
+			if (p < a.offset) { continue; }
+			if (!read) {
+				pos = positions(b.term);
+				read = true;
+			}
+			const std::uint32_t want = p - a.offset + b.offset;
+			while (j < pos.size() && pos[j] < want) { ++j; }
+			if (j == pos.size()) { return 0; }
+			if (pos[j] == want) { return 1; }
+		}
+		return 0;
 	}
 
 	// NEAR: 1 when some window of fewer than window_ positions holds every term as often as
