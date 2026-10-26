@@ -579,17 +579,33 @@ inline constexpr auto bit_masks = [] {
 	return t;
 }();
 
+// Sanitizer builds allocate every block fresh, so ASan and MSan see a use after free.
+#if defined(__SANITIZE_ADDRESS__)
+inline constexpr bool recycle_blocks = false;
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(memory_sanitizer)
+inline constexpr bool recycle_blocks = false;
+#else
+inline constexpr bool recycle_blocks = true;
+#endif
+#else
+inline constexpr bool recycle_blocks = true;
+#endif
+
 // Base for the large objects a query builds and drops (iterators, readers, scorers): their
 // blocks are kept on a per-thread stack and reused, which skips the allocator's large-block path.
+// A block kept after the thread's stack is destroyed is never freed (CR3); no such delete exists.
 template <class T>
 struct recycled {
 	static_assert(__STDCPP_DEFAULT_NEW_ALIGNMENT__ >= 16, "blocks come from the default allocation function");
 	static void* operator new(std::size_t n) {
+		if constexpr (!recycle_blocks) { return ::operator new(n); }
 		auto& s = cache();
 		if (n == sizeof(T) && s.count) { return s.blocks[--s.count]; }
 		return ::operator new(n);
 	}
 	static void operator delete(void* p, std::size_t n) noexcept {
+		if constexpr (!recycle_blocks) { return ::operator delete(p); }
 		auto& s = cache();
 		if (n == sizeof(T) && s.count < keep) {
 			s.blocks[s.count++] = p;

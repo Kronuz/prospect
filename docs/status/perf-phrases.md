@@ -12,7 +12,16 @@ No format change, no disk change. Measured on the Intel Mac only.
   (e653fa8), E5 position-index sum (ab933b1); E4 weight tables removed as a loser.
 - docs/perf/phrases-explore.md sections 4 to 7 (numbers, profile, pair-posting cost estimate).
 
+## Review fold-in (docs/reviews/perf-phrases-code.md)
+- CR1: sanitizer builds (ASan, MSan) bypass the block stack (`recycle_blocks` in reader.hh), so a
+  use after free on the three recycled types is reported again.
+- CR2: `test/recycled_test.cc` (ctest `recycled`): the 8-block cap, LIFO reuse, release at thread
+  exit, a cross-thread free, and constructors that throw.
+
 ## Next
+- CR3 (follow-up, not reachable today): a delete after the thread's stack is destroyed keeps up to
+  8 blocks nobody frees; close it with a `dead` flag in `stack::~stack` if a thread-local or
+  static destructor ever deletes one of these objects.
 - Decide on the pair posting (about +12% to +21% disk for parity on `COUNT`; section 7).
 - Measure the landing version on Linux, FreeBSD, arm64.
 - Optional build and `verify` diet, 1 to 3% each.
