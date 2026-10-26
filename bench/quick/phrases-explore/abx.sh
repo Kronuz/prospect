@@ -13,9 +13,9 @@ for r in $(seq 1 "$rounds"); do
   for i in $(seq 0 $((n-1))); do
    k=$(((i+r)%n))
    if [ "${names[$k]}" = tv ]; then
-    "$W/tantivy/target/release/bench_query" "$W/tantivy/idx" "$c" 3 < "$W/phr.txt" > "$out/$r-${names[$k]}-$c.tsv"
+    "$W/tantivy/target/release/bench_query" "$W/tantivy/idx" "$c" 3 < "${QF:-$W/phr.txt}" > "$out/$r-${names[$k]}-$c.tsv"
    else
-    "${bins[$k]}" bench "$I" "$c" 3 < "$W/phr.txt" > "$out/$r-${names[$k]}-$c.tsv" 2>/dev/null
+    "${bins[$k]}" bench "$I" "$c" 3 < "${QF:-$W/phr.txt}" > "$out/$r-${names[$k]}-$c.tsv" 2>/dev/null
    fi
   done
  done

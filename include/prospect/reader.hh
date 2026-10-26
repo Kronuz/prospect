@@ -583,6 +583,7 @@ inline constexpr auto bit_masks = [] {
 // blocks are kept on a per-thread stack and reused, which skips the allocator's large-block path.
 template <class T>
 struct recycled {
+	static_assert(__STDCPP_DEFAULT_NEW_ALIGNMENT__ >= 16, "blocks come from the default allocation function");
 	static void* operator new(std::size_t n) {
 		auto& s = cache();
 		if (n == sizeof(T) && s.count) { return s.blocks[--s.count]; }
@@ -844,10 +845,11 @@ public:
 			sum_pos_ = 0;
 			sum_ = positions_start().first_index;
 		}
-		for (; sum_pos_ < pos_; ++sum_pos_) {
-			if (sum_ + counts[sum_pos_] < sum_) { corrupt("position index"); }  // wraps past 2^64
-			sum_ += counts[sum_pos_];
-		}
+		std::uint64_t add = 0;  // at most 128 counts below 2^32 each: no overflow, and it vectorizes
+		for (std::size_t i = sum_pos_; i < pos_; ++i) { add += counts[i]; }
+		if (sum_ + add < sum_) { corrupt("position index"); }  // wraps past 2^64
+		sum_ += add;
+		sum_pos_ = pos_;
 		return sum_;
 	}
 
