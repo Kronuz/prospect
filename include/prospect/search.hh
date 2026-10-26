@@ -1239,10 +1239,34 @@ private:
 				window_end_ = end;
 			}
 			checked_ = d;
+			if (min_ > 0 && !can_compete(d)) {
+				matched_ = false;
+				d = align(terms_[lead_]->next());
+				continue;
+			}
 			if ((matched_ = phrase_freq(false) > 0)) { return d; }
 			d = align(terms_[lead_]->next());
 		}
 		return no_more_docs;
+	}
+
+	// Whether the document the terms are aligned on can score above the minimum competitive
+	// score, from counts alone: the phrase frequency is at most the smallest term count, and
+	// the weight grows with it (Xapian mode sums the terms' weights, which positions do not change).
+	bool can_compete(ordinal_t d) {
+		if (!term_weights_.empty()) { return sum_upper(score_terms_weights(d), slots_.size()) > min_; }
+		std::uint32_t most = ~std::uint32_t(0);
+		for (std::size_t u = 0; u < terms_.size(); ++u) {
+			counts_[u] = readers_[u]->count(*terms_[u]);
+			most = std::min(most, counts_[u]);
+		}
+		return sum_upper(weight_.by_norm(most, seg_->norm(d)), 1) > min_;
+	}
+	double score_terms_weights(ordinal_t d) {
+		double s = 0;
+		const std::uint32_t len = seg_->length(d);
+		for (const auto& sl : slots_) { s += term_weights_[sl.offset](terms_[sl.term]->wdf(), len); }
+		return s;
 	}
 
 	double lead_bound(ordinal_t from, ordinal_t upto) {
