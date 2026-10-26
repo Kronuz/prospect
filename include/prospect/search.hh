@@ -1250,7 +1250,13 @@ private:
 	// The current document's positions of unique term u, decoded once per document.
 	std::span<const std::uint32_t> positions(std::size_t u) {
 		if (decoded_[u] != terms_[u]->doc()) {
+#ifdef PHR_CNT
+			const auto t0 = __builtin_ia32_rdtsc();
+#endif
 			positions_[u] = readers_[u]->read(*terms_[u]);
+#ifdef PHR_CNT
+			phr_cnt[10] += __builtin_ia32_rdtsc() - t0;
+#endif
 			decoded_[u] = terms_[u]->doc();
 		}
 		return positions_[u];
@@ -1261,7 +1267,19 @@ private:
 	// intersects the others into it, stopping once nothing is left.
 	std::uint32_t phrase_freq(bool all) {
 		if (window_) { return near_freq(); }
+#ifdef PHR_CNT
+		++phr_cnt[4];
+#endif
 		for (std::size_t u = 0; u < terms_.size(); ++u) { counts_[u] = readers_[u]->count(*terms_[u]); }
+#ifdef PHR_PREFETCH
+		for (std::size_t u = 0; u < terms_.size(); ++u) { readers_[u]->prefetch(*terms_[u]); }
+#endif
+#ifdef PHR_STAGE
+		static const int stage = std::getenv("PHR_STAGE") ? std::atoi(std::getenv("PHR_STAGE")) : 9;
+		if (stage == 1) { return 1; }
+		if (stage == 2) { return 0; }
+		if (stage == 3) { for (std::size_t u = 0; u < terms_.size(); ++u) { (void)positions(u); } return 0; }
+#endif
 		order_.assign(slots_.begin(), slots_.end());
 		for (std::size_t i = 1; i < order_.size(); ++i) {  // insertion sort: a handful of slots
 			for (std::size_t j = i; j > 0 && counts_[order_[j].term] < counts_[order_[j - 1].term]; --j) { std::swap(order_[j], order_[j - 1]); }
