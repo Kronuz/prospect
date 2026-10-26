@@ -209,7 +209,7 @@ rate; the value is the benchmark ratio.
 ## 7. What would reach Tantivy: the pair posting, measured as an estimate
 
 No trim in sections 5 and 6 changes the shape: the loss is a constant factor on every query, and
-the changes recovered about a quarter of it for `COUNT` and two thirds for `TOP_10`. What remains
+the changes recovered a fifth of the `COUNT` loss and two thirds of the `TOP_10` loss. What remains
 for `COUNT` is spread over the same areas as before (postings navigation near parity with
 Tantivy's; the build and teardown; the phrase body; 41 small allocations; `verify`), each worth a
 few percent. Neither Tantivy nor Lucene rejects a candidate before it reads positions, so there is

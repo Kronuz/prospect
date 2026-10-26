@@ -20,4 +20,4 @@ No format change, no disk change. Measured on the Intel Mac only.
 ## Blocked on
 Landing: the other platforms' measurements (the lead's hosts) and a code review of the
 thread-local block stack (`recycled` in include/prospect/reader.hh) and of `can_compete`
-(include/prospect/search.hh), which changes which candidates `matches`-less top-k reads.
+(include/prospect/search.hh), which skips candidates in top-k searches before their positions are read.
