@@ -1095,7 +1095,7 @@ private:
 
 // Documents where the terms occur at consecutive positions; Lucene-style scoring with the
 // phrase frequency as tf and the summed idf of its terms.
-class phrase_scorer final : public scorer {
+class phrase_scorer final : public scorer, public recycled<phrase_scorer> {
 public:
 	// Lucene scores the phrase frequency with the terms' summed idf; Xapian (term_weights
 	// given, one per phrase term) sums each term's own weight for the document. A term
@@ -1111,6 +1111,10 @@ public:
 		if (!df.empty() && df.size() != infos.size()) { throw std::invalid_argument("strata: one document frequency per phrase term"); }
 		const statistics st = stats ? *stats : statistics(seg);
 		double idf = 0;
+		infos_.reserve(infos.size());
+		terms_.reserve(infos.size());
+		readers_.reserve(infos.size());
+		slots_.reserve(infos.size());
 		for (std::size_t k = 0; k < infos.size(); ++k) {
 			const auto& info = infos[k];
 			idf += weight::bm25(st, df.empty() ? info.df : df[k]).idf;

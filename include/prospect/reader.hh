@@ -579,11 +579,44 @@ inline constexpr auto bit_masks = [] {
 	return t;
 }();
 
+// Base for the large objects a query builds and drops (iterators, readers, scorers): their
+// blocks are kept on a per-thread stack and reused, which skips the allocator's large-block path.
+template <class T>
+struct recycled {
+	static void* operator new(std::size_t n) {
+		auto& s = cache();
+		if (n == sizeof(T) && s.count) { return s.blocks[--s.count]; }
+		return ::operator new(n);
+	}
+	static void operator delete(void* p, std::size_t n) noexcept {
+		auto& s = cache();
+		if (n == sizeof(T) && s.count < keep) {
+			s.blocks[s.count++] = p;
+			return;
+		}
+		::operator delete(p);
+	}
+
+private:
+	static constexpr std::size_t keep = 8;
+	struct stack {
+		void* blocks[keep];
+		std::size_t count = 0;
+		~stack() {
+			while (count) { ::operator delete(blocks[--count]); }
+		}
+	};
+	static stack& cache() {
+		static thread_local stack s;
+		return s;
+	}
+};
+
 // Iterates one term's postings: ordinals in increasing order with their wdf. Satisfies
 // docset::doc_iterator; scorers build on it. Skip data is read in place (F10): locating a
 // block reads its group's advance entries without checking them, and a block's entry is
 // checked when the block is decoded.
-class postings_iterator {
+class postings_iterator : public recycled<postings_iterator> {
 	friend struct fill_test_access;  // test/fill_test.cc checks the scatter scratch
 public:
 	postings_iterator(const inverted_plugin::reader& seg, const format::term_info& info) : seg_(&seg), info_(info), df_(info.df) {
@@ -1384,7 +1417,7 @@ inline std::vector<format::impact> inverted_plugin::reader::tail_impacts(const f
 	return format::competitive(std::move(pairs));
 }
 
-class positions_reader {
+class positions_reader : public recycled<positions_reader> {
 public:
 	positions_reader(const inverted_plugin::reader& seg, const format::term_info& info) {
 		if (info.flags & format::no_positions) {
