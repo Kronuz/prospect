@@ -1,6 +1,6 @@
 #!/bin/bash
 # abn.sh OUT BASE NEW ROUNDS [CMDS]: a=BASE b=NEW (ab), and BASE vs BASE (aa), interleaved
-W=/Users/kronuz/code/Kronuz/prospect-wt/explore-phrases/.scratch
+W=${W:-$(cd "$(dirname "$0")/../../.." && pwd)/.scratch}
 out=$1 A=$2 B=$3 rounds=${4:-8} cmds=${5:-"TOP_10 TOP_1000 COUNT"}; I=$HOME/.scratch/prospect-idx/1000000-reordered
 mkdir -p $out/ab $out/aa
 for r in $(seq 1 $rounds); do

@@ -25,7 +25,6 @@
 // aliases (`segment`, `document`).
 
 #pragma once
-#include <unordered_map>
 
 #include "bitpack.hh"
 #include "docset.hh"
@@ -812,20 +811,10 @@ public:
 			sum_pos_ = 0;
 			sum_ = positions_start().first_index;
 		}
-#ifdef PHR_T1
-		if (sum_pos_ < pos_) {
-			std::uint64_t delta = 0;  // at most 127 u32 counts: no wrap inside the sum
-			for (std::size_t i = sum_pos_; i < pos_; ++i) { delta += counts[i]; }
-			if (sum_ + delta < sum_) { corrupt("position index"); }  // wraps past 2^64
-			sum_ += delta;
-			sum_pos_ = pos_;
-		}
-#else
 		for (; sum_pos_ < pos_; ++sum_pos_) {
 			if (sum_ + counts[sum_pos_] < sum_) { corrupt("position index"); }  // wraps past 2^64
 			sum_ += counts[sum_pos_];
 		}
-#endif
 		return sum_;
 	}
 
@@ -1395,16 +1384,6 @@ inline std::vector<format::impact> inverted_plugin::reader::tail_impacts(const f
 	return format::competitive(std::move(pairs));
 }
 
-#ifdef PHR_CNT
-inline unsigned long long phr_cnt[16];
-struct phr_cnt_print { ~phr_cnt_print() { fprintf(stderr, "cycles: step %llu verify+decode %llu\n", phr_cnt[11], phr_cnt[12]); fprintf(stderr, "cycles: read_total %llu decode_block %llu positions-fn %llu\n", phr_cnt[8], phr_cnt[9], phr_cnt[10]); fprintf(stderr, "reads %llu decodes %llu steps %llu calls %llu pf %llu posdocs %llu\n", phr_cnt[0], phr_cnt[1], phr_cnt[2], phr_cnt[3], phr_cnt[4], phr_cnt[5]); } };
-inline phr_cnt_print phr_cnt_p;
-#endif
-#ifdef PHR_T2
-#define PHR_CONST
-#else
-#define PHR_CONST const
-#endif
 class positions_reader {
 public:
 	positions_reader(const inverted_plugin::reader& seg, const format::term_info& info) {
@@ -1415,9 +1394,6 @@ public:
 		auto bytes = seg.positions_bytes();
 		if (info.positions > bytes.size() || info.positions_length > bytes.size() - info.positions) { corrupt("positions offset"); }
 		seg_ = &seg;
-#ifdef PHR_T2
-		base_ = bytes.data();
-#endif
 		const char* p = bytes.data() + info.positions;
 		end_ = p + info.positions_length;  // every read stays inside the term's range
 		max_count_ = seg.max_positions();
@@ -1449,19 +1425,6 @@ public:
 		return counts(it.in_tail(), it.positions_start().count_offset)[it.index_in_block()];
 	}
 
-#ifdef PHR_PREFETCH
-	// Starts loading the block holding the current document's first position.
-	void prefetch(postings_iterator& it) {
-		if (none_) { return; }
-		const auto start = it.positions_start();
-		const std::uint32_t* counts = it.info().flags & format::counts_are_wdf ? it.wdfs() : this->counts(it.in_tail(), start.count_offset);
-		const std::uint64_t j = it.position_index(counts) / format::block;
-		if (j >= full_blocks_ || decoded_block_ == j) { return; }
-		const char* p = blocks_ + offsets_table()[j / PHR_TABLE * 1] ;
-		for (int i = 0; i < 4; ++i) { __builtin_prefetch(p + 64 * i); }
-	}
-#endif
-
 	// The positions of the iterator's current document, ascending.
 	void read(postings_iterator& it, std::vector<std::uint32_t>& out) {
 		const auto got = read(it);
@@ -1469,16 +1432,8 @@ public:
 	}
 
 	// The same, in a buffer the reader owns until its next read.
-#ifdef PHR_CNT
-	std::span<const std::uint32_t> read(postings_iterator& it) { const auto t0 = __builtin_ia32_rdtsc(); auto r = read_(it); phr_cnt[8] += __builtin_ia32_rdtsc() - t0; return r; }
-	std::span<const std::uint32_t> read_(postings_iterator& it) {
-#else
 	std::span<const std::uint32_t> read(postings_iterator& it) {
-#endif
 		if (none_) { return {}; }
-#ifdef PHR_CNT
-		++phr_cnt[0];
-#endif
 		const auto start = it.positions_start();
 		const std::uint32_t* counts = it.info().flags & format::counts_are_wdf ? it.wdfs() : this->counts(it.in_tail(), start.count_offset);
 		const std::uint64_t first = it.position_index(counts);
@@ -1497,11 +1452,7 @@ public:
 		// Spans of full blocks, then the tail.
 		while (i < first + count && i / format::block < full_blocks_) {
 			const std::uint64_t j = i / format::block;
-#ifdef PHR_CNT
-			if (decoded_block_ != j) { const auto t1 = __builtin_ia32_rdtsc(); decode_block(j, start); phr_cnt[9] += __builtin_ia32_rdtsc() - t1; }
-#else
 			if (decoded_block_ != j) { decode_block(j, start); }
-#endif
 			const std::uint64_t stop = std::min<std::uint64_t>(first + count, (j + 1) * format::block);
 			for (const std::uint32_t* v = block_buf_ + i % format::block; i < stop; ++i) { *o++ = at += *v++; }
 		}
@@ -1536,24 +1487,6 @@ private:
 		return tail_values_[t];
 	}
 
-#ifdef PHR_TABLE
-	// Prototype of a format-side skip table: the offset of every PHR_TABLE-th block, built by
-	// one walk on first use and kept for the process.
-	const std::vector<std::uint64_t>& offsets_table() {
-		static std::unordered_map<const char*, std::vector<std::uint64_t>> tables;
-		auto& t = tables[blocks_];
-		if (t.empty()) {
-			std::uint64_t offset = 0;
-			for (std::uint64_t b = 0; b < full_blocks_; ++b) {
-				if (b % PHR_TABLE == 0) { t.push_back(offset); }
-				need_block(blocks_ + offset, blocks_bytes_ - offset);
-				offset += bitpack::encoded_size(reinterpret_cast<const std::uint8_t*>(blocks_ + offset), blocks_bytes_ - offset);
-			}
-			t.push_back(offset);
-		}
-		return t;
-	}
-#endif
 	// Steps from the nearest known block at or before j (the decoded one, or the postings
 	// block's first) over block headers, then decodes block j.
 	void decode_block(std::uint64_t j, const postings_iterator::position_start& start) {
@@ -1562,20 +1495,6 @@ private:
 			at = decoded_block_;
 			offset = decoded_offset_;
 		}
-#ifdef PHR_CNT
-		++phr_cnt[1]; phr_cnt[2] += j - at;
-		const auto ts0 = __builtin_ia32_rdtsc();
-#endif
-#ifdef PHR_TABLE
-		{
-			const std::vector<std::uint64_t>& tab = offsets_table();
-			const std::uint64_t ta = j / PHR_TABLE;
-			if (ta * PHR_TABLE > at) {
-				at = ta * PHR_TABLE;
-				offset = tab[ta];
-			}
-		}
-#endif
 		for (; at < j; ++at) {  // j >= at: position indexes never wrap (position_index, decode_group)
 			if (offset >= blocks_bytes_) { corrupt("position block bounds"); }
 			need_block(blocks_ + offset, blocks_bytes_ - offset);
@@ -1583,43 +1502,20 @@ private:
 			if (!n) { corrupt("position block"); }
 			offset += n;
 		}
-#ifdef PHR_CNT
-		const auto ts1 = __builtin_ia32_rdtsc(); phr_cnt[11] += ts1 - ts0;
-#endif
 		if (offset < blocks_bytes_) { need_block(blocks_ + offset, blocks_bytes_ - offset); }
 		if (offset >= blocks_bytes_ ||
 			!bitpack::decode(reinterpret_cast<const std::uint8_t*>(blocks_ + offset), blocks_bytes_ - offset, block_buf_)) {
 			corrupt("position block");
 		}
-#ifdef PHR_CNT
-		phr_cnt[12] += __builtin_ia32_rdtsc() - ts1;
-#endif
 		decoded_block_ = j;
 		decoded_offset_ = offset;
 	}
 
 	// Verifies [p, p + n) of the positions section before it is read.
-#ifdef PHR_T2
-	void need(const char* p, std::uint64_t n) {
-		const std::uint64_t at = std::uint64_t(p - base_);
-		if (at >= ok_lo_ && at + n <= ok_hi_) { return; }
-		seg_->verify_positions(at, n);
-		if (at <= ok_hi_ && at + n >= ok_lo_) {
-			ok_lo_ = std::min(ok_lo_, at);
-			ok_hi_ = std::max(ok_hi_, at + n);
-		} else {
-			ok_lo_ = at;
-			ok_hi_ = at + n;
-		}
-	}
-	const char* base_ = nullptr;
-	std::uint64_t ok_lo_ = 0, ok_hi_ = 0;  // a range already verified good
-#else
 	void need(const char* p, std::uint64_t n) const { seg_->verify_positions(std::uint64_t(p - seg_->positions_bytes().data()), n); }
-#endif
 	// Verifies what reading one bitpack block at p can touch: at most a block's largest
 	// encoding (header, 32-bit values, 128 exceptions with 32 high bits).
-	void need_block(const char* p, std::uint64_t avail) PHR_CONST {
+	void need_block(const char* p, std::uint64_t avail) const {
 		constexpr std::uint64_t largest = 2 + 4 * format::block + format::block + 1 + 4 * format::block;
 		need(p, std::min(largest, avail));
 	}

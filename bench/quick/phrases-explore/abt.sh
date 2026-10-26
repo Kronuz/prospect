@@ -1,6 +1,6 @@
 #!/bin/bash
 # abt.sh OUT PROSPECT_BIN ROUNDS : tantivy (a) vs prospect (b), and prospect vs prospect (A/A)
-W=/Users/kronuz/code/Kronuz/prospect-wt/explore-phrases/.scratch
+W=${W:-$(cd "$(dirname "$0")/../../.." && pwd)/.scratch}
 out=$1 bin=$2 rounds=${3:-8}; I=$HOME/.scratch/prospect-idx/1000000-reordered
 mkdir -p $out/tv $out/aa
 for r in $(seq 1 $rounds); do

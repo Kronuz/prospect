@@ -82,3 +82,69 @@ Hand to the performance engineer if item 1 or 2 is wanted: the stage build and c
 `include/prospect/{reader,search}.hh` behind `PHR_*` macros, scripts in
 `bench/quick/phrases-explore/` (`abt.sh` Tantivy against prospect, `abn.sh` and `abm.sh` base
 against variants with the A/A, `stg.sh` the ablation, `bench_query.rs` the Tantivy timer).
+
+# Round 2 (`perf/phrases`): what reaches Tantivy
+
+Branch `perf/phrases` from `explore/phrases` (0555d10). The explorer's `PHR_*` macros are removed
+(its numbers above stand); the harness is `bench/quick/phrases-explore/{abx.sh,score.py}`
+(`abx.sh OUT ROUNDS "CMDS" name=bin ...` interleaves every variant per round, rotating the order,
+best of 3 per query; `score.py OUT A B` gives the geometric mean B/A with a bootstrap interval,
+per-round ratios, sums and result mismatches). The Tantivy 0.26 index and `bench_query` are
+rebuilt in `.scratch/tantivy` from `corpus-1m.json` (the first million lines of the gate corpus,
+`strata-wt/no-stalls/.scratch/corpus-1m.json`); 658 MB, one segment, as before.
+
+## 4. Baseline and where the time sits (before any change)
+
+Baseline on main (d6f15d6), five rounds, `quiet strict`: `TOP_10` 1.369 [1.328, 1.409] and
+`COUNT` 1.438 [1.407, 1.471] Tantivy's time (A/A 1.003 and 0.990).
+
+Per-query shape (300 phrases, `COUNT`; candidates counted with a scratch counter): the ratio is
+about 1.5 from 15 to 300 candidates per query and falls only on the 6,500-candidate sextile
+(1.14). By sums of time the 6 sextiles are 1.39, 1.48, 1.46, 1.50, 1.35, 1.14. The gate metric is
+a geometric mean over queries, so the short queries (median 50 candidates, 40 microseconds in
+Tantivy) carry it, and the explorer's profile, which is weighted by time, is a profile of the
+long tail. `sample` on the 60 shortest phrases (3,100 samples), top of stack by area:
+
+| Area | Prospect, short queries | Tantivy, same queries |
+|---|---|---|
+| postings navigation (advance, block loads, doc-id unpack) | about 45% | about 54% |
+| malloc, free, bzero | 16% | 10% |
+| `phrase_scorer` body (`find`, `phrase_freq`, vector assigns) | 12% | 8% (`PhraseScorer::advance`) |
+| positions (reader, decode, copy) | about 18% | about 25% (positions_with_offset, memmove, decompress) |
+| term lookup (FST, run walk, `decode_term_info`) | 5% | 3% |
+| residency `verify` | 4% | 0 |
+
+Phase timers inside `count_snapshot` (scratch, third run of each query): of a short query,
+building the scorer (term lookups 12%, constructor 11%) plus destroying it is 27 to 30%; the
+count itself 70%. Per query the build makes 50 allocations (19.6 KB): `postings_iterator` is 4.4
+KB, `positions_reader` 1.2 KB, `phrase_scorer` 2.6 KB, plus `term_info` copies (each holds a
+`vector<impact>`; copied four to five times per term), the term table's deque and per-column
+vectors, and the vectors of the constructor. `tail_impacts` for terms under 128 postings is not
+the cost (skipping it entirely moved nothing).
+
+Tantivy's side: its phrase scorer reads both position lists whole for every candidate
+(`positions_with_offset` into two `Vec<u32>`) and runs a merge intersection; nothing rejects a
+candidate before it reads positions, and `TOP_10` is a full scan (its `TOP_10` time equals its
+`COUNT` time). Its position blocks sit behind a contiguous array of one-byte bit widths per term,
+summed to skip. Lucene's `ExactPhraseMatcher` has no pair index or early reject either; it walks
+positions lazily with `nextPosition`. Neither engine does what the explorer's idea 1 proposes, so
+parity has to come from a cheaper constant, not a smarter test.
+
+What 145 ns of Tantivy per candidate buys, by that profile: about half is doc-id navigation
+(`BlockSegmentPostings::seek`, `load_block`, strictly-sorted bit unpack), a quarter positions
+(two `positions_with_offset` calls, bit unpack, copy), the rest the merge and bookkeeping.
+
+## Plan
+
+Hypotheses in order of measured weight, one per experiment; each is dumped byte-identical over
+the 962 queries (counted and uncounted, 100k merged and 1M reordered) and A/B-ed against main
+with an A/A in the same rotation:
+
+1. E1, build diet: recycle the large per-query objects through a per-thread free list and
+   reserve the constructor's vectors (the build is 27 to 30% of a short query).
+2. E2, two-term path: no `order_`/`lists_` assigns and no insertion sort for the 2-slot phrase
+   (198 of 300 phrases), and no allocation in the tail position path.
+3. E3, `TOP_10`: a per-candidate bound from the counts already decoded (the phrase frequency is
+   at most the smaller count) skips the position reads of candidates that cannot compete.
+4. E4, a pair/bigram posting prototype for the long candidate lists, with its disk cost; only if
+   1 to 3 leave the long tail as the loss.
