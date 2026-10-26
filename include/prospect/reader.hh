@@ -579,11 +579,61 @@ inline constexpr auto bit_masks = [] {
 	return t;
 }();
 
+// Sanitizer builds allocate every block fresh, so ASan and MSan see a use after free.
+#if defined(__SANITIZE_ADDRESS__)
+inline constexpr bool recycle_blocks = false;
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(memory_sanitizer)
+inline constexpr bool recycle_blocks = false;
+#else
+inline constexpr bool recycle_blocks = true;
+#endif
+#else
+inline constexpr bool recycle_blocks = true;
+#endif
+
+// Base for the large objects a query builds and drops (iterators, readers, scorers): their
+// blocks are kept on a per-thread stack and reused, which skips the allocator's large-block path.
+// A block kept after the thread's stack is destroyed is never freed (CR3); no such delete exists.
+template <class T>
+struct recycled {
+	static_assert(__STDCPP_DEFAULT_NEW_ALIGNMENT__ >= 16, "blocks come from the default allocation function");
+	static void* operator new(std::size_t n) {
+		if constexpr (!recycle_blocks) { return ::operator new(n); }
+		auto& s = cache();
+		if (n == sizeof(T) && s.count) { return s.blocks[--s.count]; }
+		return ::operator new(n);
+	}
+	static void operator delete(void* p, std::size_t n) noexcept {
+		if constexpr (!recycle_blocks) { return ::operator delete(p); }
+		auto& s = cache();
+		if (n == sizeof(T) && s.count < keep) {
+			s.blocks[s.count++] = p;
+			return;
+		}
+		::operator delete(p);
+	}
+
+private:
+	static constexpr std::size_t keep = 8;
+	struct stack {
+		void* blocks[keep];
+		std::size_t count = 0;
+		~stack() {
+			while (count) { ::operator delete(blocks[--count]); }
+		}
+	};
+	static stack& cache() {
+		static thread_local stack s;
+		return s;
+	}
+};
+
 // Iterates one term's postings: ordinals in increasing order with their wdf. Satisfies
 // docset::doc_iterator; scorers build on it. Skip data is read in place (F10): locating a
 // block reads its group's advance entries without checking them, and a block's entry is
 // checked when the block is decoded.
-class postings_iterator {
+class postings_iterator : public recycled<postings_iterator> {
 	friend struct fill_test_access;  // test/fill_test.cc checks the scatter scratch
 public:
 	postings_iterator(const inverted_plugin::reader& seg, const format::term_info& info) : seg_(&seg), info_(info), df_(info.df) {
@@ -811,10 +861,11 @@ public:
 			sum_pos_ = 0;
 			sum_ = positions_start().first_index;
 		}
-		for (; sum_pos_ < pos_; ++sum_pos_) {
-			if (sum_ + counts[sum_pos_] < sum_) { corrupt("position index"); }  // wraps past 2^64
-			sum_ += counts[sum_pos_];
-		}
+		std::uint64_t add = 0;  // at most 128 counts below 2^32 each: no overflow, and it vectorizes
+		for (std::size_t i = sum_pos_; i < pos_; ++i) { add += counts[i]; }
+		if (sum_ + add < sum_) { corrupt("position index"); }  // wraps past 2^64
+		sum_ += add;
+		sum_pos_ = pos_;
 		return sum_;
 	}
 
@@ -1384,7 +1435,7 @@ inline std::vector<format::impact> inverted_plugin::reader::tail_impacts(const f
 	return format::competitive(std::move(pairs));
 }
 
-class positions_reader {
+class positions_reader : public recycled<positions_reader> {
 public:
 	positions_reader(const inverted_plugin::reader& seg, const format::term_info& info) {
 		if (info.flags & format::no_positions) {
@@ -1481,6 +1532,7 @@ private:
 			if (tail_p_ == nullptr) {
 				need(tail_, std::uint64_t(end_ - tail_));
 				tail_p_ = tail_;
+				tail_values_.reserve(std::min<std::uint64_t>(format::block, std::uint64_t(end_ - tail_)));  // fewer than a block's positions
 			}
 			tail_values_.push_back(std::uint32_t(format::get_leb(&tail_p_, end_)));
 		}

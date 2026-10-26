@@ -1095,7 +1095,7 @@ private:
 
 // Documents where the terms occur at consecutive positions; Lucene-style scoring with the
 // phrase frequency as tf and the summed idf of its terms.
-class phrase_scorer final : public scorer {
+class phrase_scorer final : public scorer, public recycled<phrase_scorer> {
 public:
 	// Lucene scores the phrase frequency with the terms' summed idf; Xapian (term_weights
 	// given, one per phrase term) sums each term's own weight for the document. A term
@@ -1111,6 +1111,10 @@ public:
 		if (!df.empty() && df.size() != infos.size()) { throw std::invalid_argument("strata: one document frequency per phrase term"); }
 		const statistics st = stats ? *stats : statistics(seg);
 		double idf = 0;
+		infos_.reserve(infos.size());
+		terms_.reserve(infos.size());
+		readers_.reserve(infos.size());
+		slots_.reserve(infos.size());
 		for (std::size_t k = 0; k < infos.size(); ++k) {
 			const auto& info = infos[k];
 			idf += weight::bm25(st, df.empty() ? info.df : df[k]).idf;
@@ -1235,10 +1239,34 @@ private:
 				window_end_ = end;
 			}
 			checked_ = d;
+			if (min_ > 0 && !can_compete(d)) {
+				matched_ = false;
+				d = align(terms_[lead_]->next());
+				continue;
+			}
 			if ((matched_ = phrase_freq(false) > 0)) { return d; }
 			d = align(terms_[lead_]->next());
 		}
 		return no_more_docs;
+	}
+
+	// Whether the document the terms are aligned on can score above the minimum competitive
+	// score, from counts alone: the phrase frequency is at most the smallest term count, and
+	// the weight grows with it (Xapian mode sums the terms' weights, which positions do not change).
+	bool can_compete(ordinal_t d) {
+		if (!term_weights_.empty()) { return sum_upper(score_terms_weights(d), slots_.size()) > min_; }
+		std::uint32_t most = ~std::uint32_t(0);
+		for (std::size_t u = 0; u < terms_.size(); ++u) {
+			counts_[u] = readers_[u]->count(*terms_[u]);
+			most = std::min(most, counts_[u]);
+		}
+		return sum_upper(weight_.by_norm(most, seg_->norm(d)), 1) > min_;
+	}
+	double score_terms_weights(ordinal_t d) {
+		double s = 0;
+		const std::uint32_t len = seg_->length(d);
+		for (const auto& sl : slots_) { s += term_weights_[sl.offset](terms_[sl.term]->wdf(), len); }
+		return s;
 	}
 
 	double lead_bound(ordinal_t from, ordinal_t upto) {
@@ -1262,6 +1290,7 @@ private:
 	std::uint32_t phrase_freq(bool all) {
 		if (window_) { return near_freq(); }
 		for (std::size_t u = 0; u < terms_.size(); ++u) { counts_[u] = readers_[u]->count(*terms_[u]); }
+		if (!all && slots_.size() == 2) { return pair_match(); }
 		order_.assign(slots_.begin(), slots_.end());
 		for (std::size_t i = 1; i < order_.size(); ++i) {  // insertion sort: a handful of slots
 			for (std::size_t j = i; j > 0 && counts_[order_[j].term] < counts_[order_[j - 1].term]; --j) { std::swap(order_[j], order_[j - 1]); }
@@ -1306,6 +1335,28 @@ private:
 			candidates_.resize(keep);
 		}
 		return std::uint32_t(candidates_.size());
+	}
+
+	// phrase_freq(false) for two slots: the slot whose term has fewer positions leads (the first on
+	// a tie), and the other term's positions are read when the lead has a candidate.
+	std::uint32_t pair_match() {
+		const slot& a = counts_[slots_[1].term] < counts_[slots_[0].term] ? slots_[1] : slots_[0];
+		const slot& b = &a == &slots_[0] ? slots_[1] : slots_[0];
+		std::span<const std::uint32_t> pos;
+		std::size_t j = 0;
+		bool read = false;
+		for (const std::uint32_t p : positions(a.term)) {
+			if (p < a.offset) { continue; }
+			if (!read) {
+				pos = positions(b.term);
+				read = true;
+			}
+			const std::uint32_t want = p - a.offset + b.offset;
+			while (j < pos.size() && pos[j] < want) { ++j; }
+			if (j == pos.size()) { return 0; }
+			if (pos[j] == want) { return 1; }
+		}
+		return 0;
 	}
 
 	// NEAR: 1 when some window of fewer than window_ positions holds every term as often as
