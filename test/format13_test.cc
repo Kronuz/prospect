@@ -261,9 +261,9 @@ int main() {
 
 	// --- F2: the prefix ------------------------------------------------------------------
 	{
-		// The prefix CRC of the version written (format 14 step 1's pre-freeze, 0x8000000B), from
+		// The prefix CRC of the version written (format 14's pre-freeze, 0x8000000C), from
 		// the bytes.
-		CHECK(strata::format::get<std::uint32_t>(good.data() + 12) == 0x0941f671u);
+		CHECK(strata::format::get<std::uint32_t>(good.data() + 12) == 0x10414ebbu);
 		CHECK(strata::format::read_version(good) == strata::format::pre_freeze);
 		// The magic wrong: damage.
 		for (std::size_t at = 0; at < 8; ++at) {
@@ -457,11 +457,15 @@ int main() {
 		// unsupported (F4; F13-R30), and never read past.
 		for (unsigned b = 0; b < 64; ++b) {  // bits 32 to 63 too (F13-R40)
 			const std::uint64_t v = std::uint64_t(1) << b;
-			if (built & v || v == bit::index_sort) { continue; }
+			if (built & v || v == bit::index_sort || v == bit::term_lists) { continue; }
 			const auto got = with_bits(built | v);
 			if (got != outcome::unsupported) { std::fprintf(stderr, "bit %u: %s\n", b, name(got)); }
 			CHECK(got == outcome::unsupported);
 		}
+		// Term lists (bit 6) are read: the bit without its section is damage, and so is the bit
+		// without inverted, whatever else is set.
+		CHECK(with_bits(built | bit::term_lists) == outcome::corrupt);
+		CHECK(with_bits(bit::keys | bit::stored | bit::term_lists) == outcome::corrupt);
 		// What a later format-13 release writes, its sections placed by F3's rule and its table
 		// changed where its bit allows: unsupported, since the bits are read before the table
 		// (F23 rules 3 and 5; F13-R35).

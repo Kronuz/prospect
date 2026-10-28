@@ -27,7 +27,7 @@ over exact lengths, for Xapiand's ranking continuity and the oracle's parity vec
 ## On strata's core
 
 ```
- prospect           search_layout = layout<inverted_plugin, keys_plugin, stored_plugin, values_plugin>
+ prospect           search_layout = layout<inverted_plugin, keys_plugin, stored_plugin, values_plugin, term_lists_plugin>
                     scorers · collectors · aggregation · sort keys · collapse · reorder
  ───────────────────────────────────────────────────────────────────────────────
  strata::core       basic_index<Layout> · segments · manifests · merges · checkpoints
@@ -52,6 +52,7 @@ prospect fills them:
 | `prospect/reader.hh` | `inverted_plugin` and its reader, `search_layout`, `segment` |
 | `prospect/values.hh`, `prospect/values_writer.hh` | the values plugin: part, reader, check, digest records; builder and merge |
 | `prospect/writer.hh`, `prospect/tuple_buffer.hh`, `prospect/inverter.hh` | the inverted builder, the tuple inverter, and the buffer the core's index inverts into |
+| `prospect/term_lists.hh`, `prospect/term_lists_writer.hh` | the opt-in term-lists plugin: each document's terms by ordinal and prefix ([mechanisms/term-lists.md](mechanisms/term-lists.md)) |
 | `prospect/merge.hh` | the inverted plugin's merge and `merge_segments` |
 | `prospect/reorder.hh`, `prospect/bisection.hh` | `strata::order_source<search_layout>`: bisection over the postings |
 | `prospect/check.hh`, `prospect/index.hh` | the check report, and `index`, `transaction`, `operation`, `index_options` over the search layout |

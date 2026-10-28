@@ -520,7 +520,7 @@ void damage() {
 		}
 		// A changed wdf or term byte inside a raw record keeps the list well-formed; the
 		// cross-check catches it. Frame headers and structure are caught by the decoders.
-		CHECK(detected * 10 >= total * 9);
+		CHECK(detected == total);
 		std::fprintf(stderr, "  damage (%s): %zu of %zu one-byte changes detected\n", packed ? "zstd" : "raw", detected, total);
 	}
 }

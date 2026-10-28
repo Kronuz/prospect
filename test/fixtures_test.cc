@@ -1,6 +1,7 @@
 // Fixtures pinning format 13's bytes and the index digest (format-13.md F22): every commit must
 // reproduce them exactly. Regenerate only for an intended format change:
 // PROSPECT_WRITE_FIXTURES=1 fixtures_test.
+#include "prospect/check.hh"
 #include "prospect/index.hh"
 #include "prospect/merge.hh"
 #include "prospect/reader.hh"
@@ -63,8 +64,9 @@ static std::uint32_t terms_of(std::uint32_t d, std::vector<std::vector<std::uint
 }
 
 // A segment of `docs` documents; stored records of `stored` bytes, keys when `keyed`.
-static std::string build(std::uint32_t docs, std::size_t stored, bool keyed, bool wide = false, std::uint32_t first = 1, std::uint32_t step = 1) {
+static std::string build(std::uint32_t docs, std::size_t stored, bool keyed, bool wide = false, std::uint32_t first = 1, std::uint32_t step = 1, bool lists = false) {
 	segment_writer w;
+	if (lists) { w.structures |= strata::format::bit::term_lists; }
 	w.builder<prospect::inverted_plugin>().wide_skip_offsets = wide;
 	if (!keyed) { w.structures &= ~strata::format::bit::keys; }  // keyless: no keys structure (F4, F9)
 	std::vector<std::vector<std::uint32_t>> pos;
@@ -157,6 +159,39 @@ int main() {
 	{
 		const std::string va = build_values(400, 1, 2), vb = build_values(300, 2, 2);
 		pin("values-merge.sx", merged({va, vb}, {da, db}));
+	}
+	// Term lists: a flush, whose lists read back as the documents' terms, and a merge with
+	// deletes in both inputs.
+	{
+		const std::string file = build(300, 40, true, false, 1, 1, true);
+		pin("term-lists.sx", file);
+		const segment s(file);
+		CHECK(s.holds<prospect::term_lists_plugin>());
+		prospect::term_lists_plugin::reader::frame frame;
+		std::vector<std::vector<std::uint32_t>> pos;
+		std::vector<posting_input> in;
+		for (std::uint32_t d = 0; d < 300; ++d) {
+			(void)terms_of(d, pos, in);
+			if (in.empty()) { in.push_back({words[0], 1, {}}); }
+			std::vector<std::pair<std::string, std::uint32_t>> want;
+			for (const auto& t : in) { want.emplace_back(std::string(t.term), t.wdf); }
+			std::sort(want.begin(), want.end());
+			std::vector<std::pair<std::string, std::uint32_t>> got;
+			for (auto c = s.get<prospect::term_lists_plugin>().list(d, frame).begin(); c.next();) { got.emplace_back(std::string(c.term()), c.wdf()); }
+			CHECK(got == want);
+		}
+	}
+	{
+		const std::string a2 = build(400, 16, true, false, 1, 2, true), b2 = build(300, 16, true, false, 2, 2, true);
+		std::vector<std::uint64_t> da2((400 + 63) / 64, 0), db2((300 + 63) / 64, 0);
+		for (std::uint32_t o = 0; o < 400; o += 3) { da2[o >> 6] |= std::uint64_t(1) << (o & 63); }
+		for (std::uint32_t o = 1; o < 300; o += 5) { db2[o >> 6] |= std::uint64_t(1) << (o & 63); }
+		const std::string m = merged({a2, b2}, {da2, db2});
+		pin("term-lists-merge.sx", m);
+		const segment ms(m);
+		prospect::check_report rep;
+		prospect::check_segment(ms, nullptr, rep, "Q");
+		CHECK(rep.listed_documents == ms.core().doc_count() && rep.listed_documents == 400 - 134 + 300 - 60);
 	}
 	// A segment moved after open still answers: terms, postings, keys, and stored records
 	// The source is freed before any read, so under ASan a reader left pointing into it faults.
