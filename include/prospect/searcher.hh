@@ -223,7 +223,9 @@ inline std::vector<doc_hit> search(std::span<const segment_snapshot> segs, const
 		for (const auto& h : top_k(*s.seg, *q, k, count, floor)) { out.push_back({s.seg->core().docid(h.ord), h.score}); }
 		return out;
 	}
-	top_collector c(k, false);
+	std::size_t docs = 0;
+	for (const auto& s : segs) { docs += s.seg->core().doc_count(); }
+	top_collector c(k, false, docs);
 	c.expect_segments(segs.size());
 	if (floor > 0) { c.seed(floor); }
 	for (std::size_t i = 0; i < segs.size(); ++i) {

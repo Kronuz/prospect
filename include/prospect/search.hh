@@ -201,7 +201,12 @@ inline double equal_bound(double kth) noexcept {
 // two scores tie (within a docid-ordered segment, ordinal order is docid order). A
 // reordered segment always goes through begin() (reordering.md D5).
 struct top_collector {
-	explicit top_collector(std::size_t k, bool counting) : k(k), counting(counting) { hits.reserve(2 * k + 1); }
+	// docs bounds what can arrive (the documents searched), so k never sizes the buffer alone.
+	top_collector(std::size_t k, bool counting, std::size_t docs) : k(k), counting(counting) {
+		hits.reserve(k >= docs ? docs : std::min(docs, 2 * k + 1));
+	}
+	// Hits the buffer has room for.
+	std::size_t reserved() const noexcept { return hits.capacity(); }
 	// Scorers may skip whatever scores at or below this (0: nothing yet).
 	double min_competitive() const noexcept { return min_; }
 	// A threshold known before collection starts (another segment's k-th score, made
@@ -1450,7 +1455,7 @@ inline std::vector<hit> top_k(const segment& seg, scorer& s, std::size_t k, std:
 	// from scoring, so a floor above the k-th loses hits); the count stays exact.
 	if (count && !s.counts_apart()) { floor = 0; }
 	if (floor > 0 && !count) { s.set_min_competitive_score(floor); }
-	top_collector c(k, count != nullptr);
+	top_collector c(k, count != nullptr, seg.core().doc_count());
 	if (floor > 0) { c.seed(floor); }
 	if (!seg.core().docid_ordered()) {  // ties read docids, and the threshold stays below the k-th score
 		c.begin(seg);
