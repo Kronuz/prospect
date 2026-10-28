@@ -13,6 +13,7 @@ M=[
  ("H reorder merges graph terms by bytes only (D3)","include/prospect/reorder.hh",[("const std::pair<std::uint32_t, std::string_view> at{cursors[s].field(), cursors[s].term()};","const std::pair<std::uint32_t, std::string_view> at{0, cursors[s].term()};"),("cursors[s].field() != current_field || ","")],["reorder_test"]),
  ("I plan counts no terms (writer plan)","include/prospect/fielddict.hh",[("		++plan_.back().terms;\n","")],["fielddict_test","fields_test"]),
  ("J an unknown field name resolves to field 0 (D14)","include/prospect/searcher.hh",[("if (!id) { return std::nullopt; }\n	if (s.key_field() != id)","const std::optional<std::uint32_t> zero = 0;\n	if (!id) { return find_term_zero(s, term); }\n	if (s.key_field() != id)")],[]),
+ ("M the deep check ignores an entry's term count (fuzz finding)","include/prospect/fielddict.hh",[('e && e->terms != run) { corrupt("field term count"); }','e && false) {}')],["fielddict_test"]),
  ("L document length ignores the host's (D5)","include/prospect/inverter.hh",[("given, d.length, d.stored","given, std::nullopt, d.stored")],["fields_test"]),
 ]
 M=[m for m in M if m[3]]
@@ -30,13 +31,13 @@ for name,f,subs,tests in M:
     if mut is None: continue
     open(f,'w').write(mut)
     try:
-        b=run(f"cmake --build build-rel -j4 --target {' '.join(tests)} > .scratch/mut-build.log 2>&1")
+        b=run(f"cmake --build build-rel -j4 --target {' '.join(t.split()[0] for t in tests)} > .scratch/mut-build.log 2>&1")
         err=run("grep -c 'error:' .scratch/mut-build.log").stdout.strip()
         res=[]
         for t in tests:
             r=run(f"cd build-rel && ./{t} > ../.scratch/mut-run.log 2>&1")
             ok= r.returncode==0
-            res.append(f"{t}:{'pass' if ok else 'FAIL'}")
+            res.append(f"{t.split()[0]}:{'pass' if ok else 'FAIL'}")
         line=f"{name}: build errors {err}; "+" ".join(res)
     finally:
         open(f,'w').write(src)

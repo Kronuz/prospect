@@ -501,7 +501,8 @@ public:
 	}
 
 	// Every directory entry, in order, checked whole: the sizes add up to the sections, ids
-	// increase, flags are known, each sample matches its entry (check's job; lookups check a group).
+	// increase, flags are known, each sample matches its entry (check's job; lookups check a group);
+	// then every term is read, in order, against the entries' counts.
 	void check() const {
 		std::uint32_t prev = 0;
 		std::uint64_t blocks = 0, index = 0;
@@ -526,6 +527,28 @@ public:
 			index += x;
 		}
 		if (p != end || blocks != own_blocks_ || index != index_bytes_) { corrupt("field directory total"); }
+		// The terms themselves: strictly ascending by (field, term), and an own dictionary holds
+		// as many as its entry says.
+		cursor c(*this);
+		bool any = false;
+		std::uint32_t field = 0;
+		std::uint64_t run = 0;
+		std::string last;
+		auto close = [&] {
+			if (const auto e = entry_of(field); any && e && e->terms != run) { corrupt("field term count"); }
+		};
+		while (c.next()) {
+			if (any && (c.field() < field || (c.field() == field && c.term() <= last))) { corrupt("terms out of order"); }
+			if (any && c.field() != field) {
+				close();
+				run = 0;
+			}
+			field = c.field();
+			last.assign(c.term());
+			any = true;
+			++run;
+		}
+		close();
 	}
 
 private:

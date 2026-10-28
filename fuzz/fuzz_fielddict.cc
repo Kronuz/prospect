@@ -82,18 +82,27 @@ fd::builder::built build_dictionary(const std::map<std::uint32_t, std::vector<st
 }
 
 void exercise(const fd::reader& r, std::mt19937_64& rng) {
+	bool misordered = false;
 	try {
 		std::uint64_t seen = 0;
 		fd::reader::cursor c(r);
 		std::uint32_t pf = 0;
 		std::string pt;
 		while (c.next() && seen < 100000) {
-			if (seen && (c.field() < pf || (c.field() == pf && c.term() <= pt))) { std::abort(); }  // fence or answer: terms ascend
+			misordered |= seen && (c.field() < pf || (c.field() == pf && c.term() <= pt));
 			pf = c.field();
 			pt = std::string(c.term());
 			++seen;
 		}
 	} catch (const strata::corrupt_segment&) {
+	}
+	// Reads need no order of the bytes they are given, but the deep check must fence a dictionary that reads out of order.
+	if (misordered) {
+		try {
+			r.check();
+			std::abort();
+		} catch (const strata::corrupt_segment&) {
+		}
 	}
 	for (int k = 0; k < 24; ++k) {
 		const std::uint32_t field = k % 3 == 0 ? std::uint32_t(rng()) : k % 3 == 1 ? std::uint32_t(rng() % 800) : std::uint32_t(rng() % 3 ? 0 : 70000);

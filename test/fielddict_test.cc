@@ -284,7 +284,43 @@ static void damage_tests() {
 	CHECK(threw);
 }
 
+// A directory entry that claims another term count than its dictionary holds is refused by check(),
+// which reads the terms; lookups alone cannot tell.
+static void count_tests() {
+	std::mt19937_64 rng(13);
+	dict_model m;
+	for (unsigned i = 0; i < 300; ++i) { m[{3, std::to_string(100000 + i)}] = random_info(rng); }
+	m[{9, "x"}] = random_info(rng);
+	const built_dict d = build(m);
+	{
+		fielddict::reader r(d.terms, d.index);
+		r.check();
+	}
+	const char* p = d.index.data();
+	const char* const end = p + d.index.size();
+	const std::uint64_t own_blocks = prospect::format::get_leb(&p, end), entries = prospect::format::get_leb(&p, end);
+	(void)prospect::format::get_leb(&p, end), (void)prospect::format::get_leb(&p, end);
+	CHECK(own_blocks > 0 && entries == 1);
+	p += ((entries + fielddict::sample_every - 1) / fielddict::sample_every) * fielddict::sample_bytes;
+	(void)prospect::format::get_leb(&p, end);  // the entry: its field, then flags, then its term count (300: two bytes)
+	++p;
+	std::string index = d.index;
+	char& low = index[std::size_t(p - d.index.data())];
+	CHECK((std::uint8_t(low) & 0x7F) == (300 & 0x7F) && (std::uint8_t(low) & 0x80));
+	low = char(std::uint8_t(low) + 1);
+	bool threw = false;
+	try {
+		fielddict::reader r(d.terms, index);
+		for (const auto& [k, _] : m) { CHECK(find(r, k.first, k.second)); }  // every lookup still answers
+		r.check();
+	} catch (const strata::corrupt_segment&) {
+		threw = true;
+	}
+	CHECK(threw);
+}
+
 int main() {
+	count_tests();
 	varint_tests();
 	dict_modelests();
 	threshold_tests();
