@@ -297,11 +297,11 @@ int main() {
 		CHECK(b.key(0) == "Qk" && b.key(1).empty());
 		std::vector<std::string> seen;
 		b.scan([&](std::string_view term, strata::ordinal_t o, std::uint32_t wdf, std::span<const std::uint32_t> positions) {
-			std::string s = std::string(term) + ":" + std::to_string(o) + ":" + std::to_string(wdf);
+			std::string s = std::string(term.substr(1)) + ":" + std::to_string(o) + ":" + std::to_string(wdf);
 			for (auto p : positions) { s += "," + std::to_string(p); }
 			seen.push_back(s);
 		});
-		std::sort(seen.begin(), seen.end());
+		std::sort(seen.begin(), seen.end());  // each term is the field id's varint (0: one byte) and the bytes
 		CHECK((seen == std::vector<std::string>{"a:0:2,1,3", "a:1:2,1,3", "b:0:1,2", "b:1:1,2"}));
 		CHECK(b.key(0) == "Qk" && b.stored(0) == "s" && b.docid(0) == 7 && b.version(0) == 1 && b.length(0) == 3);
 	}

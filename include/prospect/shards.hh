@@ -87,7 +87,7 @@ public:
 	// The statistics of the shards together.
 	statistics stats() const { return snapshot_statistics(all_); }
 	// A term's document frequency over the shards, by field name: each shard resolves the name to its own id (D14).
-		std::uint64_t df(std::string_view field, std::string_view term) const { return snapshot_df(all_, field, term); }
+	std::uint64_t df(std::string_view field, std::string_view term) const { return snapshot_df(all_, field, term); }
 
 	// The docid of the shard's document `did` in the numbering across the shards.
 	std::uint64_t docid(std::size_t shard, std::uint64_t did) const { return interleave_docid(did, shard, shards_.size()); }

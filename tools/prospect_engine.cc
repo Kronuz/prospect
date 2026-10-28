@@ -1,5 +1,9 @@
 // prospect as a search-benchmark-game engine.
 //   prospect_engine index DIR < corpus.json   one segment from JSON lines ("text": whitespace tokens)
+//   prospect_engine fields DIR FILE flat|fields [SHARD]
+//                                            one segment from a terms dump (fields-and-keys T1): lines
+//                                            "doc\twdf\thex"; flat puts every term in one field, fields splits
+//                                            them as Xapiand's engine fields; SHARD keeps one shard's documents
 //   prospect_engine serve DIR                  "COMMAND\tquery" lines -> one count per line
 //   prospect_engine terms DIR                  every term and its document frequency
 //   prospect_engine dictstats DIR              the term dictionary's bytes by part
@@ -42,6 +46,7 @@
 #include <cerrno>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <unordered_map>
 #include <iostream>
 #include <string>
@@ -716,9 +721,95 @@ int churn(const std::string& dir) {
 	return 0;
 }
 
+// Xapiand's engine field of a term: its prefix up to and including the type character (the
+// first capital letter of a dot-separated part; a leading Z keeps the stem field apart).
+static bool engine_field(const std::string& t, std::size_t& prefix) {
+	std::size_t i = !t.empty() && t[0] == 'Z' ? 1 : 0;
+	while (i < t.size()) {
+		if (t[i] >= 'A' && t[i] <= 'Z') { prefix = i + 1; return true; }
+		const auto dot = t.find('.', i);
+		if (dot == std::string::npos) { return false; }
+		i = dot + 1;
+	}
+	return false;
+}
+
+static std::string unhex(std::string_view h) {
+	std::string out;
+	auto nibble = [](char c) { return c <= '9' ? c - '0' : c - 'a' + 10; };
+	for (std::size_t i = 0; i + 1 < h.size(); i += 2) { out.push_back(char(nibble(h[i]) << 4 | nibble(h[i + 1]))); }
+	return out;
+}
+
+// T1's index: a terms dump (xapiand_terms.py) as one segment. Q (the key) and V (the version) are
+// left out as in the design's probe; field ids follow first use; a document's length is the sum
+// of its wdf.
+int fields_index(const std::string& dir, const std::string& file, std::string_view mode, const char* shard) {
+	const bool split = mode == "fields";
+	if (!split && mode != "flat") { return 2; }
+	struct posting {
+		std::uint32_t field;
+		std::string term;
+		std::uint32_t wdf;
+	};
+	std::vector<std::vector<posting>> docs;
+	std::vector<std::string> names;
+	std::map<std::string, std::uint32_t> ids;
+	std::string current;
+	std::ifstream in(file);
+	std::string line;
+	const std::string only = shard ? std::string(shard) + ":" : std::string();
+	while (std::getline(in, line)) {
+		const auto a = line.find('\t'), b = line.find('\t', a + 1);
+		if (b == std::string::npos) { continue; }
+		const std::string doc = line.substr(0, a);
+		if (!only.empty() && !doc.starts_with(only)) { continue; }
+		const std::string term = unhex(std::string_view(line).substr(b + 1));
+		std::size_t prefix = 0;
+		if (!engine_field(term, prefix)) { std::cerr << "no field in a term of " << doc << '\n'; return 1; }
+		const std::string name = term.substr(0, prefix);
+		if (name == "Q" || name == "V") { continue; }
+		if (doc != current || docs.empty()) { docs.emplace_back(); current = doc; }
+		const std::string field_name = split ? name : "t";
+		const auto [it, fresh] = ids.emplace(field_name, std::uint32_t(names.size()));
+		if (fresh) { names.push_back(field_name); }
+		docs.back().push_back({it->second, split ? term.substr(prefix) : term, std::uint32_t(std::strtoul(line.c_str() + a + 1, nullptr, 10))});
+	}
+	std::filesystem::create_directories(dir);
+	kronuz::journal::PosixIO io(dir, 0600, host_io);
+	prospect::index::options o;
+	o.buffer_share = std::uint64_t(8) << 30;
+	o.auto_merge = false;
+	const std::array<char, 16> uuid{'f', 'i', 'e', 'l', 'd', 's', '-', 't', '1'};
+	auto ix = prospect::index::create(io, o, uuid);
+	prospect::transaction t;
+	for (const auto& n : names) { t.fields.push_back({n, strata::field_role::indexed, strata::field_postings::freqs, false}); }
+	auto apply = [&] {
+		if (t.ops.empty()) { return; }
+		if (ix.apply(t, {}).result != strata::verdict::accepted) { std::cerr << "rejected\n"; std::exit(1); }
+		t.ops.clear();
+	};
+	for (const auto& d : docs) {
+		prospect::operation op;
+		op.type = prospect::operation::add;
+		for (const auto& p : d) {
+			auto& part = op.doc.field(strata::field_ref::declared(p.field));
+			part.terms.push_back({p.term, p.wdf, {}});
+			part.length += p.wdf;
+		}
+		t.ops.push_back(std::move(op));
+		if (t.ops.size() == 1000) { apply(); }
+	}
+	apply();
+	ix.commit();
+	std::cerr << "fields: " << docs.size() << " documents, " << names.size() << " fields, " << ix.segments().size() << " segments\n";
+	return 0;
+}
+
 int main(int argc, char** argv) {
 	const std::string mode = argc > 1 ? argv[1] : "";
 	if (mode == "index" && argc == 3) { return index(argv[2]); }
+	if (mode == "fields" && (argc == 5 || argc == 6)) { return fields_index(argv[2], argv[3], argv[4], argc == 6 ? argv[5] : nullptr); }
 	if (mode == "merge" && argc == 3) { return merge(argv[2]); }
 	if (mode == "serve" && argc == 3) { return serve(argv[2]); }
 	if (mode == "terms" && argc == 3) { return terms(argv[2]); }

@@ -226,7 +226,7 @@ prospect::operation upsert(const std::string& key, const std::string& word) {
 
 strata::verdict::outcome apply(prospect::index& ix, const prospect::operation& op) {
 	prospect::transaction t;
-	t.fields = text_fields();
+	t.fields = keyed_fields();
 	t.ops.push_back(op);
 	return ix.apply(t, {}).result;
 }
@@ -1043,25 +1043,6 @@ int main() {
 		}
 		const auto report = ix.check();
 		CHECK(report.keys >= live.size() && report.terms >= 7);
-		// check() refuses a dictionary that holds a key-prefixed term.
-		{
-			prospect::segment_writer w;
-			std::vector<prospect::posting_input> in{{"Qx", 1, {}}};
-			w.add(1, in, 1);
-			const std::string bytes = w.flush({});
-			prospect::segment seg(bytes);
-			prospect::check_report rr;
-			bool threw = false;
-			try {
-				strata::check_segment(seg, nullptr, rr, "Q");
-			} catch (const strata::corrupt_segment&) {
-				threw = true;
-			}
-			CHECK(threw);
-			prospect::check_report plain;
-			strata::check_segment(seg, nullptr, plain);  // no prefix: an ordinary term
-			CHECK(plain.terms == 1);
-		}
 		// check() refuses keys sections that lookups would misread (F13-R37), each resealed as
 		// fuzz inputs are: two keys naming one ordinal, a range other than the first and last
 		// key, and a filter that misses held keys.
@@ -1248,7 +1229,7 @@ int main() {
 		CHECK(apply(ix, keyed) == strata::verdict::invalid);
 		CHECK(apply(ix, op) == strata::verdict::accepted);
 		ix.commit();
-		CHECK(matches(ix, "Qa", {}).size() == 1 && matches(ix, "w", {}).size() == 1);
+		CHECK(matches(ix, "text", "Qa").size() == 1 && matches(ix, "text", "w").size() == 1);
 		CHECK(!ix.find_key("Qa"));
 		CHECK(ix.check().keys == 0);
 	}
