@@ -6,10 +6,13 @@
 
 #include "prospect/reader.hh"
 #include "prospect/tuple_buffer.hh"
+#include "prospect/values.hh"
 #include "prospect/writer.hh"
 
+#include <algorithm>
 #include <cstdint>
 #include <span>
+#include <stdexcept>
 #include <string_view>
 #include <vector>
 
@@ -22,9 +25,24 @@ public:
 	ordinal_t add(std::uint64_t docid, std::uint64_t version, std::string_view key, const document& d) {
 		terms_in_.clear();
 		for (const auto& t : d.terms) { terms_in_.push_back({t.term, t.wdf, t.positions}); }
-		return d.split_text ? tuple_buffer::add_split(docid, terms_in_, d.text, d.stored, version, key)
-							: tuple_buffer::add(docid, terms_in_, d.text, d.tokens, d.length, d.stored, version, key);
+		const ordinal_t ord = d.split_text ? tuple_buffer::add_split(docid, terms_in_, d.text, d.stored, version, key)
+										   : tuple_buffer::add(docid, terms_in_, d.text, d.tokens, d.length, d.stored, version, key);
+		if (!d.values.empty()) { keep_values(ord, d.values); }
+		return ord;
 	}
+
+	// Calls f(slot, bytes) for each value the document at `ord` was given, by slot.
+	template <class F>
+	void each_value(ordinal_t ord, F&& f) const {
+		const auto it = std::lower_bound(value_docs_.begin(), value_docs_.end(), ord);
+		if (it == value_docs_.end() || *it != ord) { return; }
+		const std::size_t d = std::size_t(it - value_docs_.begin());
+		for (std::size_t e = d ? value_doc_ends_[d - 1] : 0; e < value_doc_ends_[d]; ++e) {
+			const std::uint64_t begin = e ? value_ends_[e - 1].end : 0;
+			f(value_ends_[e].slot, std::string_view(value_bytes_).substr(begin, value_ends_[e].end - begin));
+		}
+	}
+	bool has_values() const noexcept { return !value_docs_.empty(); }
 
 	// Whether the transaction's documents fit the buffer's 32-bit structures.
 	template <class Transaction>
@@ -40,7 +58,14 @@ public:
 		w.memory = settings.memory;
 		w.key_prefix = std::string(settings.key_prefix);
 		w.structures = settings.structures;
-		tuple_buffer::flush(segment_id, order, w, out, positions);
+		if (!value_docs_.empty() && !(settings.structures & values_plugin::structure)) { throw std::invalid_argument("strata: values in a segment without values"); }
+		tuple_buffer::flush(segment_id, order, w, out, positions, [&](segment_writer& writer, const auto& plan) {
+			if (value_docs_.empty()) { return; }
+			const std::size_t docs = plan.all ? doc_count() : plan.order.size();
+			for (std::size_t i = 0; i < docs; ++i) {
+				each_value(plan.all ? ordinal_t(i) : plan.order[i], [&](std::uint32_t slot, std::string_view bytes) { writer.builder<values_plugin>().add_value(ordinal_t(i), slot, bytes); });
+			}
+		});
 	}
 
 	// The buffered documents' digest records (F21): the same as their documents' own. `dead`
@@ -52,6 +77,7 @@ public:
 			document_record(docid(o), version(o), key(o));
 			if (configured & inverted_plugin::structure) { inverted_plugin::length_record(docid(o), length(o), emit); }
 			if (configured & stored_plugin::structure) { stored_plugin::record(docid(o), stored(o), emit); }
+			if (configured & values_plugin::structure) { each_value(o, [&](std::uint32_t slot, std::string_view bytes) { values_plugin::record(docid(o), slot, bytes, emit); }); }
 		}
 		if (configured & inverted_plugin::structure) {
 			scan([&](std::string_view term, ordinal_t o, std::uint32_t wdf, std::span<const std::uint32_t> positions) {
@@ -61,7 +87,35 @@ public:
 	}
 
 private:
+	// The document's values, kept beside the buffer's columns: only documents with values take
+	// an entry, so a buffer of documents without them holds nothing here.
+	void keep_values(ordinal_t ord, const std::vector<slot_value>& values) {
+		value_docs_.push_back(ord);
+		for (const auto& v : values) {
+			value_bytes_ += v.bytes;
+			value_ends_.push_back({v.slot, value_bytes_.size()});
+		}
+		value_doc_ends_.push_back(value_ends_.size());
+		if (memory) {
+			const std::uint64_t now = value_bytes_.capacity() + value_docs_.capacity() * sizeof(ordinal_t) + value_ends_.capacity() * sizeof(value_end) +
+				value_doc_ends_.capacity() * sizeof(std::uint64_t);
+			if (now > values_charged_) {
+				memory->grow(now - values_charged_);
+				values_charged_ = now;
+			}
+		}
+	}
+
+	struct value_end {
+		std::uint32_t slot;
+		std::uint64_t end;  // into value_bytes_
+	};
 	std::vector<posting_input> terms_in_;  // add()'s scratch
+	std::vector<ordinal_t> value_docs_;    // ordinals with values, ascending
+	std::vector<std::uint64_t> value_doc_ends_;  // per such ordinal: its end in value_ends_
+	std::vector<value_end> value_ends_;
+	std::string value_bytes_;
+	std::uint64_t values_charged_ = 0;
 };
 
 }  // namespace prospect

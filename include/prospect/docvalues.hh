@@ -141,47 +141,39 @@ inline void put_values(std::string& out, const std::vector<std::uint64_t>& v) {
 	out += packed;
 }
 
-// `starts` holds ordinals + 1 cumulative counts into `flat`; each ordinal's values sorted.
-inline std::string encode_column(kind k, bool multi, const std::vector<std::uint64_t>& starts, const std::vector<std::uint64_t>& flat, const std::string* dictionary, const options& opts) {
+// The column of `present` (ascending ordinals out of `doc_count`): `starts` holds present + 1
+// cumulative counts into `flat`, each present ordinal's values sorted. A dictionary is a bytes
+// column's, already encoded. No work grows with the ordinals absent.
+inline std::string encode_present(kind k, bool multi, std::uint64_t doc_count, const std::vector<::docset::doc_t>& present, const std::vector<std::uint64_t>& starts,
+	const std::vector<std::uint64_t>& flat, const std::string* dictionary, const options& opts) {
 	if (opts.group_docs == 0) { throw std::invalid_argument("strata: doc values: the group size must be positive"); }
-	const std::size_t doc_count = starts.size() - 1;
 	if (doc_count > std::numeric_limits<ordinal_t>::max()) { throw std::invalid_argument("strata: doc values: too many ordinals"); }
-	std::vector<::docset::doc_t> present;
 	std::vector<std::uint64_t> offsets{0};
 	std::string groups;
 	skip_entry group;
-	for (std::size_t o = 0; o < doc_count; ++o) {
-		const std::uint64_t n = starts[o + 1] - starts[o];
-		if (!n) { continue; }
-		if (!multi && n > 1) { throw std::invalid_argument("strata: doc values: a single-valued slot holds one value per document"); }
-		const auto lo = *std::min_element(flat.begin() + std::ptrdiff_t(starts[o]), flat.begin() + std::ptrdiff_t(starts[o + 1]));
-		const auto hi = *std::max_element(flat.begin() + std::ptrdiff_t(starts[o]), flat.begin() + std::ptrdiff_t(starts[o + 1]));
-		if (present.size() % opts.group_docs == 0) {
-			group = {ordinal_t(o), ordinal_t(o), offsets.back(), 0, lo, hi};
-		}
-		group.last = ordinal_t(o);
-		group.count += n;
-		group.min = std::min(group.min, lo);
-		group.max = std::max(group.max, hi);
-		present.push_back(::docset::doc_t(o));
-		offsets.push_back(offsets.back() + n);
-		if (present.size() % opts.group_docs == 0) {
-			format::put<std::uint32_t>(groups, group.first);
-			format::put<std::uint32_t>(groups, group.last);
-			format::put<std::uint64_t>(groups, group.first_value);
-			format::put<std::uint64_t>(groups, group.count);
-			format::put<std::uint64_t>(groups, group.min);
-			format::put<std::uint64_t>(groups, group.max);
-		}
-	}
-	if (present.size() % opts.group_docs) {
+	auto put_group = [&] {
 		format::put<std::uint32_t>(groups, group.first);
 		format::put<std::uint32_t>(groups, group.last);
 		format::put<std::uint64_t>(groups, group.first_value);
 		format::put<std::uint64_t>(groups, group.count);
 		format::put<std::uint64_t>(groups, group.min);
 		format::put<std::uint64_t>(groups, group.max);
+	};
+	for (std::size_t i = 0; i < present.size(); ++i) {
+		const std::uint64_t n = starts[i + 1] - starts[i];
+		if (!n) { throw std::invalid_argument("strata: doc values: a present ordinal holds a value"); }
+		if (!multi && n > 1) { throw std::invalid_argument("strata: doc values: a single-valued slot holds one value per document"); }
+		const auto lo = *std::min_element(flat.begin() + std::ptrdiff_t(starts[i]), flat.begin() + std::ptrdiff_t(starts[i + 1]));
+		const auto hi = *std::max_element(flat.begin() + std::ptrdiff_t(starts[i]), flat.begin() + std::ptrdiff_t(starts[i + 1]));
+		if (i % opts.group_docs == 0) { group = {ordinal_t(present[i]), ordinal_t(present[i]), offsets.back(), 0, lo, hi}; }
+		group.last = ordinal_t(present[i]);
+		group.count += n;
+		group.min = std::min(group.min, lo);
+		group.max = std::max(group.max, hi);
+		offsets.push_back(offsets.back() + n);
+		if ((i + 1) % opts.group_docs == 0) { put_group(); }
 	}
+	if (present.size() % opts.group_docs) { put_group(); }
 	statistics s;
 	s.docs = present.size();
 	s.values = flat.size();
@@ -217,6 +209,31 @@ inline std::string encode_column(kind k, bool multi, const std::vector<std::uint
 	return out;
 }
 
+// `starts` holds ordinals + 1 cumulative counts into `flat`; each ordinal's values sorted.
+inline std::string encode_column(kind k, bool multi, const std::vector<std::uint64_t>& starts, const std::vector<std::uint64_t>& flat, const std::string* dictionary, const options& opts) {
+	const std::size_t doc_count = starts.size() - 1;
+	std::vector<::docset::doc_t> present;
+	std::vector<std::uint64_t> compact{0};
+	for (std::size_t o = 0; o < doc_count; ++o) {
+		if (starts[o + 1] == starts[o]) { continue; }
+		present.push_back(::docset::doc_t(o));
+		compact.push_back(starts[o + 1]);
+	}
+	return encode_present(k, multi, doc_count, present, compact, flat, dictionary, opts);
+}
+
+// A bytes column's dictionary from its sorted distinct values: leb count, count + 1 u64
+// offsets, the values' bytes.
+inline std::string put_dictionary(const std::vector<std::string_view>& terms) {
+	std::string dictionary;
+	format::put_leb(dictionary, terms.size());
+	std::uint64_t offset = 0;
+	format::put<std::uint64_t>(dictionary, offset);
+	for (const auto t : terms) { offset += t.size(); format::put<std::uint64_t>(dictionary, offset); }
+	for (const auto t : terms) { dictionary += t; }
+	return dictionary;
+}
+
 }  // namespace detail
 
 // Encodes a numeric slot: per ordinal, its mapped values (none when absent). Multi-valued
@@ -240,12 +257,7 @@ inline std::string encode_bytes(bool multi, const std::vector<std::vector<std::s
 	for (const auto& d : docs) { terms.insert(terms.end(), d.begin(), d.end()); }
 	std::sort(terms.begin(), terms.end());
 	terms.erase(std::unique(terms.begin(), terms.end()), terms.end());
-	std::string dictionary;
-	format::put_leb(dictionary, terms.size());
-	std::uint64_t offset = 0;
-	format::put<std::uint64_t>(dictionary, offset);
-	for (const auto& t : terms) { offset += t.size(); format::put<std::uint64_t>(dictionary, offset); }
-	for (const auto& t : terms) { dictionary += t; }
+	const std::string dictionary = detail::put_dictionary(std::vector<std::string_view>(terms.begin(), terms.end()));
 	std::vector<std::uint64_t> starts{0}, flat;
 	for (const auto& d : docs) {
 		const auto from = flat.size();
