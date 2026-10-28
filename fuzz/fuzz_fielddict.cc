@@ -5,11 +5,16 @@
 // every byte reaches the decoders), and a whole segment whose two sections changed, most inputs
 // with every checksum recomputed. Base dictionaries have fields of many sizes (own and pooled),
 // the empty term, ids on both sides of every varint width, and enough fields for several
-// directory samples. Run with a -timeout of a few seconds so a hang counts as a finding.
+// directory samples. The reference oracle (test/fielddict_oracle.hh) is on both sides of the
+// mutation: an unmutated dictionary must answer exactly what a std::map says (a third base is
+// random, wide directories included), and a mutated one that the deep check accepts must read
+// the same by every path, unless a byte of the blocks, alphabet or FST changed (the termdict's
+// to validate, not the directory's). Run with a -timeout of a few seconds so a hang counts as a finding.
 #include "prospect/check.hh"
 #include "prospect/fielddict.hh"
 #include "prospect/reader.hh"
 #include "prospect/writer.hh"
+#include "../test/fielddict_oracle.hh"
 
 #include <algorithm>
 #include <crc32c/crc32c.hh>
@@ -59,27 +64,19 @@ const std::map<std::uint32_t, std::vector<std::string>>& base_terms(unsigned whi
 	return bases[which % std::size(bases)];
 }
 
-prospect::format::term_info info_of(std::uint32_t n) {
-	prospect::format::term_info t;
-	t.flags = prospect::format::single_posting | prospect::format::no_wdf | prospect::format::no_positions;
-	t.df = 1;
-	t.cf = 0;
-	t.postings = n % 50;
-	return t;
+// Base 2 is generated from the input's bytes (the oracle's generator), unless it is large.
+fd::oracle::truth_t make_base(unsigned which, const std::uint8_t* data) {
+	if (which % 3 == 2) {
+		std::mt19937_64 rng(std::uint64_t(data[1]) | std::uint64_t(data[2]) << 8);
+		auto t = fd::oracle::random_truth(rng);
+		std::size_t terms = 0;
+		for (const auto& [f, ts] : t) { terms += ts.size(); }
+		if (t.size() <= 110 && terms <= 9000) { return t; }
+	}
+	return base_terms(which % 2);
 }
 
-fd::builder::built build_dictionary(const std::map<std::uint32_t, std::vector<std::string>>& terms) {
-	fd::planner plan;
-	for (const auto& [f, ts] : terms) {
-		for (const auto& t : ts) { plan.add(f, t); }
-	}
-	fd::builder b(plan.finish());
-	std::uint32_t n = 0;
-	for (const auto& [f, ts] : terms) {
-		for (const auto& t : ts) { b.add(f, t, info_of(n++)); }
-	}
-	return b.finish();
-}
+fd::builder::built build_dictionary(const std::map<std::uint32_t, std::vector<std::string>>& terms) { return fd::oracle::build(terms); }
 
 void exercise(const fd::reader& r, std::mt19937_64& rng) {
 	bool misordered = false;
@@ -169,15 +166,47 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 	std::mt19937_64 rng(size * 131 + data[2]);
 	try {
 		if (data[0] & 0x80) {
-			auto built = build_dictionary(base_terms(data[0]));
-			std::string* both[] = {&built.blocks, &built.index};
-			for (std::size_t i = 3; i + 4 < size; i += 5) {
-				std::string& s = *both[data[i] & 1];
-				if (s.empty()) { continue; }
-				const std::uint32_t at = std::uint32_t(data[i + 1]) | std::uint32_t(data[i + 2]) << 8 | std::uint32_t(data[i + 3]) << 16;
-				s[at % s.size()] ^= char(data[i + 4] | 1);
+			const auto base = make_base(data[0], data);
+			auto built = build_dictionary(base);
+			const std::size_t td = fd::oracle::termdict_bytes_start(built.index);
+			bool mutated = false, past_directory = false;
+			if (data[1] % 5 != 0) {  // one input in five stays unmutated
+				std::string* both[] = {&built.blocks, &built.index};
+				for (std::size_t i = 3; i + 4 < size; i += 5) {
+					std::string& s = *both[data[i] & 1];
+					if (s.empty()) { continue; }
+					const std::uint32_t at = std::uint32_t(data[i + 1]) | std::uint32_t(data[i + 2]) << 8 | std::uint32_t(data[i + 3]) << 16;
+					s[at % s.size()] ^= char(data[i + 4] | 1);
+					mutated = true;
+					past_directory |= &s != &built.index || at % s.size() >= td;  // the blocks have no checksum here, so a lookup cannot tell a changed term
+				}
+				if (data[1] % 11 == 0 && !built.index.empty()) {  // truncated
+					built.index.resize(std::size_t(data[2]) * built.index.size() / 256);
+					mutated = past_directory = true;
+				}
 			}
-			if (data[1] % 11 == 0 && !built.index.empty()) { built.index.resize(std::size_t(data[2]) * built.index.size() / 256); }  // truncated
+			std::mt19937_64 orng(size);
+			fd::oracle::report rep;
+			rep.context = "fuzz input of " + std::to_string(size) + " bytes";
+			if (!mutated) {
+				try {
+					const fd::reader r(built.blocks, built.index);
+					fd::oracle::against_truth(r, base, orng, rep, {.terms_per_field = 12, .cross = 8});
+				} catch (const std::exception& e) {
+					rep.violate(std::string("a valid dictionary threw: ") + e.what());
+				}
+			} else {
+				try {
+					const fd::reader r(built.blocks, built.index);
+					r.check();
+					if (!past_directory) { fd::oracle::agree(r, orng, rep); }
+				} catch (const strata::corrupt_segment&) {
+				}
+			}
+			if (!rep.ok()) {
+				rep.print();
+				std::abort();
+			}
 			const fd::reader r(built.blocks, built.index);
 			exercise(r, rng);
 		} else {

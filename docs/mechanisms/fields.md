@@ -116,7 +116,12 @@ in two fields are two terms in the graph, with their own degrees.
 | Two shards, different declaration orders | `shards_test` (T5b) | sum-by-id mutant |
 | Xapian parity over Xapiand's bank, 49 fields | `parity_terms` (T3b) | |
 | Graph terms by field | `reorder_test` | bytes-only mutant |
-| A damaged directory fences | `fuzz_fielddict` | |
+| Every read path against a std::map, wide directories included | `fielddict_oracle_test`, `fuzz_fielddict` | scan, search, lookup and slice mutants (N to Q) |
+| A damaged directory fences or reads the same by every path; pool blocks and pool index come together | `fielddict_oracle_test`, `fielddict_test`, `fuzz_fielddict` | pairing mutant (S) |
+| A flipped bit in an own dictionary's blocks is refused by `scan_terms`, `term_cursor` and the merge | `fielddict_media_test` | verifier mutant (R) |
+| Field ids lie in the field table and miss the key field (`check_fields`; no caller yet) | `fielddict_test` | table mutants (T, U) |
 | Sizes against flat terms | `prospect_engine fields` (T1) | |
 
 `docs/status/fields.md` has the numbers.
+
+The `terms` section is checked per 4 KiB region on first read, for the pool and every own dictionary alike; the `term_index` section (directory, alphabets, FSTs) is pinned and checked at open, so the termdict's index is covered by the section checksum only.

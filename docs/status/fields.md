@@ -72,6 +72,14 @@ From the design's F2 row and the lead's task. A criterion is ticked only with ev
   (freebsd-x86_64, linux-arm64-gcc, linux-x86_64-clang, linux-x86_64-gcc, macos-x86_64, macos-arm64, linux-tsan, linux-asan-ubsan); `strata:32b6800` green on all jobs.
   The strata-oracle branch `phase8/rank-terms` (`strata-oracle:8e6611a`, local, not pushed) holds the `rank-terms` mode and the recorded T3b vectors.
 
+## Security round (2026-10-28, `docs/reviews/fields-security.md`)
+
+- SR1 fixed: `fielddict.hh` `dictionary()` takes the verifier and maps `termdict::corrupt` / FST `invalid_argument` to `corrupt_segment`. `fielddict_media_test`: 129 bit flips in the `terms` section of a segment with two large own dictionaries; `scan_terms`, a `term_cursor` walk and a merge each throw `corrupt_segment` on all 129. Mutant R (verifier dropped) dies.
+- SR2: `test/fielddict_oracle.hh` (the reviewer's oracle, as a header), `fielddict_oracle_test` (300 valid dictionaries, a share of them wide: 17 to 76 own dictionaries; 6 dictionaries with every directory byte set to 8 values), and the same oracle in `fuzz_fielddict` (unmutated inputs against the reference; mutated ones that `check()` accepts must read the same by every path, unless a termdict byte changed). Mutants N to Q (the reviewer's four) and R to U die (`tools/mutants_fields.py`).
+- SR3 fixed in the reader's constructor (`pool_index_.empty() != (terms.size() == own_blocks_)`); `fielddict_test` `pool_pairing_tests`; mutant S dies.
+- SR5: `reader::check_fields(table_size, key_field)` and its test (mutants T, U die). **Not wired**: see Blocked on.
+- SR4 hand-off to the termdict library (not changed here): require strictly increasing alphabet symbols (a repeated symbol makes the cursor decode two keys to the same bytes, so a pooled key's field id can read as another field), and cheaply cross-check the FST against the blocks (the floor of a block's first key lands on that block). Evidence: `.scratch/f2-sec/oracle-damage.log` (24,926 accepted dictionaries whose lookups disagree with the cursor, all in the alphabet or FST bytes). A media fault is covered by the section checksum; a resealed file is outside the threat model.
+
 ## Next
 
 1. Land `strata:phase8/fields-f2` (small-fix tier plus the decoder-safety review), then repin prospect to its main commit (`CMakeLists.txt` pins `strata:32b6800` now).
@@ -82,4 +90,4 @@ From the design's F2 row and the lead's task. A criterion is ticked only with ev
 
 ## Blocked on
 
-Nothing.
+SR5's call site. The segment's open context (`strata:32b6800` `core/reader.hh` `open_context`), the merge context and `check_segment` carry no field table, so prospect cannot compare a dictionary's ids with the table where a segment is opened. Options for the owner/architect: (1) `open_context` (and the merge and check contexts) carry the `field_table`, prospect calls `check_fields` in `inverted_plugin::reader`'s constructor or in `inverted_plugin::check` (an O(pool) pass, so check only); (2) strata's `index::check` calls a plugin hook with the table. Needs a strata change; the threat is a resealed file only.

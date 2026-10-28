@@ -119,8 +119,14 @@ inline listing list(const reader& r, std::size_t cap = 200000) {
 	return l;
 }
 
+// How much of a dictionary against_truth probes; the defaults probe everything.
+struct limits {
+	std::size_t terms_per_field = ~std::size_t(0);  // find_run of this many terms of each field (the first, the last, then random)
+	std::size_t cross = ~std::size_t(0);  // other fields' terms tried under each probed field
+};
+
 // A valid dictionary against `truth`: every read path. Throws what the reader throws.
-inline void against_truth(const reader& r, const truth_t& truth, std::mt19937_64& rng, report& rep) {
+inline void against_truth(const reader& r, const truth_t& truth, std::mt19937_64& rng, report& rep, const limits& lim = {}) {
 	const listing l = list(r);
 	std::vector<std::pair<std::uint32_t, std::string>> want;
 	for (const auto& [f, ts] : truth) {
@@ -138,7 +144,8 @@ inline void against_truth(const reader& r, const truth_t& truth, std::mt19937_64
 		if (e.has_value() != (ts.size() >= own_threshold)) { rep.violate("entry_of: own/pool decision differs from the threshold"); }
 		if (e && e->terms != ts.size()) { rep.violate("entry_of: term count"); }
 		if (!r.has_field(f)) { rep.violate("has_field false for a field with terms"); }
-		for (const auto& t : ts) {
+		for (std::size_t k = 0; k < std::min(ts.size(), lim.terms_per_field); ++k) {
+			const auto& t = lim.terms_per_field >= ts.size() ? ts[k] : k == 0 ? ts.front() : k == 1 ? ts.back() : ts[rng() % ts.size()];
 			const auto v = r.find_run(f, t, [](std::string_view) {});
 			if (!v) { rep.violate("find_run: present term not found"); continue; }
 			if (std::string(*v) != raw[{f, t}]) { rep.violate("find_run: value differs from the cursor's"); }
@@ -174,8 +181,9 @@ inline void against_truth(const reader& r, const truth_t& truth, std::mt19937_64
 			r.scan(f, {}, [&](std::string_view, std::string_view) { return ++n < 10; });
 			if (n) { rep.violate("scan yields terms of an absent field"); }
 		}
+		std::size_t tried = 0;
 		for (const auto& [g, ts] : truth) {
-			if (g == f) { continue; }
+			if (g == f || ++tried > lim.cross) { continue; }
 			const std::string& t = ts[rng() % ts.size()];
 			const bool member = has && std::binary_search(it->second.begin(), it->second.end(), t);
 			if (r.find_run(f, t, [](std::string_view) {}).has_value() != member) { rep.violate("find_run: another field's term found or lost wrongly"); }
