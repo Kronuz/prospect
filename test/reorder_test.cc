@@ -88,6 +88,7 @@ int main() {
 		for (int i = 0; i < 2500; ++i) {
 			transaction t;
 			t.fields = text_fields();
+			t.fields.push_back({"other", strata::field_role::indexed, strata::field_postings::positions, false});
 			operation o;
 			const std::uint64_t kind = r() % 10;
 			const std::string key = "Q" + std::to_string(r() % 900);
@@ -100,6 +101,11 @@ int main() {
 			}
 			std::sort(d.field().terms.begin(), d.field().terms.end(), [](const auto& a, const auto& b) { return a.term < b.term; });
 			d.field().terms.erase(std::unique(d.field().terms.begin(), d.field().terms.end(), [](const auto& a, const auto& b) { return a.term == b.term; }), d.field().terms.end());
+			if (r() % 2) {  // the same words in a second field: they are other terms, never merged in the graph
+				auto& other = d.field(strata::field_ref::declared(1));
+				other.terms = d.field().terms;
+				other.length = std::uint32_t(other.terms.size());
+			}
 			if (r() % 3) { d.stored = std::to_string(i) + std::string(r() % 300, char('a' + topic)); }
 			if (kind < 6) {
 				o.type = operation::replace_key;
