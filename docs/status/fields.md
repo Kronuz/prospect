@@ -32,8 +32,10 @@ From the design's F2 row and the lead's task. A criterion is ticked only with ev
 - [x] F8. T3b on Xapiand's bank (1,000 documents, 49 fields, Q and V wdf in the length): 240 term/OR/AND queries within and across fields, counts and top-10 equal Xapian's, worst relative error 4.1e-16, 1 and 5 segments (`parity_terms`; vectors `strata-oracle:8e6611a`, branch `phase8/rank-terms`, local). Phrase dropped (FK-R12).
 - [ ] F9. C5/FK-R9: the varint and empty-term decoder tests are in; per-field min/max through merges, per-field document counts at merge, live statistics: **not built** (norms and per-field statistics are D4, whose directory flag bits are reserved and refused).
 - [ ] F10. T6 open cost for the 49- and 2,100-field segments: not run.
-- [~] F11. Strata bump 0x8000000C; prospect fixtures re-pinned (`test/fixtures`, `reorder_test`, `format13_test`); `fuzz_fielddict` target and corpus; mutants A to L die.
-- [ ] F12. ASan+UBSan and TSan in separate dirs; CI green on both branches.
+- [x] F11. Strata bump 0x8000000C (`strata:32b6800` repins `flush_memory`, `merge_stream`, `format14`; its CI is green on every job); prospect fixtures re-pinned (`test/fixtures`, `reorder_test`, `format13_test`).
+  `fuzz/fuzz_fielddict.cc` (two modes: the reader over raw built bytes, and a whole segment with resealed checksums; seeds plus a 7 minute ASan+UBSan run, 57,321 executions, minimized corpus of 751 files, no crash after the fixes below).
+  Mutants (`tools/mutants_fields.py`, each applied alone, the named tests must fail): A pool threshold, B non-canonical varint, C buffer varint order, D key field in a part, E reference by number, F sum by id (T5b), G key terms in the dictionary, H reorder by bytes only, I plan counts no terms, L host length ignored, M entry term count ignored: all die. Three of them (C, E, L) first survived and got tests.
+- [~] F12. ASan+UBSan (`build-asan`) and TSan (`build-tsan`), separate dirs with their own deps (Homebrew LLVM clang, `-O1`): see the Log for the last full run. CI: see Log.
 
 ## Decisions (shapes the design leaves open)
 
@@ -44,6 +46,12 @@ From the design's F2 row and the lead's task. A criterion is ticked only with ev
 5. **Segment version** `0x8000000C` (strata `phase8/fields-f2`).
 6. **A snapshot without a field table throws** (`logic_error`), never answers empty: a missing table was a silent zero.
 7. **Tests declare `text`** (`test/text_field.hh`): `text_fields()` for single-field tests, `keyed_fields()` adds the key field `_id`.
+
+## Bugs the proof found
+
+- UBSan: the buffer's hash shifted by 64 for the empty term (`tuple_buffer.hh`); in Release it read arena garbage, so an empty term could split into several entries. Fixed; `tuple_buffer_test` now has the empty term (segfault / mismatched bytes with the fix reverted).
+- Reorder grouped graph terms by bytes only (below).
+- The fuzz oracle (cursor reads in order) found a dictionary that read out of order; the directory check fenced that input already, but `check()` now also reads the terms against the entries' counts and order (the count is unit-tested, the order only by the fuzz oracle).
 
 ## Findings for the lead
 
@@ -60,3 +68,15 @@ From the design's F2 row and the lead's task. A criterion is ticked only with ev
   here the values are real term infos. For sparse-kw the pool's keys carry a 2- or 3-byte field id (2,000 fields) and a full-byte alphabet, which a flat dictionary's 30-symbol alphabet and shared prefixes beat.
   The mutants (`.scratch/mutants.log`, `tools/mutants_fields.py`): A to L all die after three tests were added (buffer varint, reference by id, host length).
 
+
+## Next
+
+1. Land `strata:phase8/fields-f2` (small-fix tier plus the decoder-safety review), then repin prospect to its main commit (`CMakeLists.txt` pins `strata:32b6800` now).
+2. F9 (per-field min/max through merges, per-field document counts at merge, live statistics) and D4's norms: not built; the directory's flag bits are reserved and refused.
+3. F10 / T6: the 49- and 2,100-field protected-pages open, and strata `bench/idle_index`.
+4. T1's lead measurement on `main` (the sizes above are functional counts of bytes, not timings); sparse-kw misses its target by 0.018 and 0.004: an owner/architect call whether D3's threshold or D10's id width should move.
+5. T4 (Lucene parity with norms) and T7 wait for D4 and SF.
+
+## Blocked on
+
+Nothing.
