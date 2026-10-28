@@ -490,6 +490,18 @@ int main() {
 			CHECK(at != std::string::npos);
 			file[at + 3] = 'c';  // "bbbc": still between "aaaa" and "cccc"
 			CHECK(fenced_by(file, true));
+			// A failed first read fails every read the same way (TSan's pthread_once hung on a
+			// retry after a throw).
+			const segment seg(file);
+			for (int again = 0; again < 3; ++again) {
+				bool threw = false;
+				try {
+					(void)seg.get<values_plugin>().at(0);
+				} catch (const strata::corrupt_segment&) {
+					threw = true;
+				}
+				CHECK(threw);
+			}
 		}
 		// Bytes between the last column and the directory, or a last column short of them:
 		// the directory fences on its own, with no column opened.
