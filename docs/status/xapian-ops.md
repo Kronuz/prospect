@@ -51,7 +51,7 @@ Deferred, with the evidence:
 ## State
 
 Done except CI: the operators, vectors, tests, mutants, sanitizers and notes are committed and pushed; CI
-runs on the head (its jobs are recorded under Done when read).
+runs on the head (run 40616608446, see Done).
 
 ## Done
 
@@ -77,6 +77,8 @@ runs on the head (its jobs are recorded under Done when read).
 - O4, sanitizers on macOS x86_64, Homebrew LLVM 23 at -O1: `build-asan` (address and undefined, no recovery):
   `operators_test` and `search_test` clean; `build-tsan`: `operators_test` clean (no reports). Each directory fetched
   its own dependencies.
+- CI: run 40616608446 on `prospect:e134c8e` started (in progress when this was written; no job read). The lead
+  watches it.
 - No decoder or parser is added or changed (the test's s-expression and JSON readers are test code), so there is no
   fuzz target. No performance claim is made.
 
