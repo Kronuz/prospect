@@ -31,6 +31,8 @@ static void varint_tests() {
 	const std::uint32_t ids[] = {0, 1, 100, 239, 240, 241, 255, 256, 65535, 65536, (1u << 24) - 1, 1u << 24, 0xFFFFFFFFu};
 	for (std::uint32_t id : ids) {
 		const std::string s = field_bytes(id);
+		char buf[5];  // the buffer overload (the tuple buffer's keys) writes the same bytes
+		CHECK(std::string(buf, fielddict::put_field(buf, id)) == s);
 		const char* p = s.data();
 		std::uint32_t got = 0;
 		CHECK(fielddict::get_field(p, s.data() + s.size(), got) && got == id && p == s.data() + s.size());

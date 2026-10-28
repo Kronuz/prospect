@@ -227,7 +227,39 @@ static void agreement_tests() {
 	ix.close();
 }
 
+// A transaction names fields by its own declarations, in any order: a part's reference resolves to
+// the table's id for that name, never to the reference's number (D2).
+static void reference_tests() {
+	faultfs::filesystem fs;
+	faultfs::io io(fs);
+	prospect::index::options o;
+	o.key_prefix = "Q";
+	auto ix = prospect::index::create(io, o, uuid);
+	CHECK(ix.apply(tx({add("Q1", {part(TITLE, {term("alpha")}), part(BODY, {term("beta")})})}), {}).result == strata::verdict::accepted);
+	transaction t;
+	const auto all = declarations();
+	t.fields = {all[1], all[0], all[2]};  // body, title, big: declared(0) is "body"
+	t.ops = {add("Q2", {part(strata::field_ref::declared(0), {term("gamma")}), part(strata::field_ref::declared(1), {term("delta")})}),
+		add("Q3", {part(strata::field_ref::declared(2), {term("epsilon")})})};
+	CHECK(ix.apply(t, {}).result == strata::verdict::accepted);
+	ix.commit();
+	CHECK(ix.fields().find("title") == 0u && ix.fields().find("body") == 1u && ix.fields().find("big") == 2u);
+	CHECK(df(ix, "body", "gamma") == 1 && df(ix, "title", "gamma") == 0 && df(ix, "title", "delta") == 1 && df(ix, "body", "delta") == 0);
+	CHECK(df(ix, "big", "epsilon") == 1 && df(ix, "title", "epsilon") == 0 && df(ix, "body", "epsilon") == 0);
+	// A snapshot of a segment without its index's field table cannot resolve a name: it throws, never answers empty.
+	bool threw = false;
+	try {
+		const segment_snapshot bare{ix.segments()[0].seg()};
+		(void)snapshot_df(std::span<const segment_snapshot>(&bare, 1), "title", "alpha");
+	} catch (const std::logic_error&) {
+		threw = true;
+	}
+	CHECK(threw);
+	ix.close();
+}
+
 int main() {
+	reference_tests();
 	basic_tests();
 	rejection_tests();
 	dictionary_tests();
