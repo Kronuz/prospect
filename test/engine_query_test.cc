@@ -67,7 +67,7 @@ static std::string random_query(std::mt19937_64& r) {
 
 static std::vector<segment_snapshot> snapshot(const prospect::index& ix) {
 	std::vector<segment_snapshot> out;
-	for (const auto& s : ix.segments()) { out.push_back({s.seg, s.deleted, s.dead}); }
+	for (const auto& s : ix.segments()) { out.push_back({s.seg(), s.deleted, s.dead}); }
 	return out;
 }
 

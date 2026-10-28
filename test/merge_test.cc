@@ -3,6 +3,7 @@
 // sources did.
 #include "prospect/index.hh"
 #include "prospect/merge.hh"
+#include "view_sources.hh"
 #include "strata/core/faultfs.hh"
 #include "strata/core/merge_policy.hh"
 
@@ -87,8 +88,8 @@ int main() {
 			if (r() % 300 == 0) { ix.refresh(); }
 		}
 		ix.refresh();
-		std::vector<merge_source> sources;
-		for (const auto& s : ix.segments()) { sources.push_back({s.seg, s.deleted}); }
+		view_sources held(ix.segments());
+		auto& sources = held.sources;
 		CHECK(sources.size() > 3);
 		const std::array<std::uint8_t, 16> id{7};
 		std::string merged;
@@ -315,7 +316,7 @@ int main() {
 		CHECK(kept == 5);
 		ix.force_merge(1);
 		CHECK(ix.segments().size() == 1 && deleted_in(ix.segments()[0]) == 0);
-		CHECK(ix.segments()[0].seg->core().doc_count() == 175);
+		CHECK(ix.segments()[0].seg()->core().doc_count() == 175);
 		CHECK(ix.digest() == before);
 	}
 	std::printf("merge: %s\n", failures ? "FAILED" : "ok");

@@ -199,7 +199,7 @@ std::string with_version(std::string file, std::uint32_t v) {
 // routing (F8): the term table resolves a key-prefixed term as a key leaf.
 std::vector<std::uint64_t> matches(const prospect::index& ix, std::string_view term, std::string_view key_prefix) {
 	std::vector<prospect::segment_snapshot> segs;
-	for (const auto& v : ix.segments()) { segs.push_back({v.seg, v.deleted, v.dead}); }
+	for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead}); }
 	prospect::term_table table(segs, key_prefix);
 	auto build = [&](const prospect::segment& seg) -> prospect::scorer_ptr {
 		const auto* info = table.info(seg, term);
@@ -583,7 +583,7 @@ int main() {
 		CHECK(with([](strata::files::manifest& m) { m.segments.back().values_generation = 1; }) == verdict::corrupt);
 		CHECK(with([](strata::files::manifest& m) {
 			m.mask |= std::uint64_t(1) << 20;
-			m.slots = {1, 10, 0};
+			m.fields = {1, 10, 0};
 		}) == verdict::unsupported);
 		// A highest segment version above this binary's: unsupported.
 		CHECK(with([](strata::files::manifest& m) { m.max_version = strata::format::version + 1; }) == verdict::unsupported);
@@ -634,7 +634,7 @@ int main() {
 		// kept by install, and checked against the manifest's entry at open (I13).
 		{
 			auto header_id = [](const prospect::index& ix, std::size_t i) {
-				return std::string(ix.segments()[i].seg->core().section(section::header).bytes.substr(strata::format::identity_offset, 16));
+				return std::string(ix.segments()[i].seg()->core().section(section::header).bytes.substr(strata::format::identity_offset, 16));
 			};
 			auto entry_id = [](const prospect::index& ix, std::size_t i) {
 				const auto& id = ix.manifest().segments[i].identity;
@@ -944,13 +944,13 @@ int main() {
 			CHECK(ix.digest() == before);
 			CHECK(ix.apply(t2, {}).versions == std::vector<std::uint64_t>{0});  // flushed
 			ix.commit();
-			for (const auto& sv : ix.segments()) { CHECK(!sv.seg->holds<strata::keys_plugin>() && sv.seg->core().entry(section::versions) == nullptr); }
+			for (const auto& sv : ix.segments()) { CHECK(!sv.seg()->holds<strata::keys_plugin>() && sv.seg()->core().entry(section::versions) == nullptr); }
 			// A merge's output takes the configuration too (F4; CR6, M4).
 			CHECK(apply(ix, add) == strata::verdict::accepted);
 			ix.commit();
 			ix.force_merge();
 			CHECK(ix.segments().size() == 1);
-			for (const auto& sv : ix.segments()) { CHECK(!sv.seg->holds<strata::keys_plugin>() && sv.seg->core().entry(section::keys) == nullptr); }
+			for (const auto& sv : ix.segments()) { CHECK(!sv.seg()->holds<strata::keys_plugin>() && sv.seg()->core().entry(section::keys) == nullptr); }
 			CHECK(ix.digest() != before);
 		}
 	}
@@ -1031,8 +1031,8 @@ int main() {
 			std::vector<prospect::segment_snapshot> segs;
 			std::uint64_t held = 0;
 			for (const auto& v : ix.segments()) {
-				segs.push_back({v.seg, v.deleted, v.dead});
-				held += v.seg->get<strata::keys_plugin>().find("Q7", {}).has_value();
+				segs.push_back({v.seg(), v.deleted, v.dead});
+				held += v.seg()->get<strata::keys_plugin>().find("Q7", {}).has_value();
 			}
 			CHECK(prospect::snapshot_df(segs, "Q7", o.key_prefix) == held);
 		}

@@ -4,6 +4,7 @@
 // accepts, and deterministic; the fallback and cancellation hold.
 #include "prospect/index.hh"
 #include "prospect/reorder.hh"
+#include "view_sources.hh"
 #include "strata/core/faultfs.hh"
 
 #include <cstdio>
@@ -115,8 +116,8 @@ int main() {
 			if (r() % 400 == 0) { ix.refresh(); }
 		}
 		ix.refresh();
-		std::vector<merge_source> sources;
-		for (const auto& s : ix.segments()) { sources.push_back({s.seg, s.deleted}); }
+		view_sources held(ix.segments());
+		auto& sources = held.sources;
 		CHECK(sources.size() > 2);
 		reorder::settings set;
 		set.min_df = 40;
@@ -245,7 +246,7 @@ int main() {
 			ix.force_merge();
 			ix.commit();
 			CHECK(ix.segments().size() == 1);
-			CHECK(!ix.segments()[0].seg->core().docid_ordered());
+			CHECK(!ix.segments()[0].seg()->core().docid_ordered());
 			CHECK(ix.digest() == before);
 			(void)ix.check();
 			for (int k = 0; k < 900; ++k) {

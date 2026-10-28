@@ -153,7 +153,7 @@ static void check_against_scan(const std::vector<doc_hit>& hits, const std::vect
 
 static std::vector<segment_snapshot> snapshot(const prospect::index& ix) {
 	std::vector<segment_snapshot> out;
-	for (const auto& s : ix.segments()) { out.push_back({s.seg, s.deleted, s.dead}); }
+	for (const auto& s : ix.segments()) { out.push_back({s.seg(), s.deleted, s.dead}); }
 	return out;
 }
 
@@ -224,7 +224,7 @@ int main() {
 		}
 		const std::string one_bytes = one.flush({});
 		const segment single(one_bytes);
-		const std::vector<std::uint64_t> none((single.core().doc_count() + 63) / 64, 0);
+		const strata::deleted_bits none((single.core().doc_count() + 63) / 64);
 		const segment_snapshot single_snap[] = {{&single, &none}};
 		for (int qn = 0; qn < 120; ++qn) {
 			query q;
@@ -338,8 +338,8 @@ int main() {
 	// any_deleted reads the dead count when it has one (review R5) and scans the bitmap
 	// when the count is unknown.
 	{
-		std::vector<std::uint64_t> none(4, 0), some(4, 0);
-		some[3] = 1;
+		strata::deleted_bits none(4), some(4);
+		some.mutable_words()[3] = 1;
 		segment_snapshot s{nullptr, nullptr};
 		CHECK(s.dead == segment_snapshot::unknown_dead && !s.any_deleted());
 		s.deleted = &none;
@@ -370,8 +370,8 @@ int main() {
 		}
 		const std::string bytes = w.flush({});
 		const segment seg(bytes);
-		std::vector<std::uint64_t> deleted((seg.core().doc_count() + 63) / 64, 0);
-		for (std::uint32_t d = 0; d < 3000; d += 1 + std::uint32_t(r() % 5)) { deleted[d >> 6] |= std::uint64_t(1) << (d & 63); }
+		strata::deleted_bits deleted((seg.core().doc_count() + 63) / 64);
+		for (std::uint32_t d = 0; d < 3000; d += 1 + std::uint32_t(r() % 5)) { deleted.set(d); }
 		auto dead = [&](std::uint32_t d) { return (deleted[d >> 6] >> (d & 63)) & 1; };
 		auto phrase = [&] { return std::make_unique<phrase_scorer>(seg.get<prospect::inverted_plugin>(), std::vector<prospect::format::term_info>{*seg.get<prospect::inverted_plugin>().term("a"), *seg.get<prospect::inverted_plugin>().term("b")}); };
 		auto live_phrase = [&] { return std::make_unique<live_scorer>(phrase(), deleted); };

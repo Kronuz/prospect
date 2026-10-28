@@ -104,8 +104,8 @@ void refresh_toc_checksum(std::string& file) {
 
 void exercise(const prospect::segment& seg) {
 	// Every third ordinal deleted, for find's live bits.
-	std::vector<std::uint64_t> deleted((seg.core().doc_count() + 63) / 64);
-	for (strata::ordinal_t d = 0; d < seg.core().doc_count(); d += 3) { deleted[d >> 6] |= std::uint64_t(1) << (d & 63); }
+	strata::deleted_bits deleted((seg.core().doc_count() + 63) / 64);
+	for (strata::ordinal_t d = 0; d < seg.core().doc_count(); d += 3) { deleted.set(d); }
 	const strata::live_bits live{deleted.data()};
 	for (strata::ordinal_t d = 0; d < seg.core().doc_count(); d += 1 + d / 64) {
 		(void)seg.get<strata::stored_plugin>().stored(d);

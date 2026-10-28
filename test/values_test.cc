@@ -7,6 +7,7 @@
 #include "prospect/check.hh"
 #include "prospect/index.hh"
 #include "prospect/merge.hh"
+#include "view_sources.hh"
 #include "strata/core/faultfs.hh"
 
 #include <crc32c/crc32c.hh>
@@ -346,12 +347,11 @@ int main() {
 		auto expect_index = [&] {
 			std::size_t seen = 0;
 			for (const auto& s : ix.segments()) {
-				const merge_source src{s.seg, s.deleted};
-				const auto& rd = s.seg->get<values_plugin>();
-				for (ordinal_t o = 0; o < s.seg->core().doc_count(); ++o) {
-					if (!src.live(o)) { continue; }
+				const auto& rd = s.seg()->get<values_plugin>();
+				for (ordinal_t o = 0; o < s.seg()->core().doc_count(); ++o) {
+					if (!s.live(o)) { continue; }
 					++seen;
-					const auto it = model.find(s.seg->core().docid(o));
+					const auto it = model.find(s.seg()->core().docid(o));
 					CHECK(it != model.end());
 					if (it == model.end()) { continue; }
 					model_values got;
@@ -364,8 +364,8 @@ int main() {
 		expect_index();
 		CHECK(ix.segments().size() > 3);
 		// A merge of every segment: the bytes of one flush of the live documents.
-		std::vector<merge_source> sources;
-		for (const auto& s : ix.segments()) { sources.push_back({s.seg, s.deleted}); }
+		view_sources held(ix.segments());
+		auto& sources = held.sources;
 		const std::array<std::uint8_t, 16> id{9};
 		auto flush_direct = [&](const std::vector<std::uint64_t>& docids) {
 			segment_writer w;
