@@ -670,6 +670,27 @@ int main() {
 			CHECK(scored * 2 < required);  // not every required document scored
 		}
 	}
+	// A window far beyond the documents reserves for the documents, not for k, and returns them all.
+	{
+		prospect::segment_writer w;
+		for (std::size_t d = 0; d < 80; ++d) {
+			const std::vector<std::uint32_t> pos = {1};
+			w.add(d + 1, std::vector<prospect::posting_input>{{"t", 1, pos}}, 1);
+		}
+		const std::string file = w.flush({});
+		prospect::segment seg(file);
+		for (std::size_t k : {std::size_t(4294967295u), ~std::size_t(0) / 2, ~std::size_t(0)}) {
+			prospect::top_collector c(k, false, 80);
+			CHECK(c.reserved() <= 80);
+			auto& inv = seg.get<prospect::inverted_plugin>();
+			const auto w1 = prospect::weight::bm25(inv, inv.term("t")->df);
+			prospect::term_scorer q(inv, *inv.term("t"), w1);
+			std::uint64_t n = 0;
+			CHECK(prospect::top_k(seg, q, k, &n).size() == 80 && n == 80);
+		}
+		prospect::top_collector small(3, false, 80);
+		CHECK(small.reserved() >= 7 && small.reserved() <= 80);
+	}
 	std::printf("search: %s\n", failures ? "FAILED" : "ok");
 	return failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }
