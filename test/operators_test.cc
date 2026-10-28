@@ -629,7 +629,8 @@ void host_source() {
 				const ordinal_t target = ordinal_t(rng() % ndocs);
 				auto at = want.lower_bound(target);
 				CHECK(a->advance(target) == (at == want.end() ? strata::no_more_docs : at->first));
-				CHECK(a->advance(target) == a->doc());  // not past a position already reached
+				const ordinal_t here = a->doc();
+				CHECK(a->advance(0) == here);  // a target behind the position leaves it
 				CHECK(p::count(*source()) == want.size());
 				auto copy = a->fresh();
 				CHECK(copy && p::count(*copy) == want.size());
@@ -740,6 +741,41 @@ void pieces() {
 		p::scale_scorer z(std::make_unique<unbounded>(), 0.0), two(std::make_unique<unbounded>(), 2.0);
 		CHECK(z.max_score_total() == 0.0 && z.max_score(0, 5) == 0.0);
 		CHECK(two.max_score_total() == std::numeric_limits<double>::infinity());
+	}
+	// SCALE_WEIGHT's minimum for its child never skips a document whose scaled score beats it: the
+	// child skips scores at or below the minimum it is given, so one rounding the wrong way loses a hit.
+	{
+		struct fixed final : p::scorer {
+			explicit fixed(double v) : value(v) {}
+			double value, min = 0;
+			ordinal_t at = strata::no_more_docs;
+			ordinal_t doc() const noexcept override { return at; }
+			ordinal_t next() override {
+				if (started) { return at = strata::no_more_docs; }
+				started = true;
+				return at = value > min ? 0 : strata::no_more_docs;
+			}
+			ordinal_t advance(ordinal_t) override { return next(); }
+			std::uint64_t cost() const noexcept override { return 1; }
+			double score() override { return value; }
+			double max_score(ordinal_t, ordinal_t) override { return value; }
+			ordinal_t block_end(ordinal_t) override { return strata::no_more_docs; }
+			double max_score_total() const noexcept override { return value; }
+			std::size_t score_terms() const noexcept override { return 1; }
+			void set_min_competitive_score(double s) override { min = s; }
+			bool started = false;
+		};
+		std::mt19937_64 rng(9);
+		std::uniform_real_distribution<double> unit(0.01, 30.0);
+		int lost = 0;
+		for (int i = 0; i < 200000; ++i) {
+			const double c = unit(rng), f = 0.1 + unit(rng);
+			const double scaled = c * f, just_below = std::nextafter(scaled, 0.0);
+			p::scale_scorer sc(std::make_unique<fixed>(c), f);
+			sc.set_min_competitive_score(just_below);  // the document's score is above this
+			lost += sc.next() == strata::no_more_docs;
+		}
+		CHECK(lost == 0);
 	}
 	// ELITE_SET: the size defaults to ten, a size at or above the count keeps all, the heaviest win
 	// and equal weights keep query order; no children is no scorer.
