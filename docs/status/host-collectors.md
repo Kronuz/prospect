@@ -25,7 +25,7 @@
     `shards_test` clean under ASan+UBSan at the full 60 rounds (50,400 comparisons) and under TSan at 40 rounds (33,600),
     with four threads searching one snapshot; `segment_test` clean under ASan+UBSan (the reader change). CI's linux-asan-ubsan
     and linux-tsan jobs ran the whole suite green.
-  - [x] H7 CI green: run 40629357689 on `prospect:83e8152` (before the rebase onto `prospect:7f1d915`), all 8 jobs success:
+  - [x] H7 CI green: run 40629357689 on `prospect:83e8152` (pushed before the rebase onto `prospect:7f1d915`), all 8 jobs success:
     linux-tsan, macos-arm64, linux-x86_64-clang, linux-asan-ubsan, linux-x86_64-gcc, macos-x86_64, freebsd-x86_64, linux-arm64-gcc.
     The rebased head's run is the lead's to watch.
   - [x] H8 `docs/mechanisms/multi-index-search.md`.
@@ -35,10 +35,10 @@
     round spread 0.83 to 1.24: noise, no consistent direction. The single-index path is untouched; the only change it
     meets is two more fields in the reader.
 - Done:
-  - `prospect:d2c0996` `include/prospect/shards.hh` (docid map, `multi_snapshot`, pruned merge, exhaustive search with host
+  - `prospect:40fd4bf` `include/prospect/shards.hh` (docid map, `multi_snapshot`, pruned merge, exhaustive search with host
     key and visitor, document-length bounds), `reader.hh` exposes `min_length()`/`max_length()`.
-  - `prospect:7de6a13` `test/shards_test.cc`, the oracle fixtures, `test/shards_mutants.py`.
-  - `prospect:83e8152` lazy-scoring, `dont_care`, threads and empty-segment tests; the mechanism note.
+  - `prospect:c57c126` `test/shards_test.cc`, the oracle fixtures, `test/shards_mutants.py`.
+  - `prospect:bd27c84` lazy-scoring, `dont_care`, threads and empty-segment tests; the mechanism note.
   - `strata-oracle:25be4a3` the `shards` command, `gen-shards.py`, inputs and vectors, README section.
 - Doing: nothing.
 - Next: code review; then S2 (Xapiand `phase7a/strata-engine-search`) builds on `shards.hh`.
