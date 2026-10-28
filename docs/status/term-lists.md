@@ -7,24 +7,41 @@ step table; format-13 F17). Developer agent.
 
 ## State
 
-Paused by the coordinator (quota throttle) mid-evidence. The plugin is implemented; strata
-`phase4/term-lists-rank` (f6e49bf, pushed) and prospect `phase4/term-lists` are pushed. All 42 ctests
-passed at prospect b299cec plus the vocabulary fix; ASan+UBSan (separate `.scratch/build-asan`) and TSan
-(`.scratch/build-tsan`) passed term_lists, merge, index, segment, format13, reorder, background_merge,
-concurrency and both fuzz replays. Format change: a decoder-safety review follows before landing.
+Resumed 2026-10-28. Built and proven; waiting on the decoder-safety review, then landing. Strata
+`phase4/term-lists-rank` is rebased onto strata main (two commits; digests re-pinned at pre-freeze
+0x8000000C). prospect `phase4/term-lists` is rebased onto prospect main (P1 values merged) and pins
+strata `f6e49bf`, the same change stacked on values-rank (branch `phase4/term-lists-rank-on-values`):
+prospect main still pins strata at `b644708`, before strata main's `deleted_bits`/`seg()` API, so
+prospect cannot build against the rebased branch until its own strata adoption (f14-strata-pin, K7)
+lands. The two strata commits write identical bytes for the same input (flush_memory and
+merge_stream digests pass unchanged at 0x8000000B), so prospect's fixtures hold for either pin; the
+adoption moves the pin to the landed commit.
 
-**Doing (stopped):** closing mutant survivors. The last commit is NOT built or run: it removes a redundant
-trailing-bytes check in the cursor, drops the unreachable merge backstop, and adds two tests
-(`rec({}, 0)` zero count alone; frame-contiguity mutation with 2048-byte frames). Build and run
-`term_lists_test` first.
+**Done:** 46/46 prospect ctest; 14/14 prospect mutants and 4/4 strata mutants killed; fuzz 5 min
+(45k runs, no crash, corpus merged to 396 files); ASan+UBSan and TSan clean (below); size measured.
 
-**Next:**
-1. Build `.scratch/build`, run term_lists_test; then `python3 .scratch/mut-tree/mutants.py` (copy the three changed files into `.scratch/mut-tree` first; builds `build` there). Wanted: all KILLED. Done so far: 11 of 15 killed; survivors trailing-bytes, zero-count, check-skips-coverage had tests added (unverified).
-2. Strata-side mutants (reverse `m.order` in `merge_frames`; opt-in default on in `index.hh`/`writer.hh`; drop the merge opt-in rule): copy strata include to a scratch dir, `-DFETCHCONTENT_SOURCE_DIR_STRATA`.
-3. Fuzz: `.scratch/fuzzrun.sh 900` (libFuzzer build with LLVM clang in `.scratch/build-fuzz`); run minutes, add finds to `fuzz/corpus/term_lists`.
-4. Size: corpus 100k docs at `.scratch/corpus/corpus-100000.json` (from the strata Linux VM; 1M at `~/bench/search-benchmark-game/corpus-1000000.json` there). `PROSPECT_TERM_LISTS=1 build/prospect_engine index DIR < corpus` against without, default and `PROSPECT_BUFFER_MB=16`; `sections DIR` for the section bytes.
-5. Delete `.scratch/build*` dirs and strata `.scratch/build` when done; CI status of both branches.
-6. Lead: prospect fixtures and pinned hashes (format13_test CRC, reorder_test hash) conflict with `phase4/values-bytes` (both bump pre_freeze; strata branches stack: values-rank b644708 then term-lists-rank f6e49bf); re-pin after the second lands. Layout order must be inverted, keys, stored, values, term_lists.
+**Next:** decoder-safety review; land strata then prospect; move prospect's pin on adoption.
+
+## Evidence (2026-10-28)
+
+- Re-pin is the version alone: with the frame refactor and opt-in plumbing at pre_freeze 0x8000000B,
+  strata's flush_memory and merge_stream digests (main's) pass; at 0x8000000C only they change. Every
+  prospect fixture that exists on main differs from main's in exactly 4 bytes (version, header CRC;
+  offsets 8-15), same sizes.
+- Mutants: prospect `.scratch/mutants.py`, 14/14 killed (the merge-backstop mutant is gone with the
+  backstop); strata `.scratch/mutants_strata.py` on the fetched strata: merge_frames output reversed,
+  opt-in default on in writer.hh, opt-in default on in index.hh, merge opt-in rule dropped: 4/4 killed
+  by term_lists_test.
+- Fuzz: fuzz_term_lists, libFuzzer+ASan+UBSan, 300 s, 44,973 runs, no crash or timeout; 385 new
+  files merged into `fuzz/corpus/term_lists`.
+- Size, 100k-document corpus (`.scratch/corpus/corpus-100000.json`), index bytes without / with
+  `PROSPECT_TERM_LISTS=1`: default buffer (1 segment) 43,122,634 / 73,646,086 (+30.5 MB, +71%; the
+  term_lists section is 30,493,642 B, 305 B per document, against 15,965,758 B of postings and
+  22,446,072 B of positions); `PROSPECT_BUFFER_MB=16` (8 segments) 53,121,568 / 105,515,948
+  (+98%: each segment repeats the vocabulary in its lists). Terms are spelled out in every list;
+  field ids (F2) or term ordinals would shrink it.
+- Sanitizers: prospect ASan+UBSan (term_lists, merge, index, segment, format13, both fuzz replays,
+  background_merge, reorder) and TSan (term_lists, index, background_merge, concurrency, merge) pass.
 
 ## Decisions (shapes the design leaves open)
 
@@ -58,18 +75,6 @@ trailing-bytes check in the cursor, drops the unreachable merge backstop, and ad
 
 (see Log)
 
-## Evidence
-
-- Tests: term_lists_test (records, writer flush, index buffer flush, merges incl. reordering and spilled records, off by default, damage: every one-byte change of the section detected, raw and zstd); 42/42 ctest at the re-pinned fixtures.
-- Sanitizers: see State.
-- Mutants killed (11/15): observe wdf off by one, skipped first posting, reversed term order, prefix not skipping smaller terms, prefix always matching, strict skip_to, unordered/oversized-wdf/empty-suffix accepted, cross-check ignoring wdf or term.
-
-## Next
-
-1. Build and run under `quiet light`; fix.
-2. Fuzz for minutes; size run on the search-benchmark-game corpus.
-3. Mechanisms note; push both branches.
-
 ## Blocked on
 
 Nothing.
@@ -79,3 +84,4 @@ Nothing.
 - 2026-10-27: worktrees created (prospect from `9de01a1`, strata from `phase4/values-rank` b644708,
   stacked because both change `pre_freeze`). Code written: strata frame refactor, opt-in, link hook,
   rank; prospect plugin, check, fuzz target, test.
+- 2026-10-28: rebased both branches; see State and Evidence.
