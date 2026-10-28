@@ -94,6 +94,7 @@ doc random_doc(std::mt19937_64& r, std::uint64_t docid) {
 	d.length = std::uint32_t(d.tokens.size());
 	if (r() % 5) { d.key = "Q" + std::to_string(docid); }  // a key is the core's, never a term (F8)
 	if (d.key.empty()) { d.version = 0; }                  // a version belongs to a key (F9)
+	if (r() % 5 == 0) { d.terms.push_back({"", 1 + std::uint32_t(r() % 3), {}}); }      // the empty term is a term (D1)
 	if (r() % 3 == 0) { d.terms.push_back({"T" + std::to_string(r() % 4), 1, {}}); }   // positionless, wdf 1
 	if (r() % 3 == 0) { d.terms.push_back({"W" + std::to_string(r() % 4), 3, {pos + 5}}); }  // wdf apart from its count
 	if (r() % 7 == 0) { d.terms.push_back({std::string(400, 'Z'), 2, {pos + 7, pos + 9}}); }  // a long term given whole

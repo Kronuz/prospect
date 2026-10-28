@@ -142,7 +142,7 @@ inline std::uint64_t hash(const char* p, std::size_t len) noexcept {
 	std::uint64_t w;
 	if (len <= 8) {
 		std::memcpy(&w, p, 8);
-		w &= ~std::uint64_t(0) >> (64 - 8 * len);
+		w = len ? w & (~std::uint64_t(0) >> (64 - 8 * len)) : 0;  // the empty term hashes its length alone
 		w *= P;
 		w ^= w >> 29;
 		return w + std::uint64_t(len) * 0xD6E8FEB86659FD93ull;
@@ -197,10 +197,9 @@ private:
 }  // namespace tuple_detail
 
 namespace detail {
-// Preconditions, which stage 1 checks and add() asserts in debug builds: terms are non-empty
-// and unique, tokens are non-empty and within the text, positions strictly increase, and no
-// token equals a terms entry. A zero-length token would shift the hash by 64 and a repeated
-// term would write corrupt position deltas.
+// Preconditions, which stage 1 checks and add() asserts in debug builds: terms are unique (the
+// empty term is a term), tokens are non-empty and within the text, positions strictly increase, and no
+// token equals a terms entry. A repeated term would write corrupt position deltas.
 class tuple_buffer {
 public:
 	// Where the buffer reports its allocations (D17); none: nothing is counted.
