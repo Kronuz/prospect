@@ -83,7 +83,7 @@ From the design's F2 row and the lead's task. A criterion is ticked only with ev
 
 ## Next
 
-1. Land `strata:phase8/fields-f2` (small-fix tier plus the decoder-safety review), then repin prospect to its main commit (`CMakeLists.txt` pins `strata:32b6800` now).
+1. Landed: `strata:5e6af07` (F2 on strata main); prospect pins it.
 2. F9 (per-field min/max through merges, per-field document counts at merge, live statistics) and D4's norms: not built; the directory's flag bits are reserved and refused.
 3. F10 / T6: the 49- and 2,100-field protected-pages open, and strata `bench/idle_index`.
 4. T1's lead measurement on `main` (the sizes above are functional counts of bytes, not timings); sparse-kw misses its target by 0.018 and 0.004: an owner/architect call whether D3's threshold or D10's id width should move.
