@@ -35,7 +35,7 @@ From the design's F2 row and the lead's task. A criterion is ticked only with ev
 - [x] F11. Strata bump 0x8000000C (`strata:32b6800` repins `flush_memory`, `merge_stream`, `format14`; its CI is green on every job); prospect fixtures re-pinned (`test/fixtures`, `reorder_test`, `format13_test`).
   `fuzz/fuzz_fielddict.cc` (two modes: the reader over raw built bytes, and a whole segment with resealed checksums; seeds plus a 7 minute ASan+UBSan run, 57,321 executions, minimized corpus of 751 files, no crash after the fixes below).
   Mutants (`tools/mutants_fields.py`, each applied alone, the named tests must fail): A pool threshold, B non-canonical varint, C buffer varint order, D key field in a part, E reference by number, F sum by id (T5b), G key terms in the dictionary, H reorder by bytes only, I plan counts no terms, L host length ignored, M entry term count ignored: all die. Three of them (C, E, L) first survived and got tests.
-- [~] F12. ASan+UBSan (`build-asan`) and TSan (`build-tsan`), separate dirs with their own deps (Homebrew LLVM clang, `-O1`): see the Log for the last full run. CI: see Log.
+- [x] F12. ASan+UBSan (`build-asan`) and TSan (`build-tsan`) in separate dirs with their own deps (Homebrew LLVM clang, `-O1`): ctest 47 of 47 in Release, ASan+UBSan and TSan on the final code. CI green on `prospect:8588afe` (every job; macos-arm64 got no runner on the first try and passed on rerun) and on `strata:32b6800` (every job). `docs/mechanisms/fields.md` written.
 
 ## Decisions (shapes the design leaves open)
 
@@ -68,6 +68,9 @@ From the design's F2 row and the lead's task. A criterion is ticked only with ev
   here the values are real term infos. For sparse-kw the pool's keys carry a 2- or 3-byte field id (2,000 fields) and a full-byte alphabet, which a flat dictionary's 30-symbol alphabet and shared prefixes beat.
   The mutants (`.scratch/mutants.log`, `tools/mutants_fields.py`): A to L all die after three tests were added (buffer varint, reference by id, host length).
 
+- 2026-10-28 (final): Release, ASan+UBSan and TSan builds each in a directory of their own, ctest 47 of 47 on every one. The same code on CI: `prospect:8588afe`, 8 of 8 jobs
+  (freebsd-x86_64, linux-arm64-gcc, linux-x86_64-clang, linux-x86_64-gcc, macos-x86_64, macos-arm64, linux-tsan, linux-asan-ubsan); `strata:32b6800` green on all jobs.
+  The strata-oracle branch `phase8/rank-terms` (`strata-oracle:8e6611a`, local, not pushed) holds the `rank-terms` mode and the recorded T3b vectors.
 
 ## Next
 
