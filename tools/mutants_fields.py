@@ -1,7 +1,8 @@
 import subprocess,sys,os,json
-# usage: mutants_fields.py [LETTER ...]; run from the repository, with build-rel configured (Release)
+# usage: [BUILD=dir] mutants_fields.py [LETTER ...]; BUILD (default build-rel) is a configured Release or ASan tree
 root=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(root)
+BUILD=os.environ.get('BUILD','build-rel')
 M=[
  ("A pool threshold 256 -> 255 (D3)","include/prospect/fielddict.hh",[("own_threshold = 256;","own_threshold = 255;")],["fielddict_test","fields_test"]),
  ("B varint accepts a non-canonical long form (D10)","include/prospect/fielddict.hh",[("if (std::uint8_t(p[1]) == 0 || v < 0xF0) { return false; }","")],["fielddict_test"]),
@@ -15,6 +16,17 @@ M=[
  ("J an unknown field name resolves to field 0 (D14)","include/prospect/searcher.hh",[("if (!id) { return std::nullopt; }\n	if (s.key_field() != id)","const std::optional<std::uint32_t> zero = 0;\n	if (!id) { return find_term_zero(s, term); }\n	if (s.key_field() != id)")],[]),
  ("M the deep check ignores an entry's term count (fuzz finding)","include/prospect/fielddict.hh",[('e && e->terms != run) { corrupt("field term count"); }','e && false) {}')],["fielddict_test"]),
  ("L document length ignores the host's (D5)","include/prospect/inverter.hh",[("given, d.length, d.stored","given, std::nullopt, d.stored")],["fields_test"]),
+]
+F="include/prospect/fielddict.hh"
+M+=[
+ ("N pooled scan does not stop at the next field (SR2)",F,[("if (id != field) { return false; }","if (false) { return false; }")],["fielddict_oracle_test"]),
+ ("O sample search skips a field equal to a sample's (SR2)",F,[("if (sample_id(mid) <= field) { lo = mid; }","if (sample_id(mid) < field) { lo = mid; }")],["fielddict_oracle_test"]),
+ ("P pooled scan slices the wrong lead for ids of 240 and up (SR2)",F,[("return f(k.substr(lead), v);","return f(k.substr(lead > 1 ? lead - 1 : lead), v);")],["fielddict_oracle_test"]),
+ ("Q pooled lookup under the id field OR 1 (SR2)",F,[("put_field(key, field);\n\t\t\tkey += term;\n\t\t\treturn pool().find_run(key, visit);","put_field(key, field | 1);\n\t\t\tkey += term;\n\t\t\treturn pool().find_run(key, visit);")],["fielddict_oracle_test"]),
+ ("R the cursor reads an own dictionary without the verifier (SR1)",F,[("if (!verify_) { return termdict::reader(blocks, index); }","if (true) { return termdict::reader(blocks, index); }")],["fielddict_media_test"]),
+ ("S pool blocks without a pool index accepted (SR3)",F,[('		if (pool_index_.empty() != (terms.size() == own_blocks_)) { corrupt("field directory"); }  // pool blocks and pool index come together\n',"")],["fielddict_test"]),
+ ("T check_fields lets the key field hold terms (SR5)",F,[("return id < table_size && id != key_field;","return id < table_size;")],["fielddict_test"]),
+ ("U check_fields accepts an id equal to the table's size (SR5)",F,[("return id < table_size && id != key_field;","return id <= table_size && id != key_field;")],["fielddict_test"]),
 ]
 M=[m for m in M if m[3]]
 only=sys.argv[1:]
@@ -31,11 +43,11 @@ for name,f,subs,tests in M:
     if mut is None: continue
     open(f,'w').write(mut)
     try:
-        b=run(f"cmake --build build-rel -j4 --target {' '.join(t.split()[0] for t in tests)} > .scratch/mut-build.log 2>&1")
+        b=run(f"cmake --build {BUILD} -j4 --target {' '.join(t.split()[0] for t in tests)} > .scratch/mut-build.log 2>&1")
         err=run("grep -c 'error:' .scratch/mut-build.log").stdout.strip()
         res=[]
         for t in tests:
-            r=run(f"cd build-rel && ./{t} > ../.scratch/mut-run.log 2>&1")
+            r=run(f"cd {BUILD} && ./{t} > {root}/.scratch/mut-run.log 2>&1")
             ok= r.returncode==0
             res.append(f"{t.split()[0]}:{'pass' if ok else 'FAIL'}")
         line=f"{name}: build errors {err}; "+" ".join(res)

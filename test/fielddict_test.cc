@@ -1,6 +1,7 @@
 // The field dictionaries (fields-and-keys D3, D10): the field id varint, the builder and reader
 // against a model (own dictionaries, the pool, the empty term, gaps and large ids), the cursor's
 // order, and a directory or index with any byte changed, which reads or throws corrupt_segment.
+#include "fielddict_oracle.hh"
 #include "prospect/fielddict.hh"
 
 #include <algorithm>
@@ -319,8 +320,80 @@ static void count_tests() {
 	CHECK(threw);
 }
 
+// SR3: pool blocks and pool index come together. A directory with pool blocks and no pool index
+// (a torn index) would read every pooled term as absent; the reverse has nothing to index.
+static void pool_pairing_tests() {
+	std::mt19937_64 rng(17);
+	dict_model m;
+	for (unsigned i = 0; i < 20; ++i) { m[{1, "p" + std::to_string(i)}] = random_info(rng); }  // pooled
+	for (unsigned i = 0; i < 300; ++i) { m[{3, std::to_string(100000 + i)}] = random_info(rng); }  // own
+	const built_dict both = build(m);
+	auto opens = [](const std::string& terms, const std::string& index) {
+		try {
+			fielddict::reader r(terms, index);
+			return true;
+		} catch (const strata::corrupt_segment&) {
+			return false;
+		}
+	};
+	CHECK(opens(both.terms, both.index));
+	dict_model pooled_only;
+	for (unsigned i = 0; i < 9; ++i) { pooled_only[{4, "q" + std::to_string(i)}] = random_info(rng); }
+	const built_dict p = build(pooled_only);
+	CHECK(opens(p.terms, p.index));
+	CHECK(!opens(p.terms, p.index.substr(0, fielddict::oracle::termdict_bytes_start(p.index))));  // pool blocks, no pool index
+	CHECK(!opens({}, p.index));  // pool index, no pool blocks
+	dict_model own_only;
+	for (unsigned i = 0; i < 300; ++i) { own_only[{4, std::to_string(100000 + i)}] = random_info(rng); }
+	const built_dict o = build(own_only);
+	CHECK(opens(o.terms, o.index));
+	CHECK(!opens(o.terms + "x", o.index));  // pool blocks, no pool index
+}
+
+// SR5: every field id lies in the field table, and none is the key field.
+static void field_table_tests() {
+	std::mt19937_64 rng(19);
+	dict_model m;
+	for (unsigned i = 0; i < 4; ++i) { m[{2, "p" + std::to_string(i)}] = random_info(rng); }  // pooled
+	for (unsigned i = 0; i < 300; ++i) { m[{5, std::to_string(100000 + i)}] = random_info(rng); }  // own
+	for (unsigned i = 0; i < 4; ++i) { m[{9, "p" + std::to_string(i)}] = random_info(rng); }  // pooled, the last id
+	const built_dict d = build(m);
+	const fielddict::reader r(d.terms, d.index);
+	auto refused = [&](std::uint64_t size, std::optional<std::uint32_t> key) {
+		try {
+			r.check_fields(size, key);
+			return false;
+		} catch (const strata::corrupt_segment&) {
+			return true;
+		}
+	};
+	CHECK(!refused(10, std::nullopt));
+	CHECK(!refused(10, 7));
+	CHECK(!refused(1000, 0));
+	CHECK(refused(9, std::nullopt));  // the pooled field 9
+	CHECK(refused(5, std::nullopt));  // the own field 5 (and 9)
+	CHECK(refused(10, 5));  // the key field holds an own dictionary
+	CHECK(refused(10, 2));  // the key field holds pooled terms
+	CHECK(refused(10, 9));
+	CHECK(refused(0, std::nullopt));
+	dict_model own_last;
+	for (unsigned i = 0; i < 300; ++i) { own_last[{70, std::to_string(100000 + i)}] = random_info(rng); }
+	const built_dict o = build(own_last);
+	const fielddict::reader ro(o.terms, o.index);
+	ro.check_fields(71, std::nullopt);
+	bool threw = false;
+	try {
+		ro.check_fields(70, std::nullopt);
+	} catch (const strata::corrupt_segment&) {
+		threw = true;
+	}
+	CHECK(threw);
+}
+
 int main() {
 	count_tests();
+	pool_pairing_tests();
+	field_table_tests();
 	varint_tests();
 	dict_modelests();
 	threshold_tests();

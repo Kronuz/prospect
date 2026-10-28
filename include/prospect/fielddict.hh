@@ -292,6 +292,7 @@ public:
 		indexes_ = std::string_view(entries_ + entry_bytes_, index_bytes_);
 		pool_index_ = std::string_view(entries_ + entry_bytes_ + index_bytes_, std::size_t(end - (entries_ + entry_bytes_ + index_bytes_)));
 		if (entry_count_ == 0 && index_bytes_ != 0) { corrupt("field directory"); }
+		if (pool_index_.empty() != (terms.size() == own_blocks_)) { corrupt("field directory"); }  // pool blocks and pool index come together
 	}
 	reader(reader&&) = default;
 	reader& operator=(reader&&) = default;
@@ -366,6 +367,13 @@ public:
 		});
 		return any;
 	}
+
+	// A dictionary's view of the terms section: the verifier, shifted to the dictionary's blocks.
+	struct dict_context {
+		verifier verify;
+		void* context;
+		std::uint64_t base;
+	};
 
 	// Every term in (field, term) order with its decoded info, one at a time: the own dictionaries
 	// and the pool interleaved by field id. Neither copied nor moved.
@@ -446,7 +454,7 @@ public:
 			own_run_ = {};
 			while (entry_at_ < r_->entry_count_) {
 				const auto e = r_->entry_at(entry_at_);
-				own_dict_ = std::make_unique<termdict::reader>(r_->dictionary(e));
+				own_dict_ = std::make_unique<termdict::reader>(r_->dictionary(e, &own_ctx_));
 				own_cur_.emplace(*own_dict_);
 				own_field_ = e.field;
 				if (own_cur_->next()) { return; }
@@ -458,6 +466,7 @@ public:
 		const reader* r_;
 		std::optional<termdict::reader::cursor> pool_, own_cur_;
 		std::unique_ptr<termdict::reader> own_dict_;
+		dict_context own_ctx_{};
 		std::uint64_t entry_at_ = 0;
 		std::uint32_t own_field_ = 0, pool_field_ = 0, field_ = 0;
 		bool started_ = false, from_pool_ = false, pool_live_ = false;
@@ -493,6 +502,27 @@ public:
 				field_plan& p = at(id);
 				++p.terms;
 				p.alphabet.add(key.substr(std::size_t(q - key.data())));
+				return true;
+			});
+		} catch (const termdict::corrupt&) {
+			corrupt("terms checksum");
+		}
+	}
+
+	// Every field id of the dictionary lies in a table of `table_size` fields and none is the key
+	// field (D7: it holds no terms). A pass over the directory and the pool's keys.
+	void check_fields(std::uint64_t table_size, std::optional<std::uint32_t> key_field) const {
+		auto ok = [&](std::uint64_t id) { return id < table_size && id != key_field; };
+		for (std::uint64_t i = 0; i < entry_count_; ++i) {
+			if (!ok(entry_at(i).field)) { corrupt("field id outside the field table"); }
+		}
+		if (!has_pool()) { return; }
+		try {
+			pool().scan({}, [&](std::string_view key, std::string_view) {
+				const char* q = key.data();
+				std::uint32_t id;
+				if (!get_field(q, key.data() + key.size(), id)) { corrupt("pooled field id"); }
+				if (!ok(id)) { corrupt("field id outside the field table"); }
 				return true;
 			});
 		} catch (const termdict::corrupt&) {
@@ -553,11 +583,6 @@ public:
 
 private:
 	friend class cursor;
-	struct dict_context {
-		verifier verify;
-		void* context;
-		std::uint64_t base;
-	};
 	static bool verify_in(void* c, std::uint64_t offset, std::uint64_t length) {
 		const auto* d = static_cast<const dict_context*>(c);
 		return d->verify(d->context, d->base + offset, length);
@@ -611,9 +636,18 @@ private:
 		return out;
 	}
 
-	termdict::reader dictionary(const entry& e) const {
+	// An own dictionary read through the same checksum verifier as open_at's; `ctx` outlives it.
+	termdict::reader dictionary(const entry& e, dict_context* ctx) const {
 		const std::string_view blocks = terms_.substr(e.blocks, e.blocks_size), index = indexes_.substr(e.index, e.index_size);
-		return termdict::reader(blocks, index);
+		try {
+			if (!verify_) { return termdict::reader(blocks, index); }
+			*ctx = dict_context{verify_, context_, e.blocks};
+			return termdict::reader(blocks, index, &verify_in, ctx);
+		} catch (const termdict::corrupt&) {
+			corrupt("term index");
+		} catch (const std::invalid_argument&) {
+			corrupt("term index");
+		}
 	}
 	const termdict::reader& own(const entry& e) const { return open_at(e.blocks, e.blocks_size, indexes_.substr(e.index, e.index_size)); }
 	const termdict::reader& pool() const { return open_at(own_blocks_, terms_.size() - own_blocks_, pool_index_); }
