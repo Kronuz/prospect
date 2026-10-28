@@ -14,7 +14,7 @@ import sys
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 header = os.path.join(root, "include/prospect/shards.hh")
 
-# (name, old, new); each old text occurs once.
+# (name, old, new[, file]); each old text occurs once in its file (shards.hh by default).
 MUTANTS = [
     ("interleave: shard-major numbering", "return (did - 1) * shards + shard + 1;", "return shard * 1000000 + did;"),
     ("interleave: off by one", "return (did - 1) * shards + shard + 1;", "return (did - 1) * shards + shard;"),
@@ -46,6 +46,8 @@ MUTANTS = [
     ("exhaustive: the visitor sees the shard-local docid", "m.docid = interleave_docid(m.did, shard, shards);", "m.docid = m.did;"),
     ("exhaustive: the visitor's document is the previous ordinal", "m.ord = d;\n", "m.ord = d ? d - 1 : d;\n"),
     ("exhaustive: a stale score on the next match", "m.scored_ = false;", ""),
+    ("reader: the minimum length is the maximum", "min_length_ = format::get<std::uint32_t>(term_index.data() + 8);", "min_length_ = format::get<std::uint32_t>(term_index.data() + 12);", "include/prospect/reader.hh"),
+    ("reader: the maximum length is the minimum", "max_length_ = format::get<std::uint32_t>(term_index.data() + 12);", "max_length_ = format::get<std::uint32_t>(term_index.data() + 8);", "include/prospect/reader.hh"),
     ("exhaustive: the pruned path serves a key", "bool exhaustive() const { return bool(key) || bool(visit) || order == docid_order::descending; }", "bool exhaustive() const { return bool(visit) || order == docid_order::descending; }"),
     ("exhaustive: the pruned path serves a visitor", "bool exhaustive() const { return bool(key) || bool(visit) || order == docid_order::descending; }", "bool exhaustive() const { return bool(key) || order == docid_order::descending; }"),
 ]
@@ -59,33 +61,34 @@ def run(cmd, **kw):
 def main(build: str) -> int:
     jobs = os.environ.get("JOBS", "1")
     only = sys.argv[2:]
-    original = open(header).read()
-    backup = header + ".orig"
-    shutil.copy(header, backup)
     bad = 0
-    try:
-        for name, old, new in MUTANTS:
-            if only and not any(o in name for o in only):
-                continue
-            if original.count(old) != 1:
-                print(f"ERROR   {name}: the text to mutate occurs {original.count(old)} times")
-                bad += 1
-                continue
-            open(header, "w").write(original.replace(old, new))
+    for name, old, new, *rest in MUTANTS:
+        if only and not any(o in name for o in only):
+            continue
+        path = os.path.join(root, rest[0]) if rest else header
+        original = open(path).read()
+        if original.count(old) != 1:
+            print(f"ERROR   {name}: the text to mutate occurs {original.count(old)} times")
+            bad += 1
+            continue
+        backup = path + ".orig"
+        shutil.copy(path, backup)
+        try:
+            open(path, "w").write(original.replace(old, new))
             built = run(["cmake", "--build", build, "--target", "shards_test", "-j", jobs])
             if built.returncode:
                 print(f"ERROR   {name}: does not build\n{built.stdout[-800:]}{built.stderr[-800:]}")
                 bad += 1
                 continue
             test = run([os.path.join(build, "shards_test")])
-            if test.returncode:
-                print(f"caught  {name}: {(test.stderr.strip().splitlines() or ['exit ' + str(test.returncode)])[0][:110]}")
-            else:
-                print(f"SURVIVED {name}")
-                bad += 1
-    finally:
-        shutil.copy(backup, header)
-        os.remove(backup)
+        finally:
+            shutil.copy(backup, path)
+            os.remove(backup)
+        if test.returncode:
+            print(f"caught  {name}: {(test.stderr.strip().splitlines() or ['exit ' + str(test.returncode)])[0][:110]}")
+        else:
+            print(f"SURVIVED {name}")
+            bad += 1
     return 1 if bad else 0
 
 

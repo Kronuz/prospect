@@ -19,6 +19,7 @@
 #include <memory>
 #include <random>
 #include <set>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -531,19 +532,19 @@ void identity(int rounds) {
 				++compared;
 				// Exhaustive paths: key, descending docids, a visitor, each against the model
 				// (exactly: same scorer calls) and the merged index.
-				for (int variant = 0; variant < 5; ++variant) {
+				for (int variant = 0; variant < 6; ++variant) {
 					search_options e;
 					e.k = k;
-					const bool keyed = variant >= 2;
+					const bool keyed = variant >= 2 && variant != 5;
 					e.reverse_key = variant == 3;
-					e.order = variant == 1 || variant == 4 ? docid_order::descending : docid_order::ascending;
+					e.order = variant == 1 || variant == 4 ? docid_order::descending : variant == 5 ? docid_order::dont_care : docid_order::ascending;
 					if (keyed) { e.key = [&](const match& m) { return key_of.at(m.docid); }; }
-					if (variant == 0) { e.visit = [](const match&) {}; }
+					if (variant == 0 || variant == 5) { e.visit = [](const match&) {}; }
 					const auto x = search(multi, b_multi, e), y = search(one, b_one, e);
 					CHECK(x.count && *x.count == all.size());
 					CHECK(x.hits == y.hits);
 					sorted = all;
-					sort_model(sorted, keyed, e.reverse_key, e.order);
+					sort_model(sorted, keyed, e.reverse_key, e.order == docid_order::dont_care ? docid_order::ascending : e.order);
 					expect.clear();
 					for (std::size_t i = 0; i < std::min(k, sorted.size()); ++i) { expect.push_back({sorted[i].docid, sorted[i].score}); }
 					CHECK(x.hits == expect);
@@ -606,6 +607,134 @@ void visitor(int rounds) {
 	CHECK(visited_total > 1000);
 }
 
+// --- 5. one snapshot, several threads --------------------------------------------------------------
+
+// Searches are read-only over the snapshot: concurrent ones answer as they do alone (TSan's check).
+void concurrent() {
+	std::mt19937_64 r(5);
+	const auto docs = random_docs(r, 4, 600, false);
+	const auto set = build_shards(docs, 4, r, 3);
+	const multi_snapshot snap(set.inputs());
+	std::map<std::uint64_t, std::string> key_of;
+	for (const auto& d : docs) { key_of[interleave_docid(d.did, d.shard, 4)] = d.key; }
+	std::vector<query> queries = {{"OR", {"a", "b"}}, {"AND", {"a", "c"}}, {"TERM", {"rare"}}, {"PHRASE", {"a", "b"}}, {"AND_NOT", {"c", "d"}}};
+	auto run = [&](const query& q, bool keyed) {
+		const auto b = builder_for(q, snap, true);
+		search_options o;
+		o.k = 20;
+		o.count = true;
+		if (keyed) { o.key = [&](const match& m) { return key_of.at(m.docid); }; }
+		std::uint64_t seen = 0;
+		o.visit = [&](const match&) { ++seen; };
+		auto got = search(snap, b, o);
+		CHECK(got.count && *got.count == seen);
+		return got;
+	};
+	std::vector<search_result> alone;
+	for (const auto& q : queries) {
+		alone.push_back(run(q, false));
+		alone.push_back(run(q, true));
+	}
+	std::vector<std::thread> threads;
+	for (int t = 0; t < 4; ++t) {
+		threads.emplace_back([&, t] {
+			for (int round = 0; round < 30; ++round) {
+				for (std::size_t i = 0; i < queries.size(); ++i) {
+					const auto got = run(queries[(i + std::size_t(t)) % queries.size()], round % 2);
+					const auto& want = alone[((i + std::size_t(t)) % queries.size()) * 2 + std::size_t(round % 2)];
+					CHECK(got.hits == want.hits && got.count == want.count);
+				}
+			}
+		});
+	}
+	for (auto& th : threads) { th.join(); }
+}
+
+// --- 6. what the exhaustive path skips, and bounds over empty segments ------------------------------
+
+// Forwards a scorer and counts its score() calls.
+class counting_scorer final : public scorer {
+public:
+	counting_scorer(scorer_ptr inner, std::uint64_t* calls) : inner_(std::move(inner)), calls_(calls) {}
+	ordinal_t doc() const noexcept override { return inner_->doc(); }
+	ordinal_t next() override { return inner_->next(); }
+	ordinal_t advance(ordinal_t t) override { return inner_->advance(t); }
+	std::uint64_t cost() const noexcept override { return inner_->cost(); }
+	double score() override {
+		++*calls_;
+		return inner_->score();
+	}
+	double max_score(ordinal_t from, ordinal_t upto) override { return inner_->max_score(from, upto); }
+	ordinal_t block_end(ordinal_t t) override { return inner_->block_end(t); }
+	double max_score_total() const noexcept override { return inner_->max_score_total(); }
+	std::size_t score_terms() const noexcept override { return inner_->score_terms(); }
+
+private:
+	scorer_ptr inner_;
+	std::uint64_t* calls_;
+};
+
+void lazy_scoring() {
+	std::mt19937_64 r(9);
+	const auto docs = random_docs(r, 3, 900, false);
+	const auto set = build_shards(docs, 3, r, 2);
+	const multi_snapshot snap(set.inputs());
+	std::map<std::uint64_t, std::string> key_of;
+	for (const auto& d : docs) { key_of[interleave_docid(d.did, d.shard, 3)] = d.key; }
+	const query q{"TERM", {"a"}};
+	std::uint64_t calls = 0;
+	const auto b = [&](const segment& seg) -> scorer_ptr {
+		auto inner = build(seg, q, snap, true);
+		return inner ? std::make_unique<counting_scorer>(std::move(inner), &calls) : nullptr;
+	};
+	search_options o;
+	o.k = 5;
+	o.key = [&](const match& m) { return key_of.at(m.docid); };
+	const auto got = search(snap, b, o);
+	CHECK(got.count && *got.count > 300);
+	// Once the heap holds five documents with the smallest keys, a document with a larger key is
+	// rejected on its key alone: most matches are never scored.
+	CHECK(calls < *got.count / 2);
+	// Without a key every kept candidate is scored, and a visitor that asks for no score costs none.
+	calls = 0;
+	o.key = nullptr;
+	o.k = 0;
+	o.visit = [](const match&) {};
+	CHECK(search(snap, b, o).count == got.count && calls == 0);
+}
+
+// A segment with no documents, and a shard holding only deleted ones, leave the bounds to the others.
+void empty_segments() {
+	doc d;
+	d.shard = 0;
+	d.did = 1;
+	d.terms = {"a", "b", "c", "d", "e"};
+	doc e = d;
+	e.did = 2;
+	e.terms = {"a", "b", "c", "d", "e", "f", "g", "h", "i"};
+	built b0, b1;
+	segment_writer w;
+	b0.bytes.push_back(w.flush({}));
+	b0.segs.push_back(std::make_unique<segment>(b0.bytes.back()));
+	b0.deleted.emplace_back();
+	b0.dead.push_back(0);
+	b0.docids.emplace_back();
+	add_segment(b0, {{1, &d}}, {});
+	add_segment(b1, {{1, &e}}, {1});  // its only document is deleted: still a bound
+	const multi_snapshot snap(std::vector<shard_input>{{b0.snapshots(), 0}, {b1.snapshots(), 0}});
+	CHECK((snap.doc_length_bounds() == length_bounds{5, 9}));
+	CHECK(snap.stats().doc_count == 2 && snap.last_docid() == 2);
+	const multi_snapshot none(std::vector<shard_input>{{}, {}});
+	CHECK((none.doc_length_bounds() == length_bounds{0, 0}) && none.last_docid() == 0 && none.stats().doc_count == 0);
+	// Searching nothing finds nothing.
+	const auto b = [&](const segment&) -> scorer_ptr { return nullptr; };
+	search_options o;
+	o.count = true;
+	CHECK(search(none, b, o).hits.empty() && search(none, b, o).count == 0);
+	o.visit = [](const match&) {};
+	CHECK(search(none, b, o).hits.empty() && search(none, b, o).count == 0);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -614,6 +743,9 @@ int main(int argc, char** argv) {
 	oracle(dir);
 	identity(std::getenv("SHARDS_ROUNDS") ? std::atoi(std::getenv("SHARDS_ROUNDS")) : 60);
 	visitor(40);
+	concurrent();
+	lazy_scoring();
+	empty_segments();
 	if (failures) {
 		std::fprintf(stderr, "%d failures\n", failures);
 		return 1;

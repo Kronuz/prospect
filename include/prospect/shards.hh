@@ -219,9 +219,11 @@ private:
 		return o_.order == docid_order::descending ? a.docid > b.docid : a.docid < b.docid;
 	}
 	// A max-heap on rank: the worst hit kept is on top.
-	auto less() const {
-		return [this](const entry& a, const entry& b) { return before(a, b); };
-	}
+	struct by_rank {
+		const exhaustive_search* self;
+		bool operator()(const entry& a, const entry& b) const { return self->before(a, b); }
+	};
+	by_rank less() const { return {this}; }
 
 	void scan(std::size_t shard, const segment_snapshot& snap, std::size_t shards) {
 		scorer_ptr q = build_(*snap.seg);
