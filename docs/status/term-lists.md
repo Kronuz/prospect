@@ -1,4 +1,4 @@
-> Status: CURRENT (2026-10-27) P2 of xapiand-on-strata: the term-lists plugin. Branch `phase4/term-lists`, worktree `prospect-wt/term-lists`; core change on strata branch `phase4/term-lists-rank` (worktree `strata-wt/term-lists-rank`).
+> Status: ABANDONED (2026-10-28) owner ruling R-P2: no term lists in strata or prospect; see strata docs/design/xapiand-on-strata.md.
 
 # phase4/term-lists ledger
 
