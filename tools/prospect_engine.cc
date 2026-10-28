@@ -803,6 +803,12 @@ int fields_index(const std::string& dir, const std::string& file, std::string_vi
 	apply();
 	ix.commit();
 	std::cerr << "fields: " << docs.size() << " documents, " << names.size() << " fields, " << ix.segments().size() << " segments\n";
+	// Each section's kind and length, summed over the segments, as `sections` prints one segment's.
+	std::map<std::string, std::uint64_t> sizes;
+	for (const auto& v : ix.segments()) {
+		for (const auto& e : v.seg()->core().sections()) { sizes[strata::format::name_of(e.kind)] += e.length; }
+	}
+	for (const auto& [name, length] : sizes) { std::cout << name << '\t' << length << '\n'; }
 	return 0;
 }
 
