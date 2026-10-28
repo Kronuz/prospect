@@ -254,10 +254,8 @@ p::scorer_ptr build(const corpus& c, const node& n) {
 		}
 		return p::elite_set(std::move(kids), std::size_t(n.arg));
 	}
-	std::vector<const node*> flat;
-	if (n.op == "XOR") { flatten_xor(n, flat); } else { for (const auto& k : n.kids) { flat.push_back(&k); } }
 	std::vector<p::scorer_ptr> ks;
-	for (auto* k : flat) { ks.push_back(build(c, *k)); }
+	for (const auto& k : n.kids) { ks.push_back(build(c, k)); }
 	auto present = [&] {
 		std::vector<p::scorer_ptr> out;
 		for (auto& k : ks) {
@@ -707,6 +705,22 @@ void host_source() {
 // --- the small pieces ---------------------------------------------------------------------------
 
 void pieces() {
+	// A nested XOR is the one n-ary XOR: the constructor splices it, and the model flattens it.
+	{
+		std::mt19937_64 rng(5);
+		std::vector<std::vector<std::string>> docs(2000);
+		for (auto& d : docs) {
+			for (std::size_t i = 0, n = 1 + rng() % 12; i < n; ++i) { d.push_back(std::string(1, char('a' + rng() % 5))); }
+		}
+		corpus c(std::move(docs));
+		const node left = op_node("XOR", {op_node("XOR", {term_node("a"), term_node("b")}), term_node("c")});
+		const node deep = op_node("XOR", {term_node("a"), op_node("XOR", {term_node("b"), op_node("XOR", {term_node("c"), term_node("d")})}), term_node("e")});
+		for (const node* n : {&left, &deep}) {
+			const result want = model(c, *n);
+			CHECK(!want.empty());
+			check_scorer(c, *n, want, rng, true);
+		}
+	}
 	// SYNONYM's df: one term keeps its own; a union of independent sets, rounded to nearest.
 	for (std::uint64_t one : {0u, 1u, 7u, 600u}) {
 		const std::uint64_t dfs[] = {one};

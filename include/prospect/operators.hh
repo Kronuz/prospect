@@ -259,10 +259,11 @@ private:
 };
 
 // Documents an odd number of children match; the score is the matching children's, summed
-// (Xapian OP_XOR, n-ary: a nested XOR is the same operator, so callers flatten it).
+// (Xapian OP_XOR, n-ary: a nested XOR is the same operator, so the constructor splices the
+// children of any unstarted child XOR into its own).
 class xor_scorer final : public merging_scorer {
 public:
-	explicit xor_scorer(std::vector<scorer_ptr> children) : merging_scorer(std::move(children)) {
+	explicit xor_scorer(std::vector<scorer_ptr> children) : merging_scorer(splice(std::move(children))) {
 		for (const auto& c : children_) { bound_ += c->max_score_total(); }
 	}
 	double score() override {
@@ -285,6 +286,18 @@ public:
 	}
 
 private:
+	static std::vector<scorer_ptr> splice(std::vector<scorer_ptr> in) {
+		std::vector<scorer_ptr> out;
+		for (auto& c : in) {
+			if (auto* x = dynamic_cast<xor_scorer*>(c.get())) {
+				auto inner = splice(std::move(x->children_));
+				for (auto& g : inner) { out.push_back(std::move(g)); }
+			} else {
+				out.push_back(std::move(c));
+			}
+		}
+		return out;
+	}
 	bool keeps(std::size_t holding) const noexcept override { return holding % 2 == 1; }
 	double bound_ = 0.0;
 };

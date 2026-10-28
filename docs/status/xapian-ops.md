@@ -89,10 +89,21 @@ runs on the head (run 40616608446, see Done).
   exact, and any difference in Xapian's own pruning (matches dropped, percent) is not reproduced.
 - ELITE_SET among equal term weights: Xapian's pick follows no order of the query (in the tied rows it kept
   a later term over an earlier one, and in another the middle one); ours is the earlier. Only terms of equal
-  df and wqf at the edge of the set can differ; the 4 such rows are skipped by the test.
+  df and wqf at the edge of the set can differ; the 4 such rows are skipped by the test. Known difference
+  (CR3): about 5% of equal-df cuts (4 of 87 term-only rows) keep terms Xapian does not; its pick is neither the
+  earlier nor the later child, and idf ranking fits 85 of 87 rows. Accepted, stated in
+  `docs/mechanisms/query-operators.md`.
 - SYNONYM's df is computed in double and rounded to nearest; a union estimate within 1e-9 of a half could round
   the other way. The nearest vector row is 0.0135 from a half.
-- A nested XOR must be flattened by the builder (`flatten_xor` in the test shows how).
+- A nested XOR is spliced by `xor_scorer`'s constructor (CR1); callers need not flatten.
+
+## Review fixes
+
+- CR1: `xor_scorer` splices the children of any child XOR in its constructor; the test's builder no longer
+  flattens (the model still does), and `pieces()` builds nested XORs (left and three deep, 2,000 documents)
+  against the flat model. With the fix reverted the new test fails and probe P1 reports 740 wrong of 1,185;
+  with it, 0 wrong, 0 missing. `operators_test` is clean under ASan+UBSan and under TSan (separate builds).
+- CR3: recorded above as a known difference.
 
 ## Blocked on
 

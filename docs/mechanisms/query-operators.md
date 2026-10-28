@@ -60,6 +60,11 @@ the earlier child: Xapian's pick among equal weights follows no order of the que
 at the edge of the set are not asserted. For a child that is not a term the key is the caller's choice; the
 vectors do not pin one.
 
+Known difference from Xapian: when the cut falls among children of equal document frequency (and wqf), the
+terms kept can differ. In the 4 tied rows of the 87 term-only recorded rows (about 5%), Xapian's pick was
+neither the earlier nor the later children (tied {0,4,9} kept {0,4}; {0,1,2} kept {0,2}; {0,1,3} kept {1});
+ranking by idf fits 85 of the 87 rows. Result sets for such a query can differ from Xapiand's today.
+
 ## The host source
 
 `source_scorer<Slot, Source>` runs a Xapiand `PostingSource` as a column scan. `Slot` (concept `slot_values`)
