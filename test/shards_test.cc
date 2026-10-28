@@ -123,15 +123,15 @@ query parse_query(const std::string& line) {
 }
 
 // Xapian's weights over the snapshot's statistics (global across the shards).
-scorer_ptr build(const segment& seg, const query& q, std::span<const segment_snapshot> all, bool xapian) {
-	const statistics st = snapshot_statistics(all);
+scorer_ptr build(const segment& seg, const query& q, const multi_snapshot& snap, bool xapian) {
+	const statistics st = snap.stats();
 	auto weight_of = [&](const std::string& t) {
-		const std::uint64_t df = snapshot_df(all, t);
+		const std::uint64_t df = snap.df(t);
 		return xapian ? weight::bm25_xapian(st, df) : weight::bm25(st, df);
 	};
 	auto term = [&](const std::string& t) -> scorer_ptr {
-		auto info = seg.get<inverted_plugin>().term(t);
-		return info ? std::make_unique<term_scorer>(seg.get<inverted_plugin>(), *info, weight_of(t)) : nullptr;
+		auto info = seg.get<prospect::inverted_plugin>().term(t);
+		return info ? std::make_unique<term_scorer>(seg.get<prospect::inverted_plugin>(), *info, weight_of(t)) : nullptr;
 	};
 	std::vector<scorer_ptr> kids;
 	if (q.kind == "TERM") { return term(q.terms[0]); }
@@ -161,19 +161,19 @@ scorer_ptr build(const segment& seg, const query& q, std::span<const segment_sna
 		if (auto ex = term(q.terms[1])) { return std::make_unique<exclusion_scorer>(std::move(in), std::move(ex)); }
 		return in;
 	}
-	std::vector<format::term_info> infos;
+	std::vector<prospect::format::term_info> infos;
 	std::vector<weight> ws;
 	for (auto& t : q.terms) {
-		auto info = seg.get<inverted_plugin>().term(t);
+		auto info = seg.get<prospect::inverted_plugin>().term(t);
 		if (!info) { return nullptr; }
 		infos.push_back(*info);
 		ws.push_back(weight_of(t));
 	}
-	return std::make_unique<phrase_scorer>(seg.get<inverted_plugin>(), infos, std::move(ws));
+	return std::make_unique<phrase_scorer>(seg.get<prospect::inverted_plugin>(), infos, std::move(ws));
 }
 
 scorer_builder builder_for(const query& q, const multi_snapshot& snap, bool xapian) {
-	return [&q, &snap, xapian](const segment& seg) { return build(seg, q, snap.segments(), xapian); };
+	return [&q, &snap, xapian](const segment& seg) { return build(seg, q, snap, xapian); };
 }
 
 bool near_eq(double a, double b, double rel = 1e-9) { return std::abs(a - b) <= rel * std::max({1.0, std::abs(a), std::abs(b)}); }
@@ -236,7 +236,9 @@ void numbering() {
 	CHECK(seen.size() == 200 && *seen.begin() == 1 && *seen.rbegin() == 200);
 	// Edges.
 	const auto big = std::numeric_limits<std::uint64_t>::max();
-	CHECK(interleave_docid(big / 2, 0, 2) == big - 1);
+	CHECK(interleave_docid(big / 2, 0, 2) == big - 2);
+	CHECK(interleave_docid(big / 2 + 1, 0, 2) == big);
+	CHECK(interleave_docid(big / 2, 1, 2) == big - 1);
 	auto throws = [](auto f) {
 		try { f(); } catch (const std::exception&) { return true; }
 		return false;
@@ -246,6 +248,7 @@ void numbering() {
 	CHECK(throws([&] { (void)interleave_docid(1, 0, 0); }));
 	CHECK(throws([&] { (void)interleave_docid(big, 1, 2); }));
 	CHECK(throws([&] { (void)interleave_docid(big / 2 + 1, 1, 2); }));
+	CHECK(throws([&] { (void)interleave_docid(big / 2 + 2, 0, 2); }));
 	CHECK(throws([&] { (void)split_docid(0, 3); }));
 }
 
@@ -401,8 +404,10 @@ void oracle(const std::string& dir) {
 					const auto got = search(snap, build_fn, o);
 					CHECK(got.hits.size() == want.size());
 					CHECK(got.count && *got.count >= std::stoull(field(line, "lower")) && *got.count <= std::stoull(field(line, "upper")));
-					if (check == snap.stats().doc_count) {  // every match counted: Xapian's bounds meet
-						CHECK(got.count && *got.count == std::stoull(field(line, "lower")) && *got.count == std::stoull(field(line, "upper")));
+					// Xapian stops once `check_at_least` documents are checked, so its bounds meet only when the
+					// matches are fewer than that (tier 1) or when it has seen the end.
+					if (got.count && (*got.count < check || std::stoull(field(line, "lower")) == std::stoull(field(line, "upper")))) {
+						CHECK(*got.count == std::stoull(field(line, "lower")) && *got.count == std::stoull(field(line, "upper")) && *got.count == std::stoull(field(line, "estimated")));
 					}
 					for (std::size_t h = 0; h < got.hits.size() && h < want.size(); ++h) {
 						CHECK(near_eq(got.hits[h].score, want[h].second));
@@ -432,12 +437,14 @@ void oracle(const std::string& dir) {
 static const char* const vocab[] = {"a", "b", "c", "d", "e", "f", "g", "h", "rare"};
 static const std::vector<std::string> keys = {"", "a", std::string("a\0b", 3), "b", "ab", "\xff", "m"};
 
-std::vector<doc> random_docs(std::mt19937_64& r, std::size_t n, std::size_t count, bool skew) {
+// Documents over `n` shards; `holes` leaves the first and last shard empty, `skew` favors shard 0.
+std::vector<doc> random_docs(std::mt19937_64& r, std::size_t n, std::size_t count, bool skew, bool holes = false) {
 	std::vector<doc> docs;
 	std::vector<std::uint64_t> next(n, 0);
 	for (std::size_t i = 0; i < count; ++i) {
 		doc d;
 		d.shard = skew && r() % 2 ? 0 : r() % n;
+		if (holes && n > 2) { d.shard = 1 + d.shard % (n - 2); }
 		next[d.shard] += 1 + (r() % 6 == 0 ? r() % 4 : 0);  // gaps in the shard's docids
 		d.did = next[d.shard];
 		d.key = keys[r() % keys.size()];
@@ -467,7 +474,7 @@ void identity(int rounds) {
 	std::size_t compared = 0, empty_shards = 0, dead_rounds = 0;
 	for (int round = 0; round < rounds; ++round) {
 		const std::size_t n = 1 + r() % 7;
-		const auto docs = random_docs(r, n, 120 + r() % 500, round % 3 == 0);
+		const auto docs = random_docs(r, n, 120 + r() % 500, round % 3 == 0, round % 4 == 2);
 		std::set<std::pair<std::size_t, std::uint64_t>> dead;
 		std::set<std::uint64_t> dead_merged;
 		if (round % 2 == 1) {
