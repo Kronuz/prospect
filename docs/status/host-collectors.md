@@ -8,7 +8,7 @@
   `9de01a1`. Oracle side: `strata-oracle` branch `shard-vectors` at
   `/Users/kronuz/code/Kronuz/strata-oracle-wt/shards` (local, not merged; `strata-oracle:25be4a3`).
 - How it works: `docs/mechanisms/multi-index-search.md`.
-- State: implementing (code, tests and mutants done; sanitizers and smoke A/B running).
+- State: in review (every criterion met; rebased onto main `prospect:7f1d915`, pushed).
 - Done criteria (set by the lead; contributors tick, never edit):
   - [x] H1 Identity: a search over several indexes equals a search over one merged index at the interleaved
     docids: `identity()` in `test/shards_test.cc`, 50,400 comparisons over 60 random rounds (1 to 7 shards, 1 to 4
@@ -21,22 +21,30 @@
   - [x] H4 The exhaustive visitor sees every match exactly once (`visitor()`: 145,089 matches over 40 rounds, with
     deletions, k = 0, 3 and 1000; each docid seen once, shard order non-decreasing, score equals the model's).
   - [x] H5 A mutant per claim, each caught (`test/shards_mutants.py`, 33 mutants: 31 on `shards.hh`, 2 on `reader.hh`).
-  - [ ] H6 ASan+UBSan and TSan, each in its own build directory with its own dependencies (`.scratch/build-asan`,
-    `.scratch/build-tsan`).
-  - [ ] H7 CI green on the head.
+  - [x] H6 ASan+UBSan and TSan, each in its own build directory with its own dependencies (Homebrew LLVM clang):
+    `shards_test` clean under ASan+UBSan at the full 60 rounds (50,400 comparisons) and under TSan at 40 rounds (33,600),
+    with four threads searching one snapshot; `segment_test` clean under ASan+UBSan (the reader change). CI's linux-asan-ubsan
+    and linux-tsan jobs ran the whole suite green.
+  - [x] H7 CI green: run 40629357689 on `prospect:83e8152` (before the rebase onto `prospect:7f1d915`), all 8 jobs success:
+    linux-tsan, macos-arm64, linux-x86_64-clang, linux-asan-ubsan, linux-x86_64-gcc, macos-x86_64, freebsd-x86_64, linux-arm64-gcc.
+    The rebased head's run is the lead's to watch.
   - [x] H8 `docs/mechanisms/multi-index-search.md`.
-  - [ ] H9 Smoke A/B of single-index search unchanged (screen only).
+  - [x] H9 Smoke A/B of single-index search (screen only, `bench/quick/ab.sh`, main `prospect:9de01a1` against the branch, one
+    80,000-document synthetic index, 494 queries, 4 rounds of 3 runs, strict hold): results identical (0 mismatches); B/A of
+    the per-query best 0.98 to 1.04 per command (`TOP_10` 0.995 and 1.004, `TOP_100` 1.035 and 0.984, `COUNT` 1.040 and 1.002),
+    round spread 0.83 to 1.24: noise, no consistent direction. The single-index path is untouched; the only change it
+    meets is two more fields in the reader.
 - Done:
   - `prospect:d2c0996` `include/prospect/shards.hh` (docid map, `multi_snapshot`, pruned merge, exhaustive search with host
     key and visitor, document-length bounds), `reader.hh` exposes `min_length()`/`max_length()`.
   - `prospect:7de6a13` `test/shards_test.cc`, the oracle fixtures, `test/shards_mutants.py`.
   - `prospect:83e8152` lazy-scoring, `dont_care`, threads and empty-segment tests; the mechanism note.
   - `strata-oracle:25be4a3` the `shards` command, `gen-shards.py`, inputs and vectors, README section.
-- Doing: sanitizer builds and the smoke A/B (`.scratch/smoke/`).
-- Next: fill H6, H9; push; delete build dirs.
+- Doing: nothing.
+- Next: code review; then S2 (Xapiand `phase7a/strata-engine-search`) builds on `shards.hh`.
 - Blocked on: nothing.
 - Findings folded in: none yet (no review).
-- Last verified: `shards_test` passes in a Release build (6 s); all 33 mutants caught (the first run missed 3: an empty
+- Last verified (2026-10-27, rebased head): `shards_test` passes in a Release build (6 s), ASan+UBSan and TSan; all 33 mutants caught (the first run missed 3: an empty
   segment in the bounds, `dont_care`, and the key's early rejection; each got a test).
 
 ## Scope: what was built and what was not
@@ -67,5 +75,7 @@ Findings for the lead:
    reads a single shard's statistics silently ranks differently (the identity test catches it).
 
 ## Log
+
+- 2026-10-27: rebased onto main `prospect:7f1d915` (P3 landed; the CMake test list merged cleanly); sanitizers, smoke A/B and CI recorded.
 
 - 2026-10-27: branch and ledger created; oracle `shards` command and vectors; `shards.hh`, tests, mutants, note.
