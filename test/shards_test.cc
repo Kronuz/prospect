@@ -128,7 +128,7 @@ query parse_query(const std::string& line) {
 scorer_ptr build(const segment& seg, const query& q, const multi_snapshot& snap, bool xapian) {
 	const statistics st = snap.stats();
 	auto weight_of = [&](const std::string& t) {
-		const std::uint64_t df = snap.df(0, t);
+		const std::uint64_t df = snap.df("text", t);
 		return xapian ? weight::bm25_xapian(st, df) : weight::bm25(st, df);
 	};
 	auto term = [&](const std::string& t) -> scorer_ptr {
@@ -385,7 +385,7 @@ void oracle(const std::string& dir) {
 			for (std::size_t i = 1; i < vectors.size(); ++i) {
 				const auto& line = vectors[i];
 				if (line.starts_with("{\"term\"")) {
-					CHECK(snap.df(0, field(line, "term")) == std::stoull(field(line, "termfreq")));
+					CHECK(snap.df("text", field(line, "term")) == std::stoull(field(line, "termfreq")));
 					continue;
 				}
 				const query q = parse_query(field(line, "query"));

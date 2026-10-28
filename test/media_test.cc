@@ -8,6 +8,7 @@
 //     the read throws.
 //   - A segment damaged for good is recovered from a retained predecessor that does not
 //     name it (recover --to).
+#include "text_field.hh"
 #include "prospect/index.hh"
 #include "strata/core/faultfs.hh"
 
@@ -44,6 +45,7 @@ static operation erase(const std::string& key) {
 }
 static transaction tx(std::vector<operation> ops) {
 	transaction t;
+	t.fields = text_fields();
 	t.ops = std::move(ops);
 	return t;
 }

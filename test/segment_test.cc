@@ -71,23 +71,38 @@ static std::string with_section(const std::string& file, strata::format::section
 	return with_sections(file, {{kind, std::string(bytes)}}, edit);
 }
 
+// A document of terms and one text's tokens, in the one field the segments here have.
+static strata::ordinal_t add_text(prospect::segment_writer& w, std::uint64_t docid, std::span<const prospect::posting_input> terms, std::string_view text,
+	std::span<const prospect::text_token> tokens, std::uint32_t length, std::string_view stored = {}, std::uint64_t version = 0, std::string_view key = {}) {
+	const prospect::text_input x{0, text, tokens, false};
+	return prospect::detail::writer_access::add_texts(w, docid, terms, std::span<const prospect::text_input>(&x, 1), length, stored, version, key);
+}
+
 static std::string section_of(const std::string& file, strata::format::section kind);
 
 // The file with its dictionary rebuilt from its own term infos, `change` editing each.
 static std::string with_terms(const std::string& file, const std::function<void(std::string_view, prospect::format::term_info&)>& change) {
 	prospect::segment seg(file);
-	termdict::builder b(seg.get<prospect::inverted_plugin>().dictionary().alphabet_bytes().size() == 256 ? std::string_view() : seg.get<prospect::inverted_plugin>().dictionary().alphabet_bytes());
-	prospect::format::term_run run;
-	seg.get<prospect::inverted_plugin>().scan_terms([&](std::string_view term, const prospect::format::term_info& info) {
+	struct term {
+		std::uint32_t field;
+		std::string bytes;
+		prospect::format::term_info info;
+	};
+	std::vector<term> terms;
+	prospect::fielddict::planner plan;
+	seg.get<prospect::inverted_plugin>().scan_terms([&](std::uint32_t field, std::string_view bytes, const prospect::format::term_info& info) {
 		auto t = info;
-		if (t.df >= strata::format::block) { t.impacts = seg.get<prospect::inverted_plugin>().term(0, term)->impacts; }
-		change(term, t);
-		b.add(term, prospect::format::encode_term_info(t, run, b.next_is_restart()));
+		if (t.df >= strata::format::block) { t.impacts = seg.get<prospect::inverted_plugin>().term(field, bytes)->impacts; }
+		change(bytes, t);
+		plan.add(field, bytes);
+		terms.push_back({field, std::string(bytes), t});
 		return true;
 	});
-	auto t = b.finish();
+	prospect::fielddict::builder b(plan.finish());
+	for (const auto& t : terms) { b.add(t.field, t.bytes, t.info); }
+	auto built = b.finish();
 	const std::string statistics = section_of(file, strata::format::section::term_index).substr(0, prospect::inverted_plugin::statistics_size);
-	return with_sections(file, {{strata::format::section::terms, t.blocks}, {strata::format::section::term_index, statistics + t.index}});
+	return with_sections(file, {{strata::format::section::terms, built.blocks}, {strata::format::section::term_index, statistics + built.index}});
 }
 
 static std::string section_of(const std::string& file, strata::format::section kind) {
@@ -782,7 +797,7 @@ int main() {
 		// ordinal, and skip groups that do not fit the term's postings.
 		auto read_all = [](const std::string& f) {
 			prospect::segment s(f);
-			s.get<prospect::inverted_plugin>().scan_terms([&](std::string_view, const term_info& info) {
+			s.get<prospect::inverted_plugin>().scan_terms([&](std::uint32_t, std::string_view, const term_info& info) {
 				prospect::postings_iterator it(s.get<prospect::inverted_plugin>(), info);
 				while (it.next() != strata::no_more_docs) {}
 				return true;
@@ -846,7 +861,7 @@ int main() {
 					try {
 						prospect::segment s(file);
 						std::vector<prospect::format::term_info> infos;
-						s.get<prospect::inverted_plugin>().scan_terms([&](std::string_view, const prospect::format::term_info& info) {
+						s.get<prospect::inverted_plugin>().scan_terms([&](std::uint32_t, std::string_view, const prospect::format::term_info& info) {
 							infos.push_back(info);
 							prospect::postings_iterator it(s.get<prospect::inverted_plugin>(), info);
 							prospect::positions_reader pr(s.get<prospect::inverted_plugin>(), info);
@@ -1085,16 +1100,16 @@ int main() {
 			}
 			const std::string stored(d % 7, 's');
 			grouped.add(d + 1, in, n, stored, d + 1, key);
-			prospect::detail::writer_access::add_text(mixed, d + 1, terms, text, tokens, n, stored, d + 1, key);
+			add_text(mixed, d + 1, terms, text, tokens, n, stored, d + 1, key);
 		}
 		CHECK(grouped.flush({}) == mixed.flush({}));
 		prospect::segment_writer w;
 		const std::string text = " a b a";
 		const std::vector<prospect::text_token> repeat_entry = {{1, 1, 1}};
 		const std::vector<prospect::posting_input> a = {{"a", 1, {}}};
-		CHECK(throws_invalid([&] { prospect::detail::writer_access::add_text(w, 1, a, text, repeat_entry, 1); }));
+		CHECK(throws_invalid([&] { add_text(w, 1, a, text, repeat_entry, 1); }));
 		const std::vector<prospect::text_token> repeat_position = {{1, 1, 2}, {5, 1, 2}};
-		CHECK(throws_invalid([&] { prospect::detail::writer_access::add_text(w, 2, {}, text, repeat_position, 2); }));
+		CHECK(throws_invalid([&] { add_text(w, 2, {}, text, repeat_position, 2); }));
 	}
 	// Term infos in restart runs: random terms (singles, positionless, gaps, skip blocks)
 	// decode the same read in order or from their run's start, as find_run reads them.

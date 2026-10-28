@@ -1,6 +1,7 @@
 // Format 13's postings items (docs/design/format-13.md F10, F11, F13): the advance entries
 // (M16, A3 at 128 postings), against a model of every term's postings, positions, and
 // pairs; and corrupt entries, which fence or answer with ordinals in order and in range.
+#include "text_field.hh"
 #include "prospect/check.hh"
 #include "prospect/reader.hh"
 #include "prospect/search.hh"
@@ -694,16 +695,16 @@ int main() {
 		std::size_t seeded = 0, compared = 0;
 		for (const int shape : {1, 3, 4}) {  // segments, the fourth: three with deletes in the second
 			std::vector<prospect::segment_snapshot> snap;
-			for (int i = 0; i < std::min(shape, 3); ++i) { snap.push_back({&segs[std::size_t(i)], shape == 4 && i == 1 ? &deleted : nullptr}); }
+			for (int i = 0; i < std::min(shape, 3); ++i) { snap.push_back({&segs[std::size_t(i)], shape == 4 && i == 1 ? &deleted : nullptr, prospect::segment_snapshot::unknown_dead, &text_table()}); }
 			prospect::term_table table(snap);
 			for (const auto scheme : {prospect::scheme::bm25, prospect::scheme::bm25_xapian}) {
 				for (const auto& q : queries) {
 					auto build_q = [&](const prospect::segment& seg) -> prospect::scorer_ptr {
 						std::vector<prospect::scorer_ptr> kids;
 						for (const auto& t : q) {
-							const auto* info = table.info(seg, t);
+							const auto* info = table.info(seg, text_name, t);
 							if (!info) { continue; }
-							const auto w = scheme == prospect::scheme::bm25 ? prospect::weight::bm25(table.stats(), table.df(t)) : prospect::weight::bm25_xapian(table.stats(), table.df(t));
+							const auto w = scheme == prospect::scheme::bm25 ? prospect::weight::bm25(table.stats(), table.df(text_name, t)) : prospect::weight::bm25_xapian(table.stats(), table.df(text_name, t));
 							kids.push_back(std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *info, w));
 						}
 						if (kids.empty()) { return nullptr; }
@@ -748,7 +749,7 @@ int main() {
 			prospect::segment hot(bytes);
 			strata::deleted_bits gone((400 + 63) / 64);
 			for (std::size_t d = 0; d < 40; ++d) { gone.mutable_words()[d / 64] |= std::uint64_t(1) << (d % 64); }
-			const prospect::segment_snapshot one[] = {{&hot, &gone}};
+			const prospect::segment_snapshot one[] = {{&hot, &gone, prospect::segment_snapshot::unknown_dead, &text_table()}};
 			auto b = [&](const prospect::segment& seg) -> prospect::scorer_ptr { return std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term(0, "hot")); };
 			prospect::term_scorer probe(hot.get<prospect::inverted_plugin>(), *hot.get<prospect::inverted_plugin>().term(0, "hot"));
 			CHECK(probe.seed(10) > prospect::weight::bm25(hot.get<prospect::inverted_plugin>(), 400)(1, 200));  // the seed comes from the deleted postings
@@ -800,7 +801,7 @@ int main() {
 						CHECK(ok);
 						++compared;
 					}
-					const prospect::segment_snapshot one[] = {{&seg, nullptr}};
+					const prospect::segment_snapshot one[] = {{&seg, nullptr, prospect::segment_snapshot::unknown_dead, &text_table()}};
 					const auto got = prospect::search(one, [&](const prospect::segment& sg) { return std::make_unique<prospect::term_scorer>(sg.get<prospect::inverted_plugin>(), info, wt); }, k);
 					bool ok = got.size() == std::min(k, all.size());
 					for (std::size_t i = 0; ok && i < got.size(); ++i) { ok = got[i].docid == all[i].docid && got[i].score == all[i].score; }

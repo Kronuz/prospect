@@ -104,7 +104,7 @@ void count_terms(const node& n, std::map<std::string, std::uint32_t>& wqf) {
 struct snapshot_weights {
 	std::span<const prospect::segment_snapshot> segs;
 	prospect::statistics st;
-	prospect::weight of(const std::string& term, std::uint32_t wqf) const { return prospect::weight::bm25_xapian(st, prospect::snapshot_df(segs, term), wqf); }
+	prospect::weight of(const std::string& term, std::uint32_t wqf) const { return prospect::weight::bm25_xapian(st, prospect::snapshot_df(segs, "text", term), wqf); }
 };
 
 prospect::scorer_ptr build(const prospect::segment& seg, const node& n, const std::map<std::string, std::uint32_t>& wqf, const snapshot_weights* snap = nullptr) {
@@ -229,8 +229,10 @@ int main(int argc, char** argv) {
 		parts = 1;
 		std::cout << "reordered: " << (segments[0].core().docid_ordered() ? "no" : "yes") << "\n";
 	}
+	strata::field_table table;  // the one field the segments' terms are in, id 0
+	table.append({"text", strata::field_role::indexed, strata::field_postings::positions, false});
 	std::vector<prospect::segment_snapshot> snaps;
-	for (const auto& s : segments) { snaps.push_back({&s, nullptr}); }
+	for (const auto& s : segments) { snaps.push_back({.seg = &s, .fields = &table}); }
 	const snapshot_weights weights{snaps, prospect::snapshot_statistics(snaps)};
 	const snapshot_weights* snap = parts > 1 ? &weights : nullptr;
 	const prospect::segment& seg = segments[0];

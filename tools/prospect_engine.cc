@@ -98,7 +98,7 @@ void fill_document(prospect::document& d, std::string_view key, std::string_view
 	d.field().text.assign(text);
 	d.field().tokens.clear();
 	d.field().split_text = true;
-	d.length = 0;
+	d.length.reset();  // the words' count
 	d.stored.assign(id);
 }
 
@@ -143,6 +143,7 @@ int index(const std::string& dir) {
 	warn_trust(ix);
 	// The batch's operations are reused, so their strings and vectors keep their capacity.
 	prospect::transaction t;
+	t.fields = engine::declarations();
 	std::size_t batched = 0;
 	auto apply = [&] {
 		if (!batched) { return; }
@@ -227,7 +228,7 @@ int serve(const std::string& dir) {
 		auto ix = prospect::index::open(io, o);
 		warn_trust(ix);
 		std::vector<prospect::segment_snapshot> segs;
-		for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead}); }
+		for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead, &ix.fields()}); }
 		for (LineReader in; in.next(line);) {
 			const std::size_t tab = line.find('\t');
 			std::cout << run(std::span<const prospect::segment_snapshot>(segs), std::string_view(line.data(), tab), std::string_view(line).substr(tab + 1)) << '\n';
@@ -247,7 +248,7 @@ int terms(const std::string& dir) {
 	residency::file file;
 	prospect::segment seg = open(dir, file);
 	std::ios::sync_with_stdio(false);
-	seg.get<prospect::inverted_plugin>().scan_terms([](std::string_view key, const prospect::format::term_info& info) {
+	seg.get<prospect::inverted_plugin>().scan_terms([](std::uint32_t, std::string_view key, const prospect::format::term_info& info) {
 		std::cout << key << '\t' << info.df << '\n';
 		return true;
 	});
@@ -273,7 +274,9 @@ int dictstats(const std::string& dir) {
 	std::uint64_t terms = 0, single = 0, absolute = 0, keys = 0, values = 0, flags = 0, df = 0, cf = 0, ordinal = 0, impacts = 0;
 	std::uint64_t postings_length = 0, postings_offset = 0, positions_length = 0, positions_offset = 0;
 	prospect::format::term_run run;
-	seg.get<prospect::inverted_plugin>().dictionary().scan("", [&](std::string_view key, std::string_view value) {
+	prospect::inverted_plugin::reader::term_cursor cursor(seg.get<prospect::inverted_plugin>());
+	while (cursor.next()) {
+		const std::string_view key = cursor.term(), value = cursor.value();
 		const auto t = prospect::format::decode_term_info(value, run);
 		const bool abs = t.flags & prospect::format::absolute;
 		// The cursors an absolute entry stored: where its own bytes start.
@@ -302,8 +305,7 @@ int dictstats(const std::string& dir) {
 			prospect::format::encode_impacts(imp, t.impacts);
 			impacts += imp.size();
 		}
-		return true;
-	});
+	}
 	std::uint64_t section_terms = 0, section_index = 0;
 	for (const auto& e : seg.core().sections()) {
 		if (e.kind == strata::format::section::terms) { section_terms = e.length; }
@@ -337,7 +339,7 @@ int dictdump(const std::string& dir, const std::string& path) {
 	std::FILE* out = std::fopen(path.c_str(), "wb");
 	if (!out) { return 1; }
 	auto u64 = [&](std::uint64_t v) { std::fwrite(&v, 8, 1, out); };
-	seg.get<prospect::inverted_plugin>().scan_terms([&](std::string_view key, const prospect::format::term_info& t) {
+	seg.get<prospect::inverted_plugin>().scan_terms([&](std::uint32_t, std::string_view key, const prospect::format::term_info& t) {
 		u64(key.size());
 		std::fwrite(key.data(), 1, key.size(), out);
 		for (std::uint64_t v : {std::uint64_t(t.flags), std::uint64_t(t.df), t.cf, t.postings, t.positions, std::uint64_t(t.single_wdf), t.postings_length, t.positions_length,
@@ -427,7 +429,7 @@ int verify_index(const std::string& dir) {
 	auto ix = prospect::index::open(io, o);
 	warn_trust(ix);
 	std::vector<prospect::segment_snapshot> segs;
-	for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead}); }
+	for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead, &ix.fields()}); }
 	std::span<const prospect::segment_snapshot> view(segs);
 	std::size_t queries = 0, mismatches = 0;
 	auto close = [](double a, double b) { return std::abs(a - b) <= 1e-9 * std::max(1.0, std::max(a, b)); };
@@ -437,7 +439,7 @@ int verify_index(const std::string& dir) {
 		++queries;
 		const parsed p = parse(q);
 		for (const auto scheme : {prospect::scheme::bm25, prospect::scheme::bm25_xapian}) {
-			prospect::term_table table(view, o.key_prefix);
+			prospect::term_table table(view);
 			auto builder = [&](const prospect::segment& seg) { return build(seg, p, scheme, &table); };
 			std::vector<prospect::doc_hit> scan;
 			for (const auto& sv : segs) {
@@ -492,7 +494,7 @@ int dump(const std::string& dir) {
 	auto ix = prospect::index::open(io, o);
 	warn_trust(ix);
 	std::vector<prospect::segment_snapshot> segs;
-	for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead}); }
+	for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead, &ix.fields()}); }
 	const char* count_env = std::getenv("PROSPECT_DUMP_COUNT");
 	const bool with_count = !count_env || std::string_view(count_env) != "0";
 	LineReader in;
@@ -503,7 +505,7 @@ int dump(const std::string& dir) {
 		for (const auto scheme : {prospect::scheme::bm25, prospect::scheme::bm25_xapian}) {
 			for (std::size_t k : {10u, 100u, 1000u}) {
 				std::uint64_t n = 0;
-				const auto hits = search_snapshot(segs, p, k, scheme, with_count ? &n : nullptr, o.key_prefix);
+				const auto hits = search_snapshot(segs, p, k, scheme, with_count ? &n : nullptr);
 				std::printf("%s\t%d\t%zu\t%llu", q.c_str(), int(scheme), k, (unsigned long long)n);
 				for (const auto& h : hits) { std::printf(" %llu:%a", (unsigned long long)h.docid, h.score); }
 				std::printf("\n");
@@ -598,10 +600,10 @@ int bench(const std::string& dir, std::string_view command, int runs, prospect::
 		auto ix = prospect::index::open(io, o);
 		warn_trust(ix);
 		std::vector<prospect::segment_snapshot> segs;
-		for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead}); }
+		for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead, &ix.fields()}); }
 		std::cerr << "bench: " << segs.size() << " segments\n";
 		const std::span<const prospect::segment_snapshot> view(segs);
-		return bench_queries(runs, [&](std::string_view query) { return run(view, command, query, scheme, o.key_prefix); });
+		return bench_queries(runs, [&](std::string_view query) { return run(view, command, query, scheme); });
 	}
 	residency::file file;
 	prospect::segment seg = open(dir, file);
@@ -660,6 +662,7 @@ int churn(const std::string& dir) {
 	using clock = std::chrono::steady_clock;
 	auto us = [](clock::time_point t) { return std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - t).count(); };
 	prospect::transaction t;
+	t.fields = engine::declarations();
 	auto apply = [&] {
 		if (t.ops.empty()) { return; }
 		if (ix.apply(t, {}).result != strata::verdict::accepted) { std::cerr << "rejected\n"; std::exit(1); }
@@ -699,7 +702,7 @@ int churn(const std::string& dir) {
 			const std::string_view command = l.substr(a + 1, b - a - 1), query = l.substr(b + 1);
 			const auto start = clock::now();
 			std::vector<prospect::segment_snapshot> segs;
-			for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead}); }
+			for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead, &ix.fields()}); }
 			// As serve answers it: weights from the snapshot's statistics, not each segment's.
 			const std::uint64_t result = run(std::span<const prospect::segment_snapshot>(segs), command, query);
 			std::cout << "Q\t" << us(start) << '\t' << result << std::endl;

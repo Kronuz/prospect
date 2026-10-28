@@ -187,6 +187,14 @@ struct inverted_plugin {
 			fields.back().field = ref;
 			return fields.back();
 		}
+		// The same without adding: an empty part when the document has none for `ref`.
+		const field_part& field(field_ref ref = field_ref::declared(0)) const {
+			static const field_part none;
+			for (const auto& f : fields) {
+				if (f.field == ref) { return f; }
+			}
+			return none;
+		}
 	};
 	// The document's length: the host's, or the sum of its parts'.
 	static std::uint64_t document_length(const part& p) {
@@ -401,6 +409,7 @@ struct inverted_plugin {
 			std::uint32_t field() const noexcept { return c_.field(); }
 			std::string_view term() const noexcept { return c_.term(); }
 			const format::term_info& info() const noexcept { return c_.info(); }
+			std::string_view value() const noexcept { return c_.value(); }
 
 		private:
 			const reader* r_;

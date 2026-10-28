@@ -5,6 +5,7 @@
 // merges run; the rate limit; merges that never wait for indexing-budget room; ENOSPC
 // discarding a merge, EIO fencing, and a damaged source left for heal(); merge outputs
 // published in id order; and the merge build's cancellation points.
+#include "text_field.hh"
 #include "prospect/index.hh"
 #include "strata/core/faultfs.hh"
 #include "strata/core/pool_executor.hh"
@@ -55,6 +56,7 @@ static operation erase(const std::string& key) {
 }
 static transaction tx(std::vector<operation> ops) {
 	transaction t;
+	t.fields = text_fields();
 	t.ops = std::move(ops);
 	return t;
 }

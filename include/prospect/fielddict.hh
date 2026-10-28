@@ -395,6 +395,8 @@ public:
 		std::uint32_t field() const noexcept { return field_; }
 		std::string_view term() const noexcept { return term_; }
 		const format::term_info& info() const noexcept { return info_; }
+		// The entry's raw value bytes, as the builder stored them.
+		std::string_view value() const noexcept { return value_; }
 
 	private:
 		bool step() {
@@ -423,11 +425,13 @@ public:
 					get_field(q, pool_->key().data() + pool_->key().size(), id);
 					field_ = id;
 					term_ = pool_->key().substr(std::size_t(q - pool_->key().data()));
-					info_ = format::decode_term_info(pool_->value(), pool_run_);
+					value_ = pool_->value();
+					info_ = format::decode_term_info(value_, pool_run_);
 				} else {
 					field_ = own_field_;
 					term_ = own_cur_->key();
-					info_ = format::decode_term_info(own_cur_->value(), own_run_);
+					value_ = own_cur_->value();
+					info_ = format::decode_term_info(value_, own_run_);
 				}
 			}
 			return true;
@@ -458,7 +462,7 @@ public:
 		std::uint32_t own_field_ = 0, pool_field_ = 0, field_ = 0;
 		bool started_ = false, from_pool_ = false, pool_live_ = false;
 		format::term_run own_run_, pool_run_;
-		std::string_view term_;
+		std::string_view term_, value_;
 		format::term_info info_;
 	};
 

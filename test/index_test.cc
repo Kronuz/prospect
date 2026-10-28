@@ -1,6 +1,7 @@
 // The index on faultfs: keys and versions, replace and delete, atomic transactions,
 // explicit docids, replayed positions, commits surviving crashes, fencing, ENOSPC
 // recovery, retention, and fail-closed opens.
+#include "text_field.hh"
 #include "prospect/index.hh"
 #include "strata/core/faultfs.hh"
 
@@ -59,6 +60,7 @@ static operation erase(const std::string& key) {
 }
 static transaction tx(std::vector<operation> ops) {
 	transaction t;
+	t.fields = text_fields();
 	t.ops = std::move(ops);
 	return t;
 }
@@ -270,7 +272,7 @@ int main() {
 			return d;
 		};
 		auto grouped = [&](const std::string& key, const std::string& text) {
-			const document t = tokens(key, text);
+			document t = tokens(key, text);
 			document d;
 			d.key = t.key;
 			d.field().terms = t.field().terms;
@@ -1506,7 +1508,7 @@ int main() {
 		auto rich = [](int i) {
 			operation o = replace("Q" + std::to_string(i), "body");
 			for (std::uint32_t j = 0; j < 20; ++j) { o.doc.field().terms.push_back({"t" + std::to_string((i + 37 * j) % 1000), 1, {j + 2}}); }
-			o.doc.length += 20;
+			*o.doc.length += 20;
 			return o;
 		};
 		auto seg_files = [](const faultfs::filesystem& fs) {
@@ -2207,11 +2209,11 @@ int main() {
 		CHECK(ix.apply(tx({big}), {}).result == verdict::accepted);
 		big.doc.key = "Qbig2";
 		big.doc.field().split_text = false;
-		for (std::uint32_t i = 0; i < 70000; ++i) { big.doc.tokens.push_back({2 * i, 1, i + 1}); }
+		for (std::uint32_t i = 0; i < 70000; ++i) { big.doc.field().tokens.push_back({2 * i, 1, i + 1}); }
 		big.doc.length = 70000;
 		CHECK(ix.apply(tx({big}), {}).result == verdict::accepted);
 		big.doc.key = "Qbig3";
-		big.doc.tokens.resize(1000);
+		big.doc.field().tokens.resize(1000);
 		big.doc.length = 1000;
 		CHECK(ix.apply(tx({big}), {}).result == verdict::accepted);
 		for (int i = 0; i < 50; ++i) { CHECK(ix.apply(tx({add("Qd" + std::to_string(i), "d")}), {}).result == verdict::accepted); }

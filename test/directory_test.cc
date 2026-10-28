@@ -9,6 +9,7 @@
 //   directory_test STATE_DIR [tmpfs]
 //   directory_test opener DIR open|create PARENT_DIR_FD   (the spawned second process)
 #include "completion/posix.h"
+#include "text_field.hh"
 #include "prospect/index.hh"
 #include "strata/core/faultfs.hh"
 
@@ -61,6 +62,7 @@ static transaction one_doc(const std::string& key) {
 	o.doc.length = 1;
 	o.doc.stored = "s";
 	transaction t;
+	t.fields = text_fields();
 	t.ops.push_back(o);
 	return t;
 }

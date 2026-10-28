@@ -1,6 +1,7 @@
 // Format 13's open rules (docs/design/format-13.md T1, step 7c-1): the frozen prefix (F2),
 // F3's kinds and F5's canonical layout, F4's structure bits and presence, F6's reserved
 // words, the sink's file order, and the format-12 refusal fixtures.
+#include "text_field.hh"
 #include "prospect/check.hh"
 #include "prospect/index.hh"
 #include "prospect/merge.hh"
@@ -197,12 +198,12 @@ std::string with_version(std::string file, std::uint32_t v) {
 
 // The docids a term query matches over an index's live documents, through the planner's
 // routing (F8): the term table resolves a key-prefixed term as a key leaf.
-std::vector<std::uint64_t> matches(const prospect::index& ix, std::string_view term, std::string_view key_prefix) {
+std::vector<std::uint64_t> matches(const prospect::index& ix, std::string_view field, std::string_view term) {
 	std::vector<prospect::segment_snapshot> segs;
-	for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead}); }
-	prospect::term_table table(segs, key_prefix);
+	for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead, &ix.fields()}); }
+	prospect::term_table table(segs);
 	auto build = [&](const prospect::segment& seg) -> prospect::scorer_ptr {
-		const auto* info = table.info(seg, term);
+		const auto* info = table.info(seg, field, term);
 		if (!info) { return nullptr; }
 		return std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *info);
 	};
@@ -225,6 +226,7 @@ prospect::operation upsert(const std::string& key, const std::string& word) {
 
 strata::verdict::outcome apply(prospect::index& ix, const prospect::operation& op) {
 	prospect::transaction t;
+	t.fields = text_fields();
 	t.ops.push_back(op);
 	return ix.apply(t, {}).result;
 }
@@ -741,6 +743,7 @@ int main() {
 		{
 		auto ix = prospect::index::create(io, o, {});
 		prospect::transaction t;
+		t.fields = text_fields();
 		prospect::operation op;
 		op.type = prospect::operation::replace_key;
 		op.key = "Q1";
@@ -812,7 +815,7 @@ int main() {
 			const auto& inv = s.get<prospect::inverted_plugin>();
 			CHECK(!inv.term(0, "odd") && inv.length(7) == 0 && inv.total_length() == 0 && inv.norm(7) == 0);
 			std::size_t terms = 0;
-			inv.scan_terms([&](std::string_view, const prospect::format::term_info&) { return ++terms, true; });
+			inv.scan_terms([&](std::uint32_t, std::string_view, const prospect::format::term_info&) { return ++terms, true; });
 			CHECK(terms == 0);
 			CHECK(s.get<strata::keys_plugin>().find("Q7", {}) == strata::ordinal_t(7) && s.get<strata::stored_plugin>().stored(7) == std::string(3, 's'));
 			s.verify_all();
@@ -930,6 +933,7 @@ int main() {
 			add.doc.field().terms.push_back({"w", 1, {1}});
 			add.doc.length = 1;
 			prospect::transaction t;
+			t.fields = text_fields();
 			t.ops.push_back(add);
 			const auto v1 = ix.apply(t, {});
 			CHECK(v1.result == strata::verdict::accepted && v1.versions == std::vector<std::uint64_t>{0});
@@ -937,6 +941,7 @@ int main() {
 			replace.type = prospect::operation::replace_docid;
 			replace.docid = v1.docids[0];
 			prospect::transaction t2;
+			t2.fields = text_fields();
 			t2.ops.push_back(replace);
 			CHECK(ix.apply(t2, {}).versions == std::vector<std::uint64_t>{0});  // buffered
 			const std::uint64_t before = ix.digest();
@@ -1020,21 +1025,21 @@ int main() {
 		CHECK(ix.segments().size() > 2);
 		for (int k = 0; k < 120; ++k) {
 			const std::string key = "Q" + std::to_string(k);
-			const auto got = matches(ix, key, o.key_prefix);
+			const auto got = matches(ix, "_id", key);
 			const auto it = live.find(key);
 			CHECK(got == (it == live.end() ? std::vector<std::uint64_t>{} : std::vector<std::uint64_t>{it->second}));
 			// The dictionary holds no key: without the prefix's routing, nothing matches.
-			CHECK(matches(ix, key, {}).empty());
+			CHECK(matches(ix, "text", key).empty());
 		}
 		// The term table's df counts the segments holding a key, deleted copies included.
 		{
 			std::vector<prospect::segment_snapshot> segs;
 			std::uint64_t held = 0;
 			for (const auto& v : ix.segments()) {
-				segs.push_back({v.seg(), v.deleted, v.dead});
+				segs.push_back({v.seg(), v.deleted, v.dead, &ix.fields()});
 				held += v.seg()->get<strata::keys_plugin>().find("Q7", {}).has_value();
 			}
-			CHECK(prospect::snapshot_df(segs, "Q7", o.key_prefix) == held);
+			CHECK(prospect::snapshot_df(segs, "_id", "Q7") == held);
 		}
 		const auto report = ix.check();
 		CHECK(report.keys >= live.size() && report.terms >= 7);

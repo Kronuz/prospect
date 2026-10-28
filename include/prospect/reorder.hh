@@ -105,19 +105,24 @@ inline forward_stats write_forward(std::span<const merge_source> sources, output
 		std::vector<bool> more(sources.size());
 		for (std::size_t s = 0; s < sources.size(); ++s) { more[s] = cursors.emplace_back(sources[s].seg->get<inverted_plugin>()).next(); }
 		std::string current;
+		std::uint32_t current_field = 0;
 		std::vector<holder> here;
 		for (;;) {
 			check();
-			std::optional<std::string_view> next;
+			// The least (field, term) of the sources: the same bytes in two fields are two terms.
+			std::optional<std::pair<std::uint32_t, std::string_view>> next;
 			for (std::size_t s = 0; s < sources.size(); ++s) {
-				if (more[s] && (!next || cursors[s].term() < *next)) { next = cursors[s].term(); }
+				if (!more[s]) { continue; }
+				const std::pair<std::uint32_t, std::string_view> at{cursors[s].field(), cursors[s].term()};
+				if (!next || at < *next) { next = at; }
 			}
 			if (!next) { break; }
-			current = *next;
+			current_field = next->first;
+			current = next->second;
 			here.clear();
 			std::uint64_t df = 0;
 			for (std::uint32_t s = 0; s < sources.size(); ++s) {
-				if (!more[s] || cursors[s].term() != current) { continue; }
+				if (!more[s] || cursors[s].field() != current_field || cursors[s].term() != current) { continue; }
 				here.push_back({s, cursors[s].info()});
 				df += cursors[s].info().df;
 				more[s] = cursors[s].next();

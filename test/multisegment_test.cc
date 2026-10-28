@@ -3,6 +3,7 @@
 //     holding the same documents: the same docids, scores, ties, and counts.
 //   - With deletes, pruned search across segments equals an exhaustive scan of every
 //     segment's live matches, ties by docid, and counts equal.
+#include "text_field.hh"
 #include "prospect/index.hh"
 #include "prospect/searcher.hh"
 #include "strata/core/budget.hh"
@@ -41,7 +42,7 @@ static document random_doc(std::mt19937_64& r) {
 		if (r() % 100 >= (rare ? 3u : 35u)) { continue; }
 		term_entry t{w, 1 + std::uint32_t(r() % 3), {}};
 		for (std::uint32_t k = 0; k < t.wdf; ++k) { t.positions.push_back(pos += 1 + std::uint32_t(r() % 2)); }
-		d.length += t.wdf;
+		d.field().length += t.wdf;
 		d.field().terms.push_back(std::move(t));
 	}
 	if (d.field().terms.empty()) { d.field().terms.push_back({"a", 1, {1}}), d.length = 1; }
@@ -56,7 +57,7 @@ struct query {
 
 static scorer_ptr build(const segment& seg, const query& q, const statistics& st, std::span<const segment_snapshot> segs, bool xapian) {
 	auto weight_of = [&](const std::string& t) {
-		const std::uint64_t df = snapshot_df(segs, t);
+		const std::uint64_t df = snapshot_df(segs, text_name, t);
 		return xapian ? weight::bm25_xapian(st, df) : weight::bm25(st, df);
 	};
 	auto term = [&](const std::string& t) -> scorer_ptr {
@@ -102,7 +103,7 @@ static scorer_ptr build(const segment& seg, const query& q, const statistics& st
 			auto info = seg.get<prospect::inverted_plugin>().term(0, t);
 			if (!info) { return nullptr; }
 			infos.push_back(*info);
-			dfs.push_back(snapshot_df(segs, t));
+			dfs.push_back(snapshot_df(segs, text_name, t));
 			ws.push_back(weight_of(t));
 		}
 		if (xapian) { return std::make_unique<phrase_scorer>(seg.get<prospect::inverted_plugin>(), infos, std::move(ws)); }
@@ -153,7 +154,7 @@ static void check_against_scan(const std::vector<doc_hit>& hits, const std::vect
 
 static std::vector<segment_snapshot> snapshot(const prospect::index& ix) {
 	std::vector<segment_snapshot> out;
-	for (const auto& s : ix.segments()) { out.push_back({s.seg(), s.deleted, s.dead}); }
+	for (const auto& s : ix.segments()) { out.push_back({s.seg(), s.deleted, s.dead, &ix.fields()}); }
 	return out;
 }
 
@@ -175,6 +176,7 @@ int main() {
 		for (std::size_t d = 0; d < docs; ++d) {
 			all.push_back(random_doc(r));
 			transaction t;
+			t.fields = text_fields();
 			operation o;
 			o.doc = all.back();
 			t.ops.push_back(o);
@@ -187,6 +189,7 @@ int main() {
 			// across segments are not settled by segment order.
 			for (std::size_t i = 0; i < docs / 5; ++i) {
 				transaction t;
+				t.fields = text_fields();
 				operation o;
 				o.docid = 1 + r() % docs;
 				if (r() % 2) {
@@ -220,12 +223,12 @@ int main() {
 		for (std::size_t d = 0; d < docs; ++d) {
 			std::vector<posting_input> in;
 			for (const auto& t : all[d].field().terms) { in.push_back({t.term, t.wdf, t.positions}); }
-			one.add(d + 1, in, all[d].length);
+			one.add(d + 1, in, prospect::inverted_plugin::document_length(all[d]));
 		}
 		const std::string one_bytes = one.flush({});
 		const segment single(one_bytes);
 		const strata::deleted_bits none((single.core().doc_count() + 63) / 64);
-		const segment_snapshot single_snap[] = {{&single, &none}};
+		const segment_snapshot single_snap[] = {{&single, &none, prospect::segment_snapshot::unknown_dead, &text_table()}};
 		for (int qn = 0; qn < 120; ++qn) {
 			query q;
 			q.kind = int(r() % 6);
@@ -283,7 +286,7 @@ int main() {
 			}
 			files.push_back(w.flush({}));
 			owned.push_back(std::make_unique<segment>(files.back()));
-			segs.push_back({owned.back().get(), nullptr});
+			segs.push_back({owned.back().get(), nullptr, prospect::segment_snapshot::unknown_dead, &text_table()});
 		}
 		const std::vector<segment_snapshot> reversed(segs.rbegin(), segs.rend());
 		const std::vector<segment_snapshot>* const views[] = {&segs, &reversed};

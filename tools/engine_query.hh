@@ -19,6 +19,12 @@
 
 namespace engine {
 
+// The one field the harness's queries name: its documents' words are terms of it.
+inline constexpr std::string_view query_field = "text";
+inline std::vector<strata::field_declaration> declarations() {
+	return {{std::string(query_field), strata::field_role::indexed, strata::field_postings::positions, false}};
+}
+
 struct parsed {
 	std::vector<std::vector<std::string>> must, should, must_not;  // each clause: a term or a phrase
 };
@@ -61,7 +67,7 @@ inline prospect::scorer_ptr clause_scorer(const prospect::segment& seg, const st
 	std::vector<prospect::format::term_info> infos;
 	for (const auto& t : clause) {
 		if (table) {
-			const auto* info = table->info(seg, t);
+			const auto* info = table->info(seg, query_field, t);
 			if (!info) { return nullptr; }
 			infos.push_back(*info);
 		} else {
@@ -73,7 +79,7 @@ inline prospect::scorer_ptr clause_scorer(const prospect::segment& seg, const st
 	const bool xapian = scheme == prospect::scheme::bm25_xapian;
 	if (infos.size() == 1) {
 		if (table) {
-			const auto df = table->df(clause[0]);
+			const auto df = table->df(query_field, clause[0]);
 			const auto& st = table->stats();
 			return std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), infos[0], xapian ? prospect::weight::bm25_xapian(st, df, std::uint32_t(boost)) : prospect::weight::bm25(st, df, boost));
 		}
@@ -83,12 +89,12 @@ inline prospect::scorer_ptr clause_scorer(const prospect::segment& seg, const st
 	if (!xapian) {
 		if (!table) { return std::make_unique<prospect::phrase_scorer>(seg.get<prospect::inverted_plugin>(), infos); }
 		std::vector<std::uint64_t> dfs;
-		for (const auto& t : clause) { dfs.push_back(table->df(t)); }
+		for (const auto& t : clause) { dfs.push_back(table->df(query_field, t)); }
 		return std::make_unique<prospect::phrase_scorer>(seg.get<prospect::inverted_plugin>(), infos, std::vector<prospect::weight>{}, 0, &table->stats(), dfs);
 	}
 	std::vector<prospect::weight> weights;
 	for (std::size_t k = 0; k < infos.size(); ++k) {
-		weights.push_back(table ? prospect::weight::bm25_xapian(table->stats(), table->df(clause[k])) : prospect::weight::bm25_xapian(seg.get<prospect::inverted_plugin>(), infos[k].df));
+		weights.push_back(table ? prospect::weight::bm25_xapian(table->stats(), table->df(query_field, clause[k])) : prospect::weight::bm25_xapian(seg.get<prospect::inverted_plugin>(), infos[k].df));
 	}
 	return std::make_unique<prospect::phrase_scorer>(seg.get<prospect::inverted_plugin>(), infos, std::move(weights));
 }
@@ -162,10 +168,8 @@ inline std::uint64_t run(const prospect::segment& seg, std::string_view command,
 
 // The k best documents of a query over an index's segments, weighted by the snapshot's
 // statistics (D13); with count, also the number of live matches.
-// `key_prefix` is the index's: its terms are key leaves (F8).
-inline std::vector<prospect::doc_hit> search_snapshot(std::span<const prospect::segment_snapshot> segs, const parsed& q, std::size_t k, prospect::scheme scheme = prospect::scheme::bm25, std::uint64_t* count = nullptr,
-	std::string_view key_prefix = {}) {
-	prospect::term_table table(segs, key_prefix);
+inline std::vector<prospect::doc_hit> search_snapshot(std::span<const prospect::segment_snapshot> segs, const parsed& q, std::size_t k, prospect::scheme scheme = prospect::scheme::bm25, std::uint64_t* count = nullptr) {
+	prospect::term_table table(segs);
 	auto builder = [&](const prospect::segment& seg) { return build(seg, q, scheme, &table); };
 	return prospect::search(segs, builder, k, count);
 }
@@ -185,15 +189,15 @@ inline const std::string* single_term(const parsed& q) {
 
 // The number of live matches of a query over an index's segments. A single word's count
 // in a segment without deletes is its document frequency there, from the term table (P6-7).
-inline std::uint64_t count_snapshot(std::span<const prospect::segment_snapshot> segs, const parsed& q, prospect::scheme scheme = prospect::scheme::bm25, std::string_view key_prefix = {}) {
-	prospect::term_table table(segs, key_prefix);
+inline std::uint64_t count_snapshot(std::span<const prospect::segment_snapshot> segs, const parsed& q, prospect::scheme scheme = prospect::scheme::bm25) {
+	prospect::term_table table(segs);
 	auto builder = [&](const prospect::segment& seg) { return build(seg, q, scheme, &table); };
 	const std::string* term = single_term(q);
 	if (!term) { return prospect::search_count(segs, builder); }
 	std::uint64_t n = 0;
 	for (const auto& s : segs) {
 		if (!s.any_deleted()) {
-			n += table.df(*s.seg, *term);
+			n += table.df(*s.seg, query_field, *term);
 			continue;
 		}
 		const prospect::segment_snapshot one[] = {s};
@@ -204,14 +208,13 @@ inline std::uint64_t count_snapshot(std::span<const prospect::segment_snapshot> 
 
 // A query over an index's segments, as serve and churn answer it: the count for COUNT and
 // TOP_*_COUNT, else 1.
-inline std::uint64_t run(std::span<const prospect::segment_snapshot> segs, std::string_view command, std::string_view query, prospect::scheme scheme = prospect::scheme::bm25,
-	std::string_view key_prefix = {}) {
+inline std::uint64_t run(std::span<const prospect::segment_snapshot> segs, std::string_view command, std::string_view query, prospect::scheme scheme = prospect::scheme::bm25) {
 	const parsed q = parse(query);
-	if (command == "COUNT") { return count_snapshot(segs, q, scheme, key_prefix); }
+	if (command == "COUNT") { return count_snapshot(segs, q, scheme); }
 	std::size_t k = 0;
 	std::from_chars(command.data() + 4, command.data() + command.size(), k);
 	std::uint64_t n = 0;
-	(void)search_snapshot(segs, q, k, scheme, command.ends_with("_COUNT") ? &n : nullptr, key_prefix);
+	(void)search_snapshot(segs, q, k, scheme, command.ends_with("_COUNT") ? &n : nullptr);
 	return command.ends_with("_COUNT") ? n : 1;
 }
 

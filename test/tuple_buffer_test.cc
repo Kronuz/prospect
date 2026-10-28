@@ -10,6 +10,8 @@
 #include <cstdlib>
 #include <limits>
 #include <numeric>
+#include <optional>
+#include <span>
 #include <pthread.h>
 #include <sys/mman.h>
 #include <random>
@@ -52,6 +54,28 @@ struct doc {
 	}
 };
 
+// A document's text as tokens (or split at spaces), as the old adds took it: one text of field 0.
+strata::ordinal_t put(prospect::detail::tuple_buffer& b, std::uint64_t docid, std::span<const prospect::posting_input> terms, std::string_view text,
+	std::span<const prospect::text_token> tokens, std::uint32_t length, std::string_view stored, std::uint64_t version, std::string_view key) {
+	const prospect::text_input x{0, text, tokens, false};
+	return b.add(docid, terms, text.empty() && tokens.empty() ? std::span<const prospect::text_input>() : std::span<const prospect::text_input>(&x, 1), 0, length, stored, version, key);
+}
+strata::ordinal_t put_split(prospect::detail::tuple_buffer& b, std::uint64_t docid, std::span<const prospect::posting_input> terms, std::string_view text,
+	std::string_view stored, std::uint64_t version, std::string_view key) {
+	const prospect::text_input x{0, text, {}, true};
+	return b.add(docid, terms, std::span<const prospect::text_input>(&x, 1), 0, std::nullopt, stored, version, key);
+}
+strata::ordinal_t put(prospect::segment_writer& w, std::uint64_t docid, std::span<const prospect::posting_input> terms, std::string_view text,
+	std::span<const prospect::text_token> tokens, std::uint32_t length, std::string_view stored, std::uint64_t version, std::string_view key) {
+	const prospect::text_input x{0, text, tokens, false};
+	return prospect::detail::writer_access::add_texts(w, docid, terms, text.empty() && tokens.empty() ? std::span<const prospect::text_input>() : std::span<const prospect::text_input>(&x, 1), length, stored, version, key);
+}
+strata::ordinal_t put_split(prospect::segment_writer& w, std::uint64_t docid, std::span<const prospect::posting_input> terms, std::string_view text, std::uint32_t length,
+	std::string_view stored, std::uint64_t version, std::string_view key) {
+	const prospect::text_input x{0, text, {}, true};
+	return prospect::detail::writer_access::add_texts(w, docid, terms, std::span<const prospect::text_input>(&x, 1), length, stored, version, key);
+}
+
 doc random_doc(std::mt19937_64& r, std::uint64_t docid) {
 	static const std::vector<std::string> words = {"a", "b", "the", "of", "rare", "octopus", "eightbyt", "ninebytes", std::string(254, 'm'),
 		std::string(255, 'n'), std::string(300, 'l'), "x"};
@@ -82,7 +106,7 @@ std::string reference(const std::vector<doc>& docs, const std::vector<std::size_
 	for (std::size_t i : order) {
 		const doc& d = docs[i];
 		const auto in = d.inputs();
-		prospect::detail::writer_access::add_text(w, d.docid, in, d.text, d.tokens, d.length, d.stored, d.version, d.key);
+		put(w, d.docid, in, d.text, d.tokens, d.length, d.stored, d.version, d.key);
 	}
 	return w.flush({1, 2, 3});
 }
@@ -95,7 +119,7 @@ std::string tuples(const std::vector<doc>& docs, std::span<const strata::ordinal
 	b.max_run_bytes = run_cap;
 	for (const doc& d : docs) {
 		const auto in = d.inputs();
-		b.add(d.docid, in, d.text, d.tokens, d.length, d.stored, d.version, d.key);
+		put(b, d.docid, in, d.text, d.tokens, d.length, d.stored, d.version, d.key);
 	}
 	prospect::segment_writer w;
 	std::string file;
@@ -188,7 +212,7 @@ int main() {
 		b.batch_tuples = batch;
 		for (const doc& d : docs) {
 			const auto in = d.inputs();
-			b.add(d.docid, in, d.text, d.tokens, d.length, d.stored, d.version, d.key);
+			put(b, d.docid, in, d.text, d.tokens, d.length, d.stored, d.version, d.key);
 		}
 		b.drain_for_flush(nullptr);
 		std::vector<strata::ordinal_t> some;
@@ -247,7 +271,7 @@ int main() {
 				at = end + 1;
 			}
 			const std::string key = "Q" + std::to_string(i);
-			CHECK(split.add_split(1 + i, {}, text, "s", 1, key) == given.add(1 + i, {}, text, tokens, pos, "s", 1, key));
+			CHECK(put_split(split, 1 + i, {}, text, "s", 1, key) == put(given, 1 + i, {}, text, tokens, pos, "s", 1, key));
 			CHECK(split.length(strata::ordinal_t(i)) == pos);
 		}
 		auto bytes = [](prospect::detail::tuple_buffer& b) {
@@ -267,9 +291,9 @@ int main() {
 		b.batch_tuples = batch;
 		const std::string text = " a b a";
 		const std::vector<prospect::text_token> tokens = {{1, 1, 1}, {3, 1, 2}, {5, 1, 3}};
-		b.add(7, {}, text, tokens, 3, "s", 1, "Qk");
+		put(b, 7, {}, text, tokens, 3, "s", 1, "Qk");
 		CHECK(b.key(0) == "Qk");
-		b.add(8, {}, text, tokens, 3, "t", 0, "");  // drains the first when batches are 1 tuple
+		put(b, 8, {}, text, tokens, 3, "t", 0, "");  // drains the first when batches are 1 tuple
 		CHECK(b.key(0) == "Qk" && b.key(1).empty());
 		std::vector<std::string> seen;
 		b.scan([&](std::string_view term, strata::ordinal_t o, std::uint32_t wdf, std::span<const std::uint32_t> positions) {
@@ -339,8 +363,8 @@ int main() {
 		std::iota(far.begin(), far.end(), 1u);
 		const std::vector<prospect::posting_input> many = {{"p", 4000, far}};
 		for (auto* x : {&b, &given}) {
-			x->add(1, wide, "", {}, 0, "", 0, "");
-			x->add(2, many, "", {}, 0, "", 0, "");
+			put(*x, 1, wide, "", {}, 0, "", 0, "");
+			put(*x, 2, many, "", {}, 0, "", 0, "");
 		}
 		CHECK(b.run_count() == 2 && given.run_count() == 0);
 		CHECK(flushed(b) == flushed(given));
@@ -355,11 +379,11 @@ int main() {
 		for (std::uint32_t i = 0; i < far.size(); ++i) { far[i] = 200 * (i + 1); }  // 2-byte deltas
 		const std::vector<prospect::posting_input> k = {{"k", 1, {}}}, long_term = {{big, 1, {}}}, many = {{"p", 3000, far}};
 		for (auto* x : {&b, &given}) {
-			x->add(1, k, "", {}, 0, "", 0, "");
-			x->add(2, long_term, "", {}, 0, "", 0, "");
-			x->add(3, many, "", {}, 0, "", 0, "");
-			x->add_split(4, k, "a " + big, "", 0, "");
-			x->add(5, k, "", {}, 0, "", 0, "");
+			put(*x, 1, k, "", {}, 0, "", 0, "");
+			put(*x, 2, long_term, "", {}, 0, "", 0, "");
+			put(*x, 3, many, "", {}, 0, "", 0, "");
+			put_split(*x, 4, k, "a " + big, "", 0, "");
+			put(*x, 5, k, "", {}, 0, "", 0, "");
 		}
 		CHECK(b.doc_count() == 5 && flushed(b) == flushed(given));
 		prospect::segment_writer w;  // and segment_writer's bytes, an encoder the buffer does not share
@@ -368,7 +392,7 @@ int main() {
 		w.add(3, many, 0, "", 0, "");
 		const std::string split = "a " + big;
 		const std::vector<prospect::text_token> words = {{0, 1, 1}, {2, 5000, 2}};
-		prospect::detail::writer_access::add_text(w, 4, k, split, words, 2, "", 0, "");
+		put(w, 4, k, split, words, 2, "", 0, "");
 		w.add(5, k, 0, "", 0, "");
 		CHECK(flushed(b) == w.flush({1, 2, 3}));
 	}
@@ -412,7 +436,7 @@ int main() {
 			d.key = "Q" + std::to_string(i);
 			prospect::text_detail::split_words(d.text, [&](std::size_t o, std::size_t n) { d.tokens.push_back({std::uint32_t(o), std::uint32_t(n), ++d.length}); });
 			const auto in = d.inputs();
-			prospect::detail::writer_access::add_split(split, d.docid, in, d.text, d.length, d.stored, d.version, d.key);
+			put_split(split, d.docid, in, d.text, d.length, d.stored, d.version, d.key);
 		}
 		const std::string expected = reference(docs, {0, 1, 2});
 		CHECK(split.flush({1, 2, 3}) == expected);
@@ -421,7 +445,7 @@ int main() {
 			b.tuple_offsets = far;
 			for (const doc& d : docs) {
 				const auto in = d.inputs();
-				b.add_split(d.docid, in, d.text, d.stored, d.version, d.key);
+				put_split(b, d.docid, in, d.text, d.stored, d.version, d.key);
 			}
 			CHECK(flushed(b) == expected);
 		}

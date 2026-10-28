@@ -33,8 +33,12 @@ struct segment_snapshot {
 	// The field table of the index the segment belongs to: queries name fields, and each
 	// segment resolves a name to its own index's id (D14).
 	const strata::field_table* fields = nullptr;
-	std::optional<std::uint32_t> field_id(std::string_view name) const { return fields ? fields->find(name) : std::nullopt; }
-	std::optional<std::uint32_t> key_field() const { return fields ? fields->key_field() : std::nullopt; }
+	std::optional<std::uint32_t> field_id(std::string_view name) const { return table().find(name); }
+	std::optional<std::uint32_t> key_field() const { return table().key_field(); }
+	const strata::field_table& table() const {
+		if (!fields) { throw std::logic_error("strata: a segment snapshot without its index's field table"); }
+		return *fields;
+	}
 	bool any_deleted() const {
 		if (!deleted || dead == 0) { return false; }
 		if (dead != unknown_dead) { return true; }

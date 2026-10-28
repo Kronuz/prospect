@@ -8,6 +8,7 @@
 //     and the deleted fraction stay bounded against a fresh index of the same documents,
 //     and do not trend upward.
 // PROSPECT_CHURN_CYCLES sets the number of churn cycles (default 8).
+#include "text_field.hh"
 #include "prospect/index.hh"
 #include "prospect/searcher.hh"
 #include "strata/core/faultfs.hh"
@@ -49,7 +50,7 @@ static document make_doc(const std::string& key, const model_doc& m) {
 	std::uint32_t pos = 0;
 	for (const auto& w : m.words) {
 		d.field().terms.push_back({w, 1, {++pos}});
-		++d.length;
+		++d.field().length;
 	}
 	d.stored = m.stored;
 	return d;
@@ -75,6 +76,7 @@ static model_doc random_doc(std::mt19937_64& r, bool huge = false) {
 // the index assigns) or delete.
 static void put(prospect::index& ix, model& m, const std::string& key, const model_doc* doc) {
 	transaction t;
+	t.fields = text_fields();
 	operation o;
 	o.key = key;
 	if (doc) {
@@ -97,7 +99,7 @@ static void put(prospect::index& ix, model& m, const std::string& key, const mod
 
 static std::vector<prospect::segment_snapshot> snapshot(const prospect::index& ix) {
 	std::vector<prospect::segment_snapshot> out;
-	for (const auto& s : ix.segments()) { out.push_back({s.seg(), s.deleted, s.dead}); }
+	for (const auto& s : ix.segments()) { out.push_back({s.seg(), s.deleted, s.dead, &ix.fields()}); }
 	return out;
 }
 
