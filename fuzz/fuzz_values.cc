@@ -39,7 +39,7 @@ std::string build(std::uint64_t seed, std::uint32_t docs, std::uint32_t slots) {
 }
 
 const std::string& base(unsigned which) {
-	static const std::string segments[] = {build(1, 400, 6), build(2, 9000, 4), build(3, 700, 300)};
+	static const std::string segments[] = {build(1, 400, 6), build(2, 5000, 4), build(3, 300, 120)};
 	return segments[which % std::size(segments)];
 }
 
@@ -63,7 +63,12 @@ void exercise(const prospect::segment& seg) {
 	const auto& rd = seg.get<prospect::values_plugin>();
 	const std::uint64_t docs = seg.core().doc_count();
 	std::mt19937_64 rng(docs + rd.slot_count());
-	for (std::size_t i = 0; i < rd.slot_count(); ++i) {
+	std::size_t slots = 0;
+	try {
+		slots = rd.slot_count();
+	} catch (const strata::corrupt_segment&) {
+	}
+	for (std::size_t i = 0; i < slots; i += 1 + i / 16) {  // the first sixteen, then sparser
 		try {
 			const auto& c = rd.at(i);
 			(void)c.documents();
@@ -71,7 +76,7 @@ void exercise(const prospect::segment& seg) {
 			std::uint64_t seen = 0;
 			strata::ordinal_t prev = 0;
 			auto it = c.begin();
-			for (auto o = it.next(); o != strata::no_more_docs && seen < 200000; o = it.next(), ++seen) {
+			for (auto o = it.next(); o != strata::no_more_docs && seen < 20000; o = it.next(), ++seen) {
 				if (o >= docs || (seen && o <= prev)) { std::abort(); }  // fence or answer (F10)
 				prev = o;
 				(void)it.value();
@@ -94,10 +99,12 @@ void exercise(const prospect::segment& seg) {
 		} catch (const strata::corrupt_segment&) {
 		}
 	}
-	try {
-		prospect::check_report r;
-		strata::check_segment(seg, nullptr, r);
-	} catch (const strata::corrupt_segment&) {
+	if (rng() % 4 == 0) {  // the whole-segment check reads every value: one input in four
+		try {
+			prospect::check_report r;
+			strata::check_segment(seg, nullptr, r);
+		} catch (const strata::corrupt_segment&) {
+		}
 	}
 }
 

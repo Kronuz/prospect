@@ -7,8 +7,9 @@ D3 and the step table; Q2 (a): opaque `bytes` slots, typed later). Developer age
 
 ## State
 
-Implementation written and building; evidence below fills in as it lands. Format change: a
-decoder-safety review follows before landing.
+Built, proven locally (Release, ASan+UBSan, TSan, mutants, fuzz), pushed. Waiting on CI for the
+last push and the decoder-safety review. Strata prerequisite pushed as `strata:b644708`
+(`phase4/values-rank`, CI green); prospect pins it.
 
 ## Done criteria
 
@@ -63,11 +64,75 @@ unchanged.
 
 ## Done
 
-(see Evidence as items land)
+- `strata:b644708` (branch `phase4/values-rank`, from the pin 75d1e7e): rank 7 for `values`,
+  `pre_freeze` 0x8000000B, format 14 fixtures re-pinned; strata ctest 23 of 23 after the
+  fixture re-pin.
+- `prospect:ca67b32` the plugin: `values.hh` (part, stage 1, reader, check, digest records),
+  `values_writer.hh` (builder, merge), `docvalues.hh` `encode_present`, the inverter keeps values
+  beside the tuple buffer, `tuple_buffer::flush` takes an `extra` hook.
+- `prospect:c592aae` tests, fuzz target, fixtures (`values.sx`, `values-merge.sx`,
+  `digest-values.txt`; `digest.txt` unchanged), `format13_test`, `segment_test`, `reorder_test`
+  updated for the new structure bit and section.
+- `prospect:51236aa` repin strata. `prospect:880a60d` lazy open without `std::call_once`
+  (below), `prospect:8a1b148` its regression test; rebased on main 7f1d915.
+- Later commits on this branch: the fuzz corpus and the ledger.
 
 ## Evidence
 
+Host: Intel Mac, Homebrew LLVM for sanitizers. All counts from this branch's builds.
+
+- **ctest, Release:** 43 of 43 (directory_tmpfs excluded: Linux only). **ASan+UBSan (-O1):** 42 of
+  42 before the lazy-open change, 37 of 37 for the non-lifecycle subset after it (own dependency
+  tree, `.scratch/build-asan`). **TSan:** values, fixtures, merge, index, concurrency,
+  background_merge, fuzz_values_replay clean (own tree, `.scratch/build-tsan`).
+- **Digest identity:** `digest.txt` (no values) did not change with the plugin; the values digest
+  is the same buffered, flushed and force-merged (`digest-values.txt`).
+- **Merge = one flush:** `values_test` compares a merge's values section with the direct flush's
+  of the live documents byte for byte (8 seeds, 2,500 operations each, replacements and deletes),
+  plus a shuffled order, with no value only deleted documents held left in any dictionary.
+- **Bug found and fixed: the open verified a region.** The first reader read and verified its
+  directory in the constructor; `segment_test` (open verifies no region) failed on it. The
+  directory and columns now open on first use. Revert check: with `(void)entries()` back in the
+  constructor `values_test` fails at `verified_regions() == 0` (mutant A).
+- **Bug found and fixed: TSan hang.** The first CI run's linux-tsan job hung in
+  `fuzz_values_replay` for an hour. Cause (inferred; not reproduced on Linux): `std::call_once`
+  retried after a throwing initializer, and TSan's `pthread_once` wrapper does not unwind. The lazy
+  open uses a mutex and a flag. `values_test` now reads a damaged column three times. This test
+  cannot show the hang on macOS, so the revert check is CI's linux-tsan job on `prospect:8a1b148`
+  against `prospect:a2677c6` (see CI below).
+- **Mutants** (`.scratch/mutants.py`, Release, `values_test` and `fixtures_test`): A the eager open;
+  B merge keeps deleted documents' values; C `advance` ignores its target inside a group; D no
+  accounting of the columns' bytes; E the flush adds values at the buffer's ordinal; F buffered
+  documents leave no digest record; G a column read without its region checksum; H a slot twice
+  per document accepted; I merge numbers by the old ordinal. All nine fail. D and G first
+  survived; the directory-only and column-only checks in `values_test` were added for them.
+  Under A `fixtures_test` spun for over an hour (no result), killed; a hang counts as caught.
+- **Fuzz:** `fuzz_values` (libFuzzer + ASan + UBSan, three bases, byte changes mostly in the values
+  section with checksums resealed): 12,228 runs in 10 minutes, 0 findings, corpus of 275 inputs
+  checked in and replayed as `fuzz_values_replay` (1.4 s). The first 10-minute run (2,701 runs)
+  before the target was lightened also found nothing. Well short of the one CPU-hour the design
+  asks of each decoder; the lead schedules the long run (it needs a hold).
+- **Screen, indexing without values** (not a measurement of record): 60,000 documents of 40 terms
+  through `apply` and `refresh`, base 7f1d915 against this branch, six interleaved rounds under
+  `quiet strict`, Intel Mac, Release: base 1.234 1.187 1.169 1.185 1.137 1.270 s (mean 1.197),
+  branch 1.174 1.184 1.175 1.201 1.164 1.205 s (mean 1.184). Neutral within the noise.
+
+## CI
+
+- `strata:b644708`: CI green (all jobs).
+- `prospect:a2677c6` (first push): all jobs green except linux-tsan, which hit its one-hour limit
+  in `fuzz_values_replay` (above). Not yet seen for the later pushes.
+
 ## Next
+
+- Read the CI of the latest push; the linux-tsan job is the one to look at.
+- Decoder-safety review (security reviewer), then the long fuzz run under a hold.
+- Merge `strata:b644708` into strata main before this branch lands, and repin if main moved.
+- Perf, for the lead to measure: a verbatim column copy for a single source without deletes; a
+  `next(doc)` on docset's `frozen_view` for sparse presence iteration; `value(ord, slot)` cost
+  per candidate in the key makers.
+- Not in P1 (seam steps): real-time reads of values from the write buffer (the core reads stored
+  records from the buffer; values are visible after the flush), typed slots, `declare_slot`.
 
 ## Blocked on
 
