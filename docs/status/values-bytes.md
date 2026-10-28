@@ -121,7 +121,11 @@ Host: Intel Mac, Homebrew LLVM for sanitizers. All counts from this branch's bui
 
 - `strata:b644708`: CI green (all jobs).
 - `prospect:a2677c6` (first push): all jobs green except linux-tsan, which hit its one-hour limit
-  in `fuzz_values_replay` (above). Not yet seen for the later pushes.
+  in `fuzz_values_replay` (above).
+- `prospect:8a1b148`: all 8 jobs green, linux-tsan in 25 minutes (asan-ubsan, tsan, gcc and clang
+  x86_64, arm64 gcc, macOS x86_64 and arm64, FreeBSD). That is the revert check for the hang: the
+  same test and corpus hung before the lazy-open change.
+- `prospect:f686f96` (corpus, target, ledger): queued when this was written.
 
 ## Next
 
