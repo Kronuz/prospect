@@ -6,7 +6,7 @@ include(FetchContent)
 # strata, the segment core prospect is the search layout of, pinned by commit; it pins the
 # libraries the core links (fst, termdict, completion, ...). Point FETCHCONTENT_SOURCE_DIR_<NAME>
 # at local checkouts to develop them together.
-FetchContent_Declare(strata GIT_REPOSITORY https://github.com/Kronuz/strata.git GIT_TAG b644708d688f0c486e824951ac94128f796bc5e4)
+FetchContent_Declare(strata GIT_REPOSITORY https://github.com/Kronuz/strata.git GIT_TAG 1c8f6c9cddd55d36e2e5528318b5b94c7b93ee0e)
 FetchContent_MakeAvailable(strata)
 # Search's own building blocks (Kronuz libraries), each pinned to the commit its gate numbers
 # were measured at.
@@ -103,6 +103,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(values_test test/values_test.cc)
   target_link_libraries(values_test PRIVATE prospect::prospect)
   add_test(NAME values COMMAND values_test)
+  add_executable(term_lists_test test/term_lists_test.cc)
+  target_link_libraries(term_lists_test PRIVATE prospect::prospect)
+  add_test(NAME term_lists COMMAND term_lists_test)
   add_executable(docvalues_test test/docvalues_test.cc)
   target_link_libraries(docvalues_test PRIVATE prospect::prospect)
   add_test(NAME docvalues COMMAND docvalues_test)
@@ -163,7 +166,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   # Fuzz targets: each target's checked-in corpus replays as a test in every build; with
   # PROSPECT_FUZZ (Clang) the libFuzzer binaries build too.
   option(PROSPECT_FUZZ "Build the libFuzzer targets (Clang)" OFF)
-  foreach(target segment postings values)
+  foreach(target segment postings values term_lists)
     add_executable(fuzz_${target}_replay fuzz/fuzz_${target}.cc fuzz/replay.cc)
     target_link_libraries(fuzz_${target}_replay PRIVATE prospect::prospect)
     add_test(NAME fuzz_${target}_replay COMMAND fuzz_${target}_replay "${CMAKE_CURRENT_SOURCE_DIR}/fuzz/corpus/${target}")

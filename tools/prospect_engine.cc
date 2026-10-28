@@ -138,6 +138,8 @@ int index(const std::string& dir) {
 	if (const char* threads = std::getenv("PROSPECT_THREADS")) { o.flush_threads = std::max<std::size_t>(1, std::strtoull(threads, nullptr, 10)); }
 	// PROSPECT_IDENTITY_SEED: segment ids from a fixed base, so runs compare byte for byte.
 	if (const char* seed = std::getenv("PROSPECT_IDENTITY_SEED")) { o.identity_seed = std::strtoull(seed, nullptr, 10); }
+	// PROSPECT_TERM_LISTS=1: also build the term lists (opt-in; F17).
+	if (const char* lists = std::getenv("PROSPECT_TERM_LISTS"); lists && std::string_view(lists) == "1") { o.opt_in |= prospect::term_lists_plugin::structure; }
 	const std::array<char, 16> uuid{'s', 't', 'r', 'a', 't', 'a', '-', 'b', 'e', 'n', 'c', 'h'};
 	auto ix = prospect::index::create(io, o, uuid);
 	warn_trust(ix);
@@ -726,9 +728,10 @@ int main(int argc, char** argv) {
 		residency::file file;
 		prospect::segment seg = open(argv[2], file);
 		prospect::check_report r;
-		strata::check_segment(seg, nullptr, r);
+		prospect::check_segment(seg, nullptr, r);
 		std::printf("ok: %llu documents, %llu terms, %llu postings, %llu positions, %llu stored bytes\n", (unsigned long long)r.documents, (unsigned long long)r.terms,
 			(unsigned long long)r.postings, (unsigned long long)r.positions, (unsigned long long)r.stored_bytes);
+		if (seg.holds<prospect::term_lists_plugin>()) { std::printf("term lists: %llu documents, %llu terms, %llu bytes\n", (unsigned long long)r.listed_documents, (unsigned long long)r.listed_terms, (unsigned long long)r.list_bytes); }
 		return 0;
 	}
 	if (mode == "resident" && argc == 3) { return resident(argv[2]); }

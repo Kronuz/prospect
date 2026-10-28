@@ -45,6 +45,7 @@
 #include "prospect/reader.hh"
 #include "prospect/strata.hh"
 #include "prospect/values_writer.hh"
+#include "prospect/term_lists_writer.hh"
 #include "strata/core/writer.hh"
 #include "termdict.hh"
 
@@ -97,6 +98,9 @@ public:
 	// stage 1); empty for none.
 	std::string_view key_prefix;
 	bool norms = true;  // whether the norms sub-structure is built (F4)
+	// The term lists' builder, when the segment builds them: told each term as it is written
+	// (the writer links it).
+	term_lists_builder* lists = nullptr;
 
 	void configure(const builder_settings& s) noexcept {
 		memory = s.memory;
@@ -245,6 +249,7 @@ public:
 			const auto& pos = tp.positions;
 			const std::uint32_t df = std::uint32_t(ords.size());
 			if (df == 0 || wdfs.size() != df || counts.size() != df) { throw std::invalid_argument("strata: malformed term postings"); }
+			if (lists) { lists->observe(key, ords, wdfs); }
 			for (auto c : counts) { max_positions_ = std::max(max_positions_, c); }
 
 			format::term_info info;
@@ -882,6 +887,13 @@ private:
 	std::uint64_t total_length_ = 0;
 	std::uint64_t charged_ = 0;  // the lengths column's charged capacity
 };
+
+inline std::uint64_t term_lists_builder::docs() const { return inverted_->doc_count(); }
+template <class Builders>
+void term_lists_builder::link(Builders& all) noexcept {
+	inverted_ = &std::get<inverted_builder>(all);
+	inverted_->lists = enabled_ ? this : nullptr;
+}
 
 namespace detail {
 struct writer_access;

@@ -31,6 +31,7 @@
 #include "prospect/format.hh"
 #include "prospect/strata.hh"
 #include "prospect/values.hh"
+#include "prospect/term_lists.hh"
 #include "strata/core/reader.hh"
 #include "termdict.hh"
 
@@ -140,7 +141,7 @@ inline bool splittable(std::string_view text, std::uint64_t max_word) noexcept {
 class inverted_builder;
 class inverting_buffer;
 struct inverted_plugin;
-using search_layout = layout<inverted_plugin, keys_plugin, stored_plugin, values_plugin>;
+using search_layout = layout<inverted_plugin, keys_plugin, stored_plugin, values_plugin, term_lists_plugin>;
 
 }  // namespace prospect
 
