@@ -246,10 +246,10 @@ int main() {
 	{
 		prospect::segment s(good);
 		CHECK(s.core().version() == strata::format::version && strata::format::version == strata::format::pre_freeze);
-		CHECK(s.core().structures() == (bit::inverted | bit::norms | bit::keys | bit::stored));
+		CHECK(s.core().structures() == (bit::inverted | bit::norms | bit::keys | bit::stored | bit::values));
 		// F5's order: the streamed sections, then the pinned tail by rank.
 		const std::vector<section> order{section::header, section::postings, section::positions, section::terms, section::lengths, section::keys, section::stored,
-			section::docids, section::stats, section::norms, section::term_index, section::versions, section::key_index};
+			section::values, section::docids, section::stats, section::norms, section::term_index, section::versions, section::key_index};
 		std::vector<section> got;
 		for (const auto& e : s.core().sections()) { got.push_back(e.kind); }
 		CHECK(got == order);
@@ -261,9 +261,9 @@ int main() {
 
 	// --- F2: the prefix ------------------------------------------------------------------
 	{
-		// The prefix CRC of the version written (format 14 step 1's pre-freeze, 0x8000000A), from
+		// The prefix CRC of the version written (format 14 step 1's pre-freeze, 0x8000000B), from
 		// the bytes.
-		CHECK(strata::format::get<std::uint32_t>(good.data() + 12) == 0xd4045cc9u);
+		CHECK(strata::format::get<std::uint32_t>(good.data() + 12) == 0x0941f671u);
 		CHECK(strata::format::read_version(good) == strata::format::pre_freeze);
 		// The magic wrong: damage.
 		for (std::size_t at = 0; at < 8; ++at) {
@@ -442,12 +442,12 @@ int main() {
 		const auto with_bits = [&](std::uint64_t structures) {
 			return open(relayout(good, [](entries&) {}, [&](strata::format::footer& f) { f.structures = structures; }));
 		};
-		const std::uint64_t built = bit::inverted | bit::norms | bit::keys | bit::stored;
+		const std::uint64_t built = bit::inverted | bit::norms | bit::keys | bit::stored | bit::values;
 		// A built structure's bit cleared: its sections present without it, or norms without
 		// inverted: damage.
-		for (std::uint64_t b : {bit::inverted, bit::norms, bit::keys, bit::stored}) { CHECK(with_bits(built & ~b) == outcome::corrupt); }
+		for (std::uint64_t b : {bit::inverted, bit::norms, bit::keys, bit::stored, bit::values}) { CHECK(with_bits(built & ~b) == outcome::corrupt); }
 		// index_sort without values: damage.
-		CHECK(with_bits(built | bit::index_sort) == outcome::corrupt);
+		CHECK(with_bits((built & ~bit::values) | bit::index_sort) == outcome::corrupt);
 		// A sub-structure without its owner's bit: damage, whatever the binary reads.
 		CHECK(with_bits(bit::norms | bit::keys | bit::stored) == outcome::corrupt);
 		CHECK(with_bits((built & ~bit::stored) | bit::stored_spans) == outcome::corrupt);
@@ -462,7 +462,6 @@ int main() {
 			if (got != outcome::unsupported) { std::fprintf(stderr, "bit %u: %s\n", b, name(got)); }
 			CHECK(got == outcome::unsupported);
 		}
-		CHECK(with_bits(built | bit::values | bit::index_sort) == outcome::unsupported);
 		// What a later format-13 release writes, its sections placed by F3's rule and its table
 		// changed where its bit allows: unsupported, since the bits are read before the table
 		// (F23 rules 3 and 5; F13-R35).
@@ -548,7 +547,7 @@ int main() {
 			CHECK(apply(ix, upsert("Q1", "w")) == strata::verdict::accepted);
 			ix.commit();
 			const auto m = ix.manifest();
-			CHECK(m.configured == (bit::inverted | bit::norms | bit::keys | bit::stored) && m.mask == m.configured);
+			CHECK(m.configured == (bit::inverted | bit::norms | bit::keys | bit::stored | bit::values) && m.mask == m.configured);
 			CHECK(m.min_version == strata::format::pre_freeze && m.max_version == strata::format::pre_freeze);
 			return m.generation;
 		};
@@ -571,7 +570,7 @@ int main() {
 		};
 		CHECK(with([](strata::files::manifest&) {}) == verdict::opens);
 		// A mask bit this binary cannot read: unsupported, before any segment opens.
-		CHECK(with([](strata::files::manifest& m) { m.mask |= bit::values; }) == verdict::unsupported);
+		CHECK(with([](strata::files::manifest& m) { m.mask |= bit::points; }) == verdict::unsupported);
 		CHECK(with([](strata::files::manifest& m) { m.mask |= bit::compact; }) == verdict::unsupported);
 		CHECK(with([](strata::files::manifest& m) { m.mask |= std::uint64_t(1) << 40; }) == verdict::unsupported);  // bits 32 to 63 (F13-R40)
 		CHECK(with([](strata::files::manifest& m) { m.mask |= std::uint64_t(1) << 63; }) == verdict::unsupported);
@@ -865,7 +864,7 @@ int main() {
 			strata::string_spill spill;
 			(void)prospect::merge_segments(src, {}, o, spill, {});
 			prospect::segment m(out);
-			CHECK(m.core().structures() == all && m.core().doc_count() == 400);
+			CHECK(m.core().structures() == (all | bit::values) && m.core().doc_count() == 400);
 			CHECK(m.get<strata::stored_plugin>().stored(0).empty() && m.get<strata::stored_plugin>().stored(200) == std::string(1, 's'));
 			CHECK(m.get<prospect::inverted_plugin>().term("odd")->df == 100 && m.get<prospect::inverted_plugin>().length(200) == 0);
 			CHECK(m.get<strata::keys_plugin>().find("Q1000", {}) == strata::ordinal_t(200) && m.get<strata::keys_plugin>().version(200) == 1);
