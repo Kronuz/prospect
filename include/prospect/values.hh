@@ -39,6 +39,7 @@
 #include "strata/core/reader.hh"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -68,6 +69,27 @@ inline constexpr std::uint64_t max_value_bytes = format::max_stored_record;
 inline constexpr std::size_t entry_bytes = 32;
 inline constexpr std::uint8_t kind_bytes = std::uint8_t(docvalues::kind::bytes);
 }  // namespace values_format
+
+namespace values_detail {
+// Runs an initializer at most once to success, from any thread; one that throws leaves it to
+// the next caller. (Not std::call_once: TSan's pthread_once wraps the callable without
+// unwinding, and a throw there leaves every later caller waiting.)
+class lazy {
+public:
+	template <class F>
+	void run(F&& f) {
+		if (done_.load(std::memory_order_acquire)) { return; }
+		std::lock_guard lock(m_);
+		if (done_.load(std::memory_order_relaxed)) { return; }
+		f();
+		done_.store(true, std::memory_order_release);
+	}
+
+private:
+	std::mutex m_;
+	std::atomic<bool> done_{false};
+};
+}  // namespace values_detail
 
 struct values_plugin {
 	static constexpr std::string_view id = "values";
@@ -230,17 +252,17 @@ struct values_plugin {
 			std::uint64_t offset, size;
 		};
 		struct cell {
-			std::once_flag once;
+			values_detail::lazy once;
 			std::optional<column> col;
 		};
 		struct state {
-			std::once_flag once;
+			values_detail::lazy once;
 			std::vector<entry> entries;
 			std::unique_ptr<cell[]> cells;
 		};
 
 		const std::vector<entry>& entries() const {
-			std::call_once(state_->once, [&] { read_directory(*state_); });
+			state_->once.run([&] { read_directory(*state_); });
 			return state_->entries;
 		}
 		void read_directory(state& st) const {
@@ -277,7 +299,7 @@ struct values_plugin {
 		}
 		const column& open_column(std::size_t i) const {
 			cell& c = state_->cells[i];
-			std::call_once(c.once, [&] {
+			c.once.run([&] {
 				const entry& e = state_->entries[i];
 				if (!section_.verify(e.offset, e.size)) { corrupt("values checksum"); }
 				column col(docvalues::column_view::open(section_.bytes.data() + e.offset, std::size_t(e.size)));

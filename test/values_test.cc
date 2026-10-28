@@ -177,6 +177,20 @@ static bool fenced(const std::string& file) {
 	return false;
 }
 
+// Whether reading only the directory (slot_count) or only the columns, with no check_segment and
+// so no whole-section verification, fences the damage.
+static bool fenced_by(const std::string& file, bool columns) {
+	try {
+		const segment seg(file);
+		const auto& rd = seg.get<values_plugin>();
+		if (!columns) { (void)rd.slot_count(); }
+		for (std::size_t i = 0; columns && i < rd.slot_count(); ++i) { (void)rd.at(i); }
+	} catch (const strata::corrupt_segment&) {
+		return true;
+	}
+	return false;
+}
+
 int main() {
 	// --- A segment round-trips -------------------------------------------------------------
 	for (std::uint64_t seed = 0; seed < 12; ++seed) {
@@ -186,6 +200,16 @@ int main() {
 		const std::string file = write_segment(docs);
 		const segment seg(file);
 		CHECK(seg.holds<values_plugin>());
+		// An open reads nothing of the section; the directory then verifies its own region, and a
+		// column its own.
+		CHECK(seg.core().verified_regions() == 0);
+		if (docs.size() > 1) {
+			const std::size_t slots = seg.get<values_plugin>().slot_count();
+			const std::size_t after_directory = seg.core().verified_regions();
+			CHECK(slots > 0 && after_directory >= 1);
+			(void)seg.get<values_plugin>().at(0);
+			CHECK(seg.core().verified_regions() >= after_directory);
+		}
 		expect_segment(seg, docs);
 		// Written twice, the same bytes.
 		CHECK(write_segment(docs) == file);
@@ -445,6 +469,31 @@ int main() {
 			CHECK(fenced(mutate(e.length - 4, [&](char* p) { std::uint32_t v = n + 1; std::memcpy(p, &v, 4); })));
 			CHECK(fenced(mutate(e.length - 4, [&](char* p) { std::uint32_t v = n - 1; std::memcpy(p, &v, 4); })));
 		}
+		// A changed byte inside a column, checksums left alone: the column's region fails.
+		for (std::uint64_t at = 3; at < dir; at += 1 + dir / 25) {
+			std::string file = base;
+			file[e.offset + at] ^= 0x21;
+			CHECK(fenced(file));
+		}
+		// A change that keeps the column well-formed, found by the first read of a column alone
+		// (no whole-section check): one value's last byte, left in order.
+		{
+			// A second slot's bulk puts the directory in a later region than the first column.
+			std::vector<model_values> docs(300);
+			docs[0] = {{4, "aaaa"}};
+			docs[1] = {{4, "bbbb"}};
+			docs[2] = {{4, "cccc"}};
+			for (std::size_t d = 0; d < docs.size(); ++d) { docs[d][9] = std::string(100, char('0' + d % 10)) + std::to_string(d); }
+			std::string file = write_segment(docs);
+			CHECK(!fenced_by(file, true) && !fenced_by(file, false));
+			const std::size_t at = file.find("bbbb");
+			CHECK(at != std::string::npos);
+			file[at + 3] = 'c';  // "bbbc": still between "aaaa" and "cccc"
+			CHECK(fenced_by(file, true));
+		}
+		// Bytes between the last column and the directory, or a last column short of them:
+		// the directory fences on its own, with no column opened.
+		CHECK(fenced_by(mutate(entry_at(n - 1) + 24, [](char* p) { std::uint64_t v; std::memcpy(&v, p, 8); --v; std::memcpy(p, &v, 8); }), false));
 		// Each directory field.
 		CHECK(n >= 3);
 		for (std::uint32_t i : {0u, 1u, n - 1}) {
