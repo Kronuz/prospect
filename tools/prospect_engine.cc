@@ -206,7 +206,7 @@ int merge(const std::string& dir) {
 	ix.force_merge(1);
 	ix.commit();
 	const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-	const bool ordered = ix.segments().size() != 1 || ix.segments()[0].seg->core().docid_ordered();
+	const bool ordered = ix.segments().size() != 1 || ix.segments()[0].seg()->core().docid_ordered();
 	std::cerr << "merged: " << ix.segments().size() << " segments, " << (ordered ? "docid order" : "reordered") << ", " << secs << " s\n";
 	return 0;
 }
@@ -227,7 +227,7 @@ int serve(const std::string& dir) {
 		auto ix = prospect::index::open(io, o);
 		warn_trust(ix);
 		std::vector<prospect::segment_snapshot> segs;
-		for (const auto& v : ix.segments()) { segs.push_back({v.seg, v.deleted, v.dead}); }
+		for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead}); }
 		for (LineReader in; in.next(line);) {
 			const std::size_t tab = line.find('\t');
 			std::cout << run(std::span<const prospect::segment_snapshot>(segs), std::string_view(line.data(), tab), std::string_view(line).substr(tab + 1)) << '\n';
@@ -427,7 +427,7 @@ int verify_index(const std::string& dir) {
 	auto ix = prospect::index::open(io, o);
 	warn_trust(ix);
 	std::vector<prospect::segment_snapshot> segs;
-	for (const auto& v : ix.segments()) { segs.push_back({v.seg, v.deleted, v.dead}); }
+	for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead}); }
 	std::span<const prospect::segment_snapshot> view(segs);
 	std::size_t queries = 0, mismatches = 0;
 	auto close = [](double a, double b) { return std::abs(a - b) <= 1e-9 * std::max(1.0, std::max(a, b)); };
@@ -492,7 +492,7 @@ int dump(const std::string& dir) {
 	auto ix = prospect::index::open(io, o);
 	warn_trust(ix);
 	std::vector<prospect::segment_snapshot> segs;
-	for (const auto& v : ix.segments()) { segs.push_back({v.seg, v.deleted, v.dead}); }
+	for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead}); }
 	const char* count_env = std::getenv("PROSPECT_DUMP_COUNT");
 	const bool with_count = !count_env || std::string_view(count_env) != "0";
 	LineReader in;
@@ -598,7 +598,7 @@ int bench(const std::string& dir, std::string_view command, int runs, prospect::
 		auto ix = prospect::index::open(io, o);
 		warn_trust(ix);
 		std::vector<prospect::segment_snapshot> segs;
-		for (const auto& v : ix.segments()) { segs.push_back({v.seg, v.deleted, v.dead}); }
+		for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead}); }
 		std::cerr << "bench: " << segs.size() << " segments\n";
 		const std::span<const prospect::segment_snapshot> view(segs);
 		return bench_queries(runs, [&](std::string_view query) { return run(view, command, query, scheme, o.key_prefix); });
@@ -699,7 +699,7 @@ int churn(const std::string& dir) {
 			const std::string_view command = l.substr(a + 1, b - a - 1), query = l.substr(b + 1);
 			const auto start = clock::now();
 			std::vector<prospect::segment_snapshot> segs;
-			for (const auto& v : ix.segments()) { segs.push_back({v.seg, v.deleted, v.dead}); }
+			for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead}); }
 			// As serve answers it: weights from the snapshot's statistics, not each segment's.
 			const std::uint64_t result = run(std::span<const prospect::segment_snapshot>(segs), command, query);
 			std::cout << "Q\t" << us(start) << '\t' << result << std::endl;

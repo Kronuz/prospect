@@ -123,6 +123,7 @@ static transaction tx_of(operation o) {
 int main() {
 	index::options keyed;
 	keyed.key_prefix = "Q";
+	keyed.retained_predecessors = 2;  // recover --to any of the last manifests
 	// PROSPECT_LIFECYCLE_REORDER: every merge reorders, with test-sized thresholds, so each
 	// crash point, replay, and background schedule below covers reordering merges (T5).
 	const bool reorder_all = std::getenv("PROSPECT_LIFECYCLE_REORDER") != nullptr;
@@ -877,7 +878,7 @@ int main() {
 			if (i % 40 == 39) { ix.refresh(); }
 		}
 		ix.force_merge();
-		CHECK(ix.segments().size() == 1 && !ix.segments()[0].seg->core().docid_ordered());
+		CHECK(ix.segments().size() == 1 && !ix.segments()[0].seg()->core().docid_ordered());
 	}
 	tally inline_merges, background_merges;
 	t1(false, target, inline_merges);

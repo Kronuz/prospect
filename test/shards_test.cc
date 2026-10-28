@@ -71,7 +71,7 @@ postings postings_of(const doc& d) {
 struct built {
 	std::vector<std::string> bytes;
 	std::vector<std::unique_ptr<segment>> segs;
-	std::vector<std::vector<std::uint64_t>> deleted;
+	std::vector<strata::deleted_bits> deleted;
 	std::vector<std::uint64_t> dead;
 	std::vector<std::vector<std::uint64_t>> docids;  // by segment, by ordinal
 	std::vector<segment_snapshot> snapshots() const {
@@ -85,20 +85,21 @@ struct built {
 void add_segment(built& b, const std::vector<std::pair<std::uint64_t, const doc*>>& group, const std::set<std::uint64_t>& dead) {
 	segment_writer w;
 	std::vector<std::uint64_t> ids;
-	std::vector<std::uint64_t> bits((group.size() + 63) / 64, 0);
+	strata::deleted_bits bits((group.size() + 63) / 64);
+	std::uint64_t* words = bits.mutable_words();
 	std::uint64_t n = 0;
 	for (std::size_t o = 0; o < group.size(); ++o) {
 		const auto p = postings_of(*group[o].second);
 		w.add(group[o].first, p.inputs(), p.length);
 		ids.push_back(group[o].first);
 		if (dead.count(group[o].first)) {
-			bits[o >> 6] |= std::uint64_t(1) << (o & 63);
+			words[o >> 6] |= std::uint64_t(1) << (o & 63);
 			++n;
 		}
 	}
 	b.bytes.push_back(w.flush({}));
 	b.segs.push_back(std::make_unique<segment>(b.bytes.back()));
-	b.deleted.push_back(n ? bits : std::vector<std::uint64_t>());
+	b.deleted.push_back(n ? std::move(bits) : strata::deleted_bits());
 	b.dead.push_back(n);
 	b.docids.push_back(std::move(ids));
 }

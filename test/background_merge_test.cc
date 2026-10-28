@@ -72,8 +72,8 @@ static double seconds_since(clock_type::time_point t) { return std::chrono::dura
 static std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> contents(const prospect::index& ix) {
 	std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> out;
 	for (const auto& s : ix.segments()) {
-		for (ordinal_t o = 0; o < s.seg->core().doc_count(); ++o) {
-			if (s.live(o)) { out[s.seg->core().docid(o)] = {s.seg->get<strata::keys_plugin>().version(o), std::string(s.seg->get<strata::stored_plugin>().stored(o))}; }
+		for (ordinal_t o = 0; o < s.seg()->core().doc_count(); ++o) {
+			if (s.live(o)) { out[s.seg()->core().docid(o)] = {s.seg()->get<strata::keys_plugin>().version(o), std::string(s.seg()->get<strata::stored_plugin>().stored(o))}; }
 		}
 	}
 	return out;
@@ -420,6 +420,9 @@ static void close_while_merging(std::size_t threads) {
 	a = prospect::index::open(ia, o);
 	b = prospect::index::open(ib, o);
 	auto c = prospect::index::open(ic, o);
+	a.wait_deletes();  // an open posts its orphans' deletes to the executor
+	b.wait_deletes();
+	c.wait_deletes();
 	CHECK(a.digest() == da && b.digest() == db && contents(c).size() == 24);
 	CHECK(segment_files(fa) == named_segments(a) && segment_files(fb) == named_segments(b) && segment_files(fc) == named_segments(c));
 	CHECK(no_spills(fa) && no_spills(fb) && no_spills(fc));
@@ -613,7 +616,7 @@ static void build_cancellation() {
 		ix.refresh();
 	}
 	std::vector<merge_source> sources;
-	for (const auto& v : ix.segments()) { sources.push_back({v.seg, nullptr}); }
+	for (const auto& v : ix.segments()) { sources.push_back({v.seg(), nullptr}); }
 	const std::array<std::uint8_t, 16> header{};
 	std::string full;
 	{

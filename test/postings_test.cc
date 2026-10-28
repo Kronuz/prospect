@@ -687,8 +687,8 @@ int main() {
 		const corpus parts[3] = {build(6000, 31, false, 1), build(6000, 32, false, 100000), build(6000, 33, false, 200000)};
 		std::vector<prospect::segment> segs;
 		for (const auto& p : parts) { segs.emplace_back(p.bytes); }
-		std::vector<std::uint64_t> deleted((6000 + 63) / 64);
-		for (std::size_t d = 0; d < 6000; d += 3) { deleted[d / 64] |= std::uint64_t(1) << (d % 64); }
+		strata::deleted_bits deleted((6000 + 63) / 64);
+		for (std::size_t d = 0; d < 6000; d += 3) { deleted.mutable_words()[d / 64] |= std::uint64_t(1) << (d % 64); }
 		using query = std::vector<std::string>;
 		const std::vector<query> queries = {{"dense"}, {"mid"}, {"sparse"}, {"counts"}, {"clustered"}, {"mid", "sparse"}, {"dense", "counts", "gaps"}, {"bool", "mid"}};
 		std::size_t seeded = 0, compared = 0;
@@ -746,8 +746,8 @@ int main() {
 			}
 			const std::string bytes = w.flush({});
 			prospect::segment hot(bytes);
-			std::vector<std::uint64_t> gone((400 + 63) / 64);
-			for (std::size_t d = 0; d < 40; ++d) { gone[d / 64] |= std::uint64_t(1) << (d % 64); }
+			strata::deleted_bits gone((400 + 63) / 64);
+			for (std::size_t d = 0; d < 40; ++d) { gone.mutable_words()[d / 64] |= std::uint64_t(1) << (d % 64); }
 			const prospect::segment_snapshot one[] = {{&hot, &gone}};
 			auto b = [&](const prospect::segment& seg) -> prospect::scorer_ptr { return std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term("hot")); };
 			prospect::term_scorer probe(hot.get<prospect::inverted_plugin>(), *hot.get<prospect::inverted_plugin>().term("hot"));

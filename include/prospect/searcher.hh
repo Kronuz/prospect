@@ -5,6 +5,7 @@
 #pragma once
 
 #include "prospect/search.hh"
+#include "strata/core/deleted_bits.hh"
 
 #include <algorithm>
 #include <cmath>
@@ -26,7 +27,7 @@ namespace prospect {
 struct segment_snapshot {
 	static constexpr std::uint64_t unknown_dead = ~std::uint64_t(0);
 	const segment* seg = nullptr;
-	const std::vector<std::uint64_t>* deleted = nullptr;
+	const strata::deleted_bits* deleted = nullptr;
 	std::uint64_t dead = unknown_dead;
 	bool any_deleted() const {
 		if (!deleted || dead == 0) { return false; }
@@ -42,7 +43,7 @@ struct segment_snapshot {
 // frequencies are off (review C3), and windows clear deleted bits (I3).
 class live_scorer final : public scorer {
 public:
-	live_scorer(scorer_ptr inner, const std::vector<std::uint64_t>& deleted) : inner_(std::move(inner)), deleted_(&deleted) {}
+	live_scorer(scorer_ptr inner, const strata::deleted_bits& deleted) : inner_(std::move(inner)), deleted_(&deleted) {}
 	ordinal_t doc() const noexcept override { return inner_->doc(); }
 	ordinal_t next() override { return skip(inner_->next()); }
 	ordinal_t advance(ordinal_t t) override { return skip(inner_->advance(t)); }
@@ -81,7 +82,7 @@ private:
 		return d;
 	}
 	scorer_ptr inner_;
-	const std::vector<std::uint64_t>* deleted_;
+	const strata::deleted_bits* deleted_;
 };
 
 struct doc_hit {

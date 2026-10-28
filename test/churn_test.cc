@@ -97,7 +97,7 @@ static void put(prospect::index& ix, model& m, const std::string& key, const mod
 
 static std::vector<prospect::segment_snapshot> snapshot(const prospect::index& ix) {
 	std::vector<prospect::segment_snapshot> out;
-	for (const auto& s : ix.segments()) { out.push_back({s.seg, s.deleted, s.dead}); }
+	for (const auto& s : ix.segments()) { out.push_back({s.seg(), s.deleted, s.dead}); }
 	return out;
 }
 
@@ -106,8 +106,8 @@ static std::vector<prospect::segment_snapshot> snapshot(const prospect::index& i
 static void verify(const prospect::index& ix, const model& m, std::mt19937_64& r, const char* when) {
 	std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> live;  // docid -> (version, stored)
 	for (const auto& s : ix.segments()) {
-		for (strata::ordinal_t o = 0; o < s.seg->core().doc_count(); ++o) {
-			if (s.live(o)) { live[s.seg->core().docid(o)] = {s.seg->get<strata::keys_plugin>().version(o), s.seg->get<strata::stored_plugin>().stored(o)}; }
+		for (strata::ordinal_t o = 0; o < s.seg()->core().doc_count(); ++o) {
+			if (s.live(o)) { live[s.seg()->core().docid(o)] = {s.seg()->get<strata::keys_plugin>().version(o), s.seg()->get<strata::stored_plugin>().stored(o)}; }
 		}
 	}
 	CHECK(live.size() == m.size());
@@ -245,7 +245,7 @@ int main() {
 			most_segments = std::max(most_segments, ix.segments().size());
 			std::uint64_t docs = 0, deleted = 0;
 			for (const auto& s : ix.segments()) {
-				docs += s.seg->core().doc_count();
+				docs += s.seg()->core().doc_count();
 				if (s.deleted) {
 					for (auto w : *s.deleted) { deleted += std::uint64_t(std::popcount(w)); }
 				}
