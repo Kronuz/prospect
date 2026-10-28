@@ -30,6 +30,7 @@
 #include "docset.hh"
 #include "prospect/format.hh"
 #include "prospect/strata.hh"
+#include "prospect/values.hh"
 #include "strata/core/reader.hh"
 #include "termdict.hh"
 
@@ -139,7 +140,7 @@ inline bool splittable(std::string_view text, std::uint64_t max_word) noexcept {
 class inverted_builder;
 class inverting_buffer;
 struct inverted_plugin;
-using search_layout = layout<inverted_plugin, keys_plugin, stored_plugin>;
+using search_layout = layout<inverted_plugin, keys_plugin, stored_plugin, values_plugin>;
 
 }  // namespace prospect
 
@@ -558,6 +559,7 @@ struct document_fields {  // the document's fields, with the inverter's text inp
 	std::vector<text_token> tokens;
 	bool split_text = false;
 	std::string stored;
+	std::vector<slot_value> values;
 };
 }  // namespace detail
 // doc_bytes reads it at more than one flush thread, so those flush points depend on it; at

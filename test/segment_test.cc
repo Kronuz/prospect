@@ -261,6 +261,7 @@ int main() {
 				s.get<prospect::inverted_plugin>().term("absent");
 				for (strata::ordinal_t d = 0; d < s.core().doc_count(); ++d) { (void)s.get<strata::stored_plugin>().stored(d); }
 				if (s.core().doc_count()) { (void)s.get<prospect::inverted_plugin>().length(0); }  // the lengths verify whole on first use
+				(void)s.get<prospect::values_plugin>().slot_count();  // the values directory verifies on first use
 			} catch (const strata::corrupt_segment&) {
 				detected = true;
 			} catch (const termdict::corrupt&) {

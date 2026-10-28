@@ -331,10 +331,17 @@ public:
 	// or of every one in ordinal order when `order` is empty (their docids must increase),
 	// through `w`, a writer holding no documents yet; positions gather in `positions` until
 	// the postings end. The batch drains first; a second flush writes the same bytes.
-	void flush(const std::array<std::uint8_t, 16>& segment_id, std::span<const ordinal_t> order, segment_writer& w, output& out, spill& positions) {
+	// `extra(w, plan)` adds what the buffer's owner holds for the documents, after them.
+	struct no_extra {
+		template <class Plan>
+		void operator()(segment_writer&, const Plan&) const noexcept {}
+	};
+	template <class Extra = no_extra>
+	void flush(const std::array<std::uint8_t, 16>& segment_id, std::span<const ordinal_t> order, segment_writer& w, output& out, spill& positions, Extra&& extra = {}) {
 		drain_for_flush(w.memory);
 		const flush_plan p = plan(order, w.memory);
 		add_documents(w, p);
+		extra(w, p);
 		merger m(*this, {}, {});
 		term_postings old;
 		std::vector<live_posting> live;

@@ -44,6 +44,7 @@
 #include "prospect/format.hh"
 #include "prospect/reader.hh"
 #include "prospect/strata.hh"
+#include "prospect/values_writer.hh"
 #include "strata/core/writer.hh"
 #include "termdict.hh"
 
@@ -948,6 +949,7 @@ private:
 		const ordinal_t ord = begin({docid, version, key}, borrowed);
 		if (structures & format::bit::stored) { builder<stored_plugin>().add(stored); }
 		if (structures & format::bit::inverted) { (void)builder<inverted_plugin>().begin(length); }
+		if (structures & format::bit::values) { (void)builder<values_plugin>().begin(); }
 		return ord;
 	}
 };

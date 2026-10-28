@@ -85,6 +85,27 @@ static std::string build(std::uint32_t docs, std::size_t stored, bool keyed, boo
 	return w.flush(id);
 }
 
+// Document d's values: slot 1 on every document (three distinct, one empty), slot 7 on every
+// fifth with arbitrary bytes, slot 100000 on every 37th, a long value on slot 0 now and then.
+static void add_values(segment_writer& w, ordinal_t ord, std::uint32_t d) {
+	auto& b = w.builder<values_plugin>();
+	if (d % 37 == 0) { b.add_value(ord, 0, std::string(300 + d % 7, char('A' + d % 26))); }
+	b.add_value(ord, 1, d % 3 == 0 ? std::string() : d % 3 == 1 ? "one" : "two");
+	if (d % 5 == 0) { b.add_value(ord, 7, std::string("\x00\xff\x80", 3) + std::to_string(d * 31 % 17)); }
+	if (d % 37 == 5) { b.add_value(ord, 100000, "rare " + std::to_string(d)); }
+}
+
+// A keyed segment of `docs` documents with values (docids first, first + step, ...).
+static std::string build_values(std::uint32_t docs, std::uint32_t first = 1, std::uint32_t step = 1) {
+	segment_writer w;
+	for (std::uint32_t d = 0; d < docs; ++d) {
+		const std::uint32_t docid = first + d * step;
+		const ordinal_t ord = w.add(docid, {}, 0, "v" + std::to_string(d), 1 + d % 3, "Q" + std::to_string(docid));
+		add_values(w, ord, docid);
+	}
+	return w.flush(id);
+}
+
 static std::string merged(const std::vector<std::string>& files, const std::vector<std::vector<std::uint64_t>>& deleted) {
 	std::vector<segment> segs;
 	segs.reserve(files.size());
@@ -131,6 +152,12 @@ int main() {
 	for (std::uint32_t o = 0; o < 400; o += 3) { da[o >> 6] |= std::uint64_t(1) << (o & 63); }
 	for (std::uint32_t o = 1; o < 300; o += 5) { db[o >> 6] |= std::uint64_t(1) << (o & 63); }
 	pin("merge-deletes.sx", merged({a, b}, {da, db}));
+	// Values: a flush, and a merge of two with deletes in both.
+	pin("values.sx", build_values(400));
+	{
+		const std::string va = build_values(400, 1, 2), vb = build_values(300, 2, 2);
+		pin("values-merge.sx", merged({va, vb}, {da, db}));
+	}
 	// A segment moved after open still answers: terms, postings, keys, and stored records
 	// The source is freed before any read, so under ASan a reader left pointing into it faults.
 	{
@@ -208,6 +235,30 @@ int main() {
 		char text[32];
 		std::snprintf(text, sizeof text, "%016llx\n", static_cast<unsigned long long>(digest));
 		pin("digest.txt", text);
+		// The same script's documents with values, still buffered, flushed, and merged away.
+		const std::array<char, 16> uuid2 = {'f', 'i', 'x', 't', 'u', 'r', 'e', 's', 'v', 'a', 'l', 'u', 'e', 's', '0', '1'};
+		faultfs::filesystem fs2;
+		faultfs::io io2(fs2);
+		auto vx = index::create(io2, o, uuid2);
+		for (std::uint32_t d = 0; d < 120; ++d) {
+			transaction t;
+			operation op;
+			op.type = operation::replace_key;
+			op.key = "Q" + std::to_string(d % 50);
+			op.doc = doc(d);
+			if (d % 3) { op.doc.values.push_back({1, "g" + std::to_string(d % 4)}); }
+			if (d % 7 == 0) { op.doc.values.push_back({9, std::string(d, 'z')}); }
+			t.ops.push_back(op);
+			vx.apply(t, {});
+		}
+		const std::uint64_t buffered = vx.digest();
+		vx.refresh();
+		CHECK(vx.digest() == buffered);
+		vx.force_merge();
+		CHECK(vx.digest() == buffered);
+		char vtext[32];
+		std::snprintf(vtext, sizeof vtext, "%016llx\n", static_cast<unsigned long long>(buffered));
+		pin("digest-values.txt", vtext);
 	}
 	// F13 (M20): the seed pairs of a fixed corpus, pinned (seeds.txt) so every platform writes the
 	// same pairs. The average length is exactly 5, which makes exact ties between levels (the
