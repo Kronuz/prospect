@@ -226,7 +226,7 @@ prospect::operation upsert(const std::string& key, const std::string& word) {
 
 strata::verdict::outcome apply(prospect::index& ix, const prospect::operation& op) {
 	prospect::transaction t;
-	t.fields = keyed_fields();
+	t.fields = ix.manifest().key_prefix.empty() ? text_fields() : keyed_fields();
 	t.ops.push_back(op);
 	return ix.apply(t, {}).result;
 }
@@ -263,9 +263,9 @@ int main() {
 
 	// --- F2: the prefix ------------------------------------------------------------------
 	{
-		// The prefix CRC of the version written (format 14 step 1's pre-freeze, 0x8000000B), from
+		// The prefix CRC of the version written (format 14 step 1's pre-freeze, 0x8000000C), from
 		// the bytes.
-		CHECK(strata::format::get<std::uint32_t>(good.data() + 12) == 0x0941f671u);
+		CHECK(strata::format::get<std::uint32_t>(good.data() + 12) == 0x10414ebbu);
 		CHECK(strata::format::read_version(good) == strata::format::pre_freeze);
 		// The magic wrong: damage.
 		for (std::size_t at = 0; at < 8; ++at) {
@@ -968,11 +968,11 @@ int main() {
 		o.key_prefix = "Q";
 		o.auto_merge = false;
 		auto ix = prospect::index::create(io, o, {});
-		// Stage 1: a term with the key prefix, a key without it, and a key unlike the
+		// Stage 1: a term of the key field, a key without the prefix, and a key unlike the
 		// operation's are invalid (F8; F13-R25 item 2).
 		{
 			auto op = upsert("Qa", "w");
-			op.doc.field().terms.push_back({"Qb", 0, {}});
+			op.doc.field(strata::field_ref::declared(1)).terms.push_back({"Qb", 0, {}});  // a term of the key field
 			CHECK(apply(ix, op) == strata::verdict::invalid);
 			auto add = upsert("Qa", "w");
 			add.type = prospect::operation::add;
@@ -1163,27 +1163,6 @@ int main() {
 				CHECK(refused(with_section(good9, section::key_index, ix9)));
 			}
 		}
-		// The merge's backstop refuses a key-prefixed term too, never drops it (F13-R10; CR6, M33).
-		{
-			prospect::segment_writer w;
-			std::vector<prospect::posting_input> in{{"Qx", 1, {}}};
-			w.add(1, in, 1);
-			const std::string bytes = w.flush({});
-			prospect::segment seg(bytes);
-			const std::vector<prospect::merge_source> src{{&seg, nullptr}};
-			std::string out;
-			strata::string_output so(out);
-			strata::string_spill spill;
-			strata::merge_options mo;
-			mo.key_prefix = "Q";
-			bool threw = false;
-			try {
-				(void)prospect::merge_segments(src, {}, so, spill, mo);
-			} catch (const std::invalid_argument&) {
-				threw = true;
-			}
-			CHECK(threw);
-		}
 		// A length-0 document keeps its length record through a flush (F21; CR6, M5).
 		{
 			auto empty = upsert("Qempty", "w");
@@ -1193,19 +1172,6 @@ int main() {
 			const std::uint64_t buffered = ix.digest();
 			ix.commit();
 			CHECK(ix.digest() == buffered);
-		}
-		// The writer's backstop refuses a key-prefixed term, never drops it.
-		{
-			prospect::segment_writer w;
-			w.key_prefix = "Q";
-			std::vector<prospect::posting_input> in{{"Qx", 1, {}}};
-			bool threw = false;
-			try {
-				w.add(1, in, 1);
-			} catch (const std::invalid_argument&) {
-				threw = true;
-			}
-			CHECK(threw);
 		}
 	}
 	// A keyless index: no prefix, so no routing and no term refused for its bytes (F13-R33). A

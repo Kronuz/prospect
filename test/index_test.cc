@@ -232,7 +232,7 @@ int main() {
 		o.doc = bad;
 		CHECK(ix.apply(tx({o}), {}).result == verdict::invalid);
 		document two_keys = doc("Qy", "y");
-		two_keys.field().terms.push_back({"Qz", 0, {}});  // a term with the key prefix: invalid (F8)
+		two_keys.field(strata::field_ref::declared(7)).terms.push_back({"Qz", 0, {}});  // a field the transaction does not declare: invalid
 		o.doc = two_keys;
 		CHECK(ix.apply(tx({o}), {}).result == verdict::invalid);
 		CHECK(ix.apply(tx({add("Qa", "again")}), {}).result == verdict::version_conflict);
@@ -323,7 +323,7 @@ int main() {
 		d = tokens("Qk", "one two");
 		d.field().tokens[1].position = d.field().tokens[0].position;
 		CHECK(rejects(d));
-		CHECK(rejects(tokens("Qk", "one Qtwo")));  // a token with the key prefix
+		CHECK(!rejects(tokens("Qk4", "one Qtwo")));  // a token is a term of its field whatever its bytes
 		d = tokens("Qk", "one two");
 		d.field().terms.push_back({"two", 1, {9}});
 		CHECK(rejects(d));
@@ -477,9 +477,9 @@ int main() {
 				o.doc = std::move(d);
 				return a.apply(tx({o}), {}).result == verdict::invalid;
 			};
-			CHECK(rejects(doc_of("Qk", "one Qtwo", true)));
-			CHECK(rejects(doc_of("Qk", "Qone two", true)));
-			CHECK(rejects(doc_of("Qk", "one  Q", true)));
+			CHECK(!rejects(doc_of("Qk1", "one Qtwo", true)));  // a word is a term of its field whatever its bytes
+			CHECK(!rejects(doc_of("Qk2", "Qone two", true)));
+			CHECK(!rejects(doc_of("Qk3", "one  Q", true)));
 			document d = doc_of("Qk", "one two", true);
 			d.field().terms.push_back({"two", 1, {9}});
 			CHECK(rejects(d));
@@ -487,7 +487,7 @@ int main() {
 			d.field().tokens.push_back({0, 3, 1});
 			CHECK(rejects(d));
 			d = doc_of("Qk", "one two", true);
-			d.length = 2;  // the index counts a split text's length
+			d.field().length = 2;  // the index counts a split text's length
 			CHECK(rejects(d));
 			operation o;
 			o.doc = doc_of("Qk", "oneQtwo three", true);
@@ -1734,7 +1734,7 @@ int main() {
 			}
 			std::size_t data = 0;
 			for (const auto& f : fs.list()) { data += !named.count(f); }
-			CHECK(data == ix.segments().size() + 1);  // each segment and the metadata file
+			CHECK(data == ix.segments().size() + 2);  // each segment, the metadata file and the field table's
 			if (failures) {
 				std::fprintf(stderr, "  power lost after mutation %llu of %llu\n", (unsigned long long)n, (unsigned long long)points);
 				break;

@@ -215,6 +215,7 @@ int main() {
 						named.insert(f);
 						const auto mf = files::decode_manifest(fs.view(f));
 						if (mf.meta.generation) { named.insert(index_detail::meta_name(mf.meta.generation)); }
+						if (mf.fields.generation) { named.insert(index_detail::fields_name(mf.fields.generation)); }
 						for (const auto& r : mf.segments) {
 							named.insert(index_detail::segment_name(r.id));
 							if (r.live.generation) { named.insert(index_detail::live_name(r.id, r.live.generation)); }

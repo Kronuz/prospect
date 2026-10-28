@@ -108,6 +108,9 @@ int main() {
 		for (std::uint64_t at = 0; at < size; at += stride) {
 			if (at >= prefix) { offsets.push_back(at); }
 		}
+		// The field table's version varint (bytes 8 to 12) has no checksum: a changed one reads as
+		// another version, which is unsupported, not damage (strata's fields_test), and is not retried.
+		if (name.starts_with("fields-")) { std::erase_if(offsets, [](std::uint64_t at) { return at >= 8 && at < 13; }); }
 		for (const std::uint64_t at : offsets) {
 			for (faultfs::media kind : {faultfs::media::bit_flip, faultfs::media::read_error}) {
 				// Transient: the medium returns the right bytes on the next read.
@@ -182,8 +185,16 @@ int main() {
 			auto ix = prospect::index::open(io, keyed);
 			merged = index_detail::segment_name(ix.manifest().segments.at(0).id);
 		}
-		const std::uint64_t size = fs.view(merged).size();
-		fs.add_media_fault(merged, faultfs::media::bit_flip, size / 2, size / 2 + 1, 0);
+		// A byte in the middle of the postings, which every digest reads.
+		std::uint64_t at = 0;
+		{
+			const std::string_view file = fs.view(merged);
+			for (const auto& e : strata::format::decode_toc(file, strata::format::decode_footer(file))) {
+				if (e.kind == strata::format::section::postings) { at = e.offset + e.length / 2; }
+			}
+		}
+		CHECK(at != 0);
+		fs.add_media_fault(merged, faultfs::media::bit_flip, at, at + 1, 0);
 		bool head_failed = false;
 		try {
 			auto ix = prospect::index::open(io, keyed);
