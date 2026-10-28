@@ -153,6 +153,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_include_directories(engine_query_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tools")
   target_link_libraries(engine_query_test PRIVATE prospect::prospect)
   add_test(NAME engine_query COMMAND engine_query_test)
+  add_executable(shards_test test/shards_test.cc)
+  target_link_libraries(shards_test PRIVATE prospect::prospect)
+  target_compile_definitions(shards_test PRIVATE PROSPECT_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
+  add_test(NAME shards COMMAND shards_test)
   # Fuzz targets: each target's checked-in corpus replays as a test in every build; with
   # PROSPECT_FUZZ (Clang) the libFuzzer binaries build too.
   option(PROSPECT_FUZZ "Build the libFuzzer targets (Clang)" OFF)
