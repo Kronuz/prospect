@@ -165,7 +165,7 @@ int main() {
 		auto first = std::make_unique<segment>(file);
 		segment moved(std::move(*first));
 		first.reset();
-		const auto info = moved.get<prospect::inverted_plugin>().term("gamma");
+		const auto info = moved.get<prospect::inverted_plugin>().term(0, "gamma");
 		CHECK(info && info->df > 0);
 		postings_iterator it(moved.get<prospect::inverted_plugin>(), *info);
 		std::uint64_t n = 0;
@@ -200,9 +200,9 @@ int main() {
 			document x;
 			for (std::uint32_t k = 0; k < 5; ++k) {
 				if ((d + k) % 3 == 0) { continue; }
-				x.terms.push_back({words[k], 1 + (d + k) % 3, {}});
-				for (std::uint32_t p = 0; p < x.terms.back().wdf; ++p) { x.terms.back().positions.push_back(1 + k + 7 * p); }
-				x.length += x.terms.back().wdf;
+				x.field().terms.push_back({words[k], 1 + (d + k) % 3, {}});
+				for (std::uint32_t p = 0; p < x.field().terms.back().wdf; ++p) { x.field().terms.back().positions.push_back(1 + k + 7 * p); }
+				x.length += x.field().terms.back().wdf;
 			}
 			x.key = "Q" + std::to_string(d % 50);
 			x.stored = "doc" + std::to_string(d);
@@ -286,7 +286,7 @@ int main() {
 		const auto& inv = seg.get<inverted_plugin>();
 		std::string text;
 		for (const auto& name : names) {
-			const auto info = inv.term(name);
+			const auto info = inv.term(0, name);
 			if (!info) { continue; }
 			postings_iterator it(inv, *info);
 			for (std::size_t j = 0; j < it.seed_count(); ++j) {

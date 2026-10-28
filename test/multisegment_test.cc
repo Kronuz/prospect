@@ -42,9 +42,9 @@ static document random_doc(std::mt19937_64& r) {
 		term_entry t{w, 1 + std::uint32_t(r() % 3), {}};
 		for (std::uint32_t k = 0; k < t.wdf; ++k) { t.positions.push_back(pos += 1 + std::uint32_t(r() % 2)); }
 		d.length += t.wdf;
-		d.terms.push_back(std::move(t));
+		d.field().terms.push_back(std::move(t));
 	}
-	if (d.terms.empty()) { d.terms.push_back({"a", 1, {1}}), d.length = 1; }
+	if (d.field().terms.empty()) { d.field().terms.push_back({"a", 1, {1}}), d.length = 1; }
 	return d;
 }
 
@@ -60,7 +60,7 @@ static scorer_ptr build(const segment& seg, const query& q, const statistics& st
 		return xapian ? weight::bm25_xapian(st, df) : weight::bm25(st, df);
 	};
 	auto term = [&](const std::string& t) -> scorer_ptr {
-		auto info = seg.get<prospect::inverted_plugin>().term(t);
+		auto info = seg.get<prospect::inverted_plugin>().term(0, t);
 		return info ? std::make_unique<term_scorer>(seg.get<prospect::inverted_plugin>(), *info, weight_of(t)) : nullptr;
 	};
 	std::vector<scorer_ptr> kids;
@@ -99,7 +99,7 @@ static scorer_ptr build(const segment& seg, const query& q, const statistics& st
 		std::vector<std::uint64_t> dfs;
 		std::vector<weight> ws;
 		for (auto& t : q.terms) {
-			auto info = seg.get<prospect::inverted_plugin>().term(t);
+			auto info = seg.get<prospect::inverted_plugin>().term(0, t);
 			if (!info) { return nullptr; }
 			infos.push_back(*info);
 			dfs.push_back(snapshot_df(segs, t));
@@ -219,7 +219,7 @@ int main() {
 		// The same documents in one segment.
 		for (std::size_t d = 0; d < docs; ++d) {
 			std::vector<posting_input> in;
-			for (const auto& t : all[d].terms) { in.push_back({t.term, t.wdf, t.positions}); }
+			for (const auto& t : all[d].field().terms) { in.push_back({t.term, t.wdf, t.positions}); }
 			one.add(d + 1, in, all[d].length);
 		}
 		const std::string one_bytes = one.flush({});
@@ -373,7 +373,7 @@ int main() {
 		strata::deleted_bits deleted((seg.core().doc_count() + 63) / 64);
 		for (std::uint32_t d = 0; d < 3000; d += 1 + std::uint32_t(r() % 5)) { deleted.set(d); }
 		auto dead = [&](std::uint32_t d) { return (deleted[d >> 6] >> (d & 63)) & 1; };
-		auto phrase = [&] { return std::make_unique<phrase_scorer>(seg.get<prospect::inverted_plugin>(), std::vector<prospect::format::term_info>{*seg.get<prospect::inverted_plugin>().term("a"), *seg.get<prospect::inverted_plugin>().term("b")}); };
+		auto phrase = [&] { return std::make_unique<phrase_scorer>(seg.get<prospect::inverted_plugin>(), std::vector<prospect::format::term_info>{*seg.get<prospect::inverted_plugin>().term(0, "a"), *seg.get<prospect::inverted_plugin>().term(0, "b")}); };
 		auto live_phrase = [&] { return std::make_unique<live_scorer>(phrase(), deleted); };
 		// "a b" and "c" in live documents, by brute force.
 		std::set<ordinal_t> want;
@@ -387,7 +387,7 @@ int main() {
 		}
 		std::vector<scorer_ptr> kids;
 		kids.push_back(live_phrase());
-		kids.push_back(std::make_unique<term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term("c")));
+		kids.push_back(std::make_unique<term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term(0, "c")));
 		conjunction_scorer both(std::move(kids));
 		CHECK(both.two_phase());
 		std::set<ordinal_t> got;
@@ -396,11 +396,11 @@ int main() {
 		// The counting copy, and count() through the wrapper.
 		// (A phrase has no counting copy; a term does, and the wrapper keeps it.)
 		CHECK(!live_phrase()->fresh());
-		auto lt = std::make_unique<live_scorer>(std::make_unique<term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term("c")), deleted);
+		auto lt = std::make_unique<live_scorer>(std::make_unique<term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term(0, "c")), deleted);
 		auto copy = lt->fresh();
 		CHECK(copy && count(*copy) == count(*lt));
 		// A window starting off a word boundary clears exactly the deleted ordinals in it.
-		auto all_c = std::make_unique<live_scorer>(std::make_unique<term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term("c")), deleted);
+		auto all_c = std::make_unique<live_scorer>(std::make_unique<term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term(0, "c")), deleted);
 		std::uint64_t bits[64] = {};
 		all_c->advance(5);
 		all_c->fill(5, 205, bits);

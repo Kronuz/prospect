@@ -217,7 +217,7 @@ prospect::operation upsert(const std::string& key, const std::string& word) {
 	op.type = prospect::operation::replace_key;
 	op.key = key;
 	op.doc.key = key;
-	op.doc.terms.push_back({word, 1, {1}});
+	op.doc.field().terms.push_back({word, 1, {1}});
 	op.doc.length = 1;
 	op.doc.stored = key;
 	return op;
@@ -744,7 +744,7 @@ int main() {
 		prospect::operation op;
 		op.type = prospect::operation::replace_key;
 		op.key = "Q1";
-		op.doc.terms.push_back({"alpha", 1, {1}});
+		op.doc.field().terms.push_back({"alpha", 1, {1}});
 		op.doc.key = "Q1";
 		op.doc.length = 1;
 		t.ops.push_back(op);
@@ -795,7 +795,7 @@ int main() {
 			CHECK(without.core().entry(section::norms) == nullptr && without.holds<prospect::inverted_plugin>());
 			for (strata::ordinal_t o = 0; o < 200; ++o) { CHECK(without.get<prospect::inverted_plugin>().norm(o) == with.get<prospect::inverted_plugin>().norm(o)); }
 			for (const char* t : {"odd", "even"}) {
-				const auto a = with.get<prospect::inverted_plugin>().term(t), b = without.get<prospect::inverted_plugin>().term(t);
+				const auto a = with.get<prospect::inverted_plugin>().term(0, t), b = without.get<prospect::inverted_plugin>().term(0, t);
 				CHECK(a && b);
 				prospect::term_scorer sa(with.get<prospect::inverted_plugin>(), *a), sb(without.get<prospect::inverted_plugin>(), *b);
 				for (auto d = sa.next(), e = sb.next(); d != strata::no_more_docs || e != strata::no_more_docs; d = sa.next(), e = sb.next()) {
@@ -810,7 +810,7 @@ int main() {
 			prospect::segment s(document);
 			CHECK(!s.holds<prospect::inverted_plugin>() && s.holds<strata::keys_plugin>() && s.holds<strata::stored_plugin>());
 			const auto& inv = s.get<prospect::inverted_plugin>();
-			CHECK(!inv.term("odd") && inv.length(7) == 0 && inv.total_length() == 0 && inv.norm(7) == 0);
+			CHECK(!inv.term(0, "odd") && inv.length(7) == 0 && inv.total_length() == 0 && inv.norm(7) == 0);
 			std::size_t terms = 0;
 			inv.scan_terms([&](std::string_view, const prospect::format::term_info&) { return ++terms, true; });
 			CHECK(terms == 0);
@@ -866,7 +866,7 @@ int main() {
 			prospect::segment m(out);
 			CHECK(m.core().structures() == (all | bit::values) && m.core().doc_count() == 400);
 			CHECK(m.get<strata::stored_plugin>().stored(0).empty() && m.get<strata::stored_plugin>().stored(200) == std::string(1, 's'));
-			CHECK(m.get<prospect::inverted_plugin>().term("odd")->df == 100 && m.get<prospect::inverted_plugin>().length(200) == 0);
+			CHECK(m.get<prospect::inverted_plugin>().term(0, "odd")->df == 100 && m.get<prospect::inverted_plugin>().length(200) == 0);
 			CHECK(m.get<strata::keys_plugin>().find("Q1000", {}) == strata::ordinal_t(200) && m.get<strata::keys_plugin>().version(200) == 1);
 		}
 	}
@@ -884,7 +884,7 @@ int main() {
 			std::size_t n = 0;
 			keys.scan("", [&](std::string_view, strata::ordinal_t) { return ++n, true; });
 			CHECK(n == 0);
-			CHECK(s.get<prospect::inverted_plugin>().term("odd")->df == 100);
+			CHECK(s.get<prospect::inverted_plugin>().term(0, "odd")->df == 100);
 		}
 		// Versions near 2^64 - 1 at a width above 1: the writer writes base 0 at width 64, so
 		// the reader's range check passes (F13-R25 item 7).
@@ -927,7 +927,7 @@ int main() {
 			auto ix = prospect::index::create(io, prospect::index::options{}, {});
 			prospect::operation add;
 			add.type = prospect::operation::add;
-			add.doc.terms.push_back({"w", 1, {1}});
+			add.doc.field().terms.push_back({"w", 1, {1}});
 			add.doc.length = 1;
 			prospect::transaction t;
 			t.ops.push_back(add);
@@ -967,7 +967,7 @@ int main() {
 		// operation's are invalid (F8; F13-R25 item 2).
 		{
 			auto op = upsert("Qa", "w");
-			op.doc.terms.push_back({"Qb", 0, {}});
+			op.doc.field().terms.push_back({"Qb", 0, {}});
 			CHECK(apply(ix, op) == strata::verdict::invalid);
 			auto add = upsert("Qa", "w");
 			add.type = prospect::operation::add;
@@ -1201,7 +1201,7 @@ int main() {
 		// A length-0 document keeps its length record through a flush (F21; CR6, M5).
 		{
 			auto empty = upsert("Qempty", "w");
-			empty.doc.terms.clear();
+			empty.doc.field().terms.clear();
 			empty.doc.length = 0;
 			CHECK(apply(ix, empty) == strata::verdict::accepted);
 			const std::uint64_t buffered = ix.digest();
@@ -1232,8 +1232,8 @@ int main() {
 		auto ix = prospect::index::create(io, o, {});
 		prospect::operation op;
 		op.type = prospect::operation::add;
-		op.doc.terms.push_back({"Qa", 1, {1}});
-		op.doc.terms.push_back({"w", 1, {2}});
+		op.doc.field().terms.push_back({"Qa", 1, {1}});
+		op.doc.field().terms.push_back({"w", 1, {2}});
 		op.doc.length = 2;
 		prospect::operation keyed = op;
 		keyed.doc.key = "Qa";
@@ -1271,7 +1271,7 @@ int main() {
 	// The buffer and the disk estimate count a document's key as they count a term (CR12).
 	{
 		prospect::document d;
-		d.terms.push_back({"w", 1, {}});
+		d.field().terms.push_back({"w", 1, {}});
 		const std::uint64_t bytes = d.part_bytes(), disk = d.disk_estimate();
 		d.key = "Q" + std::string(999, 'k');
 		CHECK(d.part_bytes() == bytes + 1000 && d.disk_estimate() >= disk + 1000);

@@ -53,10 +53,10 @@ int main() {
 		const prospect::segment seg(file);
 		std::vector<std::string> present;
 		for (const auto& t : vocab) {
-			if (seg.get<prospect::inverted_plugin>().term(t)) { present.push_back(t); }
+			if (seg.get<prospect::inverted_plugin>().term(0, t)) { present.push_back(t); }
 		}
-		auto term = [&](const std::string& t) -> prospect::scorer_ptr { return std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term(t)); };
-		auto df = [&](const std::string& t) { return seg.get<prospect::inverted_plugin>().term(t)->df; };
+		auto term = [&](const std::string& t) -> prospect::scorer_ptr { return std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term(0, t)); };
+		auto df = [&](const std::string& t) { return seg.get<prospect::inverted_plugin>().term(0, t)->df; };
 
 		for (const auto& t : present) {
 			auto s = term(t);
@@ -92,7 +92,7 @@ int main() {
 			CHECK(but.cost() == df(pick[0]));
 			CHECK(matches(but) <= but.cost());
 			std::vector<prospect::format::term_info> infos;
-			for (const auto& t : pick) { infos.push_back(*seg.get<prospect::inverted_plugin>().term(t)); }
+			for (const auto& t : pick) { infos.push_back(*seg.get<prospect::inverted_plugin>().term(0, t)); }
 			prospect::phrase_scorer phrase(seg.get<prospect::inverted_plugin>(), infos);
 			CHECK(phrase.cost() == lo);
 			CHECK(matches(phrase) <= phrase.cost());

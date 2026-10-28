@@ -113,7 +113,7 @@ bool same(std::span<const f::impact> a, const std::vector<f::impact>& b) {
 void check_term(const corpus& c, const prospect::segment& s, const std::string& term) {
 	const auto& inv = s.get<prospect::inverted_plugin>();
 	const auto& ps = c.terms.at(term);
-	const auto info = *inv.term(term);
+	const auto info = *inv.term(0, term);
 	CHECK(info.df == ps.size());
 	{  // next(), wdf, and positions in order
 		prospect::postings_iterator it(inv, info);
@@ -239,7 +239,7 @@ bool walk(const prospect::segment& s, const f::term_info& info, bool* bad) {
 bool damaged(const corpus& c, const std::string& term, const std::function<void(std::string&, const skip_test::layout&)>& edit, bool* bad) {
 	std::string file = c.bytes;
 	prospect::segment s0(file);
-	const auto info = *s0.get<prospect::inverted_plugin>().term(term);
+	const auto info = *s0.get<prospect::inverted_plugin>().term(0, term);
 	edit(file, skip_test::parse(file, s0, info));
 	reseal(file);
 	prospect::segment s(file);
@@ -255,15 +255,15 @@ int main() {
 		prospect::segment s(c.bytes);
 		for (const auto& [term, _] : c.terms) { check_term(c, s, term); }
 		// The shapes the cases below rely on: two groups of FOR blocks, and bitset blocks.
-		const auto mid = skip_test::parse(c.bytes, s, *s.get<prospect::inverted_plugin>().term("mid"));
+		const auto mid = skip_test::parse(c.bytes, s, *s.get<prospect::inverted_plugin>().term(0, "mid"));
 		CHECK(mid.groups.size() == 2 && mid.groups[0].n == 32);
 		for (const auto& b : mid.blocks) { CHECK(b.codec == unsigned(f::block_codec::deltas)); }
-		const auto dense = skip_test::parse(c.bytes, s, *s.get<prospect::inverted_plugin>().term("dense"));
+		const auto dense = skip_test::parse(c.bytes, s, *s.get<prospect::inverted_plugin>().term(0, "dense"));
 		std::size_t bitsets = 0;
 		for (const auto& b : dense.blocks) { bitsets += b.codec == unsigned(f::block_codec::bitset); }
 		CHECK(bitsets > 0 && dense.groups[0].wf >= 1);
 		// No block is Elias-Fano: code 2 is reserved (M22), so the codec width stays within 1.
-		const auto clustered = skip_test::parse(c.bytes, s, *s.get<prospect::inverted_plugin>().term("clustered"));
+		const auto clustered = skip_test::parse(c.bytes, s, *s.get<prospect::inverted_plugin>().term(0, "clustered"));
 		for (const auto& b : clustered.blocks) { CHECK(b.codec <= f::max_block_codec); }
 		CHECK(clustered.groups[0].wf <= 1);
 		// Each group's advance entries take (n - 1) lasts and offsets and n codes at the
@@ -313,7 +313,7 @@ int main() {
 		// Every bit of the two groups' advance entries flipped in turn: fence or answer.
 		prospect::segment s0(c.bytes);
 		for (const char* term : {"mid", "dense", "dense0", "gaps", "clustered"}) {
-			const auto info = *s0.get<prospect::inverted_plugin>().term(term);
+			const auto info = *s0.get<prospect::inverted_plugin>().term(0, term);
 			const auto l = skip_test::parse(c.bytes, s0, info);
 			std::size_t flips = 0, fenced = 0;
 			for (const auto& g : l.groups) {
@@ -352,7 +352,7 @@ int main() {
 		}
 		std::string file = w.flush({});
 		prospect::segment s0(file);
-		const auto info = *s0.get<prospect::inverted_plugin>().term("t");
+		const auto info = *s0.get<prospect::inverted_plugin>().term(0, "t");
 		const auto l = skip_test::parse(file, s0, info);
 		const auto& g = l.groups[0];
 		CHECK(l.blocks.size() == 3 && g.last + 1 == s0.core().doc_count());
@@ -386,7 +386,7 @@ int main() {
 		}
 		const std::string bytes = w.flush({});
 		prospect::segment s(bytes);
-		const auto l = skip_test::parse(bytes, s, *s.get<prospect::inverted_plugin>().term("ninety"));
+		const auto l = skip_test::parse(bytes, s, *s.get<prospect::inverted_plugin>().term(0, "ninety"));
 		bool all = !l.blocks.empty();
 		for (const auto& b : l.blocks) { all = all && b.codec == unsigned(f::block_codec::bitset); }
 		CHECK(all);
@@ -416,7 +416,7 @@ int main() {
 		skip_test::layout l;
 		std::size_t target = 0;
 		for (std::uint32_t t = 0; t < 24 && term.empty(); ++t) {
-			const auto info = inv0.term(names[t]);
+			const auto info = inv0.term(0, names[t]);
 			if (!info || info->df < f::block) { continue; }
 			const auto cand = skip_test::parse(file, s0, *info);
 			const auto& g = cand.groups[0];
@@ -438,7 +438,7 @@ int main() {
 			}
 			reseal(file);
 			prospect::segment s(file);
-			const auto info = *s.get<prospect::inverted_plugin>().term(term);
+			const auto info = *s.get<prospect::inverted_plugin>().term(0, term);
 			bool fenced = false;
 			try {
 				prospect::postings_iterator it(s.get<prospect::inverted_plugin>(), info);
@@ -514,7 +514,7 @@ int main() {
 		const auto& inv = s.get<prospect::inverted_plugin>();
 		const prospect::statistics st(inv);
 		for (const auto& [term, ps] : c.terms) {
-			const auto info = *inv.term(term);
+			const auto info = *inv.term(0, term);
 			prospect::postings_iterator it(inv, info);
 			const bool stored = ps.size() >= f::block && !(info.flags & f::no_wdf);
 			CHECK(it.seed_count() == (stored ? std::size_t(std::count_if(std::begin(f::seed_ks), std::end(f::seed_ks), [&](std::uint32_t k) { return k <= ps.size(); })) : 0));
@@ -620,7 +620,7 @@ int main() {
 						if (done) { break; }
 					}
 				}
-				prospect::postings_iterator it(inv2, *inv2.term(term));
+				prospect::postings_iterator it(inv2, *inv2.term(0, term));
 				CHECK(it.seed_count() == ks);
 				for (std::size_t j = 0; j < it.seed_count(); ++j) {
 					const auto& got = it.seed_at(j);
@@ -653,7 +653,7 @@ int main() {
 			prospect::segment s3(bytes);
 			const auto& inv3 = s3.get<prospect::inverted_plugin>();
 			CHECK(inv3.doc_count() == 278 && inv3.total_length() == 2502);
-			prospect::postings_iterator it(inv3, *inv3.term("tie"));
+			prospect::postings_iterator it(inv3, *inv3.term(0, "tie"));
 			CHECK(it.seed_count() == 2);
 			CHECK(it.seed_at(0).code_wdf == 3 && it.seed_at(0).code == f::encode_length(3));
 		}
@@ -661,7 +661,7 @@ int main() {
 		{
 			std::string file = c.bytes;
 			const prospect::segment copy(file);
-			const auto info = *copy.get<prospect::inverted_plugin>().term("mid");
+			const auto info = *copy.get<prospect::inverted_plugin>().term(0, "mid");
 			const auto l = skip_test::parse(file, copy, info);
 			const char* p = file.data() + l.seeds_at;
 			(void)f::get_leb(&p, file.data() + file.size());
@@ -749,8 +749,8 @@ int main() {
 			strata::deleted_bits gone((400 + 63) / 64);
 			for (std::size_t d = 0; d < 40; ++d) { gone.mutable_words()[d / 64] |= std::uint64_t(1) << (d % 64); }
 			const prospect::segment_snapshot one[] = {{&hot, &gone}};
-			auto b = [&](const prospect::segment& seg) -> prospect::scorer_ptr { return std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term("hot")); };
-			prospect::term_scorer probe(hot.get<prospect::inverted_plugin>(), *hot.get<prospect::inverted_plugin>().term("hot"));
+			auto b = [&](const prospect::segment& seg) -> prospect::scorer_ptr { return std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term(0, "hot")); };
+			prospect::term_scorer probe(hot.get<prospect::inverted_plugin>(), *hot.get<prospect::inverted_plugin>().term(0, "hot"));
 			CHECK(probe.seed(10) > prospect::weight::bm25(hot.get<prospect::inverted_plugin>(), 400)(1, 200));  // the seed comes from the deleted postings
 			const auto got = prospect::search(one, b, 10);
 			CHECK(got.size() == 10);
@@ -784,7 +784,7 @@ int main() {
 		const auto& inv = seg.get<prospect::inverted_plugin>();
 		std::size_t compared = 0;
 		for (const char* term : {"skew", "third", "tie"}) {
-			const auto info = *inv.term(term);
+			const auto info = *inv.term(0, term);
 			for (const bool xapian : {false, true}) {
 				const auto wt = xapian ? prospect::weight::bm25_xapian(inv, info.df) : prospect::weight::bm25(inv, info.df);
 				std::vector<prospect::doc_hit> all;

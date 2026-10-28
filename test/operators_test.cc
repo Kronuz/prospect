@@ -233,7 +233,7 @@ result model(const corpus& c, const node& n) {
 // The scorer for a node, or null when it matches nothing.
 p::scorer_ptr build(const corpus& c, const node& n) {
 	if (n.op.empty()) {
-		auto info = c.rd().term(n.term);
+		auto info = c.rd().term(0, n.term);
 		if (!info) { return nullptr; }
 		return std::make_unique<p::term_scorer>(c.rd(), *info, c.term_weight(n.term, n.wqf));
 	}
@@ -242,7 +242,7 @@ p::scorer_ptr build(const corpus& c, const node& n) {
 		std::vector<std::uint64_t> dfs;
 		for (const auto& k : n.kids) {
 			dfs.push_back(c.df(k.term));
-			if (auto info = c.rd().term(k.term)) { infos.push_back(*info); }
+			if (auto info = c.rd().term(0, k.term)) { infos.push_back(*info); }
 		}
 		if (infos.empty()) { return nullptr; }
 		return std::make_unique<p::synonym_scorer>(c.rd(), infos, p::weight::bm25_xapian(p::statistics(c.rd()), p::synonym_df(dfs, c.docs.size()), 1));

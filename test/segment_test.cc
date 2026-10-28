@@ -80,7 +80,7 @@ static std::string with_terms(const std::string& file, const std::function<void(
 	prospect::format::term_run run;
 	seg.get<prospect::inverted_plugin>().scan_terms([&](std::string_view term, const prospect::format::term_info& info) {
 		auto t = info;
-		if (t.df >= strata::format::block) { t.impacts = seg.get<prospect::inverted_plugin>().term(term)->impacts; }
+		if (t.df >= strata::format::block) { t.impacts = seg.get<prospect::inverted_plugin>().term(0, term)->impacts; }
 		change(term, t);
 		b.add(term, prospect::format::encode_term_info(t, run, b.next_is_restart()));
 		return true;
@@ -171,7 +171,7 @@ int main() {
 		CHECK(seg.core().doc_count() == docs);
 		for (std::size_t d = 0; d < docs; ++d) { CHECK(seg.get<prospect::inverted_plugin>().length(strata::ordinal_t(d)) == m.lengths[d]); }
 		for (const auto& [term, list] : m.postings) {
-			auto info = seg.get<prospect::inverted_plugin>().term(term);
+			auto info = seg.get<prospect::inverted_plugin>().term(0, term);
 			CHECK(info && info->df == list.size());
 			if (!info) { continue; }
 			prospect::postings_iterator it(seg.get<prospect::inverted_plugin>(), *info);
@@ -229,7 +229,7 @@ int main() {
 				CHECK(dominated);
 			}
 		}
-		CHECK(!seg.get<prospect::inverted_plugin>().term("absent"));
+		CHECK(!seg.get<prospect::inverted_plugin>().term(0, "absent"));
 		for (strata::ordinal_t d = 0; d < seg.core().doc_count(); ++d) { CHECK(seg.get<strata::stored_plugin>().stored(d) == m.stored[d]); }
 		for (strata::ordinal_t d = 0; d < seg.core().doc_count(); ++d) { CHECK(seg.core().docid(d) == d + 1); }
 		// Corruption: truncations and random byte changes never crash.
@@ -251,14 +251,14 @@ int main() {
 			try {
 				prospect::segment s(bad);
 				for (const auto& [term, list] : m.postings) {
-					auto info = s.get<prospect::inverted_plugin>().term(term);
+					auto info = s.get<prospect::inverted_plugin>().term(0, term);
 					if (!info) { continue; }
 					prospect::postings_iterator it(s.get<prospect::inverted_plugin>(), *info);
 					prospect::positions_reader pr(s.get<prospect::inverted_plugin>(), *info);
 					std::vector<std::uint32_t> got;
 					for (auto d = it.next(); d != strata::no_more_docs; d = it.next()) { pr.read(it, got); }
 				}
-				s.get<prospect::inverted_plugin>().term("absent");
+				s.get<prospect::inverted_plugin>().term(0, "absent");
 				for (strata::ordinal_t d = 0; d < s.core().doc_count(); ++d) { (void)s.get<strata::stored_plugin>().stored(d); }
 				if (s.core().doc_count()) { (void)s.get<prospect::inverted_plugin>().length(0); }  // the lengths verify whole on first use
 				(void)s.get<prospect::values_plugin>().slot_count();  // the values directory verifies on first use
@@ -288,7 +288,7 @@ int main() {
 		{
 			prospect::segment s(file);
 			CHECK(s.core().verified_regions() == 0);
-			auto info = s.get<prospect::inverted_plugin>().term("t1");
+			auto info = s.get<prospect::inverted_plugin>().term(0, "t1");
 			CHECK(info && s.core().verified_regions() >= 1);
 		}
 	}
@@ -356,7 +356,7 @@ int main() {
 		}
 		std::string bytes = w.flush({});
 		prospect::segment s(bytes);
-		auto info = s.get<prospect::inverted_plugin>().term("big");
+		auto info = s.get<prospect::inverted_plugin>().term(0, "big");
 		prospect::postings_iterator it(s.get<prospect::inverted_plugin>(), *info);
 		prospect::positions_reader pr(s.get<prospect::inverted_plugin>(), *info);
 		std::vector<std::uint32_t> got;
@@ -401,7 +401,7 @@ int main() {
 		std::string file = w.flush({});
 		{
 			prospect::segment seg(file);
-			const auto info = *seg.get<prospect::inverted_plugin>().term("a");
+			const auto info = *seg.get<prospect::inverted_plugin>().term(0, "a");
 			const char* p = seg.get<prospect::inverted_plugin>().postings_bytes().data() + info.postings;
 			const char* end = p + info.postings_length;
 			CHECK(strata::format::get_leb(&p, end) == 6 && *p++ == 0);  // six narrow groups
@@ -420,12 +420,12 @@ int main() {
 		reseal(file);
 		CHECK(throws_corrupt([&] {
 			prospect::segment bad(file);
-			prospect::term_scorer t(bad.get<prospect::inverted_plugin>(), *bad.get<prospect::inverted_plugin>().term("a"));
+			prospect::term_scorer t(bad.get<prospect::inverted_plugin>(), *bad.get<prospect::inverted_plugin>().term(0, "a"));
 			prospect::top_k(bad, t, 10);
 		}));
 		CHECK(throws_corrupt([&] {
 			prospect::segment bad(file);
-			prospect::postings_iterator it(bad.get<prospect::inverted_plugin>(), *bad.get<prospect::inverted_plugin>().term("a"));
+			prospect::postings_iterator it(bad.get<prospect::inverted_plugin>(), *bad.get<prospect::inverted_plugin>().term(0, "a"));
 			while (it.next() != strata::no_more_docs) {}
 		}));
 	}
@@ -447,15 +447,15 @@ int main() {
 		prospect::segment seg(file);
 		std::vector<strata::ordinal_t> expected;
 		{
-			prospect::postings_iterator it(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term("t"));
+			prospect::postings_iterator it(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term(0, "t"));
 			for (auto o = it.next(); o != strata::no_more_docs; o = it.next()) { expected.push_back(o); }
 		}
 		std::vector<strata::ordinal_t> walked;
-		prospect::postings_iterator a(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term("t"));
+		prospect::postings_iterator a(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term(0, "t"));
 		a.for_each_until(300, [&](strata::ordinal_t o, std::uint32_t) { walked.push_back(o); });
 		CHECK(walked == expected);
 		std::vector<std::uint64_t> bits(5, 0);
-		prospect::postings_iterator b(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term("t"));
+		prospect::postings_iterator b(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term(0, "t"));
 		b.fill(0, 300, bits.data());
 		std::vector<strata::ordinal_t> set;
 		for (strata::ordinal_t o = 0; o < 300; ++o) {
@@ -513,7 +513,7 @@ int main() {
 			CHECK(!kr.find(keys[0], {deleted.data()}));
 			CHECK(!kr.find("Qk", {}));
 			CHECK(kr.key_count() == docs);
-			CHECK(!s.get<prospect::inverted_plugin>().find_term(keys[0]));
+			CHECK(!s.get<prospect::inverted_plugin>().find_term(0, keys[0]));
 			std::vector<std::pair<std::string, strata::ordinal_t>> expect;
 			for (std::size_t d = 0; d < docs; ++d) { expect.push_back({keys[d], strata::ordinal_t(d)}); }
 			std::sort(expect.begin(), expect.end());
@@ -888,7 +888,7 @@ int main() {
 		const std::string good = w.flush({});
 		const auto walk = [](const std::string& file) {
 			prospect::segment s(file);
-			const auto info = *s.get<prospect::inverted_plugin>().term("long");
+			const auto info = *s.get<prospect::inverted_plugin>().term(0, "long");
 			prospect::postings_iterator it(s.get<prospect::inverted_plugin>(), info);
 			std::uint64_t n = 0;
 			for (auto d = it.next(); d != strata::no_more_docs; d = it.next()) { n += it.wdf(); }
@@ -896,7 +896,7 @@ int main() {
 		};
 		CHECK(walk(good) > 0);
 		prospect::segment s(good);
-		const auto info = *s.get<prospect::inverted_plugin>().term("long");
+		const auto info = *s.get<prospect::inverted_plugin>().term(0, "long");
 		const std::uint64_t region = std::uint64_t(1) << strata::format::default_region_shift;
 		CHECK(info.postings_length > 3 * region);
 		const auto toc = strata::format::decode_toc(good, strata::format::decode_footer(good));
@@ -924,7 +924,7 @@ int main() {
 		auto with_first = [&](std::uint64_t first) {
 			std::string file = good;
 			prospect::segment s(file);
-			const auto info = *s.get<prospect::inverted_plugin>().term("p");
+			const auto info = *s.get<prospect::inverted_plugin>().term(0, "p");
 			const char* p = s.get<prospect::inverted_plugin>().postings_bytes().data() + info.postings;
 			const char* end = p + info.postings_length;
 			(void)strata::format::get_leb(&p, end);  // groups
@@ -942,8 +942,8 @@ int main() {
 			prospect::segment bad_seg(file);
 			std::size_t fenced = 0;
 			for (strata::ordinal_t target : {strata::ordinal_t(150), strata::ordinal_t(250)}) {
-				prospect::postings_iterator g(good_seg.get<prospect::inverted_plugin>(), *good_seg.get<prospect::inverted_plugin>().term("p")), b(bad_seg.get<prospect::inverted_plugin>(), *bad_seg.get<prospect::inverted_plugin>().term("p"));
-				prospect::positions_reader gp(good_seg.get<prospect::inverted_plugin>(), *good_seg.get<prospect::inverted_plugin>().term("p")), bp(bad_seg.get<prospect::inverted_plugin>(), *bad_seg.get<prospect::inverted_plugin>().term("p"));
+				prospect::postings_iterator g(good_seg.get<prospect::inverted_plugin>(), *good_seg.get<prospect::inverted_plugin>().term(0, "p")), b(bad_seg.get<prospect::inverted_plugin>(), *bad_seg.get<prospect::inverted_plugin>().term(0, "p"));
+				prospect::positions_reader gp(good_seg.get<prospect::inverted_plugin>(), *good_seg.get<prospect::inverted_plugin>().term(0, "p")), bp(bad_seg.get<prospect::inverted_plugin>(), *bad_seg.get<prospect::inverted_plugin>().term(0, "p"));
 				g.advance(target);
 				const auto want = gp.read(g);
 				try {
@@ -979,14 +979,14 @@ int main() {
 		skip_test::layout lay;
 		{
 			prospect::segment s(good);
-			lay = skip_test::parse(good, s, *s.get<prospect::inverted_plugin>().term("dense"));
+			lay = skip_test::parse(good, s, *s.get<prospect::inverted_plugin>().term(0, "dense"));
 		}
 		CHECK(lay.blocks.size() >= 4);
 		for (const auto& b : lay.blocks) { CHECK(b.codec == unsigned(prospect::format::block_codec::bitset)); }
 		auto window_count = [](const std::string& file) {
 			prospect::segment s(file);
 			std::vector<prospect::scorer_ptr> kids;
-			for (const char* t : {"dense", "m3", "m5"}) { kids.push_back(std::make_unique<prospect::term_scorer>(s.get<prospect::inverted_plugin>(), *s.get<prospect::inverted_plugin>().term(t))); }
+			for (const char* t : {"dense", "m3", "m5"}) { kids.push_back(std::make_unique<prospect::term_scorer>(s.get<prospect::inverted_plugin>(), *s.get<prospect::inverted_plugin>().term(0, t))); }
 			prospect::disjunction_scorer any(std::move(kids));
 			return prospect::count(any);
 		};
@@ -1009,7 +1009,7 @@ int main() {
 	{
 		const std::string empty = prospect::segment_writer{}.flush({});
 		prospect::segment e(empty);
-		CHECK(e.core().doc_count() == 0 && !e.core().ordinal_of(5) && !e.get<prospect::inverted_plugin>().term("x"));
+		CHECK(e.core().doc_count() == 0 && !e.core().ordinal_of(5) && !e.get<prospect::inverted_plugin>().term(0, "x"));
 		prospect::segment_writer zero, wide;
 		std::vector<std::uint32_t> none;
 		for (std::uint32_t d = 0; d < 300; ++d) {
@@ -1027,8 +1027,8 @@ int main() {
 		}
 		const std::string full_bytes = full.flush({});
 		prospect::segment f(full_bytes);
-		prospect::postings_iterator it(f.get<prospect::inverted_plugin>(), *f.get<prospect::inverted_plugin>().term("half"));  // 256 postings: two full blocks
-		CHECK(f.get<prospect::inverted_plugin>().term("half")->df == 256);
+		prospect::postings_iterator it(f.get<prospect::inverted_plugin>(), *f.get<prospect::inverted_plugin>().term(0, "half"));  // 256 postings: two full blocks
+		CHECK(f.get<prospect::inverted_plugin>().term(0, "half")->df == 256);
 		strata::ordinal_t last = strata::no_more_docs;
 		for (auto d = it.next(); d != strata::no_more_docs; d = it.next()) { last = d; }
 		CHECK(last == 511);

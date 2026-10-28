@@ -6,7 +6,7 @@ include(FetchContent)
 # strata, the segment core prospect is the search layout of, pinned by commit; it pins the
 # libraries the core links (fst, termdict, completion, ...). Point FETCHCONTENT_SOURCE_DIR_<NAME>
 # at local checkouts to develop them together.
-FetchContent_Declare(strata GIT_REPOSITORY https://github.com/Kronuz/strata.git GIT_TAG 30e3fa7e4b2c54194db79d08340896fcb22e3ffa)
+FetchContent_Declare(strata GIT_REPOSITORY https://github.com/Kronuz/strata.git GIT_TAG 6b9b4de9e93778e40934aae3deb271c359653684)
 FetchContent_MakeAvailable(strata)
 # Search's own building blocks (Kronuz libraries), each pinned to the commit its gate numbers
 # were measured at.

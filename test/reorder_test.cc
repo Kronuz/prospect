@@ -42,7 +42,7 @@ std::vector<std::vector<std::uint32_t>> direct(std::span<const merge_source> sou
 	for (const auto& t : all) {
 		std::vector<std::uint32_t> holders;
 		for (std::uint32_t s = 0; s < sources.size(); ++s) {
-			auto info = sources[s].seg->get<prospect::inverted_plugin>().term(t);
+			auto info = sources[s].seg->get<prospect::inverted_plugin>().term(0, t);
 			if (!info) { continue; }
 			postings_iterator it(sources[s].seg->get<prospect::inverted_plugin>(), *info);
 			for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
@@ -93,11 +93,11 @@ int main() {
 			document d;
 			for (int k = 0, n = 3 + int(r() % 6); k < n; ++k) {
 				const std::string w = std::string(1, char('a' + topic * 10 + r() % 10)) + (r() % 4 ? "" : "x");
-				d.terms.push_back({w, 1, {std::uint32_t(k + 1)}});
+				d.field().terms.push_back({w, 1, {std::uint32_t(k + 1)}});
 				d.length += 1;
 			}
-			std::sort(d.terms.begin(), d.terms.end(), [](const auto& a, const auto& b) { return a.term < b.term; });
-			d.terms.erase(std::unique(d.terms.begin(), d.terms.end(), [](const auto& a, const auto& b) { return a.term == b.term; }), d.terms.end());
+			std::sort(d.field().terms.begin(), d.field().terms.end(), [](const auto& a, const auto& b) { return a.term < b.term; });
+			d.field().terms.erase(std::unique(d.field().terms.begin(), d.field().terms.end(), [](const auto& a, const auto& b) { return a.term == b.term; }), d.field().terms.end());
 			if (r() % 3) { d.stored = std::to_string(i) + std::string(r() % 300, char('a' + topic)); }
 			if (kind < 6) {
 				o.type = operation::replace_key;

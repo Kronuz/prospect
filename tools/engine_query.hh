@@ -65,7 +65,7 @@ inline prospect::scorer_ptr clause_scorer(const prospect::segment& seg, const st
 			if (!info) { return nullptr; }
 			infos.push_back(*info);
 		} else {
-			auto info = seg.get<prospect::inverted_plugin>().term(t);
+			auto info = seg.get<prospect::inverted_plugin>().term(0, t);
 			if (!info) { return nullptr; }
 			infos.push_back(*info);
 		}
@@ -147,7 +147,7 @@ inline std::uint64_t run(const prospect::segment& seg, std::string_view command,
 	const bool counting = command == "COUNT" || command.ends_with("_COUNT");
 	// A single term's count is its document frequency (one segment, no deletes).
 	if (command == "COUNT" && q.must.size() + q.should.size() == 1 && q.must_not.empty() && (q.must.empty() ? q.should[0] : q.must[0]).size() == 1) {
-		auto info = seg.get<prospect::inverted_plugin>().term((q.must.empty() ? q.should[0] : q.must[0])[0]);
+		auto info = seg.get<prospect::inverted_plugin>().term(0, (q.must.empty() ? q.should[0] : q.must[0])[0]);
 		return info ? info->df : 0;
 	}
 	auto s = build(seg, q, scheme);

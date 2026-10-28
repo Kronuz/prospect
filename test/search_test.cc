@@ -83,10 +83,10 @@ int main() {
 		auto tf = [&](std::size_t d, const std::string& t) { return occurrences(d, t) * (t == "h" ? 2 : 1); };
 		bool xapian = false;  // the round's scoring scheme
 		auto weight = [&](const std::string& t) {
-			auto info = seg.get<prospect::inverted_plugin>().term(t);
+			auto info = seg.get<prospect::inverted_plugin>().term(0, t);
 			return xapian ? prospect::weight::bm25_xapian(seg.get<prospect::inverted_plugin>(), info ? info->df : 0) : prospect::weight::bm25(seg.get<prospect::inverted_plugin>(), info ? info->df : 0);
 		};
-		auto term = [&](const std::string& t) -> prospect::scorer_ptr { return std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term(t), weight(t)); };
+		auto term = [&](const std::string& t) -> prospect::scorer_ptr { return std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term(0, t), weight(t)); };
 
 		for (int round = 0; round < 300; ++round) {
 			xapian = round % 2 == 1;
@@ -94,13 +94,13 @@ int main() {
 			std::size_t n = 1 + rng() % 3;
 			while (pick.size() < n) {
 				std::string t = vocab[rng() % vocab.size()];
-				if (std::find(pick.begin(), pick.end(), t) == pick.end() && seg.get<prospect::inverted_plugin>().term(t)) { pick.push_back(t); }
+				if (std::find(pick.begin(), pick.end(), t) == pick.end() && seg.get<prospect::inverted_plugin>().term(0, t)) { pick.push_back(t); }
 			}
 			const int kind = int(rng() % 15);
 			const std::size_t need = kind >= 11 ? 4 : kind >= 7 ? 3 : 0;
 			while (pick.size() < need) {
 				std::string t = vocab[rng() % vocab.size()];
-				if (std::find(pick.begin(), pick.end(), t) == pick.end() && seg.get<prospect::inverted_plugin>().term(t)) { pick.push_back(t); }
+				if (std::find(pick.begin(), pick.end(), t) == pick.end() && seg.get<prospect::inverted_plugin>().term(0, t)) { pick.push_back(t); }
 			}
 			// Phrases may repeat a term ("a b a"): one iterator per term, a slot per position.
 			if ((kind == 4 || kind == 5) && pick.size() >= 2 && rng() % 3 == 0) { pick.push_back(pick[0]); }
@@ -291,7 +291,7 @@ int main() {
 				}
 				default: {
 					std::vector<prospect::format::term_info> infos;
-					for (auto& t : pick) { infos.push_back(*seg.get<prospect::inverted_plugin>().term(t)); }
+					for (auto& t : pick) { infos.push_back(*seg.get<prospect::inverted_plugin>().term(0, t)); }
 					std::vector<prospect::weight> ws;
 					for (auto& t : pick) { ws.push_back(weight(t)); }
 					if (kind == 6) { return std::make_unique<prospect::phrase_scorer>(seg.get<prospect::inverted_plugin>(), infos, std::move(ws), 3); }
@@ -402,7 +402,7 @@ int main() {
 		}
 		std::string file = w.flush({});
 		prospect::segment seg(file);
-		auto term = [&](const std::string& t) -> prospect::scorer_ptr { return std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term(t)); };
+		auto term = [&](const std::string& t) -> prospect::scorer_ptr { return std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term(0, t)); };
 		auto both = [&](const std::string& a, const std::string& b) {
 			std::size_t c = 0;
 			for (auto d : holds[a]) { c += holds[b].count(d); }
@@ -464,7 +464,7 @@ int main() {
 		}
 		std::string file = w.flush({});
 		prospect::segment seg(file);
-		auto phrase = [&] { return std::make_unique<prospect::phrase_scorer>(seg.get<prospect::inverted_plugin>(), std::vector<prospect::format::term_info>{*seg.get<prospect::inverted_plugin>().term("a"), *seg.get<prospect::inverted_plugin>().term("b")}); };
+		auto phrase = [&] { return std::make_unique<prospect::phrase_scorer>(seg.get<prospect::inverted_plugin>(), std::vector<prospect::format::term_info>{*seg.get<prospect::inverted_plugin>().term(0, "a"), *seg.get<prospect::inverted_plugin>().term(0, "b")}); };
 		auto pruned = phrase();
 		auto hits = prospect::top_k(seg, *pruned, 10);
 		auto all = phrase();
@@ -491,15 +491,15 @@ int main() {
 			for (std::size_t i = 0; i < hits.size(); ++i) { CHECK(hits[i].ord == i); }
 		};
 		for (bool counted : {false, true}) {
-			prospect::term_scorer t(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term("a"));
+			prospect::term_scorer t(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term(0, "a"));
 			check(t, counted);
 			std::vector<prospect::scorer_ptr> v1, v2;
-			v1.push_back(std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term("a")));
-			v1.push_back(std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term("b")));
+			v1.push_back(std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term(0, "a")));
+			v1.push_back(std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term(0, "b")));
 			prospect::disjunction_scorer u(std::move(v1));
 			check(u, counted);
-			v2.push_back(std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term("a")));
-			v2.push_back(std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term("b")));
+			v2.push_back(std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term(0, "a")));
+			v2.push_back(std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term(0, "b")));
 			prospect::conjunction_scorer c(std::move(v2));
 			check(c, counted);
 		}
@@ -529,10 +529,10 @@ int main() {
 		const std::string file2 = w2.flush({});
 		const prospect::segment seg2(file2);
 		auto make = [](const prospect::segment& sg, int kind) -> prospect::scorer_ptr {
-			if (kind == 0) { return std::make_unique<prospect::term_scorer>(sg.get<prospect::inverted_plugin>(), *sg.get<prospect::inverted_plugin>().term("a")); }
+			if (kind == 0) { return std::make_unique<prospect::term_scorer>(sg.get<prospect::inverted_plugin>(), *sg.get<prospect::inverted_plugin>().term(0, "a")); }
 			std::vector<prospect::scorer_ptr> v;
-			v.push_back(std::make_unique<prospect::term_scorer>(sg.get<prospect::inverted_plugin>(), *sg.get<prospect::inverted_plugin>().term("a")));
-			v.push_back(std::make_unique<prospect::term_scorer>(sg.get<prospect::inverted_plugin>(), *sg.get<prospect::inverted_plugin>().term("b")));
+			v.push_back(std::make_unique<prospect::term_scorer>(sg.get<prospect::inverted_plugin>(), *sg.get<prospect::inverted_plugin>().term(0, "a")));
+			v.push_back(std::make_unique<prospect::term_scorer>(sg.get<prospect::inverted_plugin>(), *sg.get<prospect::inverted_plugin>().term(0, "b")));
 			if (kind == 1) { return std::make_unique<prospect::disjunction_scorer>(std::move(v)); }
 			return std::make_unique<prospect::conjunction_scorer>(std::move(v));
 		};
@@ -584,7 +584,7 @@ int main() {
 		}
 		std::string file = w.flush({});
 		prospect::segment seg(file);
-		const std::vector<prospect::format::term_info> infos{*seg.get<prospect::inverted_plugin>().term("a"), *seg.get<prospect::inverted_plugin>().term("p")};
+		const std::vector<prospect::format::term_info> infos{*seg.get<prospect::inverted_plugin>().term(0, "a"), *seg.get<prospect::inverted_plugin>().term(0, "p")};
 		prospect::phrase_scorer phrase(seg.get<prospect::inverted_plugin>(), infos);
 		CHECK(prospect::top_k(seg, phrase, 10).empty());
 		prospect::phrase_scorer near(seg.get<prospect::inverted_plugin>(), infos, {prospect::weight::bm25(seg.get<prospect::inverted_plugin>(), 300), prospect::weight::bm25(seg.get<prospect::inverted_plugin>(), 300)}, 5);
@@ -615,7 +615,7 @@ int main() {
 		const auto& inv = seg.get<prospect::inverted_plugin>();
 		std::size_t scored = 0;
 		auto term = [&](const char* t, bool tally) -> prospect::scorer_ptr {
-			prospect::scorer_ptr s = std::make_unique<prospect::term_scorer>(inv, *inv.term(t));
+			prospect::scorer_ptr s = std::make_unique<prospect::term_scorer>(inv, *inv.term(0, t));
 			if (tally) { s = std::make_unique<scoring_tally>(std::move(s), scored); }
 			return s;
 		};
@@ -683,8 +683,8 @@ int main() {
 			prospect::top_collector c(k, false, 80);
 			CHECK(c.reserved() <= 80);
 			auto& inv = seg.get<prospect::inverted_plugin>();
-			const auto w1 = prospect::weight::bm25(inv, inv.term("t")->df);
-			prospect::term_scorer q(inv, *inv.term("t"), w1);
+			const auto w1 = prospect::weight::bm25(inv, inv.term(0, "t")->df);
+			prospect::term_scorer q(inv, *inv.term(0, "t"), w1);
 			std::uint64_t n = 0;
 			CHECK(prospect::top_k(seg, q, k, &n).size() == 80 && n == 80);
 		}

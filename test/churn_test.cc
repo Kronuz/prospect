@@ -48,7 +48,7 @@ static document make_doc(const std::string& key, const model_doc& m) {
 	d.key = key;
 	std::uint32_t pos = 0;
 	for (const auto& w : m.words) {
-		d.terms.push_back({w, 1, {++pos}});
+		d.field().terms.push_back({w, 1, {++pos}});
 		++d.length;
 	}
 	d.stored = m.stored;
@@ -123,7 +123,7 @@ static void verify(const prospect::index& ix, const model& m, std::mt19937_64& r
 		std::uint64_t want = 0;
 		for (const auto& [key, doc] : m) { want += std::binary_search(doc.words.begin(), doc.words.end(), word); }
 		const auto got = prospect::search_count(segs, [&](const prospect::segment& seg) -> prospect::scorer_ptr {
-			auto info = seg.get<prospect::inverted_plugin>().term(word);
+			auto info = seg.get<prospect::inverted_plugin>().term(0, word);
 			if (!info) { return nullptr; }
 			return std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *info);
 		});

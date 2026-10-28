@@ -94,10 +94,10 @@ private:
 // as the stored record.
 void fill_document(prospect::document& d, std::string_view key, std::string_view id, std::string_view text) {
 	d.key.assign(key);
-	d.terms.clear();
-	d.text.assign(text);
-	d.tokens.clear();
-	d.split_text = true;
+	d.field().terms.clear();
+	d.field().text.assign(text);
+	d.field().tokens.clear();
+	d.field().split_text = true;
 	d.length = 0;
 	d.stored.assign(id);
 }

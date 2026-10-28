@@ -52,7 +52,7 @@ int main() {
 				for (std::uint32_t k = 0; k < n; ++k) { t.positions.push_back(pos += 1 + std::uint32_t(r() % 2)); }
 				if (r() % 7 == 0) { t.positions.clear(); }  // indexed without positions here
 				d.length += t.wdf;
-				d.terms.push_back(std::move(t));
+				d.field().terms.push_back(std::move(t));
 			}
 			if (r() % 5 == 0) { d.stored = std::string(r() % 5000, char('a' + r() % 26)); }
 			return d;
@@ -104,7 +104,7 @@ int main() {
 		std::vector<posting_input> in;
 		for (const auto& [docid, l] : model) {
 			in.clear();
-			for (const auto& t : l.doc.terms) { in.push_back({t.term, t.wdf, t.positions}); }
+			for (const auto& t : l.doc.field().terms) { in.push_back({t.term, t.wdf, t.positions}); }
 			w.add(docid, in, l.doc.length, l.doc.stored, l.version, l.key);
 		}
 		const std::string direct = w.flush(id);
@@ -137,7 +137,7 @@ int main() {
 			sequence.push_back(docid);
 			const auto& l = model.at(docid);
 			in.clear();
-			for (const auto& t : l.doc.terms) { in.push_back({t.term, t.wdf, t.positions}); }
+			for (const auto& t : l.doc.field().terms) { in.push_back({t.term, t.wdf, t.positions}); }
 			pw.add(docid, in, l.doc.length, l.doc.stored, l.version, l.key);
 		}
 		CHECK(permuted == pw.flush(id));
@@ -248,7 +248,7 @@ int main() {
 			o.type = operation::replace_key;
 			o.key = "Q" + std::to_string(r() % 500);
 			o.doc.key = o.key;
-			o.doc.terms = {{"w" + std::to_string(r() % 30), 1, {1}}};
+			o.doc.field().terms = {{"w" + std::to_string(r() % 30), 1, {1}}};
 			o.doc.length = 1;
 			t.ops.push_back(o);
 			a.apply(t, {});
@@ -287,7 +287,7 @@ int main() {
 			op.key = key;
 			if (type == operation::replace_key) {
 				op.doc.key = key;
-				op.doc.terms = {{"w", 1, {1}}};
+				op.doc.field().terms = {{"w", 1, {1}}};
 				op.doc.length = 1;
 			}
 			t.ops.push_back(op);

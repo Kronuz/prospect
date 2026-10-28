@@ -187,7 +187,7 @@ bool ends(const prospect::inverted_plugin::reader& inv, const f::term_info& info
 
 void check_term(const prospect::segment& s, const std::string& term, const ords_t& o) {
 	const auto& inv = s.get<prospect::inverted_plugin>();
-	const auto info = *inv.term(term);
+	const auto info = *inv.term(0, term);
 	CHECK(info.df == o.size());
 	for (const ordinal_t len : {4096u, 4000u, 1024u, 300u, 64u, 1u}) {
 		for (const ordinal_t from : {0u, 37u, 4095u}) { CHECK(windows(inv, info, o, from, len)); }
@@ -202,7 +202,7 @@ struct kinds {
 	std::size_t constant = 0, deltas = 0, bitset = 0;
 };
 kinds block_kinds(const std::string& file, const prospect::segment& s, const std::string& term) {
-	const auto info = *s.get<prospect::inverted_plugin>().term(term);
+	const auto info = *s.get<prospect::inverted_plugin>().term(0, term);
 	const auto l = skip_test::parse(file, s, info);
 	kinds k;
 	for (const auto& b : l.blocks) {
@@ -288,7 +288,7 @@ bool walk_copy(const std::string& bad, const std::string& term) {
 	try {
 		prospect::segment sb(bad);
 		const auto& inv = sb.get<prospect::inverted_plugin>();
-		const auto info = *inv.term(term);
+		const auto info = *inv.term(0, term);
 		for (const ordinal_t len : {4096u, 700u}) {
 			prospect::postings_iterator it(inv, info);
 			window w;
@@ -352,7 +352,7 @@ int main_body() {
 	// A fixed case for the sum: the lone bit after a full word must land in its own word.
 	{
 		const auto& inv = s.get<prospect::inverted_plugin>();
-		const auto info = *inv.term("wrap");
+		const auto info = *inv.term(0, "wrap");
 		prospect::postings_iterator it(inv, info);
 		window w;
 		CHECK(it.next() == 0);
@@ -363,7 +363,7 @@ int main_body() {
 	// --- damaged blocks: fence or answer, never write outside the window ------------------------
 	std::size_t fenced = 0, answered = 0;
 	for (const std::string term : {"mid", "dense", "mixed", "runs", "wordy", "wrap", "run_edges", "sparse"}) {
-		const auto info0 = *s.get<prospect::inverted_plugin>().term(term);
+		const auto info0 = *s.get<prospect::inverted_plugin>().term(0, term);
 		const auto layout = skip_test::parse(file, s, info0);
 		std::mt19937_64 r(std::hash<std::string>{}(term));
 		for (int trial = 0; trial < 160; ++trial) {
@@ -394,7 +394,7 @@ int main_body() {
 	// leading ordinals far outside the window. Each copy must fence (and, if a check is removed, the
 	// assert in scatter or the guard words catch the write).
 	{
-		const auto info0 = *s.get<prospect::inverted_plugin>().term("bigwdf");
+		const auto info0 = *s.get<prospect::inverted_plugin>().term(0, "bigwdf");
 		const auto layout = skip_test::parse(file, s, info0);
 		std::size_t wide = 0, flat = 0;
 		for (std::size_t c = 2; c < layout.blocks.size(); ++c) {

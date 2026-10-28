@@ -65,7 +65,7 @@ static document make_doc(std::mt19937_64& r, const std::string& key) {
 		term_entry t{w, 1 + std::uint32_t(r() % 3), {}};
 		for (std::uint32_t k = 0; k < t.wdf; ++k) { t.positions.push_back(pos += 1 + std::uint32_t(r() % 3)); }
 		d.length += t.wdf;
-		d.terms.push_back(std::move(t));
+		d.field().terms.push_back(std::move(t));
 	}
 	d.stored = "doc " + std::to_string(r() % 1000) + std::string(r() % 40, 'x');
 	return d;

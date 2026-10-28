@@ -136,7 +136,7 @@ void exercise(const prospect::segment& seg) {
 	}
 	std::vector<prospect::format::term_info> infos;
 	for (const char* t : vocab) {
-		auto info = seg.get<prospect::inverted_plugin>().term(t);
+		auto info = seg.get<prospect::inverted_plugin>().term(0, t);
 		if (!info) { continue; }
 		infos.push_back(*info);
 		prospect::postings_iterator it(seg.get<prospect::inverted_plugin>(), *info);
@@ -157,7 +157,7 @@ void exercise(const prospect::segment& seg) {
 		std::uint64_t n = 0;
 		prospect::top_k(seg, c, 100, &n);
 	}
-	(void)seg.get<prospect::inverted_plugin>().term("absent");
+	(void)seg.get<prospect::inverted_plugin>().term(0, "absent");
 	if (infos.size() < 3) { return; }
 	auto term = [&](std::size_t i) { return std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), infos[i % infos.size()]); };
 	auto pair = [&](std::size_t i, std::size_t j) {

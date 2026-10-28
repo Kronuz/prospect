@@ -109,7 +109,7 @@ struct snapshot_weights {
 
 prospect::scorer_ptr build(const prospect::segment& seg, const node& n, const std::map<std::string, std::uint32_t>& wqf, const snapshot_weights* snap = nullptr) {
 	if (n.op.empty()) {
-		auto info = seg.get<prospect::inverted_plugin>().term(n.term);
+		auto info = seg.get<prospect::inverted_plugin>().term(0, n.term);
 		if (!info) { return nullptr; }
 		return std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *info, snap ? snap->of(n.term, wqf.at(n.term)) : prospect::weight::bm25_xapian(seg.get<prospect::inverted_plugin>(), info->df, wqf.at(n.term)));
 	}
@@ -117,7 +117,7 @@ prospect::scorer_ptr build(const prospect::segment& seg, const node& n, const st
 		std::vector<prospect::format::term_info> infos;
 		std::vector<prospect::weight> weights;
 		for (const auto& c : n.children) {
-			auto info = seg.get<prospect::inverted_plugin>().term(c.term);
+			auto info = seg.get<prospect::inverted_plugin>().term(0, c.term);
 			if (!info) { return nullptr; }
 			infos.push_back(*info);
 			weights.push_back(snap ? snap->of(c.term, wqf.at(c.term)) : prospect::weight::bm25_xapian(seg.get<prospect::inverted_plugin>(), info->df, wqf.at(c.term)));

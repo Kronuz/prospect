@@ -128,11 +128,11 @@ query parse_query(const std::string& line) {
 scorer_ptr build(const segment& seg, const query& q, const multi_snapshot& snap, bool xapian) {
 	const statistics st = snap.stats();
 	auto weight_of = [&](const std::string& t) {
-		const std::uint64_t df = snap.df(t);
+		const std::uint64_t df = snap.df(0, t);
 		return xapian ? weight::bm25_xapian(st, df) : weight::bm25(st, df);
 	};
 	auto term = [&](const std::string& t) -> scorer_ptr {
-		auto info = seg.get<prospect::inverted_plugin>().term(t);
+		auto info = seg.get<prospect::inverted_plugin>().term(0, t);
 		return info ? std::make_unique<term_scorer>(seg.get<prospect::inverted_plugin>(), *info, weight_of(t)) : nullptr;
 	};
 	std::vector<scorer_ptr> kids;
@@ -166,7 +166,7 @@ scorer_ptr build(const segment& seg, const query& q, const multi_snapshot& snap,
 	std::vector<prospect::format::term_info> infos;
 	std::vector<weight> ws;
 	for (auto& t : q.terms) {
-		auto info = seg.get<prospect::inverted_plugin>().term(t);
+		auto info = seg.get<prospect::inverted_plugin>().term(0, t);
 		if (!info) { return nullptr; }
 		infos.push_back(*info);
 		ws.push_back(weight_of(t));
@@ -385,7 +385,7 @@ void oracle(const std::string& dir) {
 			for (std::size_t i = 1; i < vectors.size(); ++i) {
 				const auto& line = vectors[i];
 				if (line.starts_with("{\"term\"")) {
-					CHECK(snap.df(field(line, "term")) == std::stoull(field(line, "termfreq")));
+					CHECK(snap.df(0, field(line, "term")) == std::stoull(field(line, "termfreq")));
 					continue;
 				}
 				const query q = parse_query(field(line, "query"));

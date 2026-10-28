@@ -35,7 +35,7 @@ static const std::array<char, 16> uuid = {'s', 't', 'r', 'a', 't', 'a', '-', 't'
 static document doc(const std::string& key, const std::string& body) {
 	document d;
 	d.key = key;
-	d.terms.push_back({body, 1, {1}});
+	d.field().terms.push_back({body, 1, {1}});
 	d.length = 1;
 	d.stored = body;
 	return d;

@@ -304,7 +304,7 @@ int main() {
 			d.key = key;
 			m = r() % 6 ? random_values(r) : model_values{};
 			d.values = as_part(m);
-			d.terms.push_back({"t" + std::to_string(r() % 5), 1, {1}});
+			d.field().terms.push_back({"t" + std::to_string(r() % 5), 1, {1}});
 			d.length = 1;
 			if (r() % 3 == 0) { d.stored = std::string(r() % 300, 's'); }
 			return d;
