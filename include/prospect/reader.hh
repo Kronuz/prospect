@@ -259,6 +259,8 @@ struct inverted_plugin {
 			const std::string_view term_index = c.section(format::section::term_index).bytes;
 			if (term_index.size() < statistics_size) { corrupt("term index statistics"); }
 			total_length_ = format::get<std::uint64_t>(term_index.data());
+			min_length_ = format::get<std::uint32_t>(term_index.data() + 8);
+			max_length_ = format::get<std::uint32_t>(term_index.data() + 12);
 			max_positions_ = format::get<std::uint32_t>(term_index.data() + 16);
 			state_->terms = c.section(format::section::terms);
 			postings_ = c.section(format::section::postings);
@@ -302,6 +304,9 @@ struct inverted_plugin {
 			if (!positions_.verify(offset, length)) { corrupt("positions checksum"); }
 		}
 		std::uint32_t max_positions() const noexcept { return max_positions_; }
+		// The shortest and longest document length written into the segment (0 for none); deleted documents count.
+		std::uint32_t min_length() const noexcept { return min_length_; }
+		std::uint32_t max_length() const noexcept { return max_length_; }
 		std::uint64_t total_length() const noexcept { return total_length_; }
 		double average_length() const noexcept { return doc_count_ ? double(total_length_) / double(doc_count_) : 0.0; }
 
@@ -476,7 +481,7 @@ struct inverted_plugin {
 		const char* norms_at_ = nullptr;  // the norms section's bytes; null until derived
 		std::optional<termdict::reader> dict_;
 		std::uint64_t doc_count_ = 0, total_length_ = 0;
-		std::uint32_t max_positions_ = 0, lengths_crc_ = 0;
+		std::uint32_t max_positions_ = 0, min_length_ = 0, max_length_ = 0, lengths_crc_ = 0;
 		std::uint8_t postings_shift_ = 0;
 	};
 	// L6: rebuilds the plugin's sections for a merge's output (merge.hh).
