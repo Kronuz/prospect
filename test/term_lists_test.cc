@@ -43,13 +43,11 @@ bool throws_corrupt(F&& f) {
 }
 
 std::vector<std::string> vocabulary(std::mt19937_64& r) {
-	static const char alphabet[] = {'a', 'b', 'c', 'd', '\0', '\x7f', '\xff', 'z'};
-	static const char* prefixes[] = {"Xa", "Xab", "Xb", "Z", "", "Xa\0q"};
+	static const char alphabet[] = {'a', 'b', 'c', '\0', '\x7f', '\xff', 'z'};
+	static const std::string prefixes[] = {"Xa", "Xab", "Xb", "Z", "", std::string("Xa\0q", 4)};
 	std::vector<std::string> v;
 	for (int i = 0; i < 90; ++i) {
-		const char* p = prefixes[r() % 6];
-		std::string t(p, std::string_view(p).empty() ? 0 : (std::string_view(p) == "Xa" && r() % 5 == 0 ? 4 : std::strlen(p)));
-		if (std::string_view(p) == "Xa" && t.size() == 4) { t = std::string("Xa\0q", 4); }
+		std::string t = prefixes[r() % std::size(prefixes)];
 		for (std::size_t n = 1 + r() % 9; n--;) { t.push_back(alphabet[r() % sizeof alphabet]); }
 		if (!t.starts_with('Q')) { v.push_back(t); }
 	}
