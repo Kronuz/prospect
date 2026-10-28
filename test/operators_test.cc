@@ -320,6 +320,13 @@ void check_scorer(const corpus& c, const node& n, const result& want, std::mt199
 		}
 		CHECK(it == want.end());
 	}
+	// Past the last match, next() and advance() stay there.
+	{
+		auto e = make();
+		while (e->next() != strata::no_more_docs) {}
+		CHECK(e->next() == strata::no_more_docs && e->next() == strata::no_more_docs);
+		CHECK(e->advance(0) == strata::no_more_docs && e->doc() == strata::no_more_docs);
+	}
 	// advance(): to random targets, then onward.
 	{
 		auto a = make();
@@ -625,6 +632,7 @@ void host_source() {
 					CHECK(s->score() == it->second);
 				}
 				CHECK(it == want.end());
+				CHECK(s->next() == strata::no_more_docs && s->advance(0) == strata::no_more_docs);  // exhausted stays so
 				auto a = source();
 				const ordinal_t target = ordinal_t(rng() % ndocs);
 				auto at = want.lower_bound(target);

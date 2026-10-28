@@ -50,7 +50,35 @@ Deferred, with the evidence:
 
 ## State
 
-Operators, vectors, tests and mutants committed. Sanitizers and CI: see below.
+Done except CI: the operators, vectors, tests, mutants, sanitizers and notes are committed and pushed; CI
+runs on the head (its jobs are recorded under Done when read).
+
+## Done
+
+- `prospect:e3eee7b` the scorers (`include/prospect/operators.hh`), `test/operators_test.cc`,
+  `test/ops_mutants.py`, the vectors as fixtures (`test/fixtures/xapian-ops/`, from `strata-oracle:6750aef`,
+  branch `ops-vectors`: the `ops` command, `gen-ops.py`, 600 documents, 711 queries, 1,423 rows).
+- `prospect:c6bb69c` tests for the scale margin and a backwards advance; this ledger and the mechanism note.
+- O1, oracle parity: 669 rows compared, counted and pruned (match count and top-50 weights to 1e-9): SYNONYM 74,
+  MAX 64, XOR 110, SCALE_WEIGHT 122, ELITE_SET 83 (4 more tied at the edge, skipped; 20 composite rows recorded),
+  FILTER 24, with 100 AND, 78 OR and 14 AND_MAYBE as controls. SCALE_WEIGHT's error rows (a negative factor)
+  throw. The SYNONYM rule (df, cap) and ELITE_SET's key were fitted to the first run's rows, then fixed before the
+  tests were written; the same rows are the test.
+- O2, property tests: 250 random trees on 300 and 5,000 documents and 60 on 20,000 (SYNONYM, MAX, XOR, SCALE,
+  ELITE_SET, FILTER, AND, OR, AND_MAYBE, AND_NOT nested to depth 3, absent terms): next, advance (including a target
+  behind the position), exhaustion, bounds (`max_score_total`, `max_score`, `current_bound` with `sum_upper`),
+  top-k counted and pruned at four sizes, count, fresh. The host source: alone, in AND, OR, AND_MAYBE and AND_NOT, with
+  a stated and an unstated `max_weight`, and four threads sharing one source.
+- O3, mutants: 25 (`test/ops_mutants.py`), every operator and the source covered, all caught. First run: 3
+  survivors (SCALE_WEIGHT's child minimum without its rounding margin, the source's advance moving backwards, and a
+  mutant whose text did not match); the tests that kill them were added, and an equivalent one (ELITE_SET with size
+  equal to the count, same set) dropped. The run before the exhaustion guards was on `prospect:c6bb69c`; the guard's
+  own mutant was run on the head.
+- O4, sanitizers on macOS x86_64, Homebrew LLVM 23 at -O1: `build-asan` (address and undefined, no recovery):
+  `operators_test` and `search_test` clean; `build-tsan`: `operators_test` clean (no reports). Each directory fetched
+  its own dependencies.
+- No decoder or parser is added or changed (the test's s-expression and JSON readers are test code), so there is no
+  fuzz target. No performance claim is made.
 
 ## Compatibility notes for the lead
 

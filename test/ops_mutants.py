@@ -39,6 +39,7 @@ MUTANTS = [
     ("source: every value is accepted", "if (source_->accept(std::string_view(slot_.value(d)))) { return d; }", "if (true) { return d; }"),
     ("source: a source that gives no max_weight is bounded at zero", "bound_ = m > 0.0 ? m : std::numeric_limits<double>::infinity();", "bound_ = m;"),
     ("source: advance moves backwards", "if (started_ && doc_ >= t) { return doc_; }\n		return doc_ = scan(t);", "return doc_ = scan(t);"),
+    ("source: next after the end starts over", "(started_ && doc_ == no_more_docs ? no_more_docs : scan(started_ ? doc_ + 1 : 0))", "scan(started_ ? doc_ + 1 : 0)"),
     ("source: the first ordinal is skipped", "next() override { return doc_ = scan(started_ ? doc_ + 1 : 0); }", "next() override { return doc_ = scan(started_ ? doc_ + 1 : 1); }"),
 ]
 

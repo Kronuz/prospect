@@ -83,6 +83,7 @@ public:
 
 	ordinal_t doc() const noexcept override { return doc_; }
 	ordinal_t next() override {
+		if (started_ && doc_ == no_more_docs) { return doc_; }
 		if (!started_) {
 			started_ = true;
 			for (auto& it : its_) { it->next(); }
@@ -145,6 +146,7 @@ class merging_scorer : public scorer {
 public:
 	ordinal_t doc() const noexcept override { return doc_; }
 	ordinal_t next() override {
+		if (started_ && doc_ == no_more_docs) { return doc_; }
 		if (!started_) {
 			started_ = true;
 			for (auto& c : children_) { c->next(); }
@@ -175,14 +177,14 @@ protected:
 	// Whether a document held by `holding` children matches.
 	virtual bool keeps(std::size_t holding) const noexcept = 0;
 
-	std::vector<scorer_ptr> clone_children() const {
-		std::vector<scorer_ptr> out;
+	// Unpositioned copies of the children, or false when one cannot be copied.
+	bool clone_children(std::vector<scorer_ptr>& out) const {
 		for (const auto& c : children_) {
 			auto f = c->fresh();
-			if (!f) { return {}; }
+			if (!f) { return false; }
 			out.push_back(std::move(f));
 		}
-		return out;
+		return true;
 	}
 
 	std::vector<scorer_ptr> children_;
@@ -247,8 +249,8 @@ public:
 		return n;
 	}
 	std::unique_ptr<scorer> fresh() const override {
-		auto kids = clone_children();
-		return kids.empty() && !children_.empty() ? nullptr : std::make_unique<max_scorer>(std::move(kids));
+		std::vector<scorer_ptr> kids;
+		return clone_children(kids) ? std::make_unique<max_scorer>(std::move(kids)) : nullptr;
 	}
 
 private:
@@ -278,8 +280,8 @@ public:
 	}
 	double max_score_total() const noexcept override { return bound_; }
 	std::unique_ptr<scorer> fresh() const override {
-		auto kids = clone_children();
-		return kids.empty() && !children_.empty() ? nullptr : std::make_unique<xor_scorer>(std::move(kids));
+		std::vector<scorer_ptr> kids;
+		return clone_children(kids) ? std::make_unique<xor_scorer>(std::move(kids)) : nullptr;
 	}
 
 private:
@@ -395,7 +397,7 @@ public:
 		bound_ = m > 0.0 ? m : std::numeric_limits<double>::infinity();
 	}
 	ordinal_t doc() const noexcept override { return doc_; }
-	ordinal_t next() override { return doc_ = scan(started_ ? doc_ + 1 : 0); }
+	ordinal_t next() override { return doc_ = (started_ && doc_ == no_more_docs ? no_more_docs : scan(started_ ? doc_ + 1 : 0)); }
 	ordinal_t advance(ordinal_t t) override {
 		if (started_ && doc_ >= t) { return doc_; }
 		return doc_ = scan(t);
