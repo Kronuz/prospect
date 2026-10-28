@@ -164,8 +164,9 @@ void check_segment_lists(std::mt19937_64& r, const segment& seg, const Docs& by_
 	CHECK(rep.listed_documents == seg.core().doc_count());
 }
 
-std::string flush_docs(const std::vector<std::pair<std::uint64_t, const doc*>>& docs, bool lists, strata::format::stored_codec codec = {}) {
+std::string flush_docs(const std::vector<std::pair<std::uint64_t, const doc*>>& docs, bool lists, strata::format::stored_codec codec = {}, std::size_t block = 0) {
 	segment_writer w;
+	if (block) { w.stored_block = block; }
 	if (lists) { w.structures |= strata::format::bit::term_lists; }
 	if (codec.kind != strata::format::codec{}) { w.stored_codec = codec; }
 	for (const auto& [docid, d] : docs) {
@@ -221,7 +222,8 @@ void records() {
 	CHECK(term_list().empty() && term_list().size() == 0 && !term_list().begin().next());
 	// Each way a record can be damaged is corruption, from the cursor.
 	auto bad = [](const std::string& r) { return throws_corrupt([&] { for (auto c = term_list(r).begin(); c.next();) {} }); };
-	CHECK(bad(rec({{0, "a", 1}}, 0)));                        // a count of zero is the empty record
+	CHECK(bad(rec({{0, "a", 1}}, 0)));                        // a count of zero with terms after it
+	CHECK(bad(rec({}, 0)));                                   // a count of zero alone: the empty record has no bytes
 	CHECK(bad(rec({{0, "a", 1}}, 2)));                        // more terms than bytes
 	CHECK(bad(rec({{0, "a", 1}, {0, "b", 1}}, 1)));           // bytes left over
 	CHECK(bad(rec({{1, "a", 1}})));                           // the first term shares
@@ -499,6 +501,25 @@ void damage() {
 				internal_ok = false;
 			}
 			if (internal_ok) { CHECK(throws_corrupt([&] { cross_check_term_lists(seg); })); }
+		}
+		// A frame that starts one ordinal early overlaps the one before it, and the frames still
+		// add up to the document count; only the contiguity check sees it.
+		{
+			const std::string framed = flush_docs(order, true, packed ? strata::format::stored_codec{} : raw, 2048);
+			const auto [so, sl] = section_range(framed, strata::format::section::term_lists);
+			const std::uint32_t frames = strata::format::get<std::uint32_t>(framed.data() + so + sl - 4);
+			CHECK(frames >= 3);
+			std::string bytes = framed;
+			const std::size_t entry = so + sl - 4 - std::size_t(frames) * 16 + 16;  // frame 1's index entry
+			const std::uint32_t earlier = strata::format::get<std::uint32_t>(bytes.data() + entry) - 1;
+			CHECK(earlier > 0);
+			std::memcpy(bytes.data() + entry, &earlier, 4);
+			reseal(bytes);
+			CHECK(throws_corrupt([&] {
+				const segment seg(bytes);
+				prospect::check_report rep;
+				strata::check_segment(seg, nullptr, rep, "Q");
+			}));
 		}
 		// Mutant: one byte changed anywhere in the section, checksums recomputed: the check
 		// throws or the lists differ from the model; nothing reads out of bounds (ASan).

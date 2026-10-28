@@ -136,11 +136,9 @@ private:
 };
 
 // A merge copies each live document's record in output order, which strata's frame merge
-// does for every plugin of this layout; the inputs must all hold lists.
+// does for every plugin of this layout. The core calls it only when every input holds lists
+// (an opt-in section merges what all its sources hold).
 inline built term_lists_plugin::merge(const merge_context& m, std::span<const reader* const> in, section_sink& sink) {
-	for (const reader* r : in) {
-		if (!r->present()) { throw std::invalid_argument("strata: term lists: a merge input without them"); }
-	}
 	detail::merge_frames(m, in, sink, format::section::term_lists);
 	return {format::bit::term_lists};
 }

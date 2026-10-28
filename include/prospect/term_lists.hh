@@ -131,7 +131,6 @@ public:
 			if (wdf > 0xFFFFFFFFull) { corrupt("term list wdf"); }
 			wdf_ = std::uint32_t(wdf);
 			--remaining_;
-			if (remaining_ == 0 && p_ != end_) { corrupt("term list length"); }
 			return true;
 		}
 		const char* p_ = nullptr;

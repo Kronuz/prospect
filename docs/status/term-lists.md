@@ -7,21 +7,24 @@ step table; format-13 F17). Developer agent.
 
 ## State
 
-Implementation written; building and testing in progress (see Log). Format change: a decoder-safety
-review follows before landing.
+Paused by the coordinator (quota throttle) mid-evidence. The plugin is implemented; strata
+`phase4/term-lists-rank` (f6e49bf, pushed) and prospect `phase4/term-lists` are pushed. All 42 ctests
+passed at prospect b299cec plus the vocabulary fix; ASan+UBSan (separate `.scratch/build-asan`) and TSan
+(`.scratch/build-tsan`) passed term_lists, merge, index, segment, format13, reorder, background_merge,
+concurrency and both fuzz replays. Format change: a decoder-safety review follows before landing.
 
-## Done criteria
+**Doing (stopped):** closing mutant survivors. The last commit is NOT built or run: it removes a redundant
+trailing-bytes check in the cursor, drops the unreachable merge backstop, and adds two tests
+(`rec({}, 0)` zero count alone; frame-contiguity mutation with 2048-byte frames). Build and run
+`term_lists_test` first.
 
-From the lead:
-
-1. Each document's terms read back exactly, by ordinal and by prefix, in order.
-2. Merge keeps live documents' lists and drops deleted ones.
-3. Decoder safety on arbitrary bytes: a fuzz target, run for minutes.
-4. Size overhead measured on the search-benchmark-game corpus against the index without term lists.
-5. A mutant per claim.
-6. ASan+UBSan and TSan, in separate build dirs with their own deps.
-7. CI green.
-8. How-it-works note `docs/mechanisms/term-lists.md`.
+**Next:**
+1. Build `.scratch/build`, run term_lists_test; then `python3 .scratch/mut-tree/mutants.py` (copy the three changed files into `.scratch/mut-tree` first; builds `build` there). Wanted: all KILLED. Done so far: 11 of 15 killed; survivors trailing-bytes, zero-count, check-skips-coverage had tests added (unverified).
+2. Strata-side mutants (reverse `m.order` in `merge_frames`; opt-in default on in `index.hh`/`writer.hh`; drop the merge opt-in rule): copy strata include to a scratch dir, `-DFETCHCONTENT_SOURCE_DIR_STRATA`.
+3. Fuzz: `.scratch/fuzzrun.sh 900` (libFuzzer build with LLVM clang in `.scratch/build-fuzz`); run minutes, add finds to `fuzz/corpus/term_lists`.
+4. Size: corpus 100k docs at `.scratch/corpus/corpus-100000.json` (from the strata Linux VM; 1M at `~/bench/search-benchmark-game/corpus-1000000.json` there). `PROSPECT_TERM_LISTS=1 build/prospect_engine index DIR < corpus` against without, default and `PROSPECT_BUFFER_MB=16`; `sections DIR` for the section bytes.
+5. Delete `.scratch/build*` dirs and strata `.scratch/build` when done; CI status of both branches.
+6. Lead: prospect fixtures and pinned hashes (format13_test CRC, reorder_test hash) conflict with `phase4/values-bytes` (both bump pre_freeze; strata branches stack: values-rank b644708 then term-lists-rank f6e49bf); re-pin after the second lands. Layout order must be inverted, keys, stored, values, term_lists.
 
 ## Decisions (shapes the design leaves open)
 
@@ -57,7 +60,9 @@ From the lead:
 
 ## Evidence
 
-(fills in as items land)
+- Tests: term_lists_test (records, writer flush, index buffer flush, merges incl. reordering and spilled records, off by default, damage: every one-byte change of the section detected, raw and zstd); 42/42 ctest at the re-pinned fixtures.
+- Sanitizers: see State.
+- Mutants killed (11/15): observe wdf off by one, skipped first posting, reversed term order, prefix not skipping smaller terms, prefix always matching, strict skip_to, unordered/oversized-wdf/empty-suffix accepted, cross-check ignoring wdf or term.
 
 ## Next
 
