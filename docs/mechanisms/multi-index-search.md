@@ -21,12 +21,12 @@ own answers for 1, 2, 3, 5 (one with two empty shards) and 7 shards.
 shard 0: seg a, seg b      shard 1: (empty)      shard 2: seg c
         \_______ multi_snapshot: segments() = [a, b, c], shard s = a sub-span ______/
                  stats() = sum of every segment's documents and lengths
-                 df(term) = sum of every segment's document frequency
+                 df(field, term) = sum of every segment's document frequency, by field name
 ```
 
 `multi_snapshot` takes each shard's segments (what `index::segments()` gives) and keeps them shard by
 shard in one flat list. Statistics are the sum over the flat list (`snapshot_statistics`,
-`snapshot_df`, which already take any list of segments), so a weight built from `stats()` and `df()` is
+`snapshot_df`, which take any list of segments and name fields: each segment resolves a name to its own index's id, so shards that declared fields in different orders still agree; docs/mechanisms/fields.md), so a weight built from `stats()` and `df()` is
 the weight a single index would give. Deleted documents count, as they do in one index (phase-3 D13).
 A shard may be empty; it keeps its slot in the numbering.
 
