@@ -46,6 +46,7 @@
 #include "prospect/strata.hh"
 #include "prospect/values_writer.hh"
 #include "strata/core/writer.hh"
+#include "prospect/fielddict.hh"
 #include "termdict.hh"
 
 #include <algorithm>
@@ -71,6 +72,16 @@ struct posting_input {
 	std::string_view term;
 	std::uint32_t wdf = 1;
 	std::span<const std::uint32_t> positions;  // sorted, unique; empty for positionless terms
+	std::uint32_t field = 0;                   // the field id the term belongs to (D1)
+};
+
+// A field's text for the inverter: its tokens (offsets into `text`, positions strictly
+// increasing), or the text split at spaces into words at positions 1, 2, ...
+struct text_input {
+	std::uint32_t field = 0;
+	std::string_view text;
+	std::span<const text_token> tokens;
+	bool split = false;
 };
 
 // One term's postings as a flush or a merge produces them: ordinals ascending, a wdf and a
@@ -93,20 +104,17 @@ class inverted_builder {
 public:
 	bool wide_skip_offsets = false;  // 64-bit skip offsets even where 32 bits fit
 	flush_charge* memory = nullptr;
-	// The index's key prefix: a term with it is refused, never dropped (F8's backstop to
-	// stage 1); empty for none.
-	std::string_view key_prefix;
 	bool norms = true;  // whether the norms sub-structure is built (F4)
 
 	void configure(const builder_settings& s) noexcept {
 		memory = s.memory;
-		key_prefix = s.key_prefix;
 		norms = (s.structures & format::bit::norms) != 0;
 	}
 
 	struct token {
 		std::string_view term;
 		std::uint32_t position;
+		std::uint32_t field = 0;
 	};
 
 	// A document's length; returns its ordinal. The core checked the limits.
@@ -120,7 +128,7 @@ public:
 	// Each term once, with its wdf and its positions in increasing order.
 	void add_terms(ordinal_t ord, std::span<const posting_input> terms) {
 		for (const auto& in : terms) {
-			term_buffer& t = buffer_for(in.term);
+			term_buffer& t = buffer_for(in.field, in.term);
 			if (t.df && t.last == ord) { throw std::invalid_argument("strata: term repeated within a document"); }
 			open_posting(t, ord);
 			for (auto p : in.positions) { add_position(t, p); }
@@ -131,7 +139,7 @@ public:
 	void add_tokens(ordinal_t ord, std::span<const token> tokens) {
 		touched_.clear();
 		for (const auto& tk : tokens) {
-			term_buffer& t = buffer_for(tk.term);
+			term_buffer& t = buffer_for(tk.field, tk.term);
 			if (!t.df || t.last != ord) {
 				open_posting(t, ord);
 				touched_.push_back(&t);
@@ -156,17 +164,17 @@ public:
 		return out;
 	}
 
-	// A document's part (L10): its length, then its terms and its text's tokens, or its text split
-	// at spaces. The writer calls it in output order.
+	// A document's part (L10): its length, then each field's terms and its text's tokens, or its
+	// text split at spaces. The writer calls it in output order; field references are ids.
 	void add(ordinal_t ord, const doc_fields&, const inverted_plugin::part& p) {
-		(void)begin(p.length);
+		(void)begin(std::uint32_t(inverted_plugin::document_length(p)));
 		terms_in_.clear();
-		for (const auto& t : p.terms) { terms_in_.push_back({t.term, t.wdf, t.positions}); }
-		if (p.split_text) {
-			add_split(ord, terms_in_, p.text);
-		} else {
-			add_text(ord, terms_in_, p.text, p.tokens);
+		texts_in_.clear();
+		for (const auto& f : p.fields) {
+			for (const auto& t : f.terms) { terms_in_.push_back({t.term, t.wdf, t.positions, f.field.n}); }
+			texts_in_.push_back({f.field.n, f.text, f.tokens, f.split_text});
 		}
+		add_texts(ord, terms_in_, texts_in_);
 	}
 
 	// The sections from the builder's own term buffers, positions through the sink's spill.
@@ -181,16 +189,13 @@ public:
 			if (slot.key) { keys.push_back({std::string_view(slot.key, slot.length), slot.buffer}); }
 		}
 		std::sort(keys.begin(), keys.end());
-		std::array<bool, 256> used{};
+		fielddict::planner plan;
 		for (const auto& [key, _] : keys) {
-			for (char c : key) { used[std::uint8_t(c)] = true; }
-		}
-		std::string alphabet;
-		for (unsigned c = 0; c < 256; ++c) {
-			if (used[c]) { alphabet.push_back(char(c)); }
+			const auto [field, term] = split_key(key);
+			plan.add(field, term);
 		}
 		std::size_t next = 0;
-		finish(sink, positions_spill, alphabet, [&](term_postings& tp) -> std::optional<std::string_view> {
+		finish(sink, positions_spill, plan.finish(), [&](term_postings& tp) -> std::optional<std::string_view> {
 			if (next == keys.size()) { return std::nullopt; }
 			const auto [key, buffer] = keys[next++];
 			const term_buffer& t = buffers_[buffer];
@@ -217,14 +222,22 @@ public:
 		});
 	}
 
-	// The sections with terms from next(tp), in strictly increasing order (a merge).
+	// A term key as the buffers hold it: the field id's varint, then the term (D10).
+	static std::pair<std::uint32_t, std::string_view> split_key(std::string_view key) {
+		const char* p = key.data();
+		std::uint32_t field = 0;
+		if (!fielddict::get_field(p, key.data() + key.size(), field)) { throw std::invalid_argument("strata: a term key without a field id"); }
+		return {field, key.substr(std::size_t(p - key.data()))};
+	}
+
+	// The sections with terms from next(tp), in strictly increasing key order (a merge): the key
+	// is the field's varint then the term, `plan` each field's term count and bytes (D3).
 	template <class Next>
-	void finish(section_sink& sink, spill& positions_spill, std::string_view alphabet, Next&& next) {
+	void finish(section_sink& sink, spill& positions_spill, std::vector<fielddict::field_plan> plan, Next&& next) {
 		section_stream& postings = sink.begin();
 		const auto deferred = sink.defer(positions_spill);
 		section_stream& positions = deferred->stream();
-		termdict::builder dict(alphabet);
-		format::term_run run;
+		fielddict::builder dict(std::move(plan));
 		seed_shortest_ = min_length();
 		term_postings tp;
 		std::string encoded_postings, term_positions;
@@ -236,7 +249,6 @@ public:
 			const std::string_view key = *got;
 			if (!first_term && key <= std::string_view(last_key)) { throw std::invalid_argument("strata: terms must increase"); }
 			first_term = false;
-			refuse_key(key);
 			last_key.assign(key);
 			const auto& t = tp;
 			const auto& ords = tp.ords;
@@ -284,7 +296,8 @@ public:
 				info.postings_length = encoded_postings.size();
 				postings.write(encoded_postings);
 			}
-			dict.add(key, format::encode_term_info(info, run, dict.next_is_restart()));
+			const auto [field, term] = split_key(key);
+			dict.add(field, term, info);
 			if (memory) {
 				const std::uint64_t now = (tp.ords.capacity() + tp.wdfs.capacity() + tp.counts.capacity() + tp.positions.capacity() + term_lengths_.capacity()) * sizeof(std::uint32_t) +
 					all.capacity() * sizeof(format::impact) + encoded_postings.capacity() + term_positions.capacity() +
@@ -312,25 +325,11 @@ public:
 
 private:
 	friend class segment_writer;  // the inverter's text add (detail::writer_access)
-	// Terms, each once with its wdf and positions, and the text's tokens in order, each
-	// adding one to its term's wdf; a term is in one of the two. Positions increase.
-	void add_text(ordinal_t ord, std::span<const posting_input> terms, std::string_view text, std::span<const text_token> tokens) {
-		add_text_with(ord, terms, [&](auto&& token) {
-			for (const auto& tk : tokens) { token(text.substr(tk.offset, tk.size), tk.position); }
-		});
-	}
-	// The same with the text's words as its tokens, at positions 1, 2, ...
-	void add_split(ordinal_t ord, std::span<const posting_input> terms, std::string_view text) {
-		add_text_with(ord, terms, [&](auto&& token) {
-			std::uint32_t position = 0;
-			text_detail::split_words(text, [&](std::size_t offset, std::size_t size) { token(text.substr(offset, size), ++position); });
-		});
-	}
-	// tokens(token) calls token(term, position) for each token, in order.
-	template <class Tokens>
-	void add_text_with(ordinal_t ord, std::span<const posting_input> terms, Tokens&& tokens) {
+	// Terms, each once with its wdf and positions, and the texts' tokens in order, each adding
+	// one to its term's wdf; a term is in one of the two. Positions increase.
+	void add_texts(ordinal_t ord, std::span<const posting_input> terms, std::span<const text_input> texts) {
 		for (const auto& in : terms) {
-			term_buffer& t = buffer_for(in.term);
+			term_buffer& t = buffer_for(in.field, in.term);
 			if (t.df && t.last == ord) { throw std::invalid_argument("strata: term repeated within a document"); }
 			open_posting(t, ord);
 			for (auto p : in.positions) { add_position(t, p); }
@@ -338,8 +337,8 @@ private:
 			t.open_prev = closed;
 		}
 		touched_.clear();
-		tokens([&](std::string_view term, std::uint32_t position) {
-			term_buffer& t = buffer_for(term);
+		auto token = [&](std::uint32_t field, std::string_view term, std::uint32_t position) {
+			term_buffer& t = buffer_for(field, term);
 			if (!t.df || t.last != ord) {
 				open_posting(t, ord);
 				touched_.push_back(&t);
@@ -347,7 +346,15 @@ private:
 				throw std::invalid_argument("strata: term repeated within a document");
 			}
 			add_position(t, position);
-		});
+		};
+		for (const auto& x : texts) {
+			if (x.split) {
+				std::uint32_t position = 0;
+				text_detail::split_words(x.text, [&](std::size_t offset, std::size_t size) { token(x.field, x.text.substr(offset, size), ++position); });
+			} else {
+				for (const auto& tk : x.tokens) { token(x.field, x.text.substr(tk.offset, tk.size), tk.position); }
+			}
+		}
 		for (term_buffer* t : touched_) { close_posting(*t, t->open_count, t->open_count); }
 	}
 	struct term_buffer {
@@ -410,25 +417,26 @@ private:
 		std::uint32_t buffer = 0;
 	};
 
-	void refuse_key(std::string_view term) const {
-		if (!key_prefix.empty() && term.starts_with(key_prefix)) { throw std::invalid_argument("strata: a term with the key prefix (F8)"); }
-	}
-	term_buffer& buffer_for(std::string_view term) {
+	// The buffer of (field, term), made on first use; the key is the field's varint then the term.
+	term_buffer& buffer_for(std::uint32_t field, std::string_view term) {
+		key_scratch_.clear();
+		fielddict::put_field(key_scratch_, field);
+		key_scratch_ += term;
+		const std::string_view key = key_scratch_;
 		if (table_.empty()) {
 			table_.resize(1 << 16);
 			if (memory) { memory->grow(table_.size() * sizeof(slot)); }
 		}
-		const std::uint64_t h = ::wordwise::hash(term.data(), term.size());
+		const std::uint64_t h = ::wordwise::hash(key.data(), key.size());
 		std::size_t mask = table_.size() - 1;
 		for (std::size_t i = h & mask;; i = (i + 1) & mask) {
 			slot& sl = table_[i];
 			if (!sl.key) { break; }
-			if (sl.hash == h && sl.length == term.size() && std::memcmp(sl.key, term.data(), term.size()) == 0) { return buffers_[sl.buffer]; }
+			if (sl.hash == h && sl.length == key.size() && std::memcmp(sl.key, key.data(), key.size()) == 0) { return buffers_[sl.buffer]; }
 		}
-		refuse_key(term);
-		const char* at = arena_.copy(term, memory).data();  // slots point into it
+		const char* at = arena_.copy(key, memory).data();  // slots point into it
 		if ((buffers_.size() + 1) * 2 > table_.size()) { grow(); }
-		insert({h, at, std::uint32_t(term.size()), std::uint32_t(buffers_.size())});
+		insert({h, at, std::uint32_t(key.size()), std::uint32_t(buffers_.size())});
 		if (memory) { memory->grow(sizeof(term_buffer)); }
 		return buffers_.emplace_back();
 	}
@@ -877,6 +885,8 @@ private:
 	std::deque<term_buffer> buffers_;
 	std::vector<term_buffer*> touched_;  // add_tokens: the document's open postings
 	std::vector<posting_input> terms_in_;  // add(part)'s scratch
+	std::vector<text_input> texts_in_;
+	std::string key_scratch_;  // buffer_for's key
 	std::vector<std::uint32_t> lengths_;
 	std::uint32_t max_positions_ = 0;  // the most positions of one term in one document
 	std::uint64_t total_length_ = 0;
@@ -918,24 +928,18 @@ public:
 
 private:
 	friend struct detail::writer_access;
-	// The inverter's entry points (detail::writer_access).
-	ordinal_t add_text(std::uint64_t docid, std::span<const posting_input> terms, std::string_view text, std::span<const text_token> tokens, std::uint32_t length,
-		std::string_view stored, std::uint64_t version, std::string_view key) {
-		const ordinal_t ord = begin_document(docid, length, stored, version, key, true);
-		if (structures & format::bit::inverted) { builder<inverted_plugin>().add_text(ord, terms, text, tokens); }
-		return ord;
-	}
-	ordinal_t add_split(std::uint64_t docid, std::span<const posting_input> terms, std::string_view text, std::uint32_t length, std::string_view stored,
+	// The inverter's entry point (detail::writer_access): terms of any fields and the fields' texts.
+	ordinal_t add_texts(std::uint64_t docid, std::span<const posting_input> terms, std::span<const text_input> texts, std::uint32_t length, std::string_view stored,
 		std::uint64_t version, std::string_view key) {
 		const ordinal_t ord = begin_document(docid, length, stored, version, key, true);
-		if (structures & format::bit::inverted) { builder<inverted_plugin>().add_split(ord, terms, text); }
+		if (structures & format::bit::inverted) { builder<inverted_plugin>().add_texts(ord, terms, texts); }
 		return ord;
 	}
 	template <class Next>
-	void flush_from(const std::array<std::uint8_t, 16>& segment_id, output& out, spill& positions_spill, std::string_view alphabet, Next&& next) {
+	void flush_from(const std::array<std::uint8_t, 16>& segment_id, output& out, spill& positions_spill, std::vector<fielddict::field_plan> plan, Next&& next) {
 		write(segment_id, out, positions_spill, [&](auto& b, section_sink& s) {
 			if constexpr (std::is_same_v<std::decay_t<decltype(b)>, inverted_builder>) {
-				b.finish(s, positions_spill, alphabet, next);
+				b.finish(s, positions_spill, std::move(plan), next);
 			} else {
 				b.finish(s);
 			}
@@ -960,20 +964,16 @@ namespace detail {
 // text (the multi-thread flush), per-document data alone, and terms from the tuple buffer.
 // Each key is borrowed: its bytes must outlive the writer's flush.
 struct writer_access {
-	static ordinal_t add_text(segment_writer& w, std::uint64_t docid, std::span<const posting_input> terms, std::string_view text,
-		std::span<const text_token> tokens, std::uint32_t length, std::string_view stored = {}, std::uint64_t version = 0, std::string_view key = {}) {
-		return w.add_text(docid, terms, text, tokens, length, stored, version, key);
-	}
-	static ordinal_t add_split(segment_writer& w, std::uint64_t docid, std::span<const posting_input> terms, std::string_view text, std::uint32_t length,
-		std::string_view stored, std::uint64_t version, std::string_view key) {
-		return w.add_split(docid, terms, text, length, stored, version, key);
+	static ordinal_t add_texts(segment_writer& w, std::uint64_t docid, std::span<const posting_input> terms, std::span<const text_input> texts, std::uint32_t length,
+		std::string_view stored = {}, std::uint64_t version = 0, std::string_view key = {}) {
+		return w.add_texts(docid, terms, texts, length, stored, version, key);
 	}
 	static ordinal_t add_document(segment_writer& w, std::uint64_t docid, std::uint32_t length, std::string_view stored, std::uint64_t version, std::string_view key) {
 		return w.begin_document(docid, length, stored, version, key, true);
 	}
 	template <class Next>
-	static void flush_from(segment_writer& w, const std::array<std::uint8_t, 16>& segment_id, output& out, spill& positions, std::string_view alphabet, Next&& next) {
-		w.flush_from(segment_id, out, positions, alphabet, std::forward<Next>(next));
+	static void flush_from(segment_writer& w, const std::array<std::uint8_t, 16>& segment_id, output& out, spill& positions, std::vector<fielddict::field_plan> plan, Next&& next) {
+		w.flush_from(segment_id, out, positions, std::move(plan), std::forward<Next>(next));
 	}
 };
 }  // namespace detail

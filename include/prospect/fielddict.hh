@@ -5,7 +5,7 @@
 //
 //   [own blocks bytes LEB][entries LEB][entry bytes LEB][own index bytes LEB]
 //   [samples: one per 16 entries, 20 bytes: id u32, entry offset u32, blocks offset u64, index offset u32]
-//   [entries: id delta LEB (the first of a group is its sample's id), flags u8, blocks LEB, index LEB]
+//   [entries: id delta LEB (the first of a group is its sample's id), flags u8, terms LEB, blocks LEB, index LEB]
 //   [the own dictionaries' indexes, in entry order][the pool's index, to the end; empty: no pool]
 //
 // An entry exists for each field with a dictionary of its own; a field without one is looked up in
@@ -53,6 +53,18 @@ inline std::size_t put_field(std::string& out, std::uint32_t id) {
 	return 1 + n;
 }
 
+// The same into a buffer of at least 5 bytes; returns the bytes written.
+inline std::size_t put_field(char* out, std::uint32_t id) noexcept {
+	if (id < 0xF0) {
+		out[0] = char(id);
+		return 1;
+	}
+	const unsigned n = id < (1u << 8) ? 1 : id < (1u << 16) ? 2 : id < (1u << 24) ? 3 : 4;
+	out[0] = char(0xF0 + n);
+	for (unsigned i = 0; i < n; ++i) { out[1 + i] = char(id >> (8 * (n - 1 - i))); }
+	return 1 + n;
+}
+
 // Reads one id at p, advancing it; false for a lead byte 0xF5 to 0xFF, a truncated form, a long
 // form below 240 or with a leading zero byte (so equal ids have equal bytes).
 inline bool get_field(const char*& p, const char* end, std::uint32_t& id) noexcept {
@@ -93,8 +105,10 @@ struct byte_set {
 	}
 };
 
-// What the builder must know of a field before its first term: how many terms it will get and
-// the bytes they use (a dictionary's alphabet is fixed at construction).
+// What the builder must know of a field before its first term: at most how many terms it will
+// get (its own dictionary or the pool: any choice is a valid segment) and the bytes they use, or
+// more (a dictionary's alphabet is fixed at construction). A merge plans from its inputs, whose
+// terms overlap.
 struct field_plan {
 	std::uint32_t field = 0;
 	std::uint64_t terms = 0;
@@ -132,7 +146,6 @@ public:
 		byte_set pool;
 		for (std::size_t i = 0; i < plan_.size(); ++i) {
 			if (i && plan_[i].field <= plan_[i - 1].field) { throw std::invalid_argument("fielddict: plan fields must increase"); }
-			if (plan_[i].terms == 0) { throw std::invalid_argument("fielddict: a planned field without terms"); }
 			if (plan_[i].terms >= own_threshold) { continue; }
 			std::string id;
 			put_field(id, plan_[i].field);
@@ -161,7 +174,6 @@ public:
 
 	built finish() {
 		close_field();
-		if (at_ != npos ? at_ + 1 != plan_.size() : !plan_.empty()) { throw std::invalid_argument("fielddict: planned fields without terms"); }
 		built out;
 		out.blocks = std::move(blocks_);
 		const std::uint64_t own_blocks = out.blocks.size();
@@ -185,6 +197,7 @@ public:
 			}
 			format::put_leb(entries, e.field - prev);
 			entries.push_back(char(0));
+			format::put_leb(entries, e.terms);
 			format::put_leb(entries, e.blocks);
 			format::put_leb(entries, e.index);
 			prev = e.field;
@@ -206,12 +219,14 @@ private:
 	static constexpr std::size_t npos = ~std::size_t(0);
 	struct entry {
 		std::uint32_t field;
-		std::uint64_t blocks, index;
+		std::uint64_t terms, blocks, index;
 	};
 
+	// The fields come in plan order, a planned field possibly without terms.
 	void advance(std::uint32_t field) {
 		close_field();
-		const std::size_t next = at_ == npos ? 0 : at_ + 1;
+		std::size_t next = at_ == npos ? 0 : at_ + 1;
+		while (next < plan_.size() && plan_[next].field < field) { ++next; }
 		if (next >= plan_.size() || plan_[next].field != field) { throw std::invalid_argument("fielddict: a field out of the plan's order"); }
 		at_ = next;
 		added_ = 0;
@@ -224,10 +239,10 @@ private:
 
 	void close_field() {
 		if (at_ == npos) { return; }
-		if (added_ != plan_[at_].terms) { throw std::invalid_argument("fielddict: a field's terms differ from its plan"); }
+		if (added_ > plan_[at_].terms) { throw std::invalid_argument("fielddict: a field has more terms than planned"); }
 		if (own_) {
 			termdict::tables t = own_->finish();
-			entries_.push_back({plan_[at_].field, blocks_.size() - last_blocks_, t.index.size()});
+			entries_.push_back({plan_[at_].field, added_, blocks_.size() - last_blocks_, t.index.size()});
 			indexes_ += t.index;
 			own_.reset();
 		}
@@ -253,7 +268,7 @@ public:
 	// A directory entry resolved: where a field's dictionary lies.
 	struct entry {
 		std::uint32_t field = 0;
-		std::uint64_t blocks = 0, blocks_size = 0, index = 0, index_size = 0;
+		std::uint64_t terms = 0, blocks = 0, blocks_size = 0, index = 0, index_size = 0;
 	};
 
 	// `terms` is the section's bytes, `index` the term_index after the statistics. Both must
@@ -447,6 +462,40 @@ public:
 		format::term_info info_;
 	};
 
+	// Adds this segment's fields to a merge's plan: an own dictionary's term count and bytes, and
+	// the pool's per-field counts and bytes (a pass over the pool's keys).
+	void add_plan(std::map<std::uint32_t, field_plan>& plan) const {
+		auto at = [&](std::uint32_t field) -> field_plan& {
+			auto& p = plan[field];
+			p.field = field;
+			return p;
+		};
+		for (std::uint64_t i = 0; i < entry_count_; ++i) {
+			const entry e = entry_at(i);
+			field_plan& p = at(e.field);
+			p.terms += e.terms;
+			try {
+				for (char c : own(e).alphabet_bytes()) { p.alphabet.add(std::uint8_t(c)); }
+			} catch (const termdict::corrupt&) {
+				corrupt("term index");
+			}
+		}
+		if (!has_pool()) { return; }
+		try {
+			pool().scan({}, [&](std::string_view key, std::string_view) {
+				const char* q = key.data();
+				std::uint32_t id;
+				if (!get_field(q, key.data() + key.size(), id)) { corrupt("pooled field id"); }
+				field_plan& p = at(id);
+				++p.terms;
+				p.alphabet.add(key.substr(std::size_t(q - key.data())));
+				return true;
+			});
+		} catch (const termdict::corrupt&) {
+			corrupt("terms checksum");
+		}
+	}
+
 	// Every directory entry, in order, checked whole: the sizes add up to the sections, ids
 	// increase, flags are known, each sample matches its entry (check's job; lookups check a group).
 	void check() const {
@@ -464,8 +513,8 @@ public:
 			const std::uint64_t delta = format::get_leb(&p, end);
 			if (p == end) { corrupt("field directory entry"); }
 			const std::uint8_t flags = std::uint8_t(*p++);
-			const std::uint64_t b = format::get_leb(&p, end), x = format::get_leb(&p, end);
-			if (flags & ~known_flags || (i && delta == 0) || (i == 0 ? delta : std::uint64_t(prev) + delta) > 0xFFFFFFFFull) { corrupt("field directory entry"); }
+			const std::uint64_t terms = format::get_leb(&p, end), b = format::get_leb(&p, end), x = format::get_leb(&p, end);
+			if (terms == 0 || flags & ~known_flags || (i && delta == 0) || (i == 0 ? delta : std::uint64_t(prev) + delta) > 0xFFFFFFFFull) { corrupt("field directory entry"); }
 			prev = std::uint32_t(i ? prev + delta : delta);
 			if (i % sample_every == 0 && format::get<std::uint32_t>(samples_ + (i / sample_every) * sample_bytes) != prev) { corrupt("field directory sample"); }
 			if (b > own_blocks_ - blocks || x > index_bytes_ - index) { corrupt("field directory sizes"); }
@@ -514,14 +563,14 @@ private:
 			const std::uint64_t delta = format::get_leb(&p, end);
 			if (p == end) { corrupt("field directory entry"); }
 			const std::uint8_t flags = std::uint8_t(*p++);
-			const std::uint64_t b = format::get_leb(&p, end), x = format::get_leb(&p, end);
+			const std::uint64_t terms = format::get_leb(&p, end), b = format::get_leb(&p, end), x = format::get_leb(&p, end);
 			if (i) {
 				if (delta == 0 || delta > 0xFFFFFFFFull - id) { corrupt("field directory entry"); }
 				id += std::uint32_t(delta);
 			}
 			if (flags & ~known_flags) { corrupt("field directory flags"); }
 			if (blocks > own_blocks_ || b > own_blocks_ - blocks || index > index_bytes_ || x > index_bytes_ - index) { corrupt("field directory sizes"); }
-			if (!f(entry{id, blocks, b, index, x})) { return; }
+			if (!f(entry{id, terms, blocks, b, index, x})) { return; }
 			blocks += b;
 			index += x;
 		}

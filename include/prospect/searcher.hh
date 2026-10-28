@@ -6,6 +6,7 @@
 
 #include "prospect/search.hh"
 #include "strata/core/deleted_bits.hh"
+#include "strata/core/fields.hh"
 
 #include <algorithm>
 #include <cmath>
@@ -29,6 +30,11 @@ struct segment_snapshot {
 	const segment* seg = nullptr;
 	const strata::deleted_bits* deleted = nullptr;
 	std::uint64_t dead = unknown_dead;
+	// The field table of the index the segment belongs to: queries name fields, and each
+	// segment resolves a name to its own index's id (D14).
+	const strata::field_table* fields = nullptr;
+	std::optional<std::uint32_t> field_id(std::string_view name) const { return fields ? fields->find(name) : std::nullopt; }
+	std::optional<std::uint32_t> key_field() const { return fields ? fields->key_field() : std::nullopt; }
 	bool any_deleted() const {
 		if (!deleted || dead == 0) { return false; }
 		if (dead != unknown_dead) { return true; }
@@ -102,13 +108,15 @@ inline statistics snapshot_statistics(std::span<const segment_snapshot> segs) {
 	return st;
 }
 
-// A term in one segment, routed by the index's key prefix (F8): a key-prefixed term is a
-// key leaf from the keys reader, at most one ordinal (deleted copies included, which the
-// live filter removes), wdf 0, no positions, so its upper bound is 0; any other term is
-// the dictionary's. An empty prefix routes every term to the dictionary (F13-R33).
-inline std::optional<format::term_info> find_term(const segment& seg, std::string_view term, std::string_view key_prefix) {
-	if (key_prefix.empty() || !term.starts_with(key_prefix)) { return seg.get<inverted_plugin>().find_term(term); }
-	const auto ord = seg.get<keys_plugin>().find(term, live_bits{});
+// A term of the field named `field` in one segment, routed by the field (D7): a term of the key
+// field is a key leaf from the keys reader, at most one ordinal (deleted copies included, which
+// the live filter removes), wdf 0, no positions, so its upper bound is 0; any other term is
+// the field's in the dictionary. A field the segment's index does not know has no terms.
+inline std::optional<format::term_info> find_term(const segment_snapshot& s, std::string_view field, std::string_view term) {
+	const auto id = s.field_id(field);
+	if (!id) { return std::nullopt; }
+	if (s.key_field() != id) { return s.seg->get<inverted_plugin>().find_term(*id, term); }
+	const auto ord = s.seg->get<keys_plugin>().find(term, live_bits{});
 	if (!ord) { return std::nullopt; }
 	format::term_info t;
 	t.flags = format::single_posting | format::no_wdf | format::no_positions;
@@ -117,11 +125,11 @@ inline std::optional<format::term_info> find_term(const segment& seg, std::strin
 	return t;
 }
 
-// A term's document frequency over every segment, deleted documents included.
-inline std::uint64_t snapshot_df(std::span<const segment_snapshot> segs, std::string_view term, std::string_view key_prefix = {}) {
+// A term's document frequency over every segment, deleted documents included, by field name.
+inline std::uint64_t snapshot_df(std::span<const segment_snapshot> segs, std::string_view field, std::string_view term) {
 	std::uint64_t df = 0;
 	for (const auto& s : segs) {
-		if (auto info = find_term(*s.seg, term, key_prefix)) { df += info->df; }
+		if (auto info = find_term(s, field, term)) { df += info->df; }
 	}
 	return df;
 }
@@ -129,30 +137,29 @@ inline std::uint64_t snapshot_df(std::span<const segment_snapshot> segs, std::st
 // A query's terms resolved once per segment (P6-3): one dictionary walk per term and
 // segment, shared by the term's snapshot document frequency and every segment's scorer.
 // A term's column fills on first use; the competitive pairs of a short list (below 128
-// postings) are computed only when a scorer asks for the term in that segment.
+// postings) are computed only when a scorer asks for the term in that segment. Terms are
+// named by field name: each segment resolves it to its own index's id (D14).
 class term_table {
 public:
-	// `key_prefix` is the index's: its terms are key leaves (F8).
-	explicit term_table(std::span<const segment_snapshot> segs, std::string_view key_prefix = {})
-		: segs_(segs), key_prefix_(key_prefix), st_(snapshot_statistics(segs)) {}
+	explicit term_table(std::span<const segment_snapshot> segs) : segs_(segs), st_(snapshot_statistics(segs)) {}
 
 	// The snapshot's statistics (D13).
 	const statistics& stats() const noexcept { return st_; }
 
 	// The term's document frequency over every segment, deleted documents included.
-	std::uint64_t df(std::string_view term) { return column(term).df; }
+	std::uint64_t df(std::string_view field, std::string_view term) { return column(field, term).df; }
 
 	// The term's document frequency in one of the snapshot's segments (0 when absent),
 	// without computing its competitive pairs.
-	std::uint64_t df(const segment& seg, std::string_view term) {
-		const auto& e = column(term).infos[index_of(seg)];
+	std::uint64_t df(const segment& seg, std::string_view field, std::string_view term) {
+		const auto& e = column(field, term).infos[index_of(seg)];
 		return e ? e->df : 0;
 	}
 
 	// The term's info in one of the snapshot's segments, ready for a scorer; null when
 	// the segment lacks it.
-	const format::term_info* info(const segment& seg, std::string_view term) {
-		column_t& c = column(term);
+	const format::term_info* info(const segment& seg, std::string_view field, std::string_view term) {
+		column_t& c = column(field, term);
 		const std::size_t s = index_of(seg);
 		auto& e = c.infos[s];
 		if (!e) { return nullptr; }
@@ -165,20 +172,21 @@ public:
 
 private:
 	struct column_t {
-		std::string term;
+		std::string field, term;
 		std::uint64_t df = 0;
 		std::vector<std::optional<format::term_info>> infos;  // by segment
 		std::vector<std::uint8_t> complete;                   // impacts computed, by segment
 	};
-	column_t& column(std::string_view term) {
+	column_t& column(std::string_view field, std::string_view term) {
 		for (auto& c : columns_) {
-			if (c.term == term) { return c; }
+			if (c.term == term && c.field == field) { return c; }
 		}
 		column_t& c = columns_.emplace_back();
+		c.field = field;
 		c.term = term;
 		c.infos.reserve(segs_.size());
 		for (const auto& s : segs_) {
-			c.infos.push_back(find_term(*s.seg, term, key_prefix_));
+			c.infos.push_back(find_term(s, field, term));
 			if (c.infos.back()) { c.df += c.infos.back()->df; }
 		}
 		c.complete.assign(segs_.size(), 0);
@@ -191,7 +199,6 @@ private:
 		throw std::invalid_argument("strata: a segment outside the term table's snapshot");
 	}
 	std::span<const segment_snapshot> segs_;
-	std::string key_prefix_;
 	statistics st_;
 	std::deque<column_t> columns_;  // stable addresses as columns are added
 };

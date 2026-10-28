@@ -20,13 +20,21 @@ namespace prospect {
 
 class inverting_buffer : public detail::tuple_buffer {
 public:
-	// A document that passed stage 1, its terms and tokens or split text inverted; returns its
-	// ordinal. `key` is borrowed from the transaction until the next flush.
-	ordinal_t add(std::uint64_t docid, std::uint64_t version, std::string_view key, const document& d) {
+	// A document that passed stage 1, each field's terms and tokens or split text inverted under
+	// the id `res` gives its reference; returns its ordinal. `key` is borrowed from the
+	// transaction until the next flush.
+	ordinal_t add(std::uint64_t docid, std::uint64_t version, std::string_view key, const document& d, const field_resolution& res) {
 		terms_in_.clear();
-		for (const auto& t : d.terms) { terms_in_.push_back({t.term, t.wdf, t.positions}); }
-		const ordinal_t ord = d.split_text ? tuple_buffer::add_split(docid, terms_in_, d.text, d.stored, version, key)
-										   : tuple_buffer::add(docid, terms_in_, d.text, d.tokens, d.length, d.stored, version, key);
+		texts_in_.clear();
+		std::uint64_t given = 0;  // the host's lengths of the fields without a split text
+		for (const auto& f : d.fields) {
+			const auto id = res.resolve(f.field);
+			if (!id) { throw std::logic_error("strata: a field reference that stage 1 accepted does not resolve"); }
+			for (const auto& t : f.terms) { terms_in_.push_back({t.term, t.wdf, t.positions, *id}); }
+			if (!f.text.empty() || !f.tokens.empty()) { texts_in_.push_back({*id, f.text, f.tokens, f.split_text}); }
+			if (!f.split_text) { given += f.length; }
+		}
+		const ordinal_t ord = tuple_buffer::add(docid, terms_in_, texts_in_, given, d.length, d.stored, version, key);
 		if (!d.values.empty()) { keep_values(ord, d.values); }
 		return ord;
 	}
@@ -48,7 +56,9 @@ public:
 	template <class Transaction>
 	bool fits(const Transaction& t) const noexcept {
 		std::size_t entries = 0;
-		for (const auto& o : t.ops) { entries += o.doc.terms.size() + (o.doc.split_text ? o.doc.text.size() / 2 + 1 : o.doc.tokens.size()); }
+		for (const auto& o : t.ops) {
+			for (const auto& f : o.doc.fields) { entries += f.terms.size() + (f.split_text ? f.text.size() / 2 + 1 : f.tokens.size()); }
+		}
 		return tuple_buffer::fits(t.ops.size(), entries);
 	}
 
@@ -111,6 +121,7 @@ private:
 		std::uint64_t end;  // into value_bytes_
 	};
 	std::vector<posting_input> terms_in_;  // add()'s scratch
+	std::vector<text_input> texts_in_;
 	std::vector<ordinal_t> value_docs_;    // ordinals with values, ascending
 	std::vector<std::uint64_t> value_doc_ends_;  // per such ordinal: its end in value_ends_
 	std::vector<value_end> value_ends_;

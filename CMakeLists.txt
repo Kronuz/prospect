@@ -6,7 +6,7 @@ include(FetchContent)
 # strata, the segment core prospect is the search layout of, pinned by commit; it pins the
 # libraries the core links (fst, termdict, completion, ...). Point FETCHCONTENT_SOURCE_DIR_<NAME>
 # at local checkouts to develop them together.
-FetchContent_Declare(strata GIT_REPOSITORY https://github.com/Kronuz/strata.git GIT_TAG c4ea4cefbb654c75e2116b2c06849aa018cf0035)
+FetchContent_Declare(strata GIT_REPOSITORY https://github.com/Kronuz/strata.git GIT_TAG 30e3fa7e4b2c54194db79d08340896fcb22e3ffa)
 FetchContent_MakeAvailable(strata)
 # Search's own building blocks (Kronuz libraries), each pinned to the commit its gate numbers
 # were measured at.
@@ -57,6 +57,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(format13_test PRIVATE prospect::prospect)
   target_compile_definitions(format13_test PRIVATE PROSPECT_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
   add_test(NAME format13 COMMAND format13_test)
+  add_executable(fields_test test/fields_test.cc)
+  target_link_libraries(fields_test PRIVATE prospect::prospect)
+  add_test(NAME fields COMMAND fields_test)
   add_executable(fielddict_test test/fielddict_test.cc)
   target_link_libraries(fielddict_test PRIVATE prospect::prospect)
   add_test(NAME fielddict COMMAND fielddict_test)

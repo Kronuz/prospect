@@ -208,16 +208,29 @@ static void builder_misuse_tests() {
 		return false;
 	};
 	CHECK(throws([&] { fielddict::builder b({{1, 2, {}}, {1, 2, {}}}); }));  // fields must increase
-	CHECK(throws([&] { fielddict::builder b({{1, 0, {}}}); }));
 	CHECK(throws([&] {
 		fielddict::builder b({{1, 1, {}}});
 		b.add(2, "a", info);
 	}));
 	CHECK(throws([&] {
-		fielddict::builder b({{1, 2, {}}});
+		fielddict::byte_set s;
+		s.add("ab");
+		fielddict::builder b({{1, 1, s}});
 		b.add(1, "a", info);
-		(void)b.finish();  // one term short
+		b.add(1, "b", info);  // more terms than planned
+		(void)b.finish();
 	}));
+	{  // a plan is an upper bound: a planned field may get fewer terms or none
+		fielddict::byte_set s;
+		s.add("abc");
+		fielddict::builder b({{1, 2, s}, {2, 5, s}, {3, 9, s}});
+		b.add(1, "a", info);
+		b.add(3, "b", info);
+		const auto built = b.finish();
+		fielddict::reader r(built.blocks, built.index);
+		r.check();
+		CHECK(find(r, 1, "a") && !find(r, 2, "a") && find(r, 3, "b"));
+	}
 	CHECK(throws([&] {
 		fielddict::byte_set s;
 		s.add("a");

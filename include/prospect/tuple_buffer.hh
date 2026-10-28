@@ -41,6 +41,7 @@
 #include <cassert>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <functional>
 #include <limits>
 #include <map>
@@ -50,6 +51,7 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -173,6 +175,25 @@ inline std::uint64_t get_leb(const char*& p) noexcept {
 	}
 }
 
+// Bytes handed out in pieces that never move, for a drain's group terms.
+class bytes_arena {
+public:
+	char* take(std::size_t n) {
+		if (chunks_.empty() || fill_ + n > size_) {
+			size_ = std::max<std::size_t>(std::size_t(1) << 16, n);
+			chunks_.push_back(std::unique_ptr<char[]>(new char[size_]));
+			fill_ = 0;
+		}
+		char* p = chunks_.back().get() + fill_;
+		fill_ += n;
+		return p;
+	}
+
+private:
+	std::vector<std::unique_ptr<char[]>> chunks_;
+	std::size_t fill_ = 0, size_ = 0;
+};
+
 }  // namespace tuple_detail
 
 namespace detail {
@@ -198,95 +219,91 @@ public:
 	static constexpr std::uint64_t run_cap = std::numeric_limits<std::uint32_t>::max();
 	std::uint64_t max_run_bytes = run_cap;
 	// Any one entry's bytes at most, for `tuples` terms and tokens with `given` positions and
-	// the longest term `longest` (encode_entry: its term, 46, 20 a tuple, 5 a given position).
+	// the longest term `longest` (encode_entry: its term, 51, 20 a tuple, 5 a given position).
 	static constexpr std::uint64_t entry_bound(std::uint64_t tuples, std::uint64_t given, std::uint64_t longest) noexcept {
-		return 46 + longest + 20 * tuples + 5 * given;
+		return 51 + longest + 20 * tuples + 5 * given;  // 5: the field id's varint
 	}
 
-	// A document: its terms, each once with its wdf and positions, and its text's tokens in
-	// order, each adding one to its term's wdf; a term is in one of the two and positions
-	// increase. `key` is the document's key (F8), never one of its terms, or empty. Returns
-	// its ordinal.
-	ordinal_t add(std::uint64_t docid, std::span<const posting_input> terms, std::string_view text, std::span<const text_token> tokens,
-		std::uint32_t length, std::string_view stored, std::uint64_t version, std::string_view key) {
-		return add_with(docid, terms, text, stored, version, key, tokens.size(), [&](auto&& token, std::string_view) {
-			for (const auto& tk : tokens) { token(tk.offset, tk.size, tk.position); }
-			return length;
-		});
-	}
-	// A document whose tokens are its text's words (split_words) at positions 1, 2, ..., its
-	// length their count; the text is split where it was copied. Stage 1 checked the words
-	// (text_detail::splittable).
-	ordinal_t add_split(std::uint64_t docid, std::span<const posting_input> terms, std::string_view text, std::string_view stored, std::uint64_t version,
-		std::string_view key) {
-		return add_with(docid, terms, text, stored, version, key, text.size(), [&](auto&& token, std::string_view copy) {
-			std::uint32_t position = 0;
-			text_detail::split_words(copy, [&](std::size_t offset, std::size_t size) { token(offset, std::uint32_t(size), ++position); });
-			return position;
-		});
-	}
-
-private:
-	// add()'s body: `tokens(token, copy)` calls token(offset, size, position) for each token of
-	// the copied text and returns the document's length; at most `most` tokens.
-	template <class Tokens>
-	ordinal_t add_with(std::uint64_t docid, std::span<const posting_input> terms, std::string_view text, std::string_view stored, std::uint64_t version,
-		std::string_view key, std::uint64_t most, Tokens&& tokens) {
+	// A document: its terms, each once with its wdf and positions, and its fields' texts' tokens
+	// in order, each adding one to its term's wdf (a split text's words are its tokens at
+	// positions 1, 2, ...); a term is in one of the two and positions increase. Its length is
+	// `total_length`, or `given_length` (the host's sum over the fields without a split text)
+	// plus the split words. `key` is the document's key (F8), never one of its terms, or empty.
+	// Returns its ordinal.
+	ordinal_t add(std::uint64_t docid, std::span<const posting_input> terms, std::span<const text_input> texts, std::uint64_t given_length,
+		std::optional<std::uint32_t> total_length, std::string_view stored, std::uint64_t version, std::string_view key) {
 		if (docids_.size() >= std::size_t(no_more_docs) - 1) { throw std::length_error("strata: segment document limit"); }
 		if (stored.size() > format::max_stored_record) { throw std::invalid_argument("strata: stored record too large"); }
 		if (batched_ >= batch_tuples) { drain(); }
 		const ordinal_t ord = ordinal_t(docids_.size());
-		std::size_t entry_bytes = 0;
-		std::uint64_t given_positions = 0, longest_term = 0;
+		std::size_t entry_bytes = 0, text_bytes = 0;
+		std::uint64_t given_positions = 0, longest_term = 0, most = 0;
 		for (const auto& in : terms) {
 			entry_bytes += in.term.size();
 			given_positions += in.positions.size();
 			longest_term = std::max<std::uint64_t>(longest_term, in.term.size());
 		}
-		reserve_entry(terms.size() + most, given_positions, std::max<std::uint64_t>(longest_term, text.size()));
-		char* base = room(text.size() + entry_bytes);
-		if (!text.empty()) { std::memcpy(base, text.data(), text.size()); }
+		for (const auto& x : texts) {
+			text_bytes += x.text.size();
+			most += x.split ? x.text.size() : x.tokens.size();
+			longest_term = std::max<std::uint64_t>(longest_term, x.text.size());
+		}
+		reserve_entry(terms.size() + most, given_positions, longest_term);
+		char* base = room(text_bytes + entry_bytes);
 #ifndef NDEBUG
-		std::optional<std::uint32_t> prev_position;
-		auto is_term = [&](std::string_view t) { return std::any_of(terms.begin(), terms.end(), [&](const posting_input& in) { return in.term == t; }); };
 		{
-			std::vector<std::string_view> sorted;  // the terms, to find repeats
+			std::vector<std::pair<std::uint32_t, std::string_view>> sorted;  // the terms, to find repeats
 			for (const auto& in : terms) {
 				assert(std::adjacent_find(in.positions.begin(), in.positions.end(), std::greater_equal<>()) == in.positions.end());
-				sorted.push_back(in.term);
+				sorted.push_back({in.field, in.term});
 			}
 			std::sort(sorted.begin(), sorted.end());
 			assert(std::adjacent_find(sorted.begin(), sorted.end()) == sorted.end());
 		}
 #endif
-		auto token = [&](std::uint64_t offset, std::uint32_t size, std::uint32_t position) {
-			const char* p = base + offset;
-			assert(size != 0 && offset + size <= text.size() && (!prev_position || position > *prev_position) && !is_term({p, size}));
+		std::uint64_t split_words = 0;
+		std::size_t text_at = 0;
+		for (const auto& x : texts) {
+			if (!x.text.empty()) { std::memcpy(base + text_at, x.text.data(), x.text.size()); }
+			bucket_set& set = set_for(x.field);
+			std::optional<std::uint32_t> prev_position;
+			(void)prev_position;
+			auto token = [&](std::uint64_t offset, std::uint32_t size, std::uint32_t position) {
+				const char* p = base + text_at + offset;
+				assert(size != 0 && offset + size <= x.text.size() && (!prev_position || position > *prev_position));
 #ifndef NDEBUG
-			prev_position = position;
+				prev_position = position;
+				for (const auto& in : terms) { assert(!(in.field == x.field && in.term == std::string_view(p, size))); }
 #endif
-			const std::uint64_t h = tuple_detail::hash(p, size) & hash_mask;
-			if (size < long_term && position < (std::uint32_t(1) << 24) && offset < tuple_offsets) {
-				push(tuple(h, ord, std::uint32_t(offset), position << 8 | size));
+				const std::uint64_t h = tuple_detail::hash(p, size) & hash_mask;
+				if (size < long_term && position < (std::uint32_t(1) << 24) && text_at + offset < tuple_offsets) {
+					push(set, tuple(h, ord, std::uint32_t(text_at + offset), position << 8 | size));
+				} else {
+					side_.push_back({p, size, 1, 1, positions_.size()}, memory);
+					positions_.push_back(position, memory);
+					push(set, tuple(h, ord, std::uint32_t(side_.size() - 1), long_term));
+				}
+			};
+			if (x.split) {
+				std::uint32_t position = 0;
+				text_detail::split_words(std::string_view(base + text_at, x.text.size()), [&](std::size_t offset, std::size_t size) { token(offset, std::uint32_t(size), ++position); });
+				split_words += position;
 			} else {
-				side_.push_back({p, size, 1, 1, positions_.size()}, memory);
-				positions_.push_back(position, memory);
-				push(tuple(h, ord, std::uint32_t(side_.size() - 1), long_term));
+				for (const auto& tk : x.tokens) { token(tk.offset, tk.size, tk.position); }
 			}
-		};
-		const std::uint32_t length = tokens(token, std::string_view(base, text.size()));
-		char* at = base + text.size();
+			text_at += x.text.size();
+		}
+		char* at = base + text_bytes;
 		for (const auto& in : terms) {
-			assert(!in.term.empty());
 			std::memcpy(at, in.term.data(), in.term.size());
 			side_.push_back({at, std::uint32_t(in.term.size()), in.wdf, std::uint32_t(in.positions.size()), positions_.size()}, memory);
 			for (auto p : in.positions) { positions_.push_back(p, memory); }
-			push(tuple(tuple_detail::hash(at, in.term.size()) & hash_mask, ord, std::uint32_t(side_.size() - 1), long_term));
+			push(set_for(in.field), tuple(tuple_detail::hash(at, in.term.size()) & hash_mask, ord, std::uint32_t(side_.size() - 1), long_term));
 			at += in.term.size();
 		}
 		docids_.push_back(docid);
 		versions_.push_back(version);
-		lengths_.push_back(length);
+		lengths_.push_back(total_length ? *total_length : std::uint32_t(given_length + split_words));
 		keys_ += key;
 		key_ends_.push_back(keys_.size());
 		texts_.push_back(base);
@@ -296,6 +313,7 @@ private:
 		return ord;
 	}
 
+private:
 	// Drains first when one entry of the batch could pass max_run_bytes with this document in
 	// it (entry_bound), so an entry past the cap holds one document's postings; the cut alone
 	// keeps every run correct.
@@ -345,7 +363,7 @@ public:
 		merger m(*this, {}, {});
 		term_postings old;
 		std::vector<live_posting> live;
-		writer_access::flush_from(w, segment_id, out, positions, alphabet(p), [&](term_postings& tp) -> std::optional<std::string_view> {
+		writer_access::flush_from(w, segment_id, out, positions, field_plan(p), [&](term_postings& tp) -> std::optional<std::string_view> {
 			std::string_view term;
 			while (m.next(term)) {
 				if (postings_of(m.entries(), p, tp, old, live)) { return term; }
@@ -355,7 +373,7 @@ public:
 	}
 
 	// --- The flush's steps, which a flush on several threads (perf/indexing-gap) takes
-	// itself: drain_for_flush(), plan(), add_documents() into its writer, alphabet(),
+	// itself: drain_for_flush(), plan(), add_documents() into its writer, field_plan(),
 	// splitters(), and each_term() over disjoint key ranges, from any threads at once once the
 	// buffer drained.
 
@@ -396,21 +414,24 @@ public:
 			writer_access::add_document(w, docids_[o], lengths_[o], stored(o), versions_[o], key(o));
 		}
 	}
-	// Every byte the written terms use, in order: the runs' terms, or, when documents are
-	// left out, those with a posting left (a pass over the runs).
-	std::string alphabet(const flush_plan& p) const {
-		std::array<bool, 256> used = used_;
-		if (!p.all) {
-			used = {};
-			each_term({}, {}, p, [&](std::string_view term, term_postings&) {
-				for (char c : term) { used[std::uint8_t(c)] = true; }
-			});
+	// Each field's term count and bytes over the terms written (D3): the runs' keys in one pass,
+	// or, when documents are left out, those with a posting left (a pass over the postings too).
+	std::vector<fielddict::field_plan> field_plan(const flush_plan& p) const {
+		fielddict::planner plan;
+		auto note = [&](std::string_view key) {
+			const char* q = key.data();
+			std::uint32_t field = 0;
+			(void)fielddict::get_field(q, key.data() + key.size(), field);
+			plan.add(field, key.substr(std::size_t(q - key.data())));
+		};
+		if (p.all) {
+			merger m(*this, {}, {});
+			std::string_view term;
+			while (m.next(term)) { note(term); }
+		} else {
+			each_term({}, {}, p, [&](std::string_view term, term_postings&) { note(term); });
 		}
-		std::string a;
-		for (unsigned c = 0; c < 256; ++c) {
-			if (used[c]) { a.push_back(char(c)); }
-		}
-		return a;
+		return plan.finish();
 	}
 	// Up to ranges - 1 increasing terms that split the runs' terms into ranges of about equal
 	// counts, sampled from the runs' marks (every 64th entry).
@@ -465,12 +486,11 @@ public:
 		std::vector<tuple> copy;
 		std::vector<group> groups;
 		group_scratch sc;
-		auto bucket_at = [&](std::size_t b) -> const std::vector<tuple>& { return buckets_ ? (*buckets_)[b] : flat_; };
-		for (std::size_t b = 0; b < (buckets_ ? 256u : 1u); ++b) {
-			const std::vector<tuple>& bucket = bucket_at(b);
+		tuple_detail::bytes_arena terms;
+		auto scan_bucket = [&](const std::vector<tuple>& bucket, std::uint32_t field) {
 			copy.assign(bucket.begin(), bucket.end());
 			groups.clear();
-			group_run(copy.data(), copy.size(), groups, sc);
+			group_run(copy.data(), copy.size(), groups, sc, field, terms);
 			for (const group& g : groups) {
 				for (const tuple* t = g.begin; t != g.end;) {
 					const ordinal_t ord = t->ord;
@@ -488,6 +508,13 @@ public:
 					}
 					f(g.term, ord, wdf, std::span<const std::uint32_t>(absolute));
 				}
+			}
+		};
+		for (const bucket_set& set : sets_) {
+			if (set.buckets) {
+				for (const auto& v : *set.buckets) { scan_bucket(v, set.field); }
+			} else {
+				scan_bucket(set.flat, set.field);
 			}
 		}
 	}
@@ -676,18 +703,33 @@ private:
 		return std::string_view(texts_[t.ord - batch_first_] + t.off, t.len());
 	}
 
-	// A tuple into one bucket until a batch holds a bucket's share (batch_tuples / 256), then
-	// into its hash's bucket of 256, which stay; buckets grow by half.
-	void push(const tuple& t) {
-		if (!buckets_) {
-			if (flat_.size() < batch_tuples / 256) {
-				push_to(flat_, t);
+	// One field's tuples in the batch: in one bucket until the field holds a bucket's share
+	// (batch_tuples / 256), then in its hash's bucket of 256, which stay; buckets grow by half.
+	struct bucket_set {
+		std::uint32_t field = 0;
+		std::vector<tuple> flat;  // one bucket, in arrival order, until the 256 exist
+		std::unique_ptr<std::array<std::vector<tuple>, 256>> buckets;  // by the hash's top byte, each in arrival order
+	};
+	bucket_set& set_for(std::uint32_t field) {
+		if (last_set_ && last_set_->field == field) { return *last_set_; }
+		const auto [it, fresh] = set_index_.try_emplace(field, sets_.size());
+		if (fresh) {
+			sets_.emplace_back();
+			sets_.back().field = field;
+		}
+		last_set_ = &sets_[it->second];
+		return *last_set_;
+	}
+	void push(bucket_set& set, const tuple& t) {
+		if (!set.buckets) {
+			if (set.flat.size() < batch_tuples / 256) {
+				push_to(set.flat, t);
 				++batched_;
 				return;
 			}
-			spread();
+			spread(set);
 		}
-		push_to((*buckets_)[t.hash_hi >> 24], t);
+		push_to((*set.buckets)[t.hash_hi >> 24], t);
 		++batched_;
 	}
 	void push_to(std::vector<tuple>& v, const tuple& t) {
@@ -699,12 +741,12 @@ private:
 		v.push_back(t);
 	}
 	// The 256 buckets, the one bucket's tuples moved in, in order, and its memory freed.
-	void spread() {
-		buckets_ = std::make_unique<std::array<std::vector<tuple>, 256>>();
-		if (memory) { memory->grow(sizeof(*buckets_)); }
-		for (const tuple& t : flat_) { push_to((*buckets_)[t.hash_hi >> 24], t); }
-		if (memory) { memory->shrink(flat_.capacity() * sizeof(tuple)); }
-		std::vector<tuple>().swap(flat_);
+	void spread(bucket_set& set) {
+		set.buckets = std::make_unique<std::array<std::vector<tuple>, 256>>();
+		if (memory) { memory->grow(sizeof(*set.buckets)); }
+		for (const tuple& t : set.flat) { push_to((*set.buckets)[t.hash_hi >> 24], t); }
+		if (memory) { memory->shrink(set.flat.capacity() * sizeof(tuple)); }
+		std::vector<tuple>().swap(set.flat);
 	}
 
 	// Room for n bytes in the batch's text arena, and a zeroed word after them for hash's
@@ -756,15 +798,18 @@ private:
 			groups_.clear();
 			encoded_.size = 0;
 			entry_at_.clear();
-			auto group_bucket = [&](std::vector<tuple>& v) {
+			tuple_detail::bytes_arena terms;  // the groups' composite terms, until the entries are encoded
+			auto group_bucket = [&](std::vector<tuple>& v, std::uint32_t field) {
 				const std::size_t first = groups_.size();
-				group_run(v.data(), v.size(), groups_, scratch_);
+				group_run(v.data(), v.size(), groups_, scratch_, field, terms);
 				for (std::size_t i = first; i < groups_.size(); ++i) { encode_entry(std::uint32_t(i)); }  // its tuples still in cache
 			};
-			if (buckets_) {
-				for (auto& v : *buckets_) { group_bucket(v); }
-			} else {
-				group_bucket(flat_);
+			for (bucket_set& set : sets_) {
+				if (set.buckets) {
+					for (auto& v : *set.buckets) { group_bucket(v, set.field); }
+				} else {
+					group_bucket(set.flat, set.field);
+				}
 			}
 			sort_groups(groups_);
 			// The encoded entries into the run in term order, marks placed as they land.
@@ -790,10 +835,12 @@ private:
 				runs_.push_back({at, std::uint32_t(end - k), first_mark, marks_.size() - first_mark});
 				k = end;
 			}
-			if (buckets_) {
-				for (auto& b : *buckets_) { b.clear(); }
+			for (bucket_set& set : sets_) {
+				if (set.buckets) {
+					for (auto& b : *set.buckets) { b.clear(); }
+				}
+				set.flat.clear();
 			}
-			flat_.clear();
 		}
 		batched_ = 0;
 		entry_term_ = 0, entry_positions_ = 0;
@@ -892,7 +939,6 @@ private:
 		}
 		entry_at_.push_back({encoded_.size, std::uint64_t(e - begin)});
 		encoded_.size += std::size_t(e - begin);
-		for (char c : g.term) { used_[std::uint8_t(c)] = true; }
 	}
 
 	// One entry's postings appended to tp, its ordinals renumbered from -1 (a run's entries
@@ -966,7 +1012,7 @@ private:
 	// One bucket: an id per distinct hash from a small table, a stable counting sort by id,
 	// then every tuple checked against its group's first; a group holding two terms (a hash
 	// collision) is split by bytes, each term's tuples keeping their order.
-	void group_run(tuple* p, std::size_t n, std::vector<group>& groups, group_scratch& sc) const {
+	void group_run(tuple* p, std::size_t n, std::vector<group>& groups, group_scratch& sc, std::uint32_t field, tuple_detail::bytes_arena& terms) const {
 		if (!n) { return; }
 		std::size_t cap = std::bit_ceil(std::max<std::size_t>(64, n / 2));
 		auto& hashes = sc.hashes;
@@ -1026,21 +1072,31 @@ private:
 				for (std::size_t i = begin + 1; i < end && !mixed; ++i) { mixed = bytes_of(p[i]) != first; }
 			}
 			if (mixed) {
-				split(p + begin, p + end, groups);
+				split(p + begin, p + end, groups, field, terms);
 			} else {
-				groups.push_back({first, p + begin, p + end});
+				groups.push_back({composite(field, first, terms), p + begin, p + end});
 			}
 			begin = end;
 		}
 	}
 
+	// A term as the runs hold it: the field id's varint, then the term's bytes (D10).
+	static std::string_view composite(std::uint32_t field, std::string_view bytes, tuple_detail::bytes_arena& terms) {
+		char head[5];
+		const std::size_t n = fielddict::put_field(head, field);
+		char* at = terms.take(n + bytes.size());
+		std::memcpy(at, head, n);
+		if (!bytes.empty()) { std::memcpy(at + n, bytes.data(), bytes.size()); }
+		return {at, n + bytes.size()};
+	}
+
 	// A hash group holding more than one term: each term's tuples, in their order.
-	void split(tuple* begin, tuple* end, std::vector<group>& groups) const {
+	void split(tuple* begin, tuple* end, std::vector<group>& groups, std::uint32_t field, tuple_detail::bytes_arena& terms) const {
 		std::stable_sort(begin, end, [&](const tuple& x, const tuple& y) { return bytes_of(x) < bytes_of(y); });
 		for (tuple* g = begin; g != end;) {
 			tuple* e = g + 1;
 			while (e != end && bytes_of(*e) == bytes_of(*g)) { ++e; }
-			groups.push_back({bytes_of(*g), g, e});
+			groups.push_back({composite(field, bytes_of(*g), terms), g, e});
 			g = e;
 		}
 	}
@@ -1135,8 +1191,9 @@ private:
 	static constexpr std::size_t arena_chunk = std::size_t(4) << 20;
 
 	// The batch: tuples by bucket, the documents' text, and side entries.
-	std::vector<tuple> flat_;  // one bucket, in arrival order, until the 256 exist
-	std::unique_ptr<std::array<std::vector<tuple>, 256>> buckets_;  // by the hash's top byte, each in arrival order
+	std::deque<bucket_set> sets_;  // by field, in order of first use; kept from batch to batch
+	std::unordered_map<std::uint32_t, std::size_t> set_index_;
+	bucket_set* last_set_ = nullptr;
 	std::size_t batched_ = 0;  // tuples in the buckets
 	std::uint64_t entry_term_ = 0, entry_positions_ = 0;  // the batch's longest term and given positions
 	tuple_detail::chunked<side_entry, 7> side_;
@@ -1155,11 +1212,10 @@ private:
 	growing_bytes sec_[4];   // an entry's sections under construction: ordinals, wdfs, counts, positions
 	growing_bytes encoded_;  // the batch's entries, in the buckets' order
 	std::vector<entry_ref> entry_at_;
-	// The runs, one per drained batch, and the bytes their terms use.
+	// The runs, one per drained batch.
 	tuple_detail::byte_log log_;
 	std::vector<run_ref> runs_;
 	std::vector<std::uint32_t> marks_;
-	std::array<bool, 256> used_{};
 	// Per document.
 	std::vector<std::uint64_t> docids_, versions_;
 	std::vector<std::uint32_t> lengths_;
