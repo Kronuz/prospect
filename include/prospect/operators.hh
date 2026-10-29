@@ -381,6 +381,169 @@ inline scorer_ptr elite_set(std::vector<elite_child> children, std::size_t size 
 
 // --- A host value source ------------------------------------------------------------------------
 
+// --- PHRASE and NEAR over alternatives ---------------------------------------------------------
+
+// One position of a phrase that holds alternatives (a term's wildcard or edit-distance expansion,
+// an OR or SYNONYM of terms): the documents holding any alternative, scored as that query scores
+// them, and the alternatives' terms, whose positions fill the position.
+struct phrase_slot {
+	scorer_ptr scorer;
+	std::vector<format::term_info> terms;
+};
+
+// Lucene's MultiPhraseQuery and Xapian's phrase over expansions: documents where the slots occur at
+// their relative positions (consecutive by default; `offsets`, one per slot, leave gaps where words
+// were removed), a slot being met by any of its terms. With window > 0 it is NEAR: one distinct
+// position per slot, in any order, spanning fewer than window positions. A document scores the sum of
+// its slots' scores, in the order given.
+class multi_phrase_scorer final : public scorer {
+public:
+	multi_phrase_scorer(const inverted_plugin::reader& seg, std::vector<phrase_slot> slots, std::uint32_t window = 0, std::span<const std::uint32_t> offsets = {})
+		: window_(window), cursors_(slots.size()), positions_(slots.size()) {
+		if (slots.empty()) { throw std::invalid_argument("strata: a phrase needs a slot"); }
+		if (!offsets.empty() && offsets.size() != slots.size()) { throw std::invalid_argument("strata: one offset per phrase slot"); }
+		offsets_.resize(slots.size());
+		for (std::size_t k = 0; k < slots.size(); ++k) { offsets_[k] = offsets.empty() ? std::uint32_t(k) : offsets[k] - offsets[0]; }
+		std::vector<scorer_ptr> children;
+		children.reserve(slots.size());
+		for (std::size_t k = 0; k < slots.size(); ++k) {
+			if (!slots[k].scorer) { throw std::invalid_argument("strata: a phrase slot needs a scorer"); }
+			children.push_back(std::move(slots[k].scorer));
+			for (const auto& info : slots[k].terms) {
+				cursors_[k].push_back({std::make_unique<postings_iterator>(seg, info), std::make_unique<positions_reader>(seg, info)});
+			}
+		}
+		all_ = std::make_unique<conjunction_scorer>(std::move(children));
+	}
+
+	ordinal_t doc() const noexcept override { return doc_; }
+	ordinal_t next() override { return doc_ = confirm(all_->next()); }
+	ordinal_t advance(ordinal_t t) override { return doc_ = confirm(all_->advance(t)); }
+	bool two_phase() const noexcept override { return true; }
+	ordinal_t approx_next() override { return doc_ = all_->next(); }
+	ordinal_t approx_advance(ordinal_t t) override { return doc_ = all_->advance(t); }
+	bool matches() override {
+		if (checked_ != doc_) {
+			checked_ = doc_;
+			matched_ = occurs(doc_);
+		}
+		return matched_;
+	}
+	std::uint64_t cost() const noexcept override { return all_->cost(); }
+	double score() override { return all_->score(); }
+	double max_score(ordinal_t from, ordinal_t upto) override { return all_->max_score(from, upto); }
+	ordinal_t block_end(ordinal_t t) override { return all_->block_end(t); }
+	double max_score_total() const noexcept override { return all_->max_score_total(); }
+	std::size_t score_terms() const noexcept override { return all_->score_terms(); }
+
+private:
+	struct cursor {
+		std::unique_ptr<postings_iterator> postings;
+		std::unique_ptr<positions_reader> reader;
+		bool begun = false;
+	};
+
+	ordinal_t confirm(ordinal_t d) {
+		while (d != no_more_docs) {
+			checked_ = d;
+			doc_ = d;
+			if ((matched_ = occurs(d))) { return d; }
+			d = all_->next();
+		}
+		return d;
+	}
+
+	// Whether the phrase occurs in document d, which every slot's scorer holds.
+	bool occurs(ordinal_t d) {
+		for (std::size_t k = 0; k < cursors_.size(); ++k) {
+			auto& at = positions_[k];
+			at.clear();
+			std::size_t sources = 0;
+			for (auto& c : cursors_[k]) {
+				if (!c.begun || c.postings->doc() < d) {
+					c.begun = true;
+					c.postings->advance(d);
+				}
+				if (c.postings->doc() != d) { continue; }
+				const auto read = c.reader->read(*c.postings);
+				at.insert(at.end(), read.begin(), read.end());
+				sources += !read.empty();
+			}
+			if (at.empty()) { return false; }
+			if (sources > 1) {
+				std::sort(at.begin(), at.end());
+				at.erase(std::unique(at.begin(), at.end()), at.end());
+			}
+		}
+		return window_ ? near() : exact();
+	}
+
+	// Some start from which every slot has a position at its offset.
+	bool exact() const {
+		std::size_t fewest = 0;
+		for (std::size_t k = 1; k < positions_.size(); ++k) {
+			if (positions_[k].size() < positions_[fewest].size()) { fewest = k; }
+		}
+		for (const std::uint32_t p : positions_[fewest]) {
+			if (p < offsets_[fewest]) { continue; }
+			const std::uint32_t start = p - offsets_[fewest];
+			bool all = true;
+			for (std::size_t k = 0; k < positions_.size() && all; ++k) {
+				all = k == fewest || std::binary_search(positions_[k].begin(), positions_[k].end(), start + offsets_[k]);
+			}
+			if (all) { return true; }
+		}
+		return false;
+	}
+
+	// Some window of fewer than window_ positions that gives every slot a position of its own.
+	bool near() {
+		span_.clear();
+		for (const auto& at : positions_) { span_.insert(span_.end(), at.begin(), at.end()); }
+		std::sort(span_.begin(), span_.end());
+		span_.erase(std::unique(span_.begin(), span_.end()), span_.end());
+		if (span_.size() < positions_.size()) { return false; }
+		for (std::size_t lo = 0; lo + positions_.size() <= span_.size(); ++lo) {
+			std::size_t hi = lo;
+			while (hi < span_.size() && span_[hi] - span_[lo] < window_) { ++hi; }
+			if (hi - lo < positions_.size()) { continue; }
+			owner_.assign(hi - lo, none);
+			bool all = true;
+			for (std::size_t k = 0; k < positions_.size() && all; ++k) {
+				seen_.assign(hi - lo, 0);
+				all = assign(k, lo, hi);
+			}
+			if (all) { return true; }
+		}
+		return false;
+	}
+
+	// Gives slot k a position of the window [lo, hi) that is free, or takes one from a slot that can use another.
+	bool assign(std::size_t k, std::size_t lo, std::size_t hi) {
+		for (std::size_t j = lo; j < hi; ++j) {
+			if (seen_[j - lo] || !std::binary_search(positions_[k].begin(), positions_[k].end(), span_[j])) { continue; }
+			seen_[j - lo] = 1;
+			if (owner_[j - lo] == none || assign(owner_[j - lo], lo, hi)) {
+				owner_[j - lo] = k;
+				return true;
+			}
+		}
+		return false;
+	}
+
+	static constexpr std::size_t none = ~std::size_t(0);
+	std::unique_ptr<conjunction_scorer> all_;
+	std::uint32_t window_;
+	std::vector<std::uint32_t> offsets_;
+	std::vector<std::vector<cursor>> cursors_;
+	std::vector<std::vector<std::uint32_t>> positions_;   // each slot's positions in the current document, ascending
+	std::vector<std::uint32_t> span_;
+	std::vector<std::size_t> owner_;
+	std::vector<std::uint8_t> seen_;
+	ordinal_t doc_ = 0, checked_ = no_more_docs;
+	bool matched_ = false;
+};
+
 // A column of opaque values keyed by ordinal: the values plugin's reader in a segment. Not every
 // ordinal holds a value.
 template <typename S>

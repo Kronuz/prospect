@@ -18,6 +18,7 @@ recorded vectors (`strata-oracle`, command `ops`), never by reading Xapian.
  SCALE_WEIGHT(q, f)          scale_scorer                 q                          f * q's score (f >= 0)
  ELITE_SET(n; q1..qm)        elite_set -> disjunction     the n heaviest children    their sum
  PostingSource(slot)         source_scorer<Slot, Source>  accept(value) holds        Source::weight(value)
+ PHRASE/NEAR(s1..sn)         multi_phrase_scorer          the slots at their positions  the slots' scores, summed
 ```
 
 ## SYNONYM
@@ -76,12 +77,28 @@ decode drops its document), and scores with `weight`. Its cost is the slot's cou
 "not said" (Xapiand's `MultipleValueRange` weighs 1.0 and says nothing), so the bound is unbounded and nothing
 is pruned on it; a parent still prunes its other children. It has no block structure: `block_end` is the end.
 
+## PHRASE and NEAR over alternatives
+
+`multi_phrase_scorer` is Lucene's MultiPhraseQuery: a phrase whose positions each hold alternatives (a
+wildcard or edit-distance expansion, an OR or SYNONYM of terms). A `phrase_slot` is the scorer that finds and
+weighs the documents holding any alternative, and the alternatives' terms, whose positions fill the slot. The
+documents are those every slot's scorer holds (a `conjunction_scorer`, so the slots sum in the order given) where
+the phrase occurs: some start from which each slot has a position at its offset (consecutive, or the `offsets`
+given), or with a window (NEAR) one distinct position per slot within fewer than `window` positions, found by
+matching slots to positions. A document scores its slots' scores summed, each as it scores alone. It iterates in
+two phases (the conjunction's documents, then the positions), has no `fresh` copy and does not use a minimum
+competitive score. A phrase of plain terms stays `phrase_scorer`, which Xapian's weights and the bounds are
+tuned for.
+
 ## Tests
 
 `test/operators_test.cc`: Xapian's recorded rows (669 compared; the counts per operator are printed), random
 operator trees against a brute-force model on 300, 5,000 and 20,000 documents (iteration, advance, top-k
 counted and pruned, count, fresh copies, every bound), and the host source alone, in four tree shapes, and
 shared by threads. `test/ops_mutants.py` applies one mutant per operator rule and expects a failure.
+`test/multi_phrase_test.cc` runs the alternatives scorer against a brute-force model on random phrases and NEAR
+groups (alternatives of one to three terms, OR and SYNONYM slots, offsets with gaps, windows): the documents, each
+score, `next`, `advance`, two-phase iteration, top-k counted and pruned, and under a conjunction.
 
 ## Not built
 
