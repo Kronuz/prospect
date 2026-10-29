@@ -1098,7 +1098,7 @@ private:
 	bool ex_started_ = false;
 };
 
-// Documents where the terms occur at consecutive positions; Lucene-style scoring with the
+// Documents where the terms occur at their relative positions (consecutive by default); Lucene-style scoring with the
 // phrase frequency as tf and the summed idf of its terms.
 class phrase_scorer final : public scorer, public recycled<phrase_scorer> {
 public:
@@ -1108,10 +1108,12 @@ public:
 	// window > 0 makes it NEAR: the terms (repeats counted) at distinct positions, in any
 	// order, spanning fewer than window positions; NEAR needs term_weights.
 	// Lucene mode reads `stats` and each term's `df` (index-wide, one per phrase term) when
-	// given, else the segment's.
+	// given, else the segment's. `offsets` (one per term) are the terms' relative positions
+	// in the phrase, with gaps for removed words; empty means 0..n-1 (consecutive).
 	phrase_scorer(const inverted_plugin::reader& seg, const std::vector<format::term_info>& infos, std::vector<weight> term_weights = {}, std::uint32_t window = 0,
-		const statistics* stats = nullptr, std::span<const std::uint64_t> df = {})
+		const statistics* stats = nullptr, std::span<const std::uint64_t> df = {}, std::span<const std::uint32_t> offsets = {})
 		: seg_(&seg), term_weights_(std::move(term_weights)), window_(window) {
+		if (!offsets.empty() && offsets.size() != infos.size()) { throw std::invalid_argument("strata: one offset per phrase term"); }
 		if (window_ && term_weights_.size() != infos.size()) { throw std::invalid_argument("strata: NEAR needs a weight per term"); }
 		if (!df.empty() && df.size() != infos.size()) { throw std::invalid_argument("strata: one document frequency per phrase term"); }
 		const statistics st = stats ? *stats : statistics(seg);
@@ -1134,7 +1136,7 @@ public:
 					lead_ = u;
 				}
 			}
-			slots_.push_back({u, std::uint32_t(k)});
+			slots_.push_back({u, std::uint32_t(k), offsets.empty() ? std::uint32_t(k) : offsets[k]});
 		}
 		for (std::size_t u = 0; u < terms_.size(); ++u) {
 			if (u != lead_) { others_.push_back(u); }
@@ -1207,7 +1209,8 @@ public:
 private:
 	struct slot {
 		std::size_t term;      // index into terms_
-		std::uint32_t offset;  // position in the phrase
+		std::uint32_t offset;  // index of the term in the phrase (its weight)
+		std::uint32_t pos;     // relative position in the phrase
 	};
 
 	// The next document at or after d holding every term, leapfrogging from the rarest.
@@ -1307,7 +1310,7 @@ private:
 			// are decoded when first needed.
 			lists_.assign(order_.size() - 1, {{}, unread});
 			for (std::uint32_t p : lead) {
-				if (p < first.offset) { continue; }
+				if (p < first.pos) { continue; }
 				std::size_t k = 1;
 				for (; k < order_.size(); ++k) {
 					auto& [pos, j] = lists_[k - 1];
@@ -1315,7 +1318,7 @@ private:
 						pos = positions(order_[k].term);
 						j = 0;
 					}
-					const std::uint32_t want = p - first.offset + order_[k].offset;
+					const std::uint32_t want = p - first.pos + order_[k].pos;
 					while (j < pos.size() && pos[j] < want) { ++j; }
 					if (j == pos.size()) { return 0; }
 					if (pos[j] != want) { break; }
@@ -1326,11 +1329,11 @@ private:
 		}
 		candidates_.clear();
 		for (std::uint32_t p : lead) {
-			if (p >= first.offset) { candidates_.push_back(p - first.offset); }
+			if (p >= first.pos) { candidates_.push_back(p - first.pos); }
 		}
 		for (std::size_t k = 1; k < order_.size() && !candidates_.empty(); ++k) {
 			const auto pos = positions(order_[k].term);
-			const std::uint32_t offset = order_[k].offset;
+			const std::uint32_t offset = order_[k].pos;
 			std::size_t keep = 0, j = 0;
 			for (std::uint32_t c : candidates_) {
 				const std::uint32_t want = c + offset;
@@ -1351,12 +1354,12 @@ private:
 		std::size_t j = 0;
 		bool read = false;
 		for (const std::uint32_t p : positions(a.term)) {
-			if (p < a.offset) { continue; }
+			if (p < a.pos) { continue; }
 			if (!read) {
 				pos = positions(b.term);
 				read = true;
 			}
-			const std::uint32_t want = p - a.offset + b.offset;
+			const std::uint32_t want = p - a.pos + b.pos;
 			while (j < pos.size() && pos[j] < want) { ++j; }
 			if (j == pos.size()) { return 0; }
 			if (pos[j] == want) { return 1; }
