@@ -130,7 +130,7 @@ void exercise(const prospect::segment& seg) {
 	}
 	try {
 		prospect::check_report r;
-		strata::check_segment(seg, &deleted, r, "Q");  // every byte, every key against its range and filter (CR2)
+		strata::check_segment(seg, &deleted, r);  // every byte, every key against its range and filter (CR2)
 	} catch (const strata::corrupt_segment&) {
 		// damage found; the query paths below still run over what opened
 	}

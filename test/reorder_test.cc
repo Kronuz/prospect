@@ -81,7 +81,7 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		index::options opts;
-		opts.key_prefix = "Q";
+		opts.keyed = true;
 		opts.reorder_settings.min_df = 40;
 		auto ix = prospect::index::create(io, opts, uuid);
 		// Two topics with their own words, interleaved, so bisection has clusters to find.
@@ -171,7 +171,7 @@ int main() {
 			string_output out(merged);
 			string_spill spill;
 			const std::array<std::uint8_t, 16> id{9};
-			const auto plan = merge_segments(sources, id, out, spill, {.order = order, .key_prefix = "Q"});
+			const auto plan = merge_segments(sources, id, out, spill, {.order = order});
 			CHECK(plan.doc_count == order.size());
 		}
 		const segment seg(merged);
@@ -185,7 +185,7 @@ int main() {
 			string_spill spill;
 			string_scratch records;
 			const std::array<std::uint8_t, 16> id{9};
-			(void)merge_segments(sources, id, out, spill, {.order = order, .records = &records, .key_prefix = "Q"});
+			(void)merge_segments(sources, id, out, spill, {.order = order, .records = &records});
 			CHECK(again == merged);
 			CHECK(!records.bytes().empty());
 		}

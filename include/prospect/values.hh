@@ -322,7 +322,7 @@ struct values_plugin {
 	struct report {
 		std::uint64_t value_slots = 0, values = 0, value_bytes = 0;
 	};
-	static void check(const reader& r, const core_segment& core, report& rep, std::string_view) {
+	static void check(const reader& r, const core_segment& core, report& rep) {
 		for (std::size_t i = 0; i < r.slot_count(); ++i) {
 			const column& c = r.at(i);
 			std::uint64_t n = 0;

@@ -21,7 +21,7 @@ MUTANTS = [
     ("interleave: no overflow check", "if (did - 1 > (std::numeric_limits<std::uint64_t>::max() - shard - 1) / shards) { throw std::overflow_error(\"prospect: interleaved docid overflows\"); }", ""),
     ("split: shard from the wrong end", "return {std::size_t((docid - 1) % shards), (docid - 1) / shards + 1};", "return {std::size_t(shards - 1 - (docid - 1) % shards), (docid - 1) / shards + 1};"),
     ("statistics: the first shard's only", "statistics stats() const { return snapshot_statistics(all_); }", "statistics stats() const { return snapshot_statistics(segments(0)); }"),
-    ("document frequency: the first shard's only", "return snapshot_df(all_, term, key_prefix); }", "return snapshot_df(segments(0), term, key_prefix); }"),
+    ("document frequency: the first shard's only", "return snapshot_df(all_, field, term); }", "return snapshot_df(segments(0), field, term); }"),
     ("last docid: the smallest, not the largest", "best = std::max(best, interleave_docid(last, i, shards_.size()));", "best = best ? std::min(best, interleave_docid(last, i, shards_.size())) : interleave_docid(last, i, shards_.size());"),
     ("last docid: the shard's own, not interleaved", "best = std::max(best, interleave_docid(last, i, shards_.size()));", "best = std::max(best, last);"),
     ("length bounds: the lower bound is the largest minimum", "b.lower = any ? std::min(b.lower, inv.min_length()) : inv.min_length();", "b.lower = any ? std::max(b.lower, inv.min_length()) : inv.min_length();"),

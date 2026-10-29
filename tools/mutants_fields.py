@@ -27,6 +27,8 @@ M+=[
  ("S pool blocks without a pool index accepted (SR3)",F,[('		if (pool_index_.empty() != (terms.size() == own_blocks_)) { corrupt("field directory"); }  // pool blocks and pool index come together\n',"")],["fielddict_test"]),
  ("T check_fields lets the key field hold terms (SR5)",F,[("return id < table_size && id != key_field;","return id < table_size;")],["fielddict_test"]),
  ("U check_fields accepts an id equal to the table's size (SR5)",F,[("return id < table_size && id != key_field;","return id <= table_size && id != key_field;")],["fielddict_test"]),
+ ("V the key leaf is chosen by the byte Q, not the field's role (F3)","include/prospect/searcher.hh",[("if (s.key_field() != id) {","if (term.empty() || term[0] != 'Q') {")],["format13_test"]),
+ ("W the key leaf is chosen by the byte 0xff, not the field's role (F3)","include/prospect/searcher.hh",[("if (s.key_field() != id) {","if (term.empty() || std::uint8_t(term[0]) != 0xff) {")],["format13_test"]),
 ]
 M=[m for m in M if m[3]]
 only=sys.argv[1:]

@@ -116,7 +116,7 @@ template <class Index> static void warn_trust(const Index& ix) {
 	}
 }
 
-// Phase 3's index: each document upserted by its key ("Q" + id, Xapiand's key prefix),
+// Phase 3's index: each document upserted by its key ("Q" + id, Xapiand's key bytes),
 // the buffer flushing past PROSPECT_BUFFER_MB (default 256) on PROSPECT_THREADS inversion
 // threads (default 1, D18) and merging by the tiered policy (PROSPECT_AUTO_MERGE=0 turns
 // merges off), committed once at the end. Segments, versions,
@@ -127,7 +127,7 @@ int index(const std::string& dir) {
 	std::filesystem::permissions(dir, std::filesystem::perms::group_write | std::filesystem::perms::others_write, std::filesystem::perm_options::remove);
 	kronuz::journal::PosixIO io(dir, 0600, host_io);
 	prospect::index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	const char* mb = std::getenv("PROSPECT_BUFFER_MB");
 	o.buffer_share = (mb ? std::strtoull(mb, nullptr, 10) : 256) << 20;
 	// PROSPECT_BUDGET_MB: the node's indexing budget (D17), this index's whole share of it,
@@ -202,7 +202,7 @@ int index(const std::string& dir) {
 int merge(const std::string& dir) {
 	kronuz::journal::PosixIO io(dir, 0600, host_io);
 	prospect::index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	if (const char* r = std::getenv("PROSPECT_REORDER"); r && std::string_view(r) == "0") { o.reordering = prospect::index::options::reorder_mode::off; }
 	if (const char* t = std::getenv("PROSPECT_REORDER_THREADS")) { o.reorder_settings.bisection.threads = std::uint32_t(std::max(1L, std::strtol(t, nullptr, 10))); }
 	if (const char* seed = std::getenv("PROSPECT_IDENTITY_SEED")) { o.identity_seed = std::strtoull(seed, nullptr, 10); }
@@ -229,7 +229,7 @@ int serve(const std::string& dir) {
 	if (!std::filesystem::exists(dir + "/segment.sx")) {  // an index of segments (Phase 3)
 		kronuz::journal::PosixIO io(dir, 0600, host_io);
 		prospect::index::options o;
-		o.key_prefix = "Q";
+		o.keyed = true;
 		auto ix = prospect::index::open(io, o);
 		warn_trust(ix);
 		std::vector<prospect::segment_snapshot> segs;
@@ -430,7 +430,7 @@ std::string query_of(const std::string& line) {
 int verify_index(const std::string& dir) {
 	kronuz::journal::PosixIO io(dir, 0600, host_io);
 	prospect::index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	auto ix = prospect::index::open(io, o);
 	warn_trust(ix);
 	std::vector<prospect::segment_snapshot> segs;
@@ -495,7 +495,7 @@ int verify_index(const std::string& dir) {
 int dump(const std::string& dir) {
 	kronuz::journal::PosixIO io(dir, 0600, host_io);
 	prospect::index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	auto ix = prospect::index::open(io, o);
 	warn_trust(ix);
 	std::vector<prospect::segment_snapshot> segs;
@@ -601,7 +601,7 @@ int bench(const std::string& dir, std::string_view command, int runs, prospect::
 	if (!std::filesystem::exists(dir + "/segment.sx")) {
 		kronuz::journal::PosixIO io(dir, 0600, host_io);
 		prospect::index::options o;
-		o.key_prefix = "Q";
+		o.keyed = true;
 		auto ix = prospect::index::open(io, o);
 		warn_trust(ix);
 		std::vector<prospect::segment_snapshot> segs;
@@ -659,7 +659,7 @@ int churn(const std::string& dir) {
 	std::filesystem::permissions(dir, std::filesystem::perms::group_write | std::filesystem::perms::others_write, std::filesystem::perm_options::remove);
 	kronuz::journal::PosixIO io(dir, 0600, host_io);
 	prospect::index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	o.auto_merge = true;
 	const std::array<char, 16> uuid{'s', 't', 'r', 'a', 't', 'a', '-', 's', 'o', 'a', 'k'};
 	auto ix = prospect::index::create(io, o, uuid);

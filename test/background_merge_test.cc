@@ -107,7 +107,7 @@ struct background {
 	// otherwise inline.
 	prospect::index::options options(bool use = true) {
 		prospect::index::options o;
-		o.key_prefix = "Q";
+		o.keyed = true;
 		o.policy.segments_per_tier = 2;
 		o.policy.floor_bytes = 1;
 		if (use) {
@@ -611,7 +611,7 @@ static void build_cancellation() {
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	prospect::index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	auto ix = prospect::index::create(io, o, uuid);
 	for (int s = 0; s < 2; ++s) {
 		for (int d = 0; d < 200; ++d) { CHECK(ix.apply(tx({replace("Q" + std::to_string(s * 200 + d), "t" + std::to_string(d % 50))}), {}).result == verdict::accepted); }
@@ -624,7 +624,7 @@ static void build_cancellation() {
 	{
 		string_output out(full);
 		string_spill spill;
-		(void)merge_segments(sources, header, out, spill, {.key_prefix = "Q"});
+		(void)merge_segments(sources, header, out, spill, {});
 	}
 	{
 		task::cancel_source source;
@@ -635,7 +635,7 @@ static void build_cancellation() {
 		string_spill spill;
 		bool cancelled = false;
 		try {
-			(void)merge_segments(sources, header, out, spill, {.cancel = &token, .key_prefix = "Q"});
+			(void)merge_segments(sources, header, out, spill, {.cancel = &token});
 		} catch (const task::cancelled&) {
 			cancelled = true;
 		}
@@ -659,7 +659,7 @@ static void build_cancellation() {
 		string_spill spill;
 		bool cancelled = false;
 		try {
-			(void)merge_segments(sources, header, out, spill, {.cancel = &token, .key_prefix = "Q"});
+			(void)merge_segments(sources, header, out, spill, {.cancel = &token});
 		} catch (const task::cancelled&) {
 			cancelled = true;
 		}

@@ -91,7 +91,7 @@ static void basic_tests() {
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	prospect::index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	auto ix = prospect::index::create(io, o, uuid);
 	// The same bytes in two fields are two terms; the empty term is a term; a document's length
 	// is the host's, not a count of its terms.
@@ -126,7 +126,7 @@ static void rejection_tests() {
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	prospect::index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	auto ix = prospect::index::create(io, o, uuid);
 	auto verdict_of = [&](std::vector<operation> ops, bool declare = true) {
 		transaction t = tx(std::move(ops));
@@ -150,7 +150,7 @@ static void dictionary_tests() {
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	prospect::index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	o.auto_merge = false;
 	auto ix = prospect::index::create(io, o, uuid);
 	std::vector<operation> ops;
@@ -194,7 +194,7 @@ static void agreement_tests() {
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	prospect::index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	o.auto_merge = false;
 	auto ix = prospect::index::create(io, o, uuid);
 	std::mt19937_64 rng(9);
@@ -233,7 +233,7 @@ static void reference_tests() {
 	faultfs::filesystem fs;
 	faultfs::io io(fs);
 	prospect::index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	auto ix = prospect::index::create(io, o, uuid);
 	CHECK(ix.apply(tx({add("Q1", {part(TITLE, {term("alpha")}), part(BODY, {term("beta")})})}), {}).result == strata::verdict::accepted);
 	transaction t;

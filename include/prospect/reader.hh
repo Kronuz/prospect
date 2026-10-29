@@ -497,8 +497,7 @@ struct inverted_plugin {
 	};
 	// Decodes every term's postings (exactly its document frequency, by the iterator's
 	// construction) and positions, and reads every document's length.
-	// The core still passes the index's key prefix (F3 removes it); terms are never checked against it.
-	static void check(const reader& inverted, const core_segment& core, report& r, std::string_view);
+	static void check(const reader& inverted, const core_segment& core, report& r);
 	// Its digest records (L8, F21): per document a length record, length 0 included, and per
 	// posting a P record; over a segment's live ordinals, or a buffered document.
 	template <class Live, class Emit>
@@ -1680,7 +1679,7 @@ void inverted_plugin::records(std::uint64_t docid, const part& p, Emit&& emit) {
 	for (const auto& [term, e] : postings) { posting_record(docid, term, e.first, e.second, emit); }
 }
 
-inline void inverted_plugin::check(const reader& inverted, const core_segment& core, report& r, std::string_view) {
+inline void inverted_plugin::check(const reader& inverted, const core_segment& core, report& r) {
 	for (ordinal_t o = 0; o < core.doc_count(); ++o) { (void)inverted.length(o); }
 	inverted.dictionary().check();
 	inverted.scan_terms([&](std::uint32_t, std::string_view, const format::term_info& info) {

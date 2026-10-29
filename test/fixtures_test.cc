@@ -116,7 +116,7 @@ static std::string merged(const std::vector<std::string>& files, const std::vect
 	std::string out;
 	string_output sink(out);
 	string_spill spill;
-	(void)merge_segments(sources, id, sink, spill, {.key_prefix = "Q"});
+	(void)merge_segments(sources, id, sink, spill, {});
 	return out;
 }
 
@@ -193,7 +193,7 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		index::options o;
-		o.key_prefix = "Q";
+		o.keyed = true;
 		o.auto_merge = false;
 		const std::array<char, 16> uuid = {'f', 'i', 'x', 't', 'u', 'r', 'e', 's', 'd', 'i', 'g', 'e', 's', 't', '0', '1'};
 		auto ix = index::create(io, o, uuid);

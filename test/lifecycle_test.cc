@@ -124,7 +124,7 @@ static transaction tx_of(operation o) {
 
 int main() {
 	index::options keyed;
-	keyed.key_prefix = "Q";
+	keyed.keyed = true;
 	keyed.retained_predecessors = 2;  // recover --to any of the last manifests
 	// PROSPECT_LIFECYCLE_REORDER: every merge reorders, with test-sized thresholds, so each
 	// crash point, replay, and background schedule below covers reordering merges (T5).
@@ -140,7 +140,7 @@ int main() {
 	// keyless one, whose documents keep version 0 however flushes fall (F9, F13-R18).
 	const index::options keyless = [&] {
 		index::options o = keyed;
-		o.key_prefix.clear();
+		o.keyed = false;
 		return o;
 	}();
 	for (int profile = 0; profile < 2; ++profile)

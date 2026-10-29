@@ -145,7 +145,7 @@ static std::uint64_t segment_bytes(const prospect::index& ix) {
 
 int main() {
 	prospect::index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	o.auto_merge = true;
 	std::size_t cycles = 8;
 	if (const char* env = std::getenv("PROSPECT_CHURN_CYCLES")) { cycles = std::strtoull(env, nullptr, 10); }
@@ -223,7 +223,7 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		prospect::index::options so;
-		so.key_prefix = "Q";
+		so.keyed = true;
 		so.auto_merge = true;
 		so.policy.floor_bytes = 4096;  // tiers at this scale, as at 16 MiB on real ones
 		auto ix = prospect::index::create(io, so, uuid);

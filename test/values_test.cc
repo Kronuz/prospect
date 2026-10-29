@@ -292,7 +292,7 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		index::options opts;
-		opts.key_prefix = "Q";
+		opts.keyed = true;
 		auto ix = prospect::index::create(io, opts, uuid);
 		struct live {
 			model_values values;
@@ -384,7 +384,7 @@ int main() {
 		{
 			string_output out(merged);
 			string_spill spill;
-			const auto plan = merge_segments(sources, id, out, spill, {.key_prefix = "Q"});
+			const auto plan = merge_segments(sources, id, out, spill, {});
 			CHECK(plan.doc_count == model.size());
 		}
 		{
@@ -425,7 +425,7 @@ int main() {
 			std::string permuted;
 			string_output out(permuted);
 			string_spill spill;
-			(void)merge_segments(sources, id, out, spill, {.order = order, .key_prefix = "Q"});
+			(void)merge_segments(sources, id, out, spill, {.order = order});
 			const segment seg(permuted);
 			const auto& rd = seg.get<values_plugin>();
 			for (ordinal_t o = 0; o < seg.core().doc_count(); ++o) {
@@ -434,7 +434,7 @@ int main() {
 				CHECK(got == model.at(seg.core().docid(o)).values);
 			}
 			check_report rep;
-			check_segment(seg, nullptr, rep, "Q");
+			check_segment(seg, nullptr, rep);
 		}
 		// The digest is the same through merging to one segment.
 		const std::uint64_t before = ix.digest();
