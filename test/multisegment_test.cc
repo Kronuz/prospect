@@ -3,6 +3,7 @@
 //     holding the same documents: the same docids, scores, ties, and counts.
 //   - With deletes, pruned search across segments equals an exhaustive scan of every
 //     segment's live matches, ties by docid, and counts equal.
+#include "text_field.hh"
 #include "prospect/index.hh"
 #include "prospect/searcher.hh"
 #include "strata/core/budget.hh"
@@ -41,10 +42,10 @@ static document random_doc(std::mt19937_64& r) {
 		if (r() % 100 >= (rare ? 3u : 35u)) { continue; }
 		term_entry t{w, 1 + std::uint32_t(r() % 3), {}};
 		for (std::uint32_t k = 0; k < t.wdf; ++k) { t.positions.push_back(pos += 1 + std::uint32_t(r() % 2)); }
-		d.length += t.wdf;
-		d.terms.push_back(std::move(t));
+		d.field().length += t.wdf;
+		d.field().terms.push_back(std::move(t));
 	}
-	if (d.terms.empty()) { d.terms.push_back({"a", 1, {1}}), d.length = 1; }
+	if (d.field().terms.empty()) { d.field().terms.push_back({"a", 1, {1}}), d.length = 1; }
 	return d;
 }
 
@@ -56,11 +57,11 @@ struct query {
 
 static scorer_ptr build(const segment& seg, const query& q, const statistics& st, std::span<const segment_snapshot> segs, bool xapian) {
 	auto weight_of = [&](const std::string& t) {
-		const std::uint64_t df = snapshot_df(segs, t);
+		const std::uint64_t df = snapshot_df(segs, text_name, t);
 		return xapian ? weight::bm25_xapian(st, df) : weight::bm25(st, df);
 	};
 	auto term = [&](const std::string& t) -> scorer_ptr {
-		auto info = seg.get<prospect::inverted_plugin>().term(t);
+		auto info = seg.get<prospect::inverted_plugin>().term(0, t);
 		return info ? std::make_unique<term_scorer>(seg.get<prospect::inverted_plugin>(), *info, weight_of(t)) : nullptr;
 	};
 	std::vector<scorer_ptr> kids;
@@ -99,10 +100,10 @@ static scorer_ptr build(const segment& seg, const query& q, const statistics& st
 		std::vector<std::uint64_t> dfs;
 		std::vector<weight> ws;
 		for (auto& t : q.terms) {
-			auto info = seg.get<prospect::inverted_plugin>().term(t);
+			auto info = seg.get<prospect::inverted_plugin>().term(0, t);
 			if (!info) { return nullptr; }
 			infos.push_back(*info);
-			dfs.push_back(snapshot_df(segs, t));
+			dfs.push_back(snapshot_df(segs, text_name, t));
 			ws.push_back(weight_of(t));
 		}
 		if (xapian) { return std::make_unique<phrase_scorer>(seg.get<prospect::inverted_plugin>(), infos, std::move(ws)); }
@@ -153,7 +154,7 @@ static void check_against_scan(const std::vector<doc_hit>& hits, const std::vect
 
 static std::vector<segment_snapshot> snapshot(const prospect::index& ix) {
 	std::vector<segment_snapshot> out;
-	for (const auto& s : ix.segments()) { out.push_back({s.seg(), s.deleted, s.dead}); }
+	for (const auto& s : ix.segments()) { out.push_back({s.seg(), s.deleted, s.dead, &ix.fields()}); }
 	return out;
 }
 
@@ -175,6 +176,7 @@ int main() {
 		for (std::size_t d = 0; d < docs; ++d) {
 			all.push_back(random_doc(r));
 			transaction t;
+			t.fields = text_fields();
 			operation o;
 			o.doc = all.back();
 			t.ops.push_back(o);
@@ -187,6 +189,7 @@ int main() {
 			// across segments are not settled by segment order.
 			for (std::size_t i = 0; i < docs / 5; ++i) {
 				transaction t;
+				t.fields = text_fields();
 				operation o;
 				o.docid = 1 + r() % docs;
 				if (r() % 2) {
@@ -219,13 +222,13 @@ int main() {
 		// The same documents in one segment.
 		for (std::size_t d = 0; d < docs; ++d) {
 			std::vector<posting_input> in;
-			for (const auto& t : all[d].terms) { in.push_back({t.term, t.wdf, t.positions}); }
-			one.add(d + 1, in, all[d].length);
+			for (const auto& t : all[d].field().terms) { in.push_back({t.term, t.wdf, t.positions}); }
+			one.add(d + 1, in, prospect::inverted_plugin::document_length(all[d]));
 		}
 		const std::string one_bytes = one.flush({});
 		const segment single(one_bytes);
 		const strata::deleted_bits none((single.core().doc_count() + 63) / 64);
-		const segment_snapshot single_snap[] = {{&single, &none}};
+		const segment_snapshot single_snap[] = {{&single, &none, prospect::segment_snapshot::unknown_dead, &text_table()}};
 		for (int qn = 0; qn < 120; ++qn) {
 			query q;
 			q.kind = int(r() % 6);
@@ -283,7 +286,7 @@ int main() {
 			}
 			files.push_back(w.flush({}));
 			owned.push_back(std::make_unique<segment>(files.back()));
-			segs.push_back({owned.back().get(), nullptr});
+			segs.push_back({owned.back().get(), nullptr, prospect::segment_snapshot::unknown_dead, &text_table()});
 		}
 		const std::vector<segment_snapshot> reversed(segs.rbegin(), segs.rend());
 		const std::vector<segment_snapshot>* const views[] = {&segs, &reversed};
@@ -373,7 +376,7 @@ int main() {
 		strata::deleted_bits deleted((seg.core().doc_count() + 63) / 64);
 		for (std::uint32_t d = 0; d < 3000; d += 1 + std::uint32_t(r() % 5)) { deleted.set(d); }
 		auto dead = [&](std::uint32_t d) { return (deleted[d >> 6] >> (d & 63)) & 1; };
-		auto phrase = [&] { return std::make_unique<phrase_scorer>(seg.get<prospect::inverted_plugin>(), std::vector<prospect::format::term_info>{*seg.get<prospect::inverted_plugin>().term("a"), *seg.get<prospect::inverted_plugin>().term("b")}); };
+		auto phrase = [&] { return std::make_unique<phrase_scorer>(seg.get<prospect::inverted_plugin>(), std::vector<prospect::format::term_info>{*seg.get<prospect::inverted_plugin>().term(0, "a"), *seg.get<prospect::inverted_plugin>().term(0, "b")}); };
 		auto live_phrase = [&] { return std::make_unique<live_scorer>(phrase(), deleted); };
 		// "a b" and "c" in live documents, by brute force.
 		std::set<ordinal_t> want;
@@ -387,7 +390,7 @@ int main() {
 		}
 		std::vector<scorer_ptr> kids;
 		kids.push_back(live_phrase());
-		kids.push_back(std::make_unique<term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term("c")));
+		kids.push_back(std::make_unique<term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term(0, "c")));
 		conjunction_scorer both(std::move(kids));
 		CHECK(both.two_phase());
 		std::set<ordinal_t> got;
@@ -396,11 +399,11 @@ int main() {
 		// The counting copy, and count() through the wrapper.
 		// (A phrase has no counting copy; a term does, and the wrapper keeps it.)
 		CHECK(!live_phrase()->fresh());
-		auto lt = std::make_unique<live_scorer>(std::make_unique<term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term("c")), deleted);
+		auto lt = std::make_unique<live_scorer>(std::make_unique<term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term(0, "c")), deleted);
 		auto copy = lt->fresh();
 		CHECK(copy && count(*copy) == count(*lt));
 		// A window starting off a word boundary clears exactly the deleted ordinals in it.
-		auto all_c = std::make_unique<live_scorer>(std::make_unique<term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term("c")), deleted);
+		auto all_c = std::make_unique<live_scorer>(std::make_unique<term_scorer>(seg.get<prospect::inverted_plugin>(), *seg.get<prospect::inverted_plugin>().term(0, "c")), deleted);
 		std::uint64_t bits[64] = {};
 		all_c->advance(5);
 		all_c->fill(5, 205, bits);

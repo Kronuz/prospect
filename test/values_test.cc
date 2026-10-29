@@ -4,6 +4,7 @@
 // values and drop the deleted ones' (a merge is the same bytes as one flush of the live
 // documents); the digest does not depend on segmentation; stage 1 and the writer refuse what
 // the limits name; damaged directories and columns fence as corrupt_segment.
+#include "text_field.hh"
 #include "prospect/check.hh"
 #include "prospect/index.hh"
 #include "prospect/merge.hh"
@@ -304,13 +305,14 @@ int main() {
 			d.key = key;
 			m = r() % 6 ? random_values(r) : model_values{};
 			d.values = as_part(m);
-			d.terms.push_back({"t" + std::to_string(r() % 5), 1, {1}});
+			d.field().terms.push_back({"t" + std::to_string(r() % 5), 1, {1}});
 			d.length = 1;
 			if (r() % 3 == 0) { d.stored = std::string(r() % 300, 's'); }
 			return d;
 		};
 		for (int i = 0; i < 2500; ++i) {
 			transaction t;
+			t.fields = text_fields();
 			operation o;
 			const std::uint64_t kind = r() % 10;
 			const std::string key = "Q" + std::to_string(r() % 300);

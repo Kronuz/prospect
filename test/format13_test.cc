@@ -1,6 +1,7 @@
 // Format 13's open rules (docs/design/format-13.md T1, step 7c-1): the frozen prefix (F2),
 // F3's kinds and F5's canonical layout, F4's structure bits and presence, F6's reserved
 // words, the sink's file order, and the format-12 refusal fixtures.
+#include "text_field.hh"
 #include "prospect/check.hh"
 #include "prospect/index.hh"
 #include "prospect/merge.hh"
@@ -197,12 +198,12 @@ std::string with_version(std::string file, std::uint32_t v) {
 
 // The docids a term query matches over an index's live documents, through the planner's
 // routing (F8): the term table resolves a key-prefixed term as a key leaf.
-std::vector<std::uint64_t> matches(const prospect::index& ix, std::string_view term, std::string_view key_prefix) {
+std::vector<std::uint64_t> matches(const prospect::index& ix, std::string_view field, std::string_view term) {
 	std::vector<prospect::segment_snapshot> segs;
-	for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead}); }
-	prospect::term_table table(segs, key_prefix);
+	for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead, &ix.fields()}); }
+	prospect::term_table table(segs);
 	auto build = [&](const prospect::segment& seg) -> prospect::scorer_ptr {
-		const auto* info = table.info(seg, term);
+		const auto* info = table.info(seg, field, term);
 		if (!info) { return nullptr; }
 		return std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *info);
 	};
@@ -217,7 +218,7 @@ prospect::operation upsert(const std::string& key, const std::string& word) {
 	op.type = prospect::operation::replace_key;
 	op.key = key;
 	op.doc.key = key;
-	op.doc.terms.push_back({word, 1, {1}});
+	op.doc.field().terms.push_back({word, 1, {1}});
 	op.doc.length = 1;
 	op.doc.stored = key;
 	return op;
@@ -225,6 +226,7 @@ prospect::operation upsert(const std::string& key, const std::string& word) {
 
 strata::verdict::outcome apply(prospect::index& ix, const prospect::operation& op) {
 	prospect::transaction t;
+	t.fields = ix.manifest().key_prefix.empty() ? text_fields() : keyed_fields();
 	t.ops.push_back(op);
 	return ix.apply(t, {}).result;
 }
@@ -261,9 +263,9 @@ int main() {
 
 	// --- F2: the prefix ------------------------------------------------------------------
 	{
-		// The prefix CRC of the version written (format 14 step 1's pre-freeze, 0x8000000B), from
+		// The prefix CRC of the version written (format 14 step 1's pre-freeze, 0x8000000C), from
 		// the bytes.
-		CHECK(strata::format::get<std::uint32_t>(good.data() + 12) == 0x0941f671u);
+		CHECK(strata::format::get<std::uint32_t>(good.data() + 12) == 0x10414ebbu);
 		CHECK(strata::format::read_version(good) == strata::format::pre_freeze);
 		// The magic wrong: damage.
 		for (std::size_t at = 0; at < 8; ++at) {
@@ -741,10 +743,11 @@ int main() {
 		{
 		auto ix = prospect::index::create(io, o, {});
 		prospect::transaction t;
+		t.fields = text_fields();
 		prospect::operation op;
 		op.type = prospect::operation::replace_key;
 		op.key = "Q1";
-		op.doc.terms.push_back({"alpha", 1, {1}});
+		op.doc.field().terms.push_back({"alpha", 1, {1}});
 		op.doc.key = "Q1";
 		op.doc.length = 1;
 		t.ops.push_back(op);
@@ -795,7 +798,7 @@ int main() {
 			CHECK(without.core().entry(section::norms) == nullptr && without.holds<prospect::inverted_plugin>());
 			for (strata::ordinal_t o = 0; o < 200; ++o) { CHECK(without.get<prospect::inverted_plugin>().norm(o) == with.get<prospect::inverted_plugin>().norm(o)); }
 			for (const char* t : {"odd", "even"}) {
-				const auto a = with.get<prospect::inverted_plugin>().term(t), b = without.get<prospect::inverted_plugin>().term(t);
+				const auto a = with.get<prospect::inverted_plugin>().term(0, t), b = without.get<prospect::inverted_plugin>().term(0, t);
 				CHECK(a && b);
 				prospect::term_scorer sa(with.get<prospect::inverted_plugin>(), *a), sb(without.get<prospect::inverted_plugin>(), *b);
 				for (auto d = sa.next(), e = sb.next(); d != strata::no_more_docs || e != strata::no_more_docs; d = sa.next(), e = sb.next()) {
@@ -810,9 +813,9 @@ int main() {
 			prospect::segment s(document);
 			CHECK(!s.holds<prospect::inverted_plugin>() && s.holds<strata::keys_plugin>() && s.holds<strata::stored_plugin>());
 			const auto& inv = s.get<prospect::inverted_plugin>();
-			CHECK(!inv.term("odd") && inv.length(7) == 0 && inv.total_length() == 0 && inv.norm(7) == 0);
+			CHECK(!inv.term(0, "odd") && inv.length(7) == 0 && inv.total_length() == 0 && inv.norm(7) == 0);
 			std::size_t terms = 0;
-			inv.scan_terms([&](std::string_view, const prospect::format::term_info&) { return ++terms, true; });
+			inv.scan_terms([&](std::uint32_t, std::string_view, const prospect::format::term_info&) { return ++terms, true; });
 			CHECK(terms == 0);
 			CHECK(s.get<strata::keys_plugin>().find("Q7", {}) == strata::ordinal_t(7) && s.get<strata::stored_plugin>().stored(7) == std::string(3, 's'));
 			s.verify_all();
@@ -866,7 +869,7 @@ int main() {
 			prospect::segment m(out);
 			CHECK(m.core().structures() == (all | bit::values) && m.core().doc_count() == 400);
 			CHECK(m.get<strata::stored_plugin>().stored(0).empty() && m.get<strata::stored_plugin>().stored(200) == std::string(1, 's'));
-			CHECK(m.get<prospect::inverted_plugin>().term("odd")->df == 100 && m.get<prospect::inverted_plugin>().length(200) == 0);
+			CHECK(m.get<prospect::inverted_plugin>().term(0, "odd")->df == 100 && m.get<prospect::inverted_plugin>().length(200) == 0);
 			CHECK(m.get<strata::keys_plugin>().find("Q1000", {}) == strata::ordinal_t(200) && m.get<strata::keys_plugin>().version(200) == 1);
 		}
 	}
@@ -884,7 +887,7 @@ int main() {
 			std::size_t n = 0;
 			keys.scan("", [&](std::string_view, strata::ordinal_t) { return ++n, true; });
 			CHECK(n == 0);
-			CHECK(s.get<prospect::inverted_plugin>().term("odd")->df == 100);
+			CHECK(s.get<prospect::inverted_plugin>().term(0, "odd")->df == 100);
 		}
 		// Versions near 2^64 - 1 at a width above 1: the writer writes base 0 at width 64, so
 		// the reader's range check passes (F13-R25 item 7).
@@ -927,9 +930,10 @@ int main() {
 			auto ix = prospect::index::create(io, prospect::index::options{}, {});
 			prospect::operation add;
 			add.type = prospect::operation::add;
-			add.doc.terms.push_back({"w", 1, {1}});
+			add.doc.field().terms.push_back({"w", 1, {1}});
 			add.doc.length = 1;
 			prospect::transaction t;
+			t.fields = text_fields();
 			t.ops.push_back(add);
 			const auto v1 = ix.apply(t, {});
 			CHECK(v1.result == strata::verdict::accepted && v1.versions == std::vector<std::uint64_t>{0});
@@ -937,6 +941,7 @@ int main() {
 			replace.type = prospect::operation::replace_docid;
 			replace.docid = v1.docids[0];
 			prospect::transaction t2;
+			t2.fields = text_fields();
 			t2.ops.push_back(replace);
 			CHECK(ix.apply(t2, {}).versions == std::vector<std::uint64_t>{0});  // buffered
 			const std::uint64_t before = ix.digest();
@@ -963,11 +968,11 @@ int main() {
 		o.key_prefix = "Q";
 		o.auto_merge = false;
 		auto ix = prospect::index::create(io, o, {});
-		// Stage 1: a term with the key prefix, a key without it, and a key unlike the
+		// Stage 1: a term of the key field, a key without the prefix, and a key unlike the
 		// operation's are invalid (F8; F13-R25 item 2).
 		{
 			auto op = upsert("Qa", "w");
-			op.doc.terms.push_back({"Qb", 0, {}});
+			op.doc.field(strata::field_ref::declared(1)).terms.push_back({"Qb", 0, {}});  // a term of the key field
 			CHECK(apply(ix, op) == strata::verdict::invalid);
 			auto add = upsert("Qa", "w");
 			add.type = prospect::operation::add;
@@ -1020,43 +1025,24 @@ int main() {
 		CHECK(ix.segments().size() > 2);
 		for (int k = 0; k < 120; ++k) {
 			const std::string key = "Q" + std::to_string(k);
-			const auto got = matches(ix, key, o.key_prefix);
+			const auto got = matches(ix, "_id", key);
 			const auto it = live.find(key);
 			CHECK(got == (it == live.end() ? std::vector<std::uint64_t>{} : std::vector<std::uint64_t>{it->second}));
 			// The dictionary holds no key: without the prefix's routing, nothing matches.
-			CHECK(matches(ix, key, {}).empty());
+			CHECK(matches(ix, "text", key).empty());
 		}
 		// The term table's df counts the segments holding a key, deleted copies included.
 		{
 			std::vector<prospect::segment_snapshot> segs;
 			std::uint64_t held = 0;
 			for (const auto& v : ix.segments()) {
-				segs.push_back({v.seg(), v.deleted, v.dead});
+				segs.push_back({v.seg(), v.deleted, v.dead, &ix.fields()});
 				held += v.seg()->get<strata::keys_plugin>().find("Q7", {}).has_value();
 			}
-			CHECK(prospect::snapshot_df(segs, "Q7", o.key_prefix) == held);
+			CHECK(prospect::snapshot_df(segs, "_id", "Q7") == held);
 		}
 		const auto report = ix.check();
 		CHECK(report.keys >= live.size() && report.terms >= 7);
-		// check() refuses a dictionary that holds a key-prefixed term.
-		{
-			prospect::segment_writer w;
-			std::vector<prospect::posting_input> in{{"Qx", 1, {}}};
-			w.add(1, in, 1);
-			const std::string bytes = w.flush({});
-			prospect::segment seg(bytes);
-			prospect::check_report rr;
-			bool threw = false;
-			try {
-				strata::check_segment(seg, nullptr, rr, "Q");
-			} catch (const strata::corrupt_segment&) {
-				threw = true;
-			}
-			CHECK(threw);
-			prospect::check_report plain;
-			strata::check_segment(seg, nullptr, plain);  // no prefix: an ordinary term
-			CHECK(plain.terms == 1);
-		}
 		// check() refuses keys sections that lookups would misread (F13-R37), each resealed as
 		// fuzz inputs are: two keys naming one ordinal, a range other than the first and last
 		// key, and a filter that misses held keys.
@@ -1177,49 +1163,15 @@ int main() {
 				CHECK(refused(with_section(good9, section::key_index, ix9)));
 			}
 		}
-		// The merge's backstop refuses a key-prefixed term too, never drops it (F13-R10; CR6, M33).
-		{
-			prospect::segment_writer w;
-			std::vector<prospect::posting_input> in{{"Qx", 1, {}}};
-			w.add(1, in, 1);
-			const std::string bytes = w.flush({});
-			prospect::segment seg(bytes);
-			const std::vector<prospect::merge_source> src{{&seg, nullptr}};
-			std::string out;
-			strata::string_output so(out);
-			strata::string_spill spill;
-			strata::merge_options mo;
-			mo.key_prefix = "Q";
-			bool threw = false;
-			try {
-				(void)prospect::merge_segments(src, {}, so, spill, mo);
-			} catch (const std::invalid_argument&) {
-				threw = true;
-			}
-			CHECK(threw);
-		}
 		// A length-0 document keeps its length record through a flush (F21; CR6, M5).
 		{
 			auto empty = upsert("Qempty", "w");
-			empty.doc.terms.clear();
+			empty.doc.field().terms.clear();
 			empty.doc.length = 0;
 			CHECK(apply(ix, empty) == strata::verdict::accepted);
 			const std::uint64_t buffered = ix.digest();
 			ix.commit();
 			CHECK(ix.digest() == buffered);
-		}
-		// The writer's backstop refuses a key-prefixed term, never drops it.
-		{
-			prospect::segment_writer w;
-			w.key_prefix = "Q";
-			std::vector<prospect::posting_input> in{{"Qx", 1, {}}};
-			bool threw = false;
-			try {
-				w.add(1, in, 1);
-			} catch (const std::invalid_argument&) {
-				threw = true;
-			}
-			CHECK(threw);
 		}
 	}
 	// A keyless index: no prefix, so no routing and no term refused for its bytes (F13-R33). A
@@ -1232,8 +1184,8 @@ int main() {
 		auto ix = prospect::index::create(io, o, {});
 		prospect::operation op;
 		op.type = prospect::operation::add;
-		op.doc.terms.push_back({"Qa", 1, {1}});
-		op.doc.terms.push_back({"w", 1, {2}});
+		op.doc.field().terms.push_back({"Qa", 1, {1}});
+		op.doc.field().terms.push_back({"w", 1, {2}});
 		op.doc.length = 2;
 		prospect::operation keyed = op;
 		keyed.doc.key = "Qa";
@@ -1243,7 +1195,7 @@ int main() {
 		CHECK(apply(ix, keyed) == strata::verdict::invalid);
 		CHECK(apply(ix, op) == strata::verdict::accepted);
 		ix.commit();
-		CHECK(matches(ix, "Qa", {}).size() == 1 && matches(ix, "w", {}).size() == 1);
+		CHECK(matches(ix, "text", "Qa").size() == 1 && matches(ix, "text", "w").size() == 1);
 		CHECK(!ix.find_key("Qa"));
 		CHECK(ix.check().keys == 0);
 	}
@@ -1271,7 +1223,7 @@ int main() {
 	// The buffer and the disk estimate count a document's key as they count a term (CR12).
 	{
 		prospect::document d;
-		d.terms.push_back({"w", 1, {}});
+		d.field().terms.push_back({"w", 1, {}});
 		const std::uint64_t bytes = d.part_bytes(), disk = d.disk_estimate();
 		d.key = "Q" + std::string(999, 'k');
 		CHECK(d.part_bytes() == bytes + 1000 && d.disk_estimate() >= disk + 1000);

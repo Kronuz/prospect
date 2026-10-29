@@ -104,12 +104,12 @@ void count_terms(const node& n, std::map<std::string, std::uint32_t>& wqf) {
 struct snapshot_weights {
 	std::span<const prospect::segment_snapshot> segs;
 	prospect::statistics st;
-	prospect::weight of(const std::string& term, std::uint32_t wqf) const { return prospect::weight::bm25_xapian(st, prospect::snapshot_df(segs, term), wqf); }
+	prospect::weight of(const std::string& term, std::uint32_t wqf) const { return prospect::weight::bm25_xapian(st, prospect::snapshot_df(segs, "text", term), wqf); }
 };
 
 prospect::scorer_ptr build(const prospect::segment& seg, const node& n, const std::map<std::string, std::uint32_t>& wqf, const snapshot_weights* snap = nullptr) {
 	if (n.op.empty()) {
-		auto info = seg.get<prospect::inverted_plugin>().term(n.term);
+		auto info = seg.get<prospect::inverted_plugin>().term(0, n.term);
 		if (!info) { return nullptr; }
 		return std::make_unique<prospect::term_scorer>(seg.get<prospect::inverted_plugin>(), *info, snap ? snap->of(n.term, wqf.at(n.term)) : prospect::weight::bm25_xapian(seg.get<prospect::inverted_plugin>(), info->df, wqf.at(n.term)));
 	}
@@ -117,7 +117,7 @@ prospect::scorer_ptr build(const prospect::segment& seg, const node& n, const st
 		std::vector<prospect::format::term_info> infos;
 		std::vector<prospect::weight> weights;
 		for (const auto& c : n.children) {
-			auto info = seg.get<prospect::inverted_plugin>().term(c.term);
+			auto info = seg.get<prospect::inverted_plugin>().term(0, c.term);
 			if (!info) { return nullptr; }
 			infos.push_back(*info);
 			weights.push_back(snap ? snap->of(c.term, wqf.at(c.term)) : prospect::weight::bm25_xapian(seg.get<prospect::inverted_plugin>(), info->df, wqf.at(c.term)));
@@ -229,8 +229,10 @@ int main(int argc, char** argv) {
 		parts = 1;
 		std::cout << "reordered: " << (segments[0].core().docid_ordered() ? "no" : "yes") << "\n";
 	}
+	strata::field_table table;  // the one field the segments' terms are in, id 0
+	table.append({"text", strata::field_role::indexed, strata::field_postings::positions, false});
 	std::vector<prospect::segment_snapshot> snaps;
-	for (const auto& s : segments) { snaps.push_back({&s, nullptr}); }
+	for (const auto& s : segments) { snaps.push_back({.seg = &s, .fields = &table}); }
 	const snapshot_weights weights{snaps, prospect::snapshot_statistics(snaps)};
 	const snapshot_weights* snap = parts > 1 ? &weights : nullptr;
 	const prospect::segment& seg = segments[0];

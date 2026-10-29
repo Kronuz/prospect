@@ -9,6 +9,7 @@
 //     up twice per segment (once for its snapshot df, once for the scorer): the same hits,
 //     scores, and counts, bit for bit; and find_term plus complete_impacts is term().
 #include "engine_query.hh"
+#include "text_field.hh"
 #include "prospect/index.hh"
 #include "prospect/writer.hh"
 #include "strata/core/faultfs.hh"
@@ -41,10 +42,10 @@ static document random_doc(std::mt19937_64& r) {
 		if (r() % 100 >= (rare ? 3u : 35u)) { continue; }
 		term_entry t{w, 1 + std::uint32_t(r() % 3), {}};
 		for (std::uint32_t k = 0; k < t.wdf; ++k) { t.positions.push_back(pos += 1 + std::uint32_t(r() % 2)); }
-		d.length += t.wdf;
-		d.terms.push_back(std::move(t));
+		d.field().length += t.wdf;
+		d.field().terms.push_back(std::move(t));
 	}
-	if (d.terms.empty()) { d.terms.push_back({"a", 1, {1}}), d.length = 1; }
+	if (d.field().terms.empty()) { d.field().terms.push_back({"a", 1, {1}}), d.length = 1; }
 	return d;
 }
 
@@ -67,7 +68,7 @@ static std::string random_query(std::mt19937_64& r) {
 
 static std::vector<segment_snapshot> snapshot(const prospect::index& ix) {
 	std::vector<segment_snapshot> out;
-	for (const auto& s : ix.segments()) { out.push_back({s.seg(), s.deleted, s.dead}); }
+	for (const auto& s : ix.segments()) { out.push_back({s.seg(), s.deleted, s.dead, &ix.fields()}); }
 	return out;
 }
 
@@ -82,7 +83,7 @@ struct reference_stats {
 		auto [it, fresh] = df.try_emplace(term, 0);
 		if (fresh) {
 			for (const auto& s : segs) {
-				if (auto info = s.seg->get<prospect::inverted_plugin>().term(term)) { it->second += info->df; }
+				if (auto info = s.seg->get<prospect::inverted_plugin>().term(0, term)) { it->second += info->df; }
 			}
 		}
 		return it->second;
@@ -92,7 +93,7 @@ struct reference_stats {
 static scorer_ptr reference_clause(const segment& seg, const std::vector<std::string>& clause, double boost, scheme sch, reference_stats& snap) {
 	std::vector<prospect::format::term_info> infos;
 	for (const auto& t : clause) {
-		auto info = seg.get<prospect::inverted_plugin>().term(t);
+		auto info = seg.get<prospect::inverted_plugin>().term(0, t);
 		if (!info) { return nullptr; }
 		infos.push_back(*info);
 	}
@@ -201,13 +202,14 @@ static void check_segment_independent(std::mt19937_64& r) {
 		for (const char* w : words) {
 			term_entry t{w, 1 + std::uint32_t(r() % 9), {}};
 			for (std::uint32_t k = 0; k < t.wdf; ++k) { t.positions.push_back(++pos); }
-			d.length += t.wdf;
-			d.terms.push_back(std::move(t));
+			d.field().length += t.wdf;
+			d.field().terms.push_back(std::move(t));
 		}
 		probes.push_back(std::move(d));
 	}
 	auto add = [&](const document& d) {
 		transaction t;
+		t.fields = text_fields();
 		operation o;
 		o.doc = d;
 		t.ops.push_back(o);
@@ -218,8 +220,8 @@ static void check_segment_independent(std::mt19937_64& r) {
 		for (int i = 0; i < 300; ++i) {  // short fillers dense in one end of the vocabulary
 			document f;
 			const char* w = words[side ? 5 - i % 3 : i % 3];
-			f.terms.push_back({w, 20, {}});
-			for (std::uint32_t k = 0; k < 20; ++k) { f.terms.back().positions.push_back(k + 1); }
+			f.field().terms.push_back({w, 20, {}});
+			for (std::uint32_t k = 0; k < 20; ++k) { f.field().terms.back().positions.push_back(k + 1); }
 			f.length = 20;
 			add(f);
 		}
@@ -251,6 +253,7 @@ static void check_interleaved(std::mt19937_64& r) {
 	for (int i = 0; i < 40; ++i) { pool.push_back(random_doc(r)); }
 	for (std::size_t d = 0; d < 3000; ++d) {
 		transaction t;
+		t.fields = text_fields();
 		operation o;
 		o.type = operation::replace_docid;
 		o.docid = 1 + r() % 6000;
@@ -300,6 +303,7 @@ int main() {
 		for (std::size_t d = 0; d < docs; ++d) {
 			all.push_back(random_doc(r));
 			transaction t;
+			t.fields = text_fields();
 			operation o;
 			o.doc = all.back();
 			t.ops.push_back(o);
@@ -311,6 +315,7 @@ int main() {
 			// Deletes in the older half of the docids only, so some segments keep none.
 			for (std::size_t i = 0; i < docs / 10; ++i) {
 				transaction t;
+				t.fields = text_fields();
 				operation o;
 				o.type = operation::delete_docid;
 				o.docid = 1 + r() % (docs / 2);
@@ -328,17 +333,17 @@ int main() {
 		segment_writer one;
 		for (std::size_t d = 0; d < docs; ++d) {
 			std::vector<posting_input> in;
-			for (const auto& t : all[d].terms) { in.push_back({t.term, t.wdf, t.positions}); }
-			one.add(d + 1, in, all[d].length);
+			for (const auto& t : all[d].field().terms) { in.push_back({t.term, t.wdf, t.positions}); }
+			one.add(d + 1, in, prospect::inverted_plugin::document_length(all[d]));
 		}
 		const std::string one_bytes = one.flush({});
 		const segment single(one_bytes);
-		const segment_snapshot single_snap[] = {{&single, nullptr, 0}};
+		const segment_snapshot single_snap[] = {{&single, nullptr, 0, &text_table()}};
 		// find_term plus complete_impacts is term(), field by field.
 		for (const auto& s : segs) {
 			for (const char* t : vocab) {
-				const auto full = s.seg->get<prospect::inverted_plugin>().term(t);
-				auto lazy = s.seg->get<prospect::inverted_plugin>().find_term(t);
+				const auto full = s.seg->get<prospect::inverted_plugin>().term(0, t);
+				auto lazy = s.seg->get<prospect::inverted_plugin>().find_term(0, t);
 				CHECK(bool(full) == bool(lazy));
 				if (!full || !lazy) { continue; }
 				CHECK(lazy->df == full->df && lazy->cf == full->cf && lazy->flags == full->flags);

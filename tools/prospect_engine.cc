@@ -1,5 +1,9 @@
 // prospect as a search-benchmark-game engine.
 //   prospect_engine index DIR < corpus.json   one segment from JSON lines ("text": whitespace tokens)
+//   prospect_engine fields DIR FILE flat|fields [SHARD]
+//                                            one segment from a terms dump (fields-and-keys T1): lines
+//                                            "doc\twdf\thex"; flat puts every term in one field, fields splits
+//                                            them as Xapiand's engine fields; SHARD keeps one shard's documents
 //   prospect_engine serve DIR                  "COMMAND\tquery" lines -> one count per line
 //   prospect_engine terms DIR                  every term and its document frequency
 //   prospect_engine dictstats DIR              the term dictionary's bytes by part
@@ -42,6 +46,7 @@
 #include <cerrno>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <unordered_map>
 #include <iostream>
 #include <string>
@@ -94,11 +99,11 @@ private:
 // as the stored record.
 void fill_document(prospect::document& d, std::string_view key, std::string_view id, std::string_view text) {
 	d.key.assign(key);
-	d.terms.clear();
-	d.text.assign(text);
-	d.tokens.clear();
-	d.split_text = true;
-	d.length = 0;
+	d.field().terms.clear();
+	d.field().text.assign(text);
+	d.field().tokens.clear();
+	d.field().split_text = true;
+	d.length.reset();  // the words' count
 	d.stored.assign(id);
 }
 
@@ -143,6 +148,7 @@ int index(const std::string& dir) {
 	warn_trust(ix);
 	// The batch's operations are reused, so their strings and vectors keep their capacity.
 	prospect::transaction t;
+	t.fields = engine::declarations();
 	std::size_t batched = 0;
 	auto apply = [&] {
 		if (!batched) { return; }
@@ -227,7 +233,7 @@ int serve(const std::string& dir) {
 		auto ix = prospect::index::open(io, o);
 		warn_trust(ix);
 		std::vector<prospect::segment_snapshot> segs;
-		for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead}); }
+		for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead, &ix.fields()}); }
 		for (LineReader in; in.next(line);) {
 			const std::size_t tab = line.find('\t');
 			std::cout << run(std::span<const prospect::segment_snapshot>(segs), std::string_view(line.data(), tab), std::string_view(line).substr(tab + 1)) << '\n';
@@ -247,7 +253,7 @@ int terms(const std::string& dir) {
 	residency::file file;
 	prospect::segment seg = open(dir, file);
 	std::ios::sync_with_stdio(false);
-	seg.get<prospect::inverted_plugin>().scan_terms([](std::string_view key, const prospect::format::term_info& info) {
+	seg.get<prospect::inverted_plugin>().scan_terms([](std::uint32_t, std::string_view key, const prospect::format::term_info& info) {
 		std::cout << key << '\t' << info.df << '\n';
 		return true;
 	});
@@ -273,7 +279,9 @@ int dictstats(const std::string& dir) {
 	std::uint64_t terms = 0, single = 0, absolute = 0, keys = 0, values = 0, flags = 0, df = 0, cf = 0, ordinal = 0, impacts = 0;
 	std::uint64_t postings_length = 0, postings_offset = 0, positions_length = 0, positions_offset = 0;
 	prospect::format::term_run run;
-	seg.get<prospect::inverted_plugin>().dictionary().scan("", [&](std::string_view key, std::string_view value) {
+	prospect::inverted_plugin::reader::term_cursor cursor(seg.get<prospect::inverted_plugin>());
+	while (cursor.next()) {
+		const std::string_view key = cursor.term(), value = cursor.value();
 		const auto t = prospect::format::decode_term_info(value, run);
 		const bool abs = t.flags & prospect::format::absolute;
 		// The cursors an absolute entry stored: where its own bytes start.
@@ -302,8 +310,7 @@ int dictstats(const std::string& dir) {
 			prospect::format::encode_impacts(imp, t.impacts);
 			impacts += imp.size();
 		}
-		return true;
-	});
+	}
 	std::uint64_t section_terms = 0, section_index = 0;
 	for (const auto& e : seg.core().sections()) {
 		if (e.kind == strata::format::section::terms) { section_terms = e.length; }
@@ -337,7 +344,7 @@ int dictdump(const std::string& dir, const std::string& path) {
 	std::FILE* out = std::fopen(path.c_str(), "wb");
 	if (!out) { return 1; }
 	auto u64 = [&](std::uint64_t v) { std::fwrite(&v, 8, 1, out); };
-	seg.get<prospect::inverted_plugin>().scan_terms([&](std::string_view key, const prospect::format::term_info& t) {
+	seg.get<prospect::inverted_plugin>().scan_terms([&](std::uint32_t, std::string_view key, const prospect::format::term_info& t) {
 		u64(key.size());
 		std::fwrite(key.data(), 1, key.size(), out);
 		for (std::uint64_t v : {std::uint64_t(t.flags), std::uint64_t(t.df), t.cf, t.postings, t.positions, std::uint64_t(t.single_wdf), t.postings_length, t.positions_length,
@@ -427,7 +434,7 @@ int verify_index(const std::string& dir) {
 	auto ix = prospect::index::open(io, o);
 	warn_trust(ix);
 	std::vector<prospect::segment_snapshot> segs;
-	for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead}); }
+	for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead, &ix.fields()}); }
 	std::span<const prospect::segment_snapshot> view(segs);
 	std::size_t queries = 0, mismatches = 0;
 	auto close = [](double a, double b) { return std::abs(a - b) <= 1e-9 * std::max(1.0, std::max(a, b)); };
@@ -437,7 +444,7 @@ int verify_index(const std::string& dir) {
 		++queries;
 		const parsed p = parse(q);
 		for (const auto scheme : {prospect::scheme::bm25, prospect::scheme::bm25_xapian}) {
-			prospect::term_table table(view, o.key_prefix);
+			prospect::term_table table(view);
 			auto builder = [&](const prospect::segment& seg) { return build(seg, p, scheme, &table); };
 			std::vector<prospect::doc_hit> scan;
 			for (const auto& sv : segs) {
@@ -492,7 +499,7 @@ int dump(const std::string& dir) {
 	auto ix = prospect::index::open(io, o);
 	warn_trust(ix);
 	std::vector<prospect::segment_snapshot> segs;
-	for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead}); }
+	for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead, &ix.fields()}); }
 	const char* count_env = std::getenv("PROSPECT_DUMP_COUNT");
 	const bool with_count = !count_env || std::string_view(count_env) != "0";
 	LineReader in;
@@ -503,7 +510,7 @@ int dump(const std::string& dir) {
 		for (const auto scheme : {prospect::scheme::bm25, prospect::scheme::bm25_xapian}) {
 			for (std::size_t k : {10u, 100u, 1000u}) {
 				std::uint64_t n = 0;
-				const auto hits = search_snapshot(segs, p, k, scheme, with_count ? &n : nullptr, o.key_prefix);
+				const auto hits = search_snapshot(segs, p, k, scheme, with_count ? &n : nullptr);
 				std::printf("%s\t%d\t%zu\t%llu", q.c_str(), int(scheme), k, (unsigned long long)n);
 				for (const auto& h : hits) { std::printf(" %llu:%a", (unsigned long long)h.docid, h.score); }
 				std::printf("\n");
@@ -598,10 +605,10 @@ int bench(const std::string& dir, std::string_view command, int runs, prospect::
 		auto ix = prospect::index::open(io, o);
 		warn_trust(ix);
 		std::vector<prospect::segment_snapshot> segs;
-		for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead}); }
+		for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead, &ix.fields()}); }
 		std::cerr << "bench: " << segs.size() << " segments\n";
 		const std::span<const prospect::segment_snapshot> view(segs);
-		return bench_queries(runs, [&](std::string_view query) { return run(view, command, query, scheme, o.key_prefix); });
+		return bench_queries(runs, [&](std::string_view query) { return run(view, command, query, scheme); });
 	}
 	residency::file file;
 	prospect::segment seg = open(dir, file);
@@ -660,6 +667,7 @@ int churn(const std::string& dir) {
 	using clock = std::chrono::steady_clock;
 	auto us = [](clock::time_point t) { return std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - t).count(); };
 	prospect::transaction t;
+	t.fields = engine::declarations();
 	auto apply = [&] {
 		if (t.ops.empty()) { return; }
 		if (ix.apply(t, {}).result != strata::verdict::accepted) { std::cerr << "rejected\n"; std::exit(1); }
@@ -699,7 +707,7 @@ int churn(const std::string& dir) {
 			const std::string_view command = l.substr(a + 1, b - a - 1), query = l.substr(b + 1);
 			const auto start = clock::now();
 			std::vector<prospect::segment_snapshot> segs;
-			for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead}); }
+			for (const auto& v : ix.segments()) { segs.push_back({v.seg(), v.deleted, v.dead, &ix.fields()}); }
 			// As serve answers it: weights from the snapshot's statistics, not each segment's.
 			const std::uint64_t result = run(std::span<const prospect::segment_snapshot>(segs), command, query);
 			std::cout << "Q\t" << us(start) << '\t' << result << std::endl;
@@ -713,9 +721,101 @@ int churn(const std::string& dir) {
 	return 0;
 }
 
+// Xapiand's engine field of a term: its prefix up to and including the type character (the
+// first capital letter of a dot-separated part; a leading Z keeps the stem field apart).
+static bool engine_field(const std::string& t, std::size_t& prefix) {
+	std::size_t i = !t.empty() && t[0] == 'Z' ? 1 : 0;
+	while (i < t.size()) {
+		if (t[i] >= 'A' && t[i] <= 'Z') { prefix = i + 1; return true; }
+		const auto dot = t.find('.', i);
+		if (dot == std::string::npos) { return false; }
+		i = dot + 1;
+	}
+	return false;
+}
+
+static std::string unhex(std::string_view h) {
+	std::string out;
+	auto nibble = [](char c) { return c <= '9' ? c - '0' : c - 'a' + 10; };
+	for (std::size_t i = 0; i + 1 < h.size(); i += 2) { out.push_back(char(nibble(h[i]) << 4 | nibble(h[i + 1]))); }
+	return out;
+}
+
+// T1's index: a terms dump (xapiand_terms.py) as one segment. Q (the key) and V (the version) are
+// left out as in the design's probe; field ids follow first use; a document's length is the sum
+// of its wdf.
+int fields_index(const std::string& dir, const std::string& file, std::string_view mode, const char* shard) {
+	const bool split = mode == "fields";
+	if (!split && mode != "flat") { return 2; }
+	struct posting {
+		std::uint32_t field;
+		std::string term;
+		std::uint32_t wdf;
+	};
+	std::vector<std::vector<posting>> docs;
+	std::vector<std::string> names;
+	std::map<std::string, std::uint32_t> ids;
+	std::string current;
+	std::ifstream in(file);
+	std::string line;
+	const std::string only = shard ? std::string(shard) + ":" : std::string();
+	while (std::getline(in, line)) {
+		const auto a = line.find('\t'), b = line.find('\t', a + 1);
+		if (b == std::string::npos) { continue; }
+		const std::string doc = line.substr(0, a);
+		if (!only.empty() && !doc.starts_with(only)) { continue; }
+		const std::string term = unhex(std::string_view(line).substr(b + 1));
+		std::size_t prefix = 0;
+		if (!engine_field(term, prefix)) { std::cerr << "no field in a term of " << doc << '\n'; return 1; }
+		const std::string name = term.substr(0, prefix);
+		if (name == "Q" || name == "V") { continue; }
+		if (doc != current || docs.empty()) { docs.emplace_back(); current = doc; }
+		const std::string field_name = split ? name : "t";
+		const auto [it, fresh] = ids.emplace(field_name, std::uint32_t(names.size()));
+		if (fresh) { names.push_back(field_name); }
+		docs.back().push_back({it->second, split ? term.substr(prefix) : term, std::uint32_t(std::strtoul(line.c_str() + a + 1, nullptr, 10))});
+	}
+	std::filesystem::create_directories(dir);
+	kronuz::journal::PosixIO io(dir, 0600, host_io);
+	prospect::index::options o;
+	o.buffer_share = std::uint64_t(8) << 30;
+	o.auto_merge = false;
+	const std::array<char, 16> uuid{'f', 'i', 'e', 'l', 'd', 's', '-', 't', '1'};
+	auto ix = prospect::index::create(io, o, uuid);
+	prospect::transaction t;
+	for (const auto& n : names) { t.fields.push_back({n, strata::field_role::indexed, strata::field_postings::freqs, false}); }
+	auto apply = [&] {
+		if (t.ops.empty()) { return; }
+		if (ix.apply(t, {}).result != strata::verdict::accepted) { std::cerr << "rejected\n"; std::exit(1); }
+		t.ops.clear();
+	};
+	for (const auto& d : docs) {
+		prospect::operation op;
+		op.type = prospect::operation::add;
+		for (const auto& p : d) {
+			auto& part = op.doc.field(strata::field_ref::declared(p.field));
+			part.terms.push_back({p.term, p.wdf, {}});
+			part.length += p.wdf;
+		}
+		t.ops.push_back(std::move(op));
+		if (t.ops.size() == 1000) { apply(); }
+	}
+	apply();
+	ix.commit();
+	std::cerr << "fields: " << docs.size() << " documents, " << names.size() << " fields, " << ix.segments().size() << " segments\n";
+	// Each section's kind and length, summed over the segments, as `sections` prints one segment's.
+	std::map<std::string, std::uint64_t> sizes;
+	for (const auto& v : ix.segments()) {
+		for (const auto& e : v.seg()->core().sections()) { sizes[strata::format::name_of(e.kind)] += e.length; }
+	}
+	for (const auto& [name, length] : sizes) { std::cout << name << '\t' << length << '\n'; }
+	return 0;
+}
+
 int main(int argc, char** argv) {
 	const std::string mode = argc > 1 ? argv[1] : "";
 	if (mode == "index" && argc == 3) { return index(argv[2]); }
+	if (mode == "fields" && (argc == 5 || argc == 6)) { return fields_index(argv[2], argv[3], argv[4], argc == 6 ? argv[5] : nullptr); }
 	if (mode == "merge" && argc == 3) { return merge(argv[2]); }
 	if (mode == "serve" && argc == 3) { return serve(argv[2]); }
 	if (mode == "terms" && argc == 3) { return terms(argv[2]); }

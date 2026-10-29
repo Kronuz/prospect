@@ -158,7 +158,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 	{
 		prospect::segment s(file);
 		for (int k = 0; k < 2; ++k) {
-			const auto info = s.get<prospect::inverted_plugin>().term(k ? "b" : "a");
+			const auto info = s.get<prospect::inverted_plugin>().term(0, k ? "b" : "a");
 			if (terms[k].empty() != !info) { fail("a term lost or invented"); }
 			if (!info) { continue; }
 			prospect::postings_iterator it(s.get<prospect::inverted_plugin>(), *info);
@@ -191,7 +191,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 	}
 	// Flips inside term a's postings, resealed.
 	prospect::segment s0(file);
-	const auto info = s0.get<prospect::inverted_plugin>().term("a");
+	const auto info = s0.get<prospect::inverted_plugin>().term(0, "a");
 	if (!info || (info->flags & f::single_posting) || !in.n) { return 0; }
 	const std::size_t base = std::size_t(s0.get<prospect::inverted_plugin>().postings_bytes().data() - file.data()) + std::size_t(info->postings);
 	for (std::size_t k = 0; k < 64 && in.n >= 3; ++k) {

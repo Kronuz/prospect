@@ -1,6 +1,7 @@
 // The index on faultfs: keys and versions, replace and delete, atomic transactions,
 // explicit docids, replayed positions, commits surviving crashes, fencing, ENOSPC
 // recovery, retention, and fail-closed opens.
+#include "text_field.hh"
 #include "prospect/index.hh"
 #include "strata/core/faultfs.hh"
 
@@ -32,7 +33,7 @@ static const std::array<char, 16> uuid = {'s', 't', 'r', 'a', 't', 'a', '-', 't'
 static document doc(const std::string& key, const std::string& body, std::uint32_t pos = 1) {
 	document d;
 	d.key = key;
-	d.terms.push_back({body, 1, {pos}});
+	d.field().terms.push_back({body, 1, {pos}});
 	d.length = 1;
 	d.stored = body;
 	return d;
@@ -59,6 +60,7 @@ static operation erase(const std::string& key) {
 }
 static transaction tx(std::vector<operation> ops) {
 	transaction t;
+	t.fields = text_fields();
 	t.ops = std::move(ops);
 	return t;
 }
@@ -225,12 +227,12 @@ int main() {
 		CHECK(ix.buffered_count() == 2);  // the original and its replacement; nothing of the rejected one
 		// Invalid documents and a repeated key reject.
 		document bad = doc("Qy", "dup");
-		bad.terms.push_back({"dup", 1, {2}});
+		bad.field().terms.push_back({"dup", 1, {2}});
 		operation o;
 		o.doc = bad;
 		CHECK(ix.apply(tx({o}), {}).result == verdict::invalid);
 		document two_keys = doc("Qy", "y");
-		two_keys.terms.push_back({"Qz", 0, {}});  // a term with the key prefix: invalid (F8)
+		two_keys.field(strata::field_ref::declared(7)).terms.push_back({"Qz", 0, {}});  // a field the transaction does not declare: invalid
 		o.doc = two_keys;
 		CHECK(ix.apply(tx({o}), {}).result == verdict::invalid);
 		CHECK(ix.apply(tx({add("Qa", "again")}), {}).result == verdict::version_conflict);
@@ -257,12 +259,12 @@ int main() {
 		auto tokens = [](const std::string& key, const std::string& text) {
 			document d;
 			d.key = key;
-			d.text = text;
+			d.field().text = text;
 			std::uint32_t pos = 0;
 			for (std::size_t i = 0; i < text.size();) {
 				std::size_t j = text.find(' ', i);
 				if (j == std::string::npos) { j = text.size(); }
-				if (j > i) { d.tokens.push_back({std::uint32_t(i), std::uint32_t(j - i), ++pos}); }
+				if (j > i) { d.field().tokens.push_back({std::uint32_t(i), std::uint32_t(j - i), ++pos}); }
 				i = j + 1;
 			}
 			d.length = pos;
@@ -270,13 +272,13 @@ int main() {
 			return d;
 		};
 		auto grouped = [&](const std::string& key, const std::string& text) {
-			const document t = tokens(key, text);
+			document t = tokens(key, text);
 			document d;
 			d.key = t.key;
-			d.terms = t.terms;
+			d.field().terms = t.field().terms;
 			std::map<std::string, std::vector<std::uint32_t>> by_term;
-			for (const auto& tk : t.tokens) { by_term[text.substr(tk.offset, tk.size)].push_back(tk.position); }
-			for (auto& [term, positions] : by_term) { d.terms.push_back({term, std::uint32_t(positions.size()), positions}); }
+			for (const auto& tk : t.field().tokens) { by_term[text.substr(tk.offset, tk.size)].push_back(tk.position); }
+			for (auto& [term, positions] : by_term) { d.field().terms.push_back({term, std::uint32_t(positions.size()), positions}); }
 			d.length = t.length;
 			d.stored = t.stored;
 			return d;
@@ -310,23 +312,23 @@ int main() {
 			return a.apply(tx({o}), {}).result == verdict::invalid;
 		};
 		document d = tokens("Qk", "one two");
-		d.tokens[1].size = 0;
+		d.field().tokens[1].size = 0;
 		CHECK(rejects(d));
 		d = tokens("Qk", "one two");
-		d.tokens[1].offset = std::uint32_t(d.text.size());
+		d.field().tokens[1].offset = std::uint32_t(d.field().text.size());
 		CHECK(rejects(d));
 		d = tokens("Qk", "one two");
-		d.tokens[1].size = 4;  // past the text's end
+		d.field().tokens[1].size = 4;  // past the text's end
 		CHECK(rejects(d));
 		d = tokens("Qk", "one two");
-		d.tokens[1].position = d.tokens[0].position;
+		d.field().tokens[1].position = d.field().tokens[0].position;
 		CHECK(rejects(d));
-		CHECK(rejects(tokens("Qk", "one Qtwo")));  // a token with the key prefix
+		CHECK(!rejects(tokens("Qk4", "one Qtwo")));  // a token is a term of its field whatever its bytes
 		d = tokens("Qk", "one two");
-		d.terms.push_back({"two", 1, {9}});
+		d.field().terms.push_back({"two", 1, {9}});
 		CHECK(rejects(d));
 		d = tokens("Qk", "one two");
-		d.terms.push_back({"three", 1, {9}});
+		d.field().terms.push_back({"three", 1, {9}});
 		operation o;
 		o.doc = d;
 		CHECK(a.apply(tx({o}), {}).result == verdict::accepted);
@@ -345,12 +347,12 @@ int main() {
 		auto token_doc = [](const std::string& key, const std::string& text) {
 			document d;
 			d.key = key;
-			d.text = text;
+			d.field().text = text;
 			std::uint32_t pos = 0;
 			for (std::size_t i = 0; i < text.size();) {
 				std::size_t j = text.find(' ', i);
 				if (j == std::string::npos) { j = text.size(); }
-				if (j > i) { d.tokens.push_back({std::uint32_t(i), std::uint32_t(j - i), ++pos}); }
+				if (j > i) { d.field().tokens.push_back({std::uint32_t(i), std::uint32_t(j - i), ++pos}); }
 				i = j + 1;
 			}
 			d.length = pos;
@@ -362,8 +364,8 @@ int main() {
 		auto split_doc = [](const std::string& key, const std::string& text) {
 			document d;
 			d.key = key;
-			d.text = text;
-			d.split_text = true;
+			d.field().text = text;
+			d.field().split_text = true;
 			d.stored = key + text;
 			return d;
 		};
@@ -424,17 +426,17 @@ int main() {
 		auto doc_of = [](const std::string& key, const std::string& text, bool split) {
 			document d;
 			d.key = key;
-			d.text = text;
+			d.field().text = text;
 			d.stored = key + text;
 			if (split) {
-				d.split_text = true;
+				d.field().split_text = true;
 				return d;
 			}
 			std::uint32_t pos = 0;
 			for (std::size_t i = 0; i < text.size();) {
 				std::size_t j = text.find(' ', i);
 				if (j == std::string::npos) { j = text.size(); }
-				if (j > i) { d.tokens.push_back({std::uint32_t(i), std::uint32_t(j - i), ++pos}); }
+				if (j > i) { d.field().tokens.push_back({std::uint32_t(i), std::uint32_t(j - i), ++pos}); }
 				i = j + 1;
 			}
 			d.length = pos;
@@ -475,17 +477,17 @@ int main() {
 				o.doc = std::move(d);
 				return a.apply(tx({o}), {}).result == verdict::invalid;
 			};
-			CHECK(rejects(doc_of("Qk", "one Qtwo", true)));
-			CHECK(rejects(doc_of("Qk", "Qone two", true)));
-			CHECK(rejects(doc_of("Qk", "one  Q", true)));
+			CHECK(!rejects(doc_of("Qk1", "one Qtwo", true)));  // a word is a term of its field whatever its bytes
+			CHECK(!rejects(doc_of("Qk2", "Qone two", true)));
+			CHECK(!rejects(doc_of("Qk3", "one  Q", true)));
 			document d = doc_of("Qk", "one two", true);
-			d.terms.push_back({"two", 1, {9}});
+			d.field().terms.push_back({"two", 1, {9}});
 			CHECK(rejects(d));
 			d = doc_of("Qk", "one two", true);
-			d.tokens.push_back({0, 3, 1});
+			d.field().tokens.push_back({0, 3, 1});
 			CHECK(rejects(d));
 			d = doc_of("Qk", "one two", true);
-			d.length = 2;  // the index counts a split text's length
+			d.field().length = 2;  // the index counts a split text's length
 			CHECK(rejects(d));
 			operation o;
 			o.doc = doc_of("Qk", "oneQtwo three", true);
@@ -508,7 +510,7 @@ int main() {
 		ix = prospect::index::open(io, keyed);
 		auto df = [&] {
 			std::uint64_t n = 0;
-			for (const auto& seg : ix.segments()) { if (auto t = seg.seg()->get<prospect::inverted_plugin>().term(body)) { n += t->df; } }
+			for (const auto& seg : ix.segments()) { if (auto t = seg.seg()->get<prospect::inverted_plugin>().term(0, body)) { n += t->df; } }
 			return n;
 		};
 		CHECK(ix.find_key(key) == kv(1, 1) && ix.segments().size() == 2 && df() == 2);
@@ -958,7 +960,7 @@ int main() {
 	merge_rooms({}, [&](prospect::index& ix) {
 		auto shared = [] {
 			document d;
-			for (int t = 0; t < 1000; ++t) { d.terms.push_back({"t" + std::to_string(t), 0, {}}); }
+			for (int t = 0; t < 1000; ++t) { d.field().terms.push_back({"t" + std::to_string(t), 0, {}}); }
 			return d;
 		};
 		auto one = [&](document d) {
@@ -970,7 +972,7 @@ int main() {
 		one(shared());
 		for (int i = 0; i < 1023; ++i) {
 			document d;
-			d.terms.push_back({"f", 0, {}});
+			d.field().terms.push_back({"f", 0, {}});
 			one(std::move(d));
 		}
 		ix.refresh();
@@ -1078,7 +1080,7 @@ int main() {
 	const std::function<void(prospect::index&)> growing = [&](prospect::index& ix) {
 		auto shared = [] {
 			document d;
-			for (int t = 0; t < 1000; ++t) { d.terms.push_back({"t" + std::to_string(t), 0, {}}); }
+			for (int t = 0; t < 1000; ++t) { d.field().terms.push_back({"t" + std::to_string(t), 0, {}}); }
 			return d;
 		};
 		auto one = [&](document d) {
@@ -1090,7 +1092,7 @@ int main() {
 		one(shared());
 		for (int i = 0; i < 1023; ++i) {
 			document d;
-			d.terms.push_back({"f", 0, {}});
+			d.field().terms.push_back({"f", 0, {}});
 			one(std::move(d));
 		}
 		ix.refresh();
@@ -1505,8 +1507,8 @@ int main() {
 	{
 		auto rich = [](int i) {
 			operation o = replace("Q" + std::to_string(i), "body");
-			for (std::uint32_t j = 0; j < 20; ++j) { o.doc.terms.push_back({"t" + std::to_string((i + 37 * j) % 1000), 1, {j + 2}}); }
-			o.doc.length += 20;
+			for (std::uint32_t j = 0; j < 20; ++j) { o.doc.field().terms.push_back({"t" + std::to_string((i + 37 * j) % 1000), 1, {j + 2}}); }
+			*o.doc.length += 20;
 			return o;
 		};
 		auto seg_files = [](const faultfs::filesystem& fs) {
@@ -1732,7 +1734,7 @@ int main() {
 			}
 			std::size_t data = 0;
 			for (const auto& f : fs.list()) { data += !named.count(f); }
-			CHECK(data == ix.segments().size() + 1);  // each segment and the metadata file
+			CHECK(data == ix.segments().size() + 2);  // each segment, the metadata file and the field table's
 			if (failures) {
 				std::fprintf(stderr, "  power lost after mutation %llu of %llu\n", (unsigned long long)n, (unsigned long long)points);
 				break;
@@ -2202,16 +2204,16 @@ int main() {
 		for (int i = 0; i < 70000; ++i) { text += "w "; }
 		operation big;
 		big.doc.key = "Qbig";
-		big.doc.text = text;
-		big.doc.split_text = true;
+		big.doc.field().text = text;
+		big.doc.field().split_text = true;
 		CHECK(ix.apply(tx({big}), {}).result == verdict::accepted);
 		big.doc.key = "Qbig2";
-		big.doc.split_text = false;
-		for (std::uint32_t i = 0; i < 70000; ++i) { big.doc.tokens.push_back({2 * i, 1, i + 1}); }
+		big.doc.field().split_text = false;
+		for (std::uint32_t i = 0; i < 70000; ++i) { big.doc.field().tokens.push_back({2 * i, 1, i + 1}); }
 		big.doc.length = 70000;
 		CHECK(ix.apply(tx({big}), {}).result == verdict::accepted);
 		big.doc.key = "Qbig3";
-		big.doc.tokens.resize(1000);
+		big.doc.field().tokens.resize(1000);
 		big.doc.length = 1000;
 		CHECK(ix.apply(tx({big}), {}).result == verdict::accepted);
 		for (int i = 0; i < 50; ++i) { CHECK(ix.apply(tx({add("Qd" + std::to_string(i), "d")}), {}).result == verdict::accepted); }

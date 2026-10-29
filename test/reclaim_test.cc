@@ -8,6 +8,7 @@
 //   3. The open succeeds; after reclaim() and a commit, every strata file on disk is named
 //      by a manifest on disk, and a storage budget's permit covers the bytes on disk.
 // PROSPECT_CRASH_POINTS sets how many crash points to cover per workload (default 400).
+#include "text_field.hh"
 #include "prospect/index.hh"
 #include "strata/core/faultfs.hh"
 
@@ -23,7 +24,7 @@ static const std::array<char, 16> uuid_a = {'s', 't', 'r', 'a', 't', 'a', '-', '
 
 struct step {
 	enum kind { apply, refresh, commit, checkpoint, release, merge } type = apply;
-	transaction t;
+	transaction t{{}, {}, {}, text_fields()};
 	std::size_t merge_to = 0;
 };
 
@@ -39,8 +40,8 @@ static document make_doc(std::mt19937_64& r, const std::string& key) {
 		if (!used.insert(w).second) { continue; }
 		term_entry t{w, 1 + std::uint32_t(r() % 3), {}};
 		for (std::uint32_t k = 0; k < t.wdf; ++k) { t.positions.push_back(pos += 1 + std::uint32_t(r() % 3)); }
-		d.length += t.wdf;
-		d.terms.push_back(std::move(t));
+		d.field().length += t.wdf;
+		d.field().terms.push_back(std::move(t));
 	}
 	d.stored = "doc " + std::to_string(r() % 1000) + std::string(200 + r() % 400, 'x');  // larger than one reclaim step
 	return d;
@@ -214,6 +215,7 @@ int main() {
 						named.insert(f);
 						const auto mf = files::decode_manifest(fs.view(f));
 						if (mf.meta.generation) { named.insert(index_detail::meta_name(mf.meta.generation)); }
+						if (mf.fields.generation) { named.insert(index_detail::fields_name(mf.fields.generation)); }
 						for (const auto& r : mf.segments) {
 							named.insert(index_detail::segment_name(r.id));
 							if (r.live.generation) { named.insert(index_detail::live_name(r.id, r.live.generation)); }

@@ -32,6 +32,7 @@
 #include "prospect/strata.hh"
 #include "prospect/values.hh"
 #include "strata/core/reader.hh"
+#include "prospect/fielddict.hh"
 #include "termdict.hh"
 
 #include <algorithm>
@@ -158,76 +159,93 @@ using segment = basic_segment<search_layout>;
 struct inverted_plugin {
 	static constexpr std::string_view id = "inverted";
 
-	// What a document carries for it (L10). `tokens` index `text` in order, positions
-	// strictly increasing; each adds one to its term's wdf and its position to the term's
-	// positions. A term is in `terms` or among the tokens, not both; the key is the core's
-	// (F8). With `split_text`, `tokens` is empty, `length` is 0, and the text's words
-	// (maximal runs of bytes other than ' ') are its tokens at positions 1, 2, ...; the
-	// index counts them as its length.
-	struct part {
+	// One field's share of a document (L10, fields-and-keys D5, D9). `tokens` index `text` in
+	// order, positions strictly increasing; each adds one to its term's wdf and its position
+	// to the term's positions. A term is in `terms` or among the tokens, not both. With
+	// `split_text`, `tokens` is empty, `length` is 0, and the text's words (maximal runs of
+	// bytes other than ' ') are its tokens at positions 1, 2, ...; the index counts them as
+	// its length. `length` is the host's sum of the wdf of the field's terms.
+	struct field_part {
+		field_ref field;
 		std::vector<term_entry> terms;
 		std::uint32_t length = 0;
 		std::string text;
 		std::vector<text_token> tokens;
 		bool split_text = false;
 	};
-	// Stage-1 checks (D10): terms non-empty, within the term limit, unique, positions
-	// increasing, none with the index's key prefix, which names keys (F8); tokens in bounds
-	// and increasing, none with the key prefix or equal to a term.
-	static bool validate(const validate_context& vc, const part& p) {
-		thread_local std::vector<std::string_view> terms;  // sorted, to find repeats
-		terms.clear();
-		std::array<std::uint64_t, 4> firsts{};  // first bytes of the terms a token could equal
-		const std::string_view prefix = vc.key_prefix;
-		for (const auto& t : p.terms) {
-			if (t.term.empty() || t.term.size() > format::max_term_bytes) { return false; }
-			if (!prefix.empty() && t.term.starts_with(prefix)) { return false; }
-			for (std::size_t i = 1; i < t.positions.size(); ++i) {
-				if (t.positions[i] <= t.positions[i - 1]) { return false; }
+	// A document's terms by field. Its length is the host's total, which defaults to the sum
+	// of its parts' lengths (D5): Xapiand passes the sum of every wdf, its id term's included.
+	struct part {
+		std::vector<field_part> fields;
+		std::optional<std::uint32_t> length;
+		// The part naming `ref`, added empty when absent.
+		field_part& field(field_ref ref = field_ref::declared(0)) {
+			for (auto& f : fields) {
+				if (f.field == ref) { return f; }
 			}
-			terms.push_back(t.term);
-			firsts[std::uint8_t(t.term[0]) >> 6] |= std::uint64_t(1) << (std::uint8_t(t.term[0]) & 63);
+			fields.emplace_back();
+			fields.back().field = ref;
+			return fields.back();
 		}
-		if (terms.size() > 1) {
-			std::sort(terms.begin(), terms.end());
-			if (std::adjacent_find(terms.begin(), terms.end()) != terms.end()) { return false; }
+		// The same without adding: an empty part when the document has none for `ref`.
+		const field_part& field(field_ref ref = field_ref::declared(0)) const {
+			static const field_part none;
+			for (const auto& f : fields) {
+				if (f.field == ref) { return f; }
+			}
+			return none;
 		}
-		const bool any_firsts = (firsts[0] | firsts[1] | firsts[2] | firsts[3]) != 0;
-		const std::string_view text = p.text;
-		if (p.split_text) { return valid_words(prefix, p, terms, firsts, any_firsts); }
-		const std::uint64_t n = text.size();
-		// Bounds, sizes, and order folded into one flag per token, no branch; the prefix and
-		// the terms entries need a token's first byte, so they read it once in bounds.
-		bool ok = true;
-		std::uint64_t prev = 0;
-		for (std::size_t i = 0; i < p.tokens.size(); ++i) {
-			const text_token& tk = p.tokens[i];
-			ok &= tk.size != 0 && std::uint64_t(tk.offset) + tk.size <= n && (i == 0 || tk.position > prev);
-			prev = tk.position;
+	};
+	// The document's length: the host's, or the sum of its parts'.
+	static std::uint64_t document_length(const part& p) {
+		if (p.length) { return *p.length; }
+		std::uint64_t n = 0;
+		for (const auto& f : p.fields) { n += f.split_text ? text_detail::count_words(f.text).words : f.length; }
+		return n;
+	}
+	// Stage-1 checks (D10): every field part names a field the transaction resolves, other
+	// than the key field, once; terms within the term limit (the empty term is a term),
+	// unique, positions increasing; tokens in bounds and increasing, none equal to a term of
+	// the part; the document's length fits 32 bits.
+	static bool validate(const validate_context& vc, const part& p) {
+		thread_local std::vector<std::uint32_t> ids;  // sorted, to find repeats
+		ids.clear();
+		for (const auto& f : p.fields) {
+			const auto id = vc.field(f.field);
+			if (!id || vc.is_key_field(*id)) { return false; }
+			ids.push_back(*id);
+			if (!valid_field(f)) { return false; }
 		}
-		if (!ok) { return false; }
-		if (prefix.empty() && !any_firsts) { return true; }
-		const char p0 = prefix.empty() ? 0 : prefix[0];
-		for (const text_token& tk : p.tokens) {
-			const std::uint8_t first = std::uint8_t(text[tk.offset]);
-			if (!prefix.empty() && char(first) == p0 && text.substr(tk.offset, tk.size).starts_with(prefix)) { return false; }
-			if (any_firsts && (firsts[first >> 6] >> (first & 63) & 1) && std::binary_search(terms.begin(), terms.end(), text.substr(tk.offset, tk.size))) { return false; }
+		if (ids.size() > 1) {
+			std::sort(ids.begin(), ids.end());
+			if (std::adjacent_find(ids.begin(), ids.end()) != ids.end()) { return false; }
 		}
-		return true;
+		return document_length(p) <= std::numeric_limits<std::uint32_t>::max();
+	}
+	// Rewrites every field reference to the id it resolved to (the buffer stores ids).
+	static void resolve(part& p, const field_resolution& r) {
+		for (auto& f : p.fields) {
+			if (const auto id = r.resolve(f.field)) { f.field = field_ref::id(*id); }
+		}
 	}
 	// Buffer memory and an overestimate of disk bytes.
 	static std::uint64_t bytes(const part& p) {
-		std::uint64_t n = p.text.size() + sizeof(text_token) * p.tokens.size();
-		for (const auto& t : p.terms) { n += sizeof(term_entry) + t.term.size() + 4 * t.positions.size(); }
+		std::uint64_t n = 0;
+		for (const auto& f : p.fields) {
+			n += sizeof(field_part) + f.text.size() + sizeof(text_token) * f.tokens.size();
+			for (const auto& t : f.terms) { n += sizeof(term_entry) + t.term.size() + 4 * t.positions.size(); }
+		}
 		return n;
 	}
 	static std::uint64_t disk_estimate(const part& p) {
 		std::uint64_t n = 0;
-		for (const auto& t : p.terms) { n += t.term.size() + 12 + 4 * t.positions.size(); }
-		for (const auto& tk : p.tokens) { n += tk.size + 16; }  // as a term of its own
-		if (p.split_text) {
-			const text_detail::word_counts w = text_detail::count_words(p.text);
-			n += w.bytes + 16 * w.words;
+		for (const auto& f : p.fields) {
+			for (const auto& t : f.terms) { n += t.term.size() + 12 + 4 * t.positions.size(); }
+			for (const auto& tk : f.tokens) { n += tk.size + 16; }  // as a term of its own
+			if (f.split_text) {
+				const text_detail::word_counts w = text_detail::count_words(f.text);
+				n += w.bytes + 16 * w.words;
+			}
 		}
 		return n;
 	}
@@ -239,7 +257,9 @@ struct inverted_plugin {
 	static bool consistent(format::structure_bits s) noexcept { return !(s & format::bit::norms) || (s & format::bit::inverted); }
 	// A document as the index buffers it: a text split at spaces has its length counted now.
 	static void buffered(part& p) {
-		if (p.split_text) { p.length = std::uint32_t(text_detail::count_words(p.text).words); }
+		for (auto& f : p.fields) {
+			if (f.split_text) { f.length = std::uint32_t(text_detail::count_words(f.text).words); }
+		}
 	}
 	// The bytes of its statistics at the head of term_index (F7).
 	static constexpr std::size_t statistics_size = 20;
@@ -281,13 +301,9 @@ struct inverted_plugin {
 			// The term index is copied out of the mapping (verified at open), so later lookups
 			// never read bytes that could change or fault under the FST's unchecked traversal.
 			state_->pinned_index.assign(term_index.substr(statistics_size));
-			try {
-				dict_.emplace(state_->terms.bytes, state_->pinned_index, &verify_terms, state_.get());  // validates the FST index
-			} catch (const termdict::corrupt&) {
-				corrupt("term index");
-			} catch (const std::invalid_argument&) {
-				corrupt("term index");  // the FST's own check
-			}
+			// The directory's header is checked here; a field's dictionary opens (and its FST is
+			// validated) on first use (fields-and-keys T6).
+			dict_.emplace(state_->terms.bytes, state_->pinned_index, &verify_terms, state_.get());
 		}
 
 		// A document's encode_length byte: the norms section's, or derived once from lengths
@@ -327,8 +343,8 @@ struct inverted_plugin {
 
 		// A term's info, its offsets resolved from its dictionary run and, for a term without
 		// skip blocks, its competitive pairs computed from its postings (at most 127).
-		std::optional<format::term_info> term(std::string_view key) const {
-			auto info = find_term(key);
+		std::optional<format::term_info> term(std::uint32_t field, std::string_view key) const {
+			auto info = find_term(field, key);
 			if (info) { complete_impacts(*info); }
 			return info;
 		}
@@ -340,54 +356,45 @@ struct inverted_plugin {
 		std::vector<format::impact> tail_impacts(const format::term_info& info) const;
 		// The same as term() from one dictionary walk, leaving a term without skip blocks with
 		// no competitive pairs: its df and offsets, for statistics and counts.
-		std::optional<format::term_info> find_term(std::string_view key) const {
+		std::optional<format::term_info> find_term(std::uint32_t field, std::string_view key) const {
 			// The run's values end with key's: the earlier ones only move the cursor.
 			format::term_run run, before;
 			std::string_view last;
-			std::optional<std::string_view> v;
-			try {
-				v = dict_->find_run(key, [&](std::string_view value) {
-					before = run;
-					(void)format::decode_term_info(value, run, false);
-					last = value;
-				});
-			} catch (const termdict::corrupt&) {
-				corrupt("terms checksum");  // a dictionary block failed its region check
-			}
+			const auto v = dict_->find_run(field, key, [&](std::string_view value) {
+				before = run;
+				(void)format::decode_term_info(value, run, false);
+				last = value;
+			});
 			if (!v) { return std::nullopt; }
 			auto info = format::decode_term_info(last, before);
 			if (info.df > doc_count_) { corrupt("document frequency"); }
 			return info;
 		}
 
+		// Calls f(field, term, info) for every term in (field, term) order, until f returns false.
 		template <class F>
 		void scan_terms(F&& f) const {
-			format::term_run run;
-			try {
-				dict_->scan("", [&](std::string_view key, std::string_view value) {
-					const auto info = format::decode_term_info(value, run);
-					if (info.df > doc_count_) { corrupt("document frequency"); }
-					return f(key, info);
-				});
-			} catch (const termdict::corrupt&) {
-				corrupt("terms checksum");
+			fielddict::reader::cursor c(*dict_);
+			while (c.next()) {
+				if (c.info().df > doc_count_) { corrupt("document frequency"); }
+				if (!f(c.field(), c.term(), c.info())) { break; }
 			}
 		}
+		// Calls f(term, value) for each term of `field` from `from` on, until f returns false;
+		// the value is the dictionary's raw bytes.
 		template <class F>
-		void scan_dictionary(std::string_view from, F&& f) const {
-			try {
-				dict_->scan(from, std::forward<F>(f));
-			} catch (const termdict::corrupt&) {
-				corrupt("terms checksum");
-			}
+		void scan_dictionary(std::uint32_t field, std::string_view from, F&& f) const {
+			dict_->scan(field, from, std::forward<F>(f));
 		}
+		// Whether any term of `field` is in the segment.
+		bool has_field(std::uint32_t field) const { return dict_->has_field(field); }
 
 		std::string_view postings_bytes() const noexcept { return postings_.bytes; }
 		std::string_view positions_bytes() const noexcept { return positions_.bytes; }
-		const termdict::reader& dictionary() const noexcept { return *dict_; }
+		const fielddict::reader& dictionary() const noexcept { return *dict_; }
 
-		// Every term in order with its info (impacts left empty below 128 postings), pulled
-		// one at a time, for k-way merges. Neither copied nor moved.
+		// Every term in (field, term) order with its info (impacts left empty below 128
+		// postings), pulled one at a time, for k-way merges. Neither copied nor moved.
 		class term_cursor {
 		public:
 			explicit term_cursor(const reader& r) : r_(&r), c_(r.dictionary()) {}
@@ -395,23 +402,18 @@ struct inverted_plugin {
 			term_cursor& operator=(const term_cursor&) = delete;
 			// Moves to the next term; false past the last.
 			bool next() {
-				try {
-					if (!c_.next()) { return false; }
-					info_ = format::decode_term_info(c_.value(), run_);
-				} catch (const termdict::corrupt&) {
-					corrupt("terms checksum");
-				}
-				if (info_.df > r_->doc_count()) { corrupt("document frequency"); }
+				if (!c_.next()) { return false; }
+				if (c_.info().df > r_->doc_count()) { corrupt("document frequency"); }
 				return true;
 			}
-			std::string_view term() const noexcept { return c_.key(); }
-			const format::term_info& info() const noexcept { return info_; }
+			std::uint32_t field() const noexcept { return c_.field(); }
+			std::string_view term() const noexcept { return c_.term(); }
+			const format::term_info& info() const noexcept { return c_.info(); }
+			std::string_view value() const noexcept { return c_.value(); }
 
 		private:
 			const reader* r_;
-			termdict::reader::cursor c_;
-			format::term_run run_;
-			format::term_info info_;
+			fielddict::reader::cursor c_;
 		};
 		std::uint64_t doc_count() const noexcept { return doc_count_; }
 
@@ -458,13 +460,11 @@ struct inverted_plugin {
 			state_->terms = c.section(format::section::terms);
 			postings_ = c.section(format::section::postings);
 			positions_ = c.section(format::section::positions);
-			auto tables = termdict::builder().finish();
-			state_->owned_blocks = std::move(tables.blocks);
-			state_->pinned_index = std::move(tables.index);
+			state_->pinned_index.assign(4, '\0');  // an empty directory: no own dictionary, no pool
 			state_->owned_lengths.assign(1, '\0');  // width 0
 			lengths_ = state_->owned_lengths;
 			lengths_crc_ = ::kronuz::crc32c::crc32c(lengths_.data(), lengths_.size());
-			dict_.emplace(state_->owned_blocks, state_->pinned_index);
+			dict_.emplace(state_->owned_blocks, state_->pinned_index);  // owned_blocks stays empty
 		}
 		// Heap-held, so the dictionary's verifier context survives moving the segment.
 		struct state {
@@ -480,7 +480,7 @@ struct inverted_plugin {
 		section_handle postings_, positions_;
 		std::string_view lengths_, norms_;
 		const char* norms_at_ = nullptr;  // the norms section's bytes; null until derived
-		std::optional<termdict::reader> dict_;
+		std::optional<fielddict::reader> dict_;
 		std::uint64_t doc_count_ = 0, total_length_ = 0;
 		std::uint32_t max_positions_ = 0, min_length_ = 0, max_length_ = 0, lengths_crc_ = 0;
 		std::uint8_t postings_shift_ = 0;
@@ -497,7 +497,8 @@ struct inverted_plugin {
 	};
 	// Decodes every term's postings (exactly its document frequency, by the iterator's
 	// construction) and positions, and reads every document's length.
-	static void check(const reader& inverted, const core_segment& core, report& r, std::string_view key_prefix);
+	// The core still passes the index's key prefix (F3 removes it); terms are never checked against it.
+	static void check(const reader& inverted, const core_segment& core, report& r, std::string_view);
 	// Its digest records (L8, F21): per document a length record, length 0 included, and per
 	// posting a P record; over a segment's live ordinals, or a buffered document.
 	template <class Live, class Emit>
@@ -524,21 +525,48 @@ struct inverted_plugin {
 	}
 
 private:
-	// validate()'s token checks for a document split at spaces: no tokens and no length
-	// given, no word begins with the key prefix (one memchr when the prefix's first byte is
-	// not in the text), and none equals one of its terms.
-	static bool valid_words(std::string_view prefix, const part& p, const std::vector<std::string_view>& terms, const std::array<std::uint64_t, 4>& firsts,
-		bool any_firsts) {
-		const std::string_view text = p.text;
-		if (!p.tokens.empty() || p.length != 0 || !text_detail::splittable(text, format::max_term_bytes)) { return false; }
-		if (!prefix.empty()) {
-			for (const char* at = text.data(); (at = static_cast<const char*>(std::memchr(at, prefix[0], std::size_t(text.data() + text.size() - at))));) {
-				const std::size_t i = std::size_t(at - text.data());
-				const bool word_start = i == 0 || text[i - 1] == ' ';
-				if (word_start && text.substr(i, text.find(' ', i) - i).starts_with(prefix)) { return false; }
-				++at;
+	// One field part's checks (see validate).
+	static bool valid_field(const field_part& f) {
+		thread_local std::vector<std::string_view> terms;  // sorted, to find repeats
+		terms.clear();
+		std::array<std::uint64_t, 4> firsts{};  // first bytes of the terms a token could equal
+		for (const auto& t : f.terms) {
+			if (t.term.size() > format::max_term_bytes) { return false; }
+			for (std::size_t i = 1; i < t.positions.size(); ++i) {
+				if (t.positions[i] <= t.positions[i - 1]) { return false; }
 			}
+			terms.push_back(t.term);
+			if (!t.term.empty()) { firsts[std::uint8_t(t.term[0]) >> 6] |= std::uint64_t(1) << (std::uint8_t(t.term[0]) & 63); }
 		}
+		if (terms.size() > 1) {
+			std::sort(terms.begin(), terms.end());
+			if (std::adjacent_find(terms.begin(), terms.end()) != terms.end()) { return false; }
+		}
+		const bool any_firsts = (firsts[0] | firsts[1] | firsts[2] | firsts[3]) != 0;
+		const std::string_view text = f.text;
+		if (f.split_text) { return valid_words(f, terms, firsts, any_firsts); }
+		const std::uint64_t n = text.size();
+		// Bounds, sizes, and order folded into one flag per token, no branch.
+		bool ok = true;
+		std::uint64_t prev = 0;
+		for (std::size_t i = 0; i < f.tokens.size(); ++i) {
+			const text_token& tk = f.tokens[i];
+			ok &= tk.size != 0 && std::uint64_t(tk.offset) + tk.size <= n && (i == 0 || tk.position > prev);
+			prev = tk.position;
+		}
+		if (!ok) { return false; }
+		if (!any_firsts) { return true; }
+		for (const text_token& tk : f.tokens) {
+			const std::uint8_t first = std::uint8_t(text[tk.offset]);
+			if ((firsts[first >> 6] >> (first & 63) & 1) && std::binary_search(terms.begin(), terms.end(), text.substr(tk.offset, tk.size))) { return false; }
+		}
+		return true;
+	}
+	// valid_field's token checks for a text split at spaces: no tokens and no length given, and
+	// no word equals one of the part's terms.
+	static bool valid_words(const field_part& f, const std::vector<std::string_view>& terms, const std::array<std::uint64_t, 4>& firsts, bool any_firsts) {
+		const std::string_view text = f.text;
+		if (!f.tokens.empty() || f.length != 0 || !text_detail::splittable(text, format::max_term_bytes)) { return false; }
 		if (!any_firsts) { return true; }
 		bool ok = true;
 		text_detail::split_words(text, [&](std::size_t offset, std::size_t size) {
@@ -553,11 +581,8 @@ using document = basic_document<search_layout>;
 namespace detail {
 struct document_fields {  // the document's fields, with the inverter's text inputs
 	std::string key;
-	std::vector<term_entry> terms;
-	std::uint32_t length = 0;
-	std::string text;
-	std::vector<text_token> tokens;
-	bool split_text = false;
+	std::vector<inverted_plugin::field_part> fields;
+	std::optional<std::uint32_t> length;
 	std::string stored;
 	std::vector<slot_value> values;
 };
@@ -1601,11 +1626,15 @@ void inverted_plugin::records(const reader& r, const core_segment& core, Live&& 
 	for (ordinal_t o = 0; o < core.doc_count(); ++o) {
 		if (live(o)) { length_record(core.docid(o), r.length(o), emit); }
 	}
-	r.scan_terms([&](std::string_view term, const format::term_info& info) {
+	std::string key;  // a posting's term as the digest names it: the field id's varint, then the term
+	r.scan_terms([&](std::uint32_t field, std::string_view term, const format::term_info& info) {
+		key.clear();
+		fielddict::put_field(key, field);
+		key += term;
 		postings_iterator it(r, info);
 		positions_reader pr(r, info);
 		for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
-			if (live(o)) { posting_record(core.docid(o), term, it.wdf(), pr.read(it), emit); }
+			if (live(o)) { posting_record(core.docid(o), key, it.wdf(), pr.read(it), emit); }
 		}
 		return true;
 	});
@@ -1613,23 +1642,48 @@ void inverted_plugin::records(const reader& r, const core_segment& core, Live&& 
 
 template <class Emit>
 void inverted_plugin::records(std::uint64_t docid, const part& p, Emit&& emit) {
-	std::uint32_t length = p.length;
-	std::map<std::string_view, std::vector<std::uint32_t>> by_term;  // the tokens' postings
-	if (p.split_text) {
-		length = 0;
-		text_detail::split_words(p.text, [&](std::size_t offset, std::size_t size) { by_term[std::string_view(p.text).substr(offset, size)].push_back(++length); });
+	// A split text counts its words; the references were resolved to ids when the part was buffered.
+	std::uint64_t split_length = 0;
+	for (const auto& f : p.fields) {
+		if (f.split_text) { split_length += text_detail::count_words(f.text).words; }
 	}
-	for (const auto& tk : p.tokens) { by_term[std::string_view(p.text).substr(tk.offset, tk.size)].push_back(tk.position); }
-	length_record(docid, length, emit);
-	for (const auto& t : p.terms) { posting_record(docid, t.term, t.wdf, t.positions, emit); }
-	for (const auto& [term, positions] : by_term) { posting_record(docid, term, std::uint32_t(positions.size()), positions, emit); }
+	length_record(docid, std::uint32_t(p.length ? *p.length : split_length + [&] {
+		std::uint64_t n = 0;
+		for (const auto& f : p.fields) { n += f.split_text ? 0 : f.length; }
+		return n;
+	}()), emit);
+	std::map<std::string, std::pair<std::uint32_t, std::vector<std::uint32_t>>> postings;  // the digest's key: field varint, term
+	std::string key;
+	auto key_of = [&](const field_part& f, std::string_view term) {
+		key.clear();
+		fielddict::put_field(key, f.field.n);
+		key += term;
+		return key;
+	};
+	for (const auto& f : p.fields) {
+		for (const auto& t : f.terms) { postings[key_of(f, t.term)] = {t.wdf, t.positions}; }
+		const std::string_view text = f.text;
+		std::uint32_t position = 0;
+		if (f.split_text) {
+			text_detail::split_words(text, [&](std::size_t offset, std::size_t size) {
+				auto& e = postings[key_of(f, text.substr(offset, size))];
+				++e.first;
+				e.second.push_back(++position);
+			});
+		}
+		for (const auto& tk : f.tokens) {
+			auto& e = postings[key_of(f, text.substr(tk.offset, tk.size))];
+			++e.first;
+			e.second.push_back(tk.position);
+		}
+	}
+	for (const auto& [term, e] : postings) { posting_record(docid, term, e.first, e.second, emit); }
 }
 
-inline void inverted_plugin::check(const reader& inverted, const core_segment& core, report& r, std::string_view key_prefix) {
+inline void inverted_plugin::check(const reader& inverted, const core_segment& core, report& r, std::string_view) {
 	for (ordinal_t o = 0; o < core.doc_count(); ++o) { (void)inverted.length(o); }
-	inverted.scan_terms([&](std::string_view term, const format::term_info& info) {
-		// Terms and keys are disjoint under a nonempty prefix (F8).
-		if (!key_prefix.empty() && term.starts_with(key_prefix)) { corrupt("a term with the key prefix"); }
+	inverted.dictionary().check();
+	inverted.scan_terms([&](std::uint32_t, std::string_view, const format::term_info& info) {
 		++r.terms;
 		postings_iterator it(inverted, info);
 		positions_reader pr(inverted, info);

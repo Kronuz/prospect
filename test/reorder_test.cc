@@ -2,6 +2,7 @@
 // computed directly from the sources' live postings, with permuted sources and deletes; its
 // bytes do not depend on how many passes the memory allows; the order is one merge_segments
 // accepts, and deterministic; the fallback and cancellation hold.
+#include "text_field.hh"
 #include "prospect/index.hh"
 #include "prospect/reorder.hh"
 #include "view_sources.hh"
@@ -30,10 +31,10 @@ std::vector<std::vector<std::uint32_t>> direct(std::span<const merge_source> sou
 	const auto refs = reorder::docid_order(sources);
 	std::map<std::pair<std::uint32_t, ordinal_t>, std::uint32_t> rank;
 	for (std::uint32_t r = 0; r < refs.size(); ++r) { rank[{refs[r].source, refs[r].ord}] = r; }
-	std::set<std::string> all;
+	std::set<std::pair<std::uint32_t, std::string>> all;
 	for (const auto& s : sources) {
-		s.seg->get<prospect::inverted_plugin>().scan_dictionary("", [&](std::string_view t, std::string_view) {
-			all.insert(std::string(t));
+		s.seg->get<prospect::inverted_plugin>().scan_terms([&](std::uint32_t f, std::string_view t, const prospect::format::term_info&) {
+			all.insert({f, std::string(t)});
 			return true;
 		});
 	}
@@ -42,7 +43,7 @@ std::vector<std::vector<std::uint32_t>> direct(std::span<const merge_source> sou
 	for (const auto& t : all) {
 		std::vector<std::uint32_t> holders;
 		for (std::uint32_t s = 0; s < sources.size(); ++s) {
-			auto info = sources[s].seg->get<prospect::inverted_plugin>().term(t);
+			auto info = sources[s].seg->get<prospect::inverted_plugin>().term(t.first, t.second);
 			if (!info) { continue; }
 			postings_iterator it(sources[s].seg->get<prospect::inverted_plugin>(), *info);
 			for (ordinal_t o = it.next(); o != no_more_docs; o = it.next()) {
@@ -86,6 +87,8 @@ int main() {
 		// Two topics with their own words, interleaved, so bisection has clusters to find.
 		for (int i = 0; i < 2500; ++i) {
 			transaction t;
+			t.fields = text_fields();
+			t.fields.push_back({"other", strata::field_role::indexed, strata::field_postings::positions, false});
 			operation o;
 			const std::uint64_t kind = r() % 10;
 			const std::string key = "Q" + std::to_string(r() % 900);
@@ -93,11 +96,16 @@ int main() {
 			document d;
 			for (int k = 0, n = 3 + int(r() % 6); k < n; ++k) {
 				const std::string w = std::string(1, char('a' + topic * 10 + r() % 10)) + (r() % 4 ? "" : "x");
-				d.terms.push_back({w, 1, {std::uint32_t(k + 1)}});
-				d.length += 1;
+				d.field().terms.push_back({w, 1, {std::uint32_t(k + 1)}});
+				d.field().length += 1;
 			}
-			std::sort(d.terms.begin(), d.terms.end(), [](const auto& a, const auto& b) { return a.term < b.term; });
-			d.terms.erase(std::unique(d.terms.begin(), d.terms.end(), [](const auto& a, const auto& b) { return a.term == b.term; }), d.terms.end());
+			std::sort(d.field().terms.begin(), d.field().terms.end(), [](const auto& a, const auto& b) { return a.term < b.term; });
+			d.field().terms.erase(std::unique(d.field().terms.begin(), d.field().terms.end(), [](const auto& a, const auto& b) { return a.term == b.term; }), d.field().terms.end());
+			if (r() % 2) {  // the same words in a second field: they are other terms, never merged in the graph
+				auto& other = d.field(strata::field_ref::declared(1));
+				other.terms = d.field().terms;
+				other.length = std::uint32_t(other.terms.size());
+			}
 			if (r() % 3) { d.stored = std::to_string(i) + std::string(r() % 300, char('a' + topic)); }
 			if (kind < 6) {
 				o.type = operation::replace_key;
@@ -309,7 +317,7 @@ int main() {
 		}
 		CHECK(out_bytes[0] == out_bytes[1]);
 		const std::uint64_t h = xxh64::hash(out_bytes[0]);
-		constexpr std::uint64_t pinned = 0x86cb8079c3134932ull;  // strata format 0x8000000B's bytes
+		constexpr std::uint64_t pinned = 0xc770db3d97fb6957ull;  // strata format 0x8000000C's bytes
 		if (h != pinned) { std::fprintf(stderr, "T7: reordering merge hash %016llx\n", (unsigned long long)h); }
 		CHECK(h == pinned);
 	}

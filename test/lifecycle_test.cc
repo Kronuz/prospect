@@ -14,6 +14,7 @@
 // PROSPECT_CRASH_POINTS sets how many crash points to cover (default 10,000), and
 // PROSPECT_BG_CRASH_POINTS how many with background merges (default 2,000; the gate's
 // count is 10,000, run as docs/gates/phase-3-lifecycle.md records).
+#include "text_field.hh"
 #include "prospect/index.hh"
 #include "stepping_executor.hh"
 #include "strata/core/faultfs.hh"
@@ -39,7 +40,7 @@ static const std::array<char, 16> uuid_b = {'b', 'b', 'b', 'b', 'b', 'b', 'b', '
 // One step of a workload: a transaction, or a refresh, commit, or checkpoint.
 struct step {
 	enum kind { apply, refresh, commit, checkpoint, release, merge } type = apply;
-	transaction t;
+	transaction t{{}, {}, {}, text_fields()};
 	std::size_t merge_to = 0;  // merge: at most this many segments, or 0 for the policy's merges
 };
 
@@ -64,8 +65,8 @@ static document make_doc(std::mt19937_64& r, const std::string& key) {
 		if (!used.insert(w).second) { continue; }
 		term_entry t{w, 1 + std::uint32_t(r() % 3), {}};
 		for (std::uint32_t k = 0; k < t.wdf; ++k) { t.positions.push_back(pos += 1 + std::uint32_t(r() % 3)); }
-		d.length += t.wdf;
-		d.terms.push_back(std::move(t));
+		d.field().length += t.wdf;
+		d.field().terms.push_back(std::move(t));
 	}
 	d.stored = "doc " + std::to_string(r() % 1000) + std::string(r() % 40, 'x');
 	return d;
@@ -116,6 +117,7 @@ static std::vector<step> workload(std::uint64_t seed, std::size_t steps) {
 
 static transaction tx_of(operation o) {
 	transaction t;
+	t.fields = text_fields();
 	t.ops.push_back(std::move(o));
 	return t;
 }
@@ -590,7 +592,7 @@ int main() {
 					++reran;
 					ix.emplace(index::create(io, keyed, uuid_a));
 				}
-				CHECK(ix->apply(transaction{{add_op("Qk")}}, {}).result == verdict::accepted);
+				CHECK(ix->apply(transaction{{add_op("Qk")}, {}, {}, text_fields()}, {}).result == verdict::accepted);
 				ix->commit();
 				ix->close();
 				CHECK(index::open(io, keyed).digest() != empty);
@@ -601,7 +603,7 @@ int main() {
 		faultfs::io io(fs);
 		{
 			auto ix = index::create(io, keyed, uuid_a);
-			ix.apply(transaction{{add_op("Qk")}}, {});
+			ix.apply(transaction{{add_op("Qk")}, {}, {}, text_fields()}, {});
 			ix.commit();
 		}
 		CHECK(throws([&] { index::create(io, keyed, uuid_a); }));  // an index is there
@@ -622,7 +624,7 @@ int main() {
 			{
 				auto ix = index::create(lio, keyed, uuid_a);
 				for (int i = 0; i < 4; ++i) {
-					ix.apply(transaction{{add_op("Q" + std::to_string(i))}}, {});
+					ix.apply(transaction{{add_op("Q" + std::to_string(i))}, {}, {}, text_fields()}, {});
 					ix.commit();
 				}
 			}
@@ -634,17 +636,17 @@ int main() {
 			faultfs::io dio(dfs);
 			{
 				auto ix = index::create(dio, keyed, uuid_a);
-				ix.apply(transaction{{add_op("Qd")}}, {});
+				ix.apply(transaction{{add_op("Qd")}, {}, {}, text_fields()}, {});
 				operation m;
 				m.type = operation::set_meta;
 				m.meta_key = "m";
 				m.meta_value = "v";
-				ix.apply(transaction{{m}}, {});
+				ix.apply(transaction{{m}, {}, {}, text_fields()}, {});
 				ix.commit();
 				operation del;
 				del.type = operation::delete_key;
 				del.key = "Qd";
-				ix.apply(transaction{{del}}, {});
+				ix.apply(transaction{{del}, {}, {}, text_fields()}, {});
 				ix.commit();
 				CHECK(ix.segments().empty());
 				for (int i = 0; i < 3; ++i) { ix.commit(); }  // past the retained predecessors: no segment left

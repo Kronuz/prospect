@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <deque>
+#include <map>
 #include <optional>
 #include <span>
 #include <string>
@@ -26,21 +27,16 @@ using merge_source = basic_merge_source<search_layout>;
 inline built inverted_plugin::merge(const merge_context& m, std::span<const reader* const> in, section_sink& sink) {
 	inverted_builder b;
 	b.memory = m.memory;
-	b.key_prefix = m.key_prefix;
 	b.norms = (m.structures & format::bit::norms) != 0;
 	for (const auto& src : m.order) { (void)b.begin(in[src.source]->length(src.ord)); }
 	std::deque<reader::term_cursor> terms;
 	std::vector<bool> more(in.size());
 	for (std::size_t s = 0; s < in.size(); ++s) { more[s] = terms.emplace_back(*in[s]).next(); }
-	// The dictionary's alphabet: every byte the inputs' dictionaries use.
-	std::array<bool, 256> used{};
-	for (const reader* r : in) {
-		for (char c : r->dictionary().alphabet_bytes()) { used[std::uint8_t(c)] = true; }
-	}
-	std::string alphabet;
-	for (unsigned c = 0; c < 256; ++c) {
-		if (used[c]) { alphabet.push_back(char(c)); }
-	}
+	// The plan: each field's terms and bytes over the inputs (an upper bound where they overlap).
+	std::map<std::uint32_t, fielddict::field_plan> by_field;
+	for (const reader* r : in) { r->dictionary().add_plan(by_field); }
+	std::vector<fielddict::field_plan> plan;
+	for (auto& [field, p] : by_field) { plan.push_back(p); }
 	std::string current;
 	struct posting {
 		ordinal_t ord;
@@ -49,19 +45,24 @@ inline built inverted_plugin::merge(const merge_context& m, std::span<const read
 	};
 	std::vector<posting> postings;
 	std::uint64_t charged = 0;  // the per-term postings' high-water mark
-	b.finish(sink, sink.held(), alphabet, [&](term_postings& tp) -> std::optional<std::string_view> {
+	b.finish(sink, sink.held(), std::move(plan), [&](term_postings& tp) -> std::optional<std::string_view> {
 		for (;;) {
 			m.check();
-			// The smallest term not yet merged.
-			std::optional<std::string_view> next;
+			// The smallest (field, term) not yet merged.
+			std::size_t first = in.size();
 			for (std::size_t s = 0; s < in.size(); ++s) {
-				if (more[s] && (!next || terms[s].term() < *next)) { next = terms[s].term(); }
+				if (!more[s]) { continue; }
+				if (first == in.size() || terms[s].field() < terms[first].field() || (terms[s].field() == terms[first].field() && terms[s].term() < terms[first].term())) { first = s; }
 			}
-			if (!next) { return std::nullopt; }
-			current = *next;
+			if (first == in.size()) { return std::nullopt; }
+			const std::uint32_t field = terms[first].field();
+			current.clear();
+			fielddict::put_field(current, field);
+			current += terms[first].term();
+			const std::string_view term = std::string_view(current).substr(current.size() - terms[first].term().size());
 			postings.clear();
 			for (std::size_t s = 0; s < in.size(); ++s) {
-				if (!more[s] || terms[s].term() != current) { continue; }
+				if (!more[s] || terms[s].field() != field || terms[s].term() != term) { continue; }
 				const format::term_info info = terms[s].info();
 				more[s] = terms[s].next();
 				postings_iterator it(*in[s], info);
@@ -104,8 +105,7 @@ inline built inverted_plugin::merge(const merge_context& m, std::span<const read
 }
 
 // Writes the merge of `sources` to sink (positions through spill). Each live document keeps
-// its key, from the keys reader; `key_prefix` is the index's, for the inverted builder's
-// backstop (F8). Throws std::logic_error if
+// its key, from the keys reader. Throws std::logic_error if
 // two live documents share a docid. With `cancel`, it throws task::cancelled when asked.
 // Stored records are read a frame at a time per source; out of docid order, `records`
 // (when given) takes each source's live records, every frame decoded once, and the output

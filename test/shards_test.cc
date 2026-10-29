@@ -7,6 +7,9 @@
 //      as one index holding the same documents at the interleaved docids.
 //   4. The visitor sees every live match exactly once.
 #include "prospect/shards.hh"
+#include "text_field.hh"
+#include "prospect/index.hh"
+#include "strata/core/faultfs.hh"
 #include "prospect/writer.hh"
 
 #include <algorithm>
@@ -17,6 +20,7 @@
 #include <fstream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <random>
 #include <set>
 #include <thread>
@@ -76,7 +80,7 @@ struct built {
 	std::vector<std::vector<std::uint64_t>> docids;  // by segment, by ordinal
 	std::vector<segment_snapshot> snapshots() const {
 		std::vector<segment_snapshot> out;
-		for (std::size_t i = 0; i < segs.size(); ++i) { out.push_back({segs[i].get(), deleted[i].empty() ? nullptr : &deleted[i], deleted[i].empty() ? 0 : dead[i]}); }
+		for (std::size_t i = 0; i < segs.size(); ++i) { out.push_back({segs[i].get(), deleted[i].empty() ? nullptr : &deleted[i], deleted[i].empty() ? 0 : dead[i], &text_table()}); }
 		return out;
 	}
 };
@@ -128,11 +132,11 @@ query parse_query(const std::string& line) {
 scorer_ptr build(const segment& seg, const query& q, const multi_snapshot& snap, bool xapian) {
 	const statistics st = snap.stats();
 	auto weight_of = [&](const std::string& t) {
-		const std::uint64_t df = snap.df(t);
+		const std::uint64_t df = snap.df("text", t);
 		return xapian ? weight::bm25_xapian(st, df) : weight::bm25(st, df);
 	};
 	auto term = [&](const std::string& t) -> scorer_ptr {
-		auto info = seg.get<prospect::inverted_plugin>().term(t);
+		auto info = seg.get<prospect::inverted_plugin>().term(0, t);
 		return info ? std::make_unique<term_scorer>(seg.get<prospect::inverted_plugin>(), *info, weight_of(t)) : nullptr;
 	};
 	std::vector<scorer_ptr> kids;
@@ -166,7 +170,7 @@ scorer_ptr build(const segment& seg, const query& q, const multi_snapshot& snap,
 	std::vector<prospect::format::term_info> infos;
 	std::vector<weight> ws;
 	for (auto& t : q.terms) {
-		auto info = seg.get<prospect::inverted_plugin>().term(t);
+		auto info = seg.get<prospect::inverted_plugin>().term(0, t);
 		if (!info) { return nullptr; }
 		infos.push_back(*info);
 		ws.push_back(weight_of(t));
@@ -385,7 +389,7 @@ void oracle(const std::string& dir) {
 			for (std::size_t i = 1; i < vectors.size(); ++i) {
 				const auto& line = vectors[i];
 				if (line.starts_with("{\"term\"")) {
-					CHECK(snap.df(field(line, "term")) == std::stoull(field(line, "termfreq")));
+					CHECK(snap.df("text", field(line, "term")) == std::stoull(field(line, "termfreq")));
 					continue;
 				}
 				const query q = parse_query(field(line, "query"));
@@ -736,6 +740,129 @@ void empty_segments() {
 	CHECK(search(none, b, o).hits.empty() && search(none, b, o).count == 0);
 }
 
+// --- 5. fields by name (fields-and-keys T5b, D14) ---------------------------------------------------
+
+// Two shards that declare their fields in different orders (and one field only one shard has)
+// answer as one index holding every document: each shard resolves a query's field names to its
+// own ids, and the statistics are summed by name.
+struct named_index {
+	strata::faultfs::filesystem fs;
+	strata::faultfs::io io{fs};
+	std::optional<prospect::index> ix;
+	std::vector<std::string> order;  // the field names, in declaration order
+	named_index(std::vector<std::string> names, const std::array<char, 16>& uuid) : order(std::move(names)) {
+		ix.emplace(prospect::index::create(io, prospect::index::options{}, uuid));
+	}
+	strata::field_ref ref(const std::string& name) const {
+		return strata::field_ref::declared(std::uint32_t(std::find(order.begin(), order.end(), name) - order.begin()));
+	}
+	void add_all(const std::vector<std::map<std::string, std::vector<std::pair<std::string, std::uint32_t>>>>& docs) {
+		prospect::transaction t;
+		for (const auto& n : order) { t.fields.push_back({n, strata::field_role::indexed, strata::field_postings::freqs, false}); }
+		for (const auto& d : docs) {
+			prospect::operation op;
+			op.type = prospect::operation::add;
+			for (const auto& [name, terms] : d) {
+				auto& part = op.doc.field(ref(name));
+				for (const auto& [term, wdf] : terms) {
+					part.terms.push_back({term, wdf, {}});
+					part.length += wdf;
+				}
+			}
+			t.ops.push_back(std::move(op));
+		}
+		CHECK(ix->apply(t, {}).result == strata::verdict::accepted);
+		ix->commit();
+	}
+	shard_input input() const {
+		shard_input in;
+		for (const auto& s : ix->segments()) { in.segments.push_back({s.seg(), s.deleted, s.dead, &ix->fields()}); }
+		return in;
+	}
+};
+
+using named_doc = std::map<std::string, std::vector<std::pair<std::string, std::uint32_t>>>;
+
+struct field_query {
+	bool all;  // AND, else OR
+	std::vector<std::pair<std::string, std::string>> clauses;  // (field, term)
+};
+
+scorer_ptr build_fields(const segment& seg, const field_query& q, term_table& table, bool xapian) {
+	std::vector<scorer_ptr> kids;
+	for (const auto& [field, term] : q.clauses) {
+		const auto* info = table.info(seg, field, term);
+		if (!info) {
+			if (q.all) { return nullptr; }
+			continue;
+		}
+		const auto w = xapian ? weight::bm25_xapian(table.stats(), table.df(field, term)) : weight::bm25(table.stats(), table.df(field, term));
+		kids.push_back(std::make_unique<term_scorer>(seg.get<prospect::inverted_plugin>(), *info, w));
+	}
+	if (kids.empty()) { return nullptr; }
+	if (kids.size() == 1) { return std::move(kids[0]); }
+	if (q.all) { return std::make_unique<conjunction_scorer>(std::move(kids)); }
+	return std::make_unique<disjunction_scorer>(std::move(kids));
+}
+
+void fields_by_name() {
+	static const std::array<char, 16> uuid_a{'s', 'h', 'a', 'r', 'd', 'a'}, uuid_b{'s', 'h', 'a', 'r', 'd', 'b'}, uuid_one{'o', 'n', 'e'};
+	static const std::vector<std::string> words = {"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"};
+	static const std::vector<std::string> names = {"title", "body", "extra"};
+	std::mt19937_64 r(5150);
+	std::vector<named_doc> docs;
+	for (std::size_t k = 0; k < 300; ++k) {
+		named_doc d;
+		for (const auto& n : names) {
+			if (n == "extra" && k % 2 == 0) { continue; }  // only the second shard has the field
+			if (r() % 4 == 0) { continue; }
+			std::set<std::string> chosen;
+			for (std::size_t m = 1 + r() % 6; m > 0; --m) { chosen.insert(words[r() % words.size()]); }
+			for (const auto& w : chosen) { d[n].push_back({w, 1 + std::uint32_t(r() % 3)}); }
+		}
+		docs.push_back(std::move(d));
+	}
+	named_index a({"title", "body"}, uuid_a), b({"extra", "title", "body"}, uuid_b), one({"title", "body", "extra"}, uuid_one);
+	std::vector<named_doc> for_a, for_b;
+	for (std::size_t k = 0; k < docs.size(); ++k) { (k % 2 ? for_b : for_a).push_back(docs[k]); }
+	a.add_all(for_a);
+	b.add_all(for_b);
+	one.add_all(docs);  // document k has docid k + 1, which is its interleaved docid across the two shards
+	CHECK(a.ix->fields().find("title") == 0u && b.ix->fields().find("title") == 1u && one.ix->fields().find("title") == 0u);
+	CHECK(a.ix->fields().find("body") == 1u && b.ix->fields().find("body") == 2u && !a.ix->fields().find("extra"));
+	const multi_snapshot sharded(std::vector<shard_input>{a.input(), b.input()});
+	const multi_snapshot single(std::vector<shard_input>{one.input()});
+	std::size_t compared = 0, nonempty = 0;
+	for (std::size_t round = 0; round < 120; ++round) {
+		field_query q;
+		q.all = r() % 3 == 0;
+		for (std::size_t c = 1 + r() % 3; c > 0; --c) { q.clauses.push_back({names[r() % names.size()], words[r() % words.size()]}); }
+		for (const bool xapian : {false, true}) {
+			for (int path = 0; path < 3; ++path) {
+				search_options so;
+				so.k = 10;
+				so.count = true;
+				if (path == 1) { so.key = [](const match& m) { return std::to_string(m.docid % 5); }; }  // the exhaustive path
+				if (path == 2) { so.order = docid_order::descending; }
+				term_table ts(sharded.segments()), t1(single.segments());
+				const auto got = search(sharded, [&](const segment& seg) { return build_fields(seg, q, ts, xapian); }, so);
+				const auto want = search(single, [&](const segment& seg) { return build_fields(seg, q, t1, xapian); }, so);
+				CHECK(got.count == want.count);
+				CHECK(got.hits.size() == want.hits.size());
+				for (std::size_t i = 0; i < std::min(got.hits.size(), want.hits.size()); ++i) {
+					CHECK(got.hits[i].docid == want.hits[i].docid);
+					CHECK(std::fabs(got.hits[i].score - want.hits[i].score) <= 1e-12 * std::max(1.0, std::fabs(want.hits[i].score)));
+				}
+				++compared;
+				nonempty += !want.hits.empty();
+			}
+		}
+	}
+	CHECK(compared == 720 && nonempty > 600);
+	// A field one shard lacks has the other's documents only, and a name nobody declared has none.
+	CHECK(sharded.df("extra", "a") == single.df("extra", "a") && sharded.df("extra", "a") > 0 && sharded.df("nope", "a") == 0);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -747,6 +874,7 @@ int main(int argc, char** argv) {
 	concurrent();
 	lazy_scoring();
 	empty_segments();
+	fields_by_name();
 	if (failures) {
 		std::fprintf(stderr, "%d failures\n", failures);
 		return 1;

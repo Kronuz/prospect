@@ -8,6 +8,7 @@
 //     the read throws.
 //   - A segment damaged for good is recovered from a retained predecessor that does not
 //     name it (recover --to).
+#include "text_field.hh"
 #include "prospect/index.hh"
 #include "strata/core/faultfs.hh"
 
@@ -31,7 +32,7 @@ static operation add(const std::string& key, const std::string& body) {
 	o.type = operation::add;
 	o.doc.key = key;
 	std::uint32_t pos = 0;
-	for (std::size_t i = 0; i < body.size(); i += 3) { o.doc.terms.push_back({body.substr(i, 3), 1, {++pos}}); }
+	for (std::size_t i = 0; i < body.size(); i += 3) { o.doc.field().terms.push_back({body.substr(i, 3), 1, {++pos}}); }
 	o.doc.length = pos;
 	o.doc.stored = body;
 	return o;
@@ -44,6 +45,7 @@ static operation erase(const std::string& key) {
 }
 static transaction tx(std::vector<operation> ops) {
 	transaction t;
+	t.fields = text_fields();
 	t.ops = std::move(ops);
 	return t;
 }
@@ -106,6 +108,9 @@ int main() {
 		for (std::uint64_t at = 0; at < size; at += stride) {
 			if (at >= prefix) { offsets.push_back(at); }
 		}
+		// The field table's version varint (bytes 8 to 12) has no checksum: a changed one reads as
+		// another version, which is unsupported, not damage (strata's fields_test), and is not retried.
+		if (name.starts_with("fields-")) { std::erase_if(offsets, [](std::uint64_t at) { return at >= 8 && at < 13; }); }
 		for (const std::uint64_t at : offsets) {
 			for (faultfs::media kind : {faultfs::media::bit_flip, faultfs::media::read_error}) {
 				// Transient: the medium returns the right bytes on the next read.
@@ -180,8 +185,16 @@ int main() {
 			auto ix = prospect::index::open(io, keyed);
 			merged = index_detail::segment_name(ix.manifest().segments.at(0).id);
 		}
-		const std::uint64_t size = fs.view(merged).size();
-		fs.add_media_fault(merged, faultfs::media::bit_flip, size / 2, size / 2 + 1, 0);
+		// A byte in the middle of the postings, which every digest reads.
+		std::uint64_t at = 0;
+		{
+			const std::string_view file = fs.view(merged);
+			for (const auto& e : strata::format::decode_toc(file, strata::format::decode_footer(file))) {
+				if (e.kind == strata::format::section::postings) { at = e.offset + e.length / 2; }
+			}
+		}
+		CHECK(at != 0);
+		fs.add_media_fault(merged, faultfs::media::bit_flip, at, at + 1, 0);
 		bool head_failed = false;
 		try {
 			auto ix = prospect::index::open(io, keyed);

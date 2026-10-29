@@ -1,6 +1,7 @@
 // Merges: the merge of an index's segments, after deletes and replacements, is the same
 // bytes as one flush of its live documents in docid order; and the result answers as the
 // sources did.
+#include "text_field.hh"
 #include "prospect/index.hh"
 #include "prospect/merge.hh"
 #include "view_sources.hh"
@@ -51,14 +52,15 @@ int main() {
 				const std::uint32_t n = std::string_view(w) == "Bool" ? 1 : t.wdf;
 				for (std::uint32_t k = 0; k < n; ++k) { t.positions.push_back(pos += 1 + std::uint32_t(r() % 2)); }
 				if (r() % 7 == 0) { t.positions.clear(); }  // indexed without positions here
-				d.length += t.wdf;
-				d.terms.push_back(std::move(t));
+				d.field().length += t.wdf;
+				d.field().terms.push_back(std::move(t));
 			}
 			if (r() % 5 == 0) { d.stored = std::string(r() % 5000, char('a' + r() % 26)); }
 			return d;
 		};
 		for (int i = 0; i < 3000; ++i) {
 			transaction t;
+			t.fields = text_fields();
 			operation o;
 			const std::uint64_t kind = r() % 10;
 			const std::string key = "Q" + std::to_string(r() % 400);
@@ -104,8 +106,8 @@ int main() {
 		std::vector<posting_input> in;
 		for (const auto& [docid, l] : model) {
 			in.clear();
-			for (const auto& t : l.doc.terms) { in.push_back({t.term, t.wdf, t.positions}); }
-			w.add(docid, in, l.doc.length, l.doc.stored, l.version, l.key);
+			for (const auto& t : l.doc.field().terms) { in.push_back({t.term, t.wdf, t.positions}); }
+			w.add(docid, in, prospect::inverted_plugin::document_length(l.doc), l.doc.stored, l.version, l.key);
 		}
 		const std::string direct = w.flush(id);
 		CHECK(merged == direct);
@@ -137,8 +139,8 @@ int main() {
 			sequence.push_back(docid);
 			const auto& l = model.at(docid);
 			in.clear();
-			for (const auto& t : l.doc.terms) { in.push_back({t.term, t.wdf, t.positions}); }
-			pw.add(docid, in, l.doc.length, l.doc.stored, l.version, l.key);
+			for (const auto& t : l.doc.field().terms) { in.push_back({t.term, t.wdf, t.positions}); }
+			pw.add(docid, in, prospect::inverted_plugin::document_length(l.doc), l.doc.stored, l.version, l.key);
 		}
 		CHECK(permuted == pw.flush(id));
 		const segment ps(permuted);
@@ -244,11 +246,12 @@ int main() {
 		std::mt19937_64 r(8);
 		for (int i = 0; i < 2000; ++i) {
 			transaction t;
+			t.fields = text_fields();
 			operation o;
 			o.type = operation::replace_key;
 			o.key = "Q" + std::to_string(r() % 500);
 			o.doc.key = o.key;
-			o.doc.terms = {{"w" + std::to_string(r() % 30), 1, {1}}};
+			o.doc.field().terms = {{"w" + std::to_string(r() % 30), 1, {1}}};
 			o.doc.length = 1;
 			t.ops.push_back(o);
 			a.apply(t, {});
@@ -282,12 +285,13 @@ int main() {
 		};
 		auto put = [&](const std::string& key, operation::kind type) {
 			transaction t;
+			t.fields = text_fields();
 			operation op;
 			op.type = type;
 			op.key = key;
 			if (type == operation::replace_key) {
 				op.doc.key = key;
-				op.doc.terms = {{"w", 1, {1}}};
+				op.doc.field().terms = {{"w", 1, {1}}};
 				op.doc.length = 1;
 			}
 			t.ops.push_back(op);

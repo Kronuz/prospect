@@ -34,7 +34,7 @@ int main() {
 		digest = 0;
 		auto mix = [&](double v) { digest = digest * 1000003 + std::uint64_t(v * 1e6); };
 		std::vector<prospect::format::term_info> infos;
-		for (const char* t : vocab) { infos.push_back(*seg.get<prospect::inverted_plugin>().term(t)); }
+		for (const char* t : vocab) { infos.push_back(*seg.get<prospect::inverted_plugin>().term(0, t)); }
 		for (std::size_t i = 0; i < infos.size(); ++i) {
 			prospect::term_scorer s(seg.get<prospect::inverted_plugin>(), infos[i]);
 			for (const auto& h : prospect::top_k(seg, s, 10)) { mix(h.score + h.ord); }
