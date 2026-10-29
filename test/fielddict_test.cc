@@ -350,6 +350,27 @@ static void pool_pairing_tests() {
 	CHECK(!opens(o.terms + "x", o.index));  // pool blocks, no pool index
 }
 
+// A merge plans from its inputs, an upper bound: a pooled field the merge writes no term for
+// (every term dropped) leaves an empty pool beside an own dictionary; the directory still reads.
+static void overplanned_pool_tests() {
+	std::mt19937_64 rng(23);
+	fielddict::planner plan;
+	for (unsigned i = 0; i < 5; ++i) { plan.add(1, "p" + std::to_string(i)); }  // planned pooled, never added
+	dict_model own;
+	for (unsigned i = 0; i < 300; ++i) { own[{3, std::to_string(100000 + i)}] = random_info(rng); }
+	for (const auto& [k, _] : own) { plan.add(k.first, k.second); }
+	fielddict::builder b(plan.finish());
+	for (const auto& [k, info] : own) { b.add(k.first, k.second, info); }
+	auto built = b.finish();
+	bool ok = true;
+	try {
+		fielddict::reader r(built.blocks, built.index);
+	} catch (const strata::corrupt_segment&) {
+		ok = false;
+	}
+	CHECK(ok);
+}
+
 // SR5: every field id lies in the field table, and none is the key field.
 static void field_table_tests() {
 	std::mt19937_64 rng(19);
@@ -393,6 +414,7 @@ static void field_table_tests() {
 int main() {
 	count_tests();
 	pool_pairing_tests();
+	overplanned_pool_tests();
 	field_table_tests();
 	varint_tests();
 	dict_modelests();

@@ -166,6 +166,7 @@ public:
 			put_field(key_, field);
 			key_ += term;
 			pool_dict_->add(key_, format::encode_term_info(info, pool_run_, pool_dict_->next_is_restart()));
+			++pool_terms_;
 		} else {
 			own_->add(term, format::encode_term_info(info, own_run_, own_->next_is_restart()));
 		}
@@ -178,7 +179,7 @@ public:
 		out.blocks = std::move(blocks_);
 		const std::uint64_t own_blocks = out.blocks.size();
 		std::string pool_index;
-		if (pooled_) {
+		if (pooled_ && pool_terms_) {  // a pool no term reached (a merge's plan is an upper bound) writes nothing
 			termdict::tables t = pool_dict_->finish();
 			out.blocks += t.blocks;
 			pool_index = std::move(t.index);
@@ -250,7 +251,7 @@ private:
 
 	std::vector<field_plan> plan_;
 	std::size_t at_ = npos;
-	std::uint64_t added_ = 0, last_blocks_ = 0;
+	std::uint64_t added_ = 0, last_blocks_ = 0, pool_terms_ = 0;
 	bool pooled_ = false;
 	std::optional<termdict::builder> pool_dict_, own_;
 	format::term_run pool_run_, own_run_;
