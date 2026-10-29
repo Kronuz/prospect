@@ -593,6 +593,74 @@ struct range_source {
 static_assert(p::slot_values<decimal_slot>);
 static_assert(p::value_source<range_source>);
 
+// Phrases with explicit relative offsets (gaps where words were removed, repeated terms)
+// against a brute-force oracle, in both the any-match and the frequency paths.
+void phrase_offsets() {
+	std::mt19937_64 rng(5);
+	const std::vector<std::string> vocab = {"a", "b", "c", "d"};
+	std::vector<std::vector<std::string>> docs;
+	// fixed: a _ b matches "a x b" only; "a b" consecutive does not
+	docs.push_back({"a", "x", "b"});
+	docs.push_back({"a", "b"});
+	docs.push_back({"b", "x", "a"});
+	for (int i = 0; i < 300; ++i) {
+		std::vector<std::string> d(1 + rng() % 14);
+		for (auto& w : d) { w = vocab[rng() % vocab.size()]; }
+		docs.push_back(std::move(d));
+	}
+	corpus c(std::move(docs));
+	auto run = [&](const std::vector<std::string>& terms, const std::vector<std::uint32_t>& offs, bool counted) {
+		std::vector<p::format::term_info> infos;
+		for (const auto& t : terms) {
+			auto ti = c.rd().term(0, t);
+			CHECK(ti.has_value());
+			infos.push_back(*ti);
+		}
+		p::phrase_scorer ph(c.rd(), infos, {}, 0, nullptr, {}, offs);
+		std::uint64_t n = 0;
+		std::vector<std::size_t> got;
+		for (auto h : p::top_k(*c.seg, ph, 1000, counted ? &n : nullptr)) { got.push_back(h.ord); }
+		std::sort(got.begin(), got.end());
+		return got;
+	};
+	auto oracle = [&](const std::vector<std::string>& terms, const std::vector<std::uint32_t>& offs) {
+		std::vector<std::size_t> want;
+		for (std::size_t d = 0; d < c.docs.size(); ++d) {
+			const auto& w = c.docs[d];
+			bool hit = false;
+			for (std::size_t s = 0; s < w.size() && !hit; ++s) {
+				bool ok = true;
+				for (std::size_t k = 0; k < terms.size() && ok; ++k) { ok = s + offs[k] - offs[0] < w.size() && w[s + offs[k] - offs[0]] == terms[k]; }
+				hit = ok;
+			}
+			if (hit) { want.push_back(d); }
+		}
+		return want;
+	};
+	auto has = [](const std::vector<std::size_t>& v, std::size_t d) { return std::find(v.begin(), v.end(), d) != v.end(); };
+	const auto gap = run({"a", "b"}, {0, 2}, false), adjacent = run({"a", "b"}, {0, 1}, false);
+	CHECK(has(gap, 0) && !has(gap, 1) && !has(gap, 2));
+	CHECK(has(adjacent, 1) && !has(adjacent, 0) && !has(adjacent, 2));
+	CHECK(run({"a", "b"}, {0, 2}, true) == gap);
+	int matched = 0;
+	for (int i = 0; i < 400; ++i) {
+		const std::size_t n = 2 + rng() % 3;
+		std::vector<std::string> terms;
+		std::vector<std::uint32_t> offs;
+		std::uint32_t at = 0;
+		for (std::size_t k = 0; k < n; ++k) {
+			terms.push_back(vocab[rng() % vocab.size()]);
+			offs.push_back(at);
+			at += 1 + rng() % 3;
+		}
+		const auto want = oracle(terms, offs);
+		matched += !want.empty();
+		CHECK(run(terms, offs, false) == want);
+		CHECK(run(terms, offs, true) == want);
+	}
+	CHECK(matched > 100);
+}
+
 void host_source() {
 	std::mt19937_64 rng(77);
 	const std::vector<std::string> vocab = {"a", "b", "c", "d", "e", "f"};
@@ -838,6 +906,7 @@ int main(int argc, char** argv) {
 	pieces();
 	parity(fixtures);
 	random_trees();
+	phrase_offsets();
 	host_source();
 	if (failures) {
 		std::fprintf(stderr, "%d failures\n", failures);
