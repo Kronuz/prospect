@@ -14,6 +14,8 @@
 - Mutants, each killed (`.scratch/mutants.sh`): offset off by one, NEAR window `<=`, NEAR positions not distinct, score halved,
   every candidate accepted, a slot's terms not merged, only the first term's positions read.
 
+- ASan+UBSan (Homebrew LLVM 22, `-fsanitize=address,undefined`): `multi_phrase_test` passes with no report.
+
 ## Next
 
 Nothing in this repository; the Xapiand build reads it through `strata/search.cc`.
