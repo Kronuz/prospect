@@ -152,7 +152,7 @@ static bool throws(const std::function<void()>& f) {
 
 int main() {
 	prospect::index::options keyed;
-	keyed.key_prefix = "Q";
+	keyed.keyed = true;
 	keyed.retained_predecessors = 2;  // the suite checks recover --to and pinned manifests
 	// The version map's table against std::map: inserts, finds, and removals (which shift
 	// entries back) with hashes narrowed so many values share one.
@@ -2228,7 +2228,7 @@ int main() {
 			faultfs::filesystem fs;
 			faultfs::io io(fs);
 			prospect::index::options opts;
-			opts.key_prefix = "Q";
+			opts.keyed = true;
 			opts.flush_threads = flush_threads;
 			auto ix = prospect::index::create(io, opts, uuid);
 			std::mt19937_64 rng(seed);
@@ -2269,7 +2269,7 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		prospect::index::options opts;
-		opts.key_prefix = "Q";
+		opts.keyed = true;
 		auto ix = prospect::index::create(io, opts, uuid);
 		CHECK(ix.apply(tx({add("Qa", "alpha")}), {}).result == verdict::accepted);
 		ix.commit();
@@ -2277,7 +2277,7 @@ int main() {
 		bool refused = false;
 		try {
 			strata::basic_index<strata::document_layout>::options d;
-			d.key_prefix = "Q";
+			d.keyed = true;
 			(void)strata::basic_index<strata::document_layout>::open(io, d);
 		} catch (const strata::unsupported_index&) {
 			refused = true;

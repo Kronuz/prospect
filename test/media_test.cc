@@ -64,7 +64,7 @@ static std::optional<std::uint64_t> read_digest(prospect::index& ix, bool& heale
 
 int main() {
 	prospect::index::options keyed;
-	keyed.key_prefix = "Q";
+	keyed.keyed = true;
 	keyed.retained_predecessors = 2;  // the head is recovered from a predecessor that does not name the damaged segment
 	faultfs::filesystem fs;
 	faultfs::io io(fs);

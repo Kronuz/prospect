@@ -226,7 +226,7 @@ prospect::operation upsert(const std::string& key, const std::string& word) {
 
 strata::verdict::outcome apply(prospect::index& ix, const prospect::operation& op) {
 	prospect::transaction t;
-	t.fields = ix.manifest().key_prefix.empty() ? text_fields() : keyed_fields();
+	t.fields = (ix.manifest().configured & strata::format::bit::keys) ? keyed_fields() : text_fields();
 	t.ops.push_back(op);
 	return ix.apply(t, {}).result;
 }
@@ -542,7 +542,7 @@ int main() {
 			}
 		};
 		prospect::index::options o;
-		o.key_prefix = "Q";
+		o.keyed = true;
 		// A committed index; returns its head manifest's generation.
 		auto make = [&](strata::faultfs::io& io) {
 			auto ix = prospect::index::create(io, o, {});
@@ -595,7 +595,7 @@ int main() {
 		CHECK(with([](strata::files::manifest& m) { m.mask = m.configured = bit::inverted | bit::norms | bit::keys; }) == verdict::corrupt);
 		// Configured bits no flush could write: damage at open (CR5). Clearing stored is a
 		// valid configuration.
-		CHECK(with([](strata::files::manifest& m) { m.configured = bit::inverted | bit::norms | bit::stored; }) == verdict::corrupt);  // keys off, prefix Q
+		CHECK(with([](strata::files::manifest& m) { m.configured = bit::inverted | bit::norms | bit::stored; }) == verdict::other);  // keys off: a keyless index, which a keyed request refuses (F3)
 		CHECK(with([](strata::files::manifest& m) { m.configured = bit::norms | bit::keys | bit::stored; }) == verdict::corrupt);    // norms without inverted
 		CHECK(with([](strata::files::manifest& m) { m.configured = bit::inverted | bit::norms | bit::keys; }) == verdict::opens);
 		// A version-1 manifest: unsupported.
@@ -722,7 +722,7 @@ int main() {
 				CHECK(apply(a, upsert("Q1", "w")) == strata::verdict::accepted);
 				gen = a.checkpoint();
 			}
-			rewrite(fs_a, io_a, gen, [](strata::files::manifest& m) { m.configured &= ~bit::keys; });
+			rewrite(fs_a, io_a, gen, [](strata::files::manifest& m) { m.configured &= ~bit::inverted; });  // norms without inverted
 			auto b = prospect::index::create(io_b, o, {});
 			bool corrupt = false;
 			try {
@@ -739,7 +739,7 @@ int main() {
 		strata::faultfs::filesystem fs;
 		strata::faultfs::io io(fs);
 		prospect::index::options o;
-		o.key_prefix = "Q";
+		o.keyed = true;
 		{
 		auto ix = prospect::index::create(io, o, {});
 		prospect::transaction t;
@@ -907,7 +907,7 @@ int main() {
 			for (std::uint64_t d = 1; d <= 10; ++d) { w.add(d, {}, 0, {}, d == 3 ? 7 : 0, d == 3 ? "Q3" : ""); }
 			const std::string good_versions = w.flush({});
 			prospect::check_report r;
-			strata::check_segment(prospect::segment(good_versions), nullptr, r, "Q");
+			strata::check_segment(prospect::segment(good_versions), nullptr, r);
 			std::string v;
 			strata::format::put<std::uint64_t>(v, 5);
 			v.push_back('\0');  // every document at version 5, width 0
@@ -916,7 +916,7 @@ int main() {
 			bool threw = false;
 			try {
 				prospect::check_report rr;
-				strata::check_segment(prospect::segment(bad), nullptr, rr, "Q");
+				strata::check_segment(prospect::segment(bad), nullptr, rr);
 			} catch (const strata::corrupt_segment&) {
 				threw = true;
 			}
@@ -965,19 +965,14 @@ int main() {
 		strata::faultfs::filesystem fs;
 		strata::faultfs::io io(fs);
 		prospect::index::options o;
-		o.key_prefix = "Q";
+		o.keyed = true;
 		o.auto_merge = false;
 		auto ix = prospect::index::create(io, o, {});
-		// Stage 1: a term of the key field, a key without the prefix, and a key unlike the
-		// operation's are invalid (F8; F13-R25 item 2).
+		// Stage 1: a term of the key field and a key unlike the operation's are invalid (F8).
 		{
 			auto op = upsert("Qa", "w");
 			op.doc.field(strata::field_ref::declared(1)).terms.push_back({"Qb", 0, {}});  // a term of the key field
 			CHECK(apply(ix, op) == strata::verdict::invalid);
-			auto add = upsert("Qa", "w");
-			add.type = prospect::operation::add;
-			add.doc.key = "Xa";
-			CHECK(apply(ix, add) == strata::verdict::invalid);
 			auto other = upsert("Qa", "w");
 			other.doc.key = "Qz";
 			CHECK(apply(ix, other) == strata::verdict::invalid);
@@ -1028,7 +1023,7 @@ int main() {
 			const auto got = matches(ix, "_id", key);
 			const auto it = live.find(key);
 			CHECK(got == (it == live.end() ? std::vector<std::uint64_t>{} : std::vector<std::uint64_t>{it->second}));
-			// The dictionary holds no key: without the prefix's routing, nothing matches.
+			// The dictionary holds no key: only the key field reaches the keys.
 			CHECK(matches(ix, "text", key).empty());
 		}
 		// The term table's df counts the segments holding a key, deleted copies included.
@@ -1056,7 +1051,7 @@ int main() {
 			auto refused = [](const std::string& file) {
 				try {
 					prospect::check_report rr;
-					strata::check_segment(prospect::segment(file), nullptr, rr, "Q");
+					strata::check_segment(prospect::segment(file), nullptr, rr);
 				} catch (const strata::corrupt_segment&) {
 					return true;
 				}
@@ -1137,7 +1132,6 @@ int main() {
 				strata::string_output so(out);
 				strata::string_spill spill;
 				strata::merge_options mo;
-				mo.key_prefix = "Q";
 				try {
 					(void)prospect::merge_segments(src, {}, so, spill, mo);
 				} catch (const strata::corrupt_segment&) {
@@ -1198,6 +1192,57 @@ int main() {
 		CHECK(matches(ix, "text", "Qa").size() == 1 && matches(ix, "text", "w").size() == 1);
 		CHECK(!ix.find_key("Qa"));
 		CHECK(ix.check().keys == 0);
+	}
+
+	// F3: nothing in the term space is reserved. In a keyed index, for every first byte (a former
+	// prefix, 0xff and NUL included) a document's key is also a term of the text field; the key
+	// field finds the key's document and the text field the term's, through flush, merge and
+	// reopen, and replace and erase by key act on the key alone.
+	{
+		strata::faultfs::filesystem fs;
+		strata::faultfs::io io(fs);
+		prospect::index::options o;
+		o.keyed = true;
+		o.auto_merge = false;
+		auto ix = prospect::index::create(io, o, {});
+		auto key_of = [](int b) { return std::string(1, char(b)) + "k"; };
+		for (int b = 0; b < 256; ++b) {
+			auto op = upsert(key_of(b), key_of(b));  // the term equals the key
+			CHECK(apply(ix, op) == strata::verdict::accepted);
+			if (b % 64 == 63) { ix.commit(); }
+		}
+		auto check_all = [&](int erased) {
+			for (int b = 0; b < 256; ++b) {
+				const auto doc = ix.find_key(key_of(b));
+				if (b == erased) {
+					CHECK(!doc && matches(ix, "_id", key_of(b)).empty() && matches(ix, "text", key_of(b)).empty());
+					continue;
+				}
+				CHECK(doc.has_value());
+				const std::vector<std::uint64_t> want{doc->first};
+				CHECK(matches(ix, "_id", key_of(b)) == want);
+				CHECK(matches(ix, "text", key_of(b)) == want);
+			}
+		};
+		ix.commit();
+		check_all(-1);
+		ix.force_merge();
+		check_all(-1);
+		ix.close();
+		prospect::index::options reopened;  // the flag is the manifest's
+		ix = prospect::index::open(io, reopened);
+		check_all(-1);
+		// Erase one former prefix and replace another: the old term goes with the old document.
+		prospect::operation del;
+		del.type = prospect::operation::delete_key;
+		del.key = key_of('Q');
+		CHECK(apply(ix, del) == strata::verdict::accepted);
+		ix.commit();
+		check_all('Q');
+		CHECK(apply(ix, upsert(key_of(0xff), "other")) == strata::verdict::accepted);
+		ix.commit();
+		CHECK(matches(ix, "text", key_of(0xff)).empty() && matches(ix, "text", "other").size() == 1 && matches(ix, "_id", key_of(0xff)).size() == 1);
+		CHECK(ix.check().keys >= 255);
 	}
 
 	// inverted's statistics equal its documents' (F7; CR6, M28): total, minimum, and maximum

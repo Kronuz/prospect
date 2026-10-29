@@ -121,7 +121,7 @@ int main() {
 		const bool budgeted = seed % 2;
 		auto options = [&](byte_budget* storage) {
 			index::options o;
-			o.key_prefix = "Q";
+			o.keyed = true;
 			o.reclaim_step = 256;
 			o.reclaim_slice = 1024;
 			o.storage = budgeted ? storage : nullptr;

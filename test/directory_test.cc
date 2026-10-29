@@ -49,7 +49,7 @@ static const std::array<char, 16> uuid_a = {'d', 'i', 'r', 'e', 'c', 't', 'o', '
 
 static index::options keyed() {
 	index::options o;
-	o.key_prefix = "Q";
+	o.keyed = true;
 	return o;
 }
 

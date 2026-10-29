@@ -66,7 +66,6 @@ public:
 	void flush(const std::array<std::uint8_t, 16>& segment_id, std::span<const ordinal_t> order, const builder_settings& settings, output& out, spill& positions) {
 		segment_writer w;
 		w.memory = settings.memory;
-		w.key_prefix = std::string(settings.key_prefix);
 		w.structures = settings.structures;
 		if (!value_docs_.empty() && !(settings.structures & values_plugin::structure)) { throw std::invalid_argument("strata: values in a segment without values"); }
 		tuple_buffer::flush(segment_id, order, w, out, positions, [&](segment_writer& writer, const auto& plan) {

@@ -32,7 +32,7 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		index::options opts;
-		opts.key_prefix = "Q";
+		opts.keyed = true;
 		auto ix = prospect::index::create(io, opts, uuid);
 		// The model: each live docid's document, key, and version.
 		struct live {
@@ -98,7 +98,7 @@ int main() {
 		{
 			string_output out(merged);
 			string_spill spill;
-			const auto plan = merge_segments(sources, id, out, spill, {.key_prefix = "Q"});
+			const auto plan = merge_segments(sources, id, out, spill, {});
 			CHECK(plan.doc_count == model.size());
 		}
 		// One flush of the live documents in docid order.
@@ -127,7 +127,7 @@ int main() {
 		{
 			string_output out(permuted);
 			string_spill spill;
-			const auto plan = merge_segments(sources, id, out, spill, {.order = order, .key_prefix = "Q"});
+			const auto plan = merge_segments(sources, id, out, spill, {.order = order});
 			CHECK(plan.doc_count == order.size());
 			for (std::size_t i = 0; i < order.size(); ++i) { CHECK(plan.ordinals[order[i].source][order[i].ord] == ordinal_t(i)); }
 		}
@@ -152,7 +152,7 @@ int main() {
 			std::string again;
 			string_output out(again);
 			string_spill spill;
-			(void)merge_segments(one, id, out, spill, {.key_prefix = "Q"});
+			(void)merge_segments(one, id, out, spill, {});
 			CHECK(again == permuted);
 		}
 		// A merge of the permuted segment back into docid order equals the docid-order flush.
@@ -166,7 +166,7 @@ int main() {
 			std::string back;
 			string_output out(back);
 			string_spill spill;
-			(void)merge_segments(one, id, out, spill, {.order = sorted_order, .key_prefix = "Q"});
+			(void)merge_segments(one, id, out, spill, {.order = sorted_order});
 			CHECK(back == direct);
 		}
 		// An order that misses or repeats a document is refused.
@@ -182,7 +182,7 @@ int main() {
 				std::string junk;
 				string_output out(junk);
 				string_spill spill;
-				(void)merge_segments(sources, id, out, spill, {.order = wrong, .key_prefix = "Q"});
+				(void)merge_segments(sources, id, out, spill, {.order = wrong});
 			} catch (const std::invalid_argument&) {
 				threw = true;
 			}
@@ -238,10 +238,10 @@ int main() {
 		faultfs::filesystem fa, fb;
 		faultfs::io ia(fa), ib(fb);
 		index::options merging;
-		merging.key_prefix = "Q";
+		merging.keyed = true;
 		merging.auto_merge = true;
 		index::options plain;
-		plain.key_prefix = "Q";
+		plain.keyed = true;
 		auto a = prospect::index::create(ia, merging, uuid), b = prospect::index::create(ib, plain, uuid);
 		std::mt19937_64 r(8);
 		for (int i = 0; i < 2000; ++i) {
@@ -274,7 +274,7 @@ int main() {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		index::options o;
-		o.key_prefix = "Q";
+		o.keyed = true;
 		auto ix = prospect::index::create(io, o, uuid);
 		auto deleted_in = [&](const index::segment_view& v) {
 			std::uint64_t n = 0;

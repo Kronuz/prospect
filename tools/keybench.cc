@@ -17,12 +17,11 @@
 
 int main(int argc, char** argv) {
 	if (argc < 3) {
-		std::cerr << "usage: keybench DIR ROUNDS [PREFIX] < keys\n";
+		std::cerr << "usage: keybench DIR ROUNDS < keys\n";
 		return 2;
 	}
 	kronuz::journal::PosixIO io(argv[1], 0600, {true, true});
 	prospect::index::options o;
-	o.key_prefix = argc > 3 ? argv[3] : "Q";
 	o.auto_merge = false;
 	auto ix = prospect::index::open(io, o);
 	std::vector<std::string> hits, misses;
