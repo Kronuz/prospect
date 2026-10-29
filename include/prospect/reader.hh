@@ -172,6 +172,11 @@ struct inverted_plugin {
 		std::string text;
 		std::vector<text_token> tokens;
 		bool split_text = false;
+		// The host guarantees what valid_field checks of `terms` (each within the term limit, none
+		// twice, positions strictly increasing) and the part has no text or tokens: stage 1 skips
+		// the sort that finds repeats. A part whose guarantee is false is rejected or corrupts the
+		// index, so only a host that builds its terms from a table sets it.
+		bool checked = false;
 	};
 	// A document's terms by field. Its length is the host's total, which defaults to the sum
 	// of its parts' lengths (D5): Xapiand passes the sum of every wdf, its id term's included.
@@ -214,7 +219,7 @@ struct inverted_plugin {
 			const auto id = vc.field(f.field);
 			if (!id || vc.is_key_field(*id)) { return false; }
 			ids.push_back(*id);
-			if (!valid_field(f)) { return false; }
+			if (!(f.checked && f.tokens.empty() && !f.split_text) && !valid_field(f)) { return false; }
 		}
 		if (ids.size() > 1) {
 			std::sort(ids.begin(), ids.end());
