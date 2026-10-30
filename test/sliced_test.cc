@@ -249,12 +249,12 @@ std::vector<doc> big_docs(std::mt19937_64& r, std::size_t n, std::size_t count) 
 	return docs;
 }
 
-void big(std::size_t n, unsigned parts, std::size_t count) {
+void big(std::size_t n, unsigned parts, std::size_t count, bool deletes) {
 	std::mt19937_64 r(77 + n);
 	const auto docs = big_docs(r, n, count);
 	std::set<std::pair<std::size_t, std::uint64_t>> dead;
 	for (const auto& d : docs) {
-		if (r() % 50 == 0) { dead.insert({d.shard, d.did}); }
+		if (deletes && r() % 50 == 0) { dead.insert({d.shard, d.did}); }
 	}
 	const auto set = build_shards(docs, n, r, parts, dead);
 	const multi_snapshot multi(set.inputs());
@@ -286,24 +286,38 @@ void big(std::size_t n, unsigned parts, std::size_t count) {
 				CHECK(got.value && same_hits(got.value->hits, expect));
 			}
 		}
-		// Counting by intersection or window is sliced too: a counted top-k resumes about once per window.
-		if (q.kind != "TERM") {
+		// Counting by intersection or window is sliced too: a counted top-k resumes about once per window,
+		// twice where the count and the scoring are separate passes over a segment without deletions.
+		if (q.kind != "TERM" && q.kind != "AND_MAYBE") {  // a term's count is its frequency; so is a required term's
 			search_options o;
 			o.k = 10;
 			o.count = true;
 			const auto got = drive<search_result>([&](task::budget& b) { return search_task(multi, build, o, slice{b}); }, std::chrono::nanoseconds(0));
 			CHECK(got.value && !got.error);
 			CHECK(got.yields() * 10 >= windows * 9);
+			if (!deletes && ((q.kind == "OR" && q.terms.size() == 3) || q.kind == "AND_NOT")) { CHECK(got.yields() * 10 >= windows * 18); }
+			const auto counted = drive<std::uint64_t>([&](task::budget& b) { return search_count_task(multi.segments(), build, slice{b}); }, std::chrono::nanoseconds(0));
+			CHECK(counted.value && *counted.value == all.size());
+			CHECK(counted.yields() * 10 >= windows * 9);
 		}
 		// Reading every posting (k above the corpus, no count, so nothing prunes) resumes about once per
 		// window, whichever scorer drives it; an exhaustive scan does too.
 		for (const bool exhaustive : {false, true}) {
 			search_options o;
 			o.k = 100000;
-			if (exhaustive) { o.visit = [](const match&) {}; }
+			std::uint64_t visited = 0;
+			if (exhaustive) { o.visit = [&](const match&) { ++visited; }; }
 			const auto got = drive<search_result>([&](task::budget& b) { return search_task(multi, build, o, slice{b}); }, std::chrono::nanoseconds(0));
 			CHECK(got.value && !got.error);
-			CHECK(got.yields() * 10 >= windows * 9);
+			// A rare term's postings fit one block, which is bounded work however many windows it spans.
+			if (!(q.kind == "TERM" && q.terms[0] == "rare")) { CHECK(got.yields() * 10 >= windows * 9); }
+			// Against the model, not the synchronous search, which shares the code under test.
+			CHECK(got.value && same_hits(got.value->hits, [&] {
+				std::vector<doc_hit> all_hits;
+				for (const auto& row : all) { all_hits.push_back({row.docid, row.score}); }
+				return all_hits;
+			}()));
+			if (exhaustive) { CHECK(visited == all.size() && got.value && got.value->count && *got.value->count == all.size()); }
 			yielded += got.yields();
 		}
 	}
@@ -531,8 +545,8 @@ void threads() {
 
 int main() {
 	identity(std::getenv("SLICED_ROUNDS") ? std::atoi(std::getenv("SLICED_ROUNDS")) : 12);
-	big(3, 2, 54000);  // several segments per shard: the multi-segment collector
-	big(1, 1, 24000);  // one segment: top_k alone
+	big(3, 2, 54000, true);  // several segments per shard, with deletions: the multi-segment collector, live_scorer
+	big(1, 1, 24000, false);  // one segment, no deletions: top_k alone, and the scorers' own bulk loops
 	reordered();
 	cancellation();
 	sharing();
