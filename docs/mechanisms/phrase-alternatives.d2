@@ -1,0 +1,13 @@
+vars: { d2-config: { layout-engine: elk; theme-id: 302; sketch: true; pad: 24 } }
+direction: right
+
+conj: "phase 1\nconjunction of\nslot scorers" { style.fill: "#F4F1EA" }
+occ: "phase 2\noccurs(d)" { style.fill: "#F4F1EA" }
+exact: "exact()\nwindow = 0" { style.fill: "#F4F1EA" }
+nr: "near()\nwindow > 0" { style.fill: "#F4F1EA" }
+hit: "hit\nslots' scores summed" { style.fill: "#FBE3C8" }
+conj -> occ
+occ -> exact
+occ -> nr
+exact -> hit
+nr -> hit

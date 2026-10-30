@@ -1,0 +1,14 @@
+vars: { d2-config: { layout-engine: elk; theme-id: 302; sketch: true; pad: 24 } }
+direction: right
+
+offer: "add(item, key)" { style.fill: "#FBE3C8" }
+loose: "no key\nkept, never collapsed" { style.fill: "#F4F1EA" }
+room: "group has room\njoins the group" { style.fill: "#F4F1EA" }
+full: "group full\ndropped += 1,\nrank against its worst" { style.fill: "#F4F1EA" }
+swap: "ranks above\nreplaces the worst" { style.fill: "#F4F1EA" }
+drop: "otherwise\ndiscarded" { style.fill: "#F4F1EA" }
+offer -> loose
+offer -> room
+offer -> full
+full -> swap
+full -> drop
