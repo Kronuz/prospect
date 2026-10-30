@@ -57,7 +57,8 @@
 | Docid map | `interleave_docid` / `split_docid` (checked against 64-bit overflow) |
 | Doc-length bounds | reader accessors and `multi_snapshot::doc_length_bounds()`; equal to glass's on the vectors |
 
-Not built (and why): collapse, thresholds and `get_eset` (census: zero uses); percent (the caller's, from the first hit);
+Collapse is built since (`collapse.hh`, exact for collapse_max > 1; `docs/mechanisms/collapse.md`).
+Not built (and why): thresholds and `get_eset` (census: zero uses; removed from Xapiand); percent (the caller's, from the first hit);
 Xapian-style estimates at `check_at_least` 0 (strata counts exactly, Xapian's tier 1); a threshold shared between shards in
 the pruned path (an optimization; the lead measures); parallel shards (the snapshot is read-only and is searched from four
 threads in the test).
