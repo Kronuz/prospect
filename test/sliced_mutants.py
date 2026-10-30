@@ -17,20 +17,20 @@ header = os.path.join(root, "include/prospect/search.hh")
 # (name, old, new[, file]); each old text occurs once in its file (search.hh by default).
 MUTANTS = [
     # Yields: a scorer or driver that stops awaiting the slice stops yielding.
-    ("disjunction: no checkpoint per window", "	for (;;) {\n		co_await sl.checkpoint();\n		// Clauses that can still matter", "	for (;;) {\n		// Clauses that can still matter"),
-    ("conjunction: no checkpoint per lead block", "		window_gate gate;\n		for (ordinal_t d = lead.next(); d != no_more_docs;) {\n			if (gate.due(d)) { co_await sl.checkpoint(); }", "		for (ordinal_t d = lead.next(); d != no_more_docs;) {"),
-    ("term: no checkpoint per block", "			if (gate.due(d)) { co_await sl.checkpoint(); }\n			min_ = c.min_competitive();", "			min_ = c.min_competitive();"),
+    ("disjunction: no checkpoint per window", "	do { co_await sl.checkpoint(); } while (collect_window(c, count_here, window_min, buf));", "	while (collect_window(c, count_here, window_min, buf)) {}"),
+    ("conjunction: no checkpoint per lead block", "		window_gate gate;\n		for (ordinal_t d = lead.next(); d != no_more_docs;) {\n			if (gate.due(d)) { co_await sl.checkpoint(); }\n			d = collect_block(c, lead, d);", "		for (ordinal_t d = lead.next(); d != no_more_docs;) {\n			d = collect_block(c, lead, d);"),
+    ("term: no checkpoint per block", "			if (gate.due(d)) { co_await sl.checkpoint(); }\n			if (!collect_block(c, d)) { break; }", "			if (!collect_block(c, d)) { break; }"),
     ("term groups: no checkpoint per group", "			co_await sl.checkpoint();  // a group is 32 blocks\n", ""),
     ("count: no checkpoint per window", "	for (ordinal_t d = s.next(); d != no_more_docs; d = s.doc()) {\n		co_await sl.checkpoint();", "	for (ordinal_t d = s.next(); d != no_more_docs; d = s.doc()) {"),
-    ("top_k: no checkpoint in the generic loop", "	for (ordinal_t d = s.next(); d != no_more_docs; d = s.next()) {\n		if (gate.due(d)) { co_await sl.checkpoint(); }\n		++n;\n		if (heap.size() == k", "	for (ordinal_t d = s.next(); d != no_more_docs; d = s.next()) {\n		++n;\n		if (heap.size() == k"),
-    ("top_k: no checkpoint in the unordered loop", "		for (ordinal_t d = s.next(); d != no_more_docs; d = s.next()) {\n			if (gate.due(d)) { co_await sl.checkpoint(); }\n			++n;", "		for (ordinal_t d = s.next(); d != no_more_docs; d = s.next()) {\n			++n;"),
+    ("top_k: no checkpoint in the generic loop", "	for (ordinal_t at = s.next(); at != no_more_docs;) {\n		co_await sl.checkpoint();\n		at = window(at);\n	}\n	if (count) { *count = n; }", "	for (ordinal_t at = s.next(); at != no_more_docs;) {\n		at = window(at);\n	}\n	if (count) { *count = n; }"),
+    ("top_k: no checkpoint in the unordered loop", "		for (ordinal_t at = s.next(); at != no_more_docs;) {\n			co_await sl.checkpoint();\n			at = window(at);", "		for (ordinal_t at = s.next(); at != no_more_docs;) {\n			at = window(at);"),
     ("disjunction: counting copy runs unsliced", "c.count += co_await count_task(*copy, sl);", "c.count += co_await count_task(*copy, slice{});", ),
     ("exclusion: intersection count runs unsliced", "co_return *n - co_await count_task(common, sl);", "co_return *n - co_await count_task(common, slice{});"),
-    ("search: no checkpoint in the multi-segment generic loop", "		for (ordinal_t d = q->next(); d != no_more_docs; d = q->next()) {\n			if (gate.due(d)) { co_await sl.checkpoint(); }", "		for (ordinal_t d = q->next(); d != no_more_docs; d = q->next()) {", "include/prospect/searcher.hh"),
-    ("exhaustive: no checkpoint in the scan", "			if (gate.due(d)) { co_await sl.checkpoint(); }\n			++count_;", "			++count_;", "include/prospect/shards.hh"),
+    ("search: no checkpoint in the multi-segment generic loop", "		for (ordinal_t at = q->next(); at != no_more_docs;) {\n			co_await sl.checkpoint();", "		for (ordinal_t at = q->next(); at != no_more_docs;) {", "include/prospect/searcher.hh"),
+    ("exhaustive: no checkpoint in the scan", "		for (ordinal_t at = q->next(); at != no_more_docs;) {\n			co_await sl.checkpoint();", "		for (ordinal_t at = q->next(); at != no_more_docs;) {", "include/prospect/shards.hh"),
     # Identity: a resume must continue where the search stopped.
-    ("exhaustive: a resume drops the match", "			if (gate.due(d)) { co_await sl.checkpoint(); }\n			++count_;", "			if (gate.due(d)) { co_await sl.checkpoint(); continue; }\n			++count_;", "include/prospect/shards.hh"),
-    ("top_k: a resume drops the match", "		if (gate.due(d)) { co_await sl.checkpoint(); }\n		++n;\n		if (heap.size() == k", "		if (gate.due(d)) { co_await sl.checkpoint(); continue; }\n		++n;\n		if (heap.size() == k"),
+    ("exhaustive: a match at a window start is dropped", "				++count_;\n				m.ord = d;", "				if (d % 4096 == 0) { return; }\n				++count_;\n				m.ord = d;", "include/prospect/shards.hh"),
+    ("top_k: a match at a window start is dropped", "			++seen;\n			if (heap.size() == keep", "			if (d % 4096 == 0) { continue; }\n			++seen;\n			if (heap.size() == keep"),
     # Cancellation and the pin.
     ("slice: a set token is not observed", "if (budget_) { a.inner.emplace(budget_->checkpoint()); }", "if (budget_ && !budget_->token().requested()) { a.inner.emplace(budget_->checkpoint()); }", "include/prospect/slice.hh"),
     ("slice: never checkpoints", "if (budget_) { a.inner.emplace(budget_->checkpoint()); }", "", "include/prospect/slice.hh"),

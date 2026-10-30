@@ -267,13 +267,25 @@ inline task::task<std::vector<doc_hit>> search_task(std::span<const segment_snap
 			continue;
 		}
 		std::uint64_t n = 0;
-		window_gate gate;
-		for (ordinal_t d = q->next(); d != no_more_docs; d = q->next()) {
-			if (gate.due(d)) { co_await sl.checkpoint(); }
-			++n;
-			if (c.counting && c.min_competitive() > 0 && q->current_bound() <= c.min_competitive()) { continue; }  // counted, cannot compete
-			c.collect(d, q->score());
-			if (!c.counting && c.min_competitive() != min) { q->set_min_competitive_score(min = c.min_competitive()); }
+		// A window of matches is a lambda of plain locals (see top_k_task).
+		auto window = [&](ordinal_t d) {
+			const std::uint64_t end = (std::uint64_t(d) | (window_ordinals - 1)) + 1;
+			std::uint64_t seen = 0;
+			double floor_now = min;
+			scorer& sc = *q;
+			for (; d != no_more_docs && d < end; d = sc.next()) {
+				++seen;
+				if (c.counting && c.min_competitive() > 0 && sc.current_bound() <= c.min_competitive()) { continue; }  // counted, cannot compete
+				c.collect(d, sc.score());
+				if (!c.counting && c.min_competitive() != floor_now) { sc.set_min_competitive_score(floor_now = c.min_competitive()); }
+			}
+			n += seen;
+			min = floor_now;
+			return d;
+		};
+		for (ordinal_t at = q->next(); at != no_more_docs;) {
+			co_await sl.checkpoint();
+			at = window(at);
 		}
 		if (c.counting) { *count += n; }
 	}

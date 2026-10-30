@@ -372,13 +372,19 @@ public:
 		window_gate gate;
 		for (ordinal_t d = it_.next(); d != no_more_docs; d = it_.doc()) {
 			if (gate.due(d)) { co_await sl.checkpoint(); }
-			min_ = c.min_competitive();
-			if ((d = skip_blocks(d)) == no_more_docs) { break; }
-			const ordinal_t last = it_.block_end(d);
-			it_.for_each_until(last == no_more_docs ? no_more_docs : last + 1,
-				[&](ordinal_t ord, std::uint32_t wdf) { c.collect(ord, score_of(ord, wdf)); });
+			if (!collect_block(c, d)) { break; }
 		}
 		co_return true;
+	}
+	// The block at d, unless the threshold skips it; false when no block is left. A plain function,
+	// so its locals stay in registers, which a coroutine frame's would not.
+	bool collect_block(top_collector& c, ordinal_t d) {
+		min_ = c.min_competitive();
+		if ((d = skip_blocks(d)) == no_more_docs) { return false; }
+		const ordinal_t last = it_.block_end(d);
+		it_.for_each_until(last == no_more_docs ? no_more_docs : last + 1,
+			[&](ordinal_t ord, std::uint32_t wdf) { c.collect(ord, score_of(ord, wdf)); });
+		return true;
 	}
 	void fill(ordinal_t base, ordinal_t end, std::uint64_t* bits) override { it_.fill(base, end, bits); }
 
@@ -620,55 +626,61 @@ public:
 	// this to the generic loop.
 	task::task<bool> collect_top_k(top_collector& c, slice sl) override {
 		if (c.counting || terms_.empty()) { co_return false; }
-		const std::size_t n = terms_.size();
 		auto& lead = terms_[0]->postings();
 		window_gate gate;
 		for (ordinal_t d = lead.next(); d != no_more_docs;) {
 			if (gate.due(d)) { co_await sl.checkpoint(); }
-			const ordinal_t end = lead.block_end(d);
-			const ordinal_t upto = end == no_more_docs ? no_more_docs - 1 : end;
-			// The window's bounds, computed once a threshold exists: at the window's start,
-			// or where one first appears inside it (bounding the rest of the window).
-			double rest = 0;
-			bool bounded = false;
-			auto bound = [&](ordinal_t from) {
-				bounded = true;
-				rest = 0;
-				for (std::size_t i = 1; i < n; ++i) { rest += terms_[i]->max_score(from, upto); }
-				return terms_[0]->max_score(from, upto) + rest;
-			};
-			if (const double min = c.min_competitive(); min > 0 && sum_upper(bound(d), n) <= min) {
-				if (end == no_more_docs) { break; }
-				d = lead.advance(end + 1);
-				continue;
-			}
-			while (d <= upto) {
-				const double s = parts_[rank_[0]] = terms_[0]->score_of(d, lead.wdf());
-				if (const double min = c.min_competitive(); min > 0) {
-					if (!bounded) { bound(d); }
-					if (sum_upper(s + rest, n) <= min) {
-						d = lead.next();
-						continue;
-					}
-				}
-				bool agreed = true;
-				for (std::size_t i = 1; i < n; ++i) {
-					auto& it = terms_[i]->postings();
-					const ordinal_t e = it.advance(d);
-					if (e != d) {
-						d = lead.advance(e);
-						agreed = false;
-						break;
-					}
-					parts_[rank_[i]] = terms_[i]->score_of(d, it.wdf());
-				}
-				if (agreed) {
-					c.collect(d, sum_parts());
-					d = lead.next();
-				}
-			}
+			d = collect_block(c, lead, d);
 		}
 		co_return true;
+	}
+
+	// The lead's block holding d: skipped whole when the bounds cannot compete, else scored
+	// document by document. Returns the lead's next document. A plain function, so its locals
+	// stay in registers, which a coroutine frame's would not.
+	ordinal_t collect_block(top_collector& c, postings_iterator& lead, ordinal_t d) {
+		const std::size_t n = terms_.size();
+		const ordinal_t end = lead.block_end(d);
+		const ordinal_t upto = end == no_more_docs ? no_more_docs - 1 : end;
+		// The window's bounds, computed once a threshold exists: at the window's start,
+		// or where one first appears inside it (bounding the rest of the window).
+		double rest = 0;
+		bool bounded = false;
+		auto bound = [&](ordinal_t from) {
+			bounded = true;
+			rest = 0;
+			for (std::size_t i = 1; i < n; ++i) { rest += terms_[i]->max_score(from, upto); }
+			return terms_[0]->max_score(from, upto) + rest;
+		};
+		if (const double min = c.min_competitive(); min > 0 && sum_upper(bound(d), n) <= min) {
+			return end == no_more_docs ? no_more_docs : lead.advance(end + 1);
+		}
+		while (d <= upto) {
+			const double s = parts_[rank_[0]] = terms_[0]->score_of(d, lead.wdf());
+			if (const double min = c.min_competitive(); min > 0) {
+				if (!bounded) { bound(d); }
+				if (sum_upper(s + rest, n) <= min) {
+					d = lead.next();
+					continue;
+				}
+			}
+			bool agreed = true;
+			for (std::size_t i = 1; i < n; ++i) {
+				auto& it = terms_[i]->postings();
+				const ordinal_t e = it.advance(d);
+				if (e != d) {
+					d = lead.advance(e);
+					agreed = false;
+					break;
+				}
+				parts_[rank_[i]] = terms_[i]->score_of(d, it.wdf());
+			}
+			if (agreed) {
+				c.collect(d, sum_parts());
+				d = lead.next();
+			}
+		}
+		return d;
 	}
 
 	ordinal_t doc() const noexcept override { return doc_; }
@@ -875,6 +887,15 @@ public:
 
 	// Block-max MaxScore over windows of 4,096 ordinals (see the definition).
 	task::task<bool> collect_top_k(top_collector& c, slice sl) override;
+	// One window's buffers: scores per clause, bounds, the clause order, the match bits.
+	struct window_buffers {
+		static constexpr ordinal_t window = 4096;
+		explicit window_buffers(std::size_t clauses) : acc(clauses * window, 0.0), bound(clauses), order(clauses) {}
+		std::vector<double> acc, bound, below;
+		std::vector<std::size_t> order;
+		std::uint64_t bits[window / 64];
+	};
+	bool collect_window(top_collector& c, bool count_here, ordinal_t& window_min, window_buffers& buf);
 	bool counts_apart() const noexcept override { return true; }
 	// A match scores the sum of its clauses' non-negative scores, at least any one's (F13).
 	double seed(std::size_t k) override {
@@ -1474,7 +1495,6 @@ inline task::task<std::vector<hit>> top_k_task(const segment& seg, scorer& s, st
 	if (floor > 0 && !count) { s.set_min_competitive_score(floor); }
 	top_collector c(k, count != nullptr, seg.core().doc_count());
 	if (floor > 0) { c.seed(floor); }
-	window_gate gate;
 	if (!seg.core().docid_ordered()) {  // ties read docids, and the threshold stays below the k-th score
 		c.begin(seg);
 		if (co_await s.collect_top_k(c, sl)) {
@@ -1483,12 +1503,25 @@ inline task::task<std::vector<hit>> top_k_task(const segment& seg, scorer& s, st
 		}
 		std::uint64_t n = 0;
 		double min = c.counting ? 0.0 : c.min_competitive();
-		for (ordinal_t d = s.next(); d != no_more_docs; d = s.next()) {
-			if (gate.due(d)) { co_await sl.checkpoint(); }
-			++n;
-			if (c.counting && c.min_competitive() > 0 && s.current_bound() <= c.min_competitive()) { continue; }  // counted, cannot compete
-			c.collect(d, s.score());
-			if (!c.counting && c.min_competitive() != min) { s.set_min_competitive_score(min = c.min_competitive()); }
+		// A window of matches is a lambda of plain locals, which stay in registers; a coroutine
+		// frame's variables would be reloaded and stored on every match.
+		auto window = [&](ordinal_t d) {
+			const std::uint64_t end = (std::uint64_t(d) | (window_ordinals - 1)) + 1;
+			std::uint64_t seen = 0;
+			double floor_now = min;
+			for (; d != no_more_docs && d < end; d = s.next()) {
+				++seen;
+				if (c.counting && c.min_competitive() > 0 && s.current_bound() <= c.min_competitive()) { continue; }  // counted, cannot compete
+				c.collect(d, s.score());
+				if (!c.counting && c.min_competitive() != floor_now) { s.set_min_competitive_score(floor_now = c.min_competitive()); }
+			}
+			n += seen;
+			min = floor_now;
+			return d;
+		};
+		for (ordinal_t at = s.next(); at != no_more_docs;) {
+			co_await sl.checkpoint();
+			at = window(at);
 		}
 		if (count) { *count = n; }
 		co_return c.finish();
@@ -1499,22 +1532,34 @@ inline task::task<std::vector<hit>> top_k_task(const segment& seg, scorer& s, st
 	}
 	std::vector<hit> heap;
 	std::uint64_t n = 0;
-	for (ordinal_t d = s.next(); d != no_more_docs; d = s.next()) {
-		if (gate.due(d)) { co_await sl.checkpoint(); }
-		++n;
-		if (heap.size() == k && count && s.current_bound() <= heap.front().score) { continue; }  // counted, cannot compete
-		double sc = s.score();
-		if (floor > 0 && sc <= floor) { continue; }  // cannot enter the top k across segments
-		if (heap.size() < k) {
-			heap.push_back({d, sc});
-			std::push_heap(heap.begin(), heap.end(), worse);
-			if (heap.size() == k && !count) { s.set_min_competitive_score(std::max(floor, equal_bound(heap.front().score))); }
-		} else if (k && sc > heap.front().score) {
-			std::pop_heap(heap.begin(), heap.end(), worse);
-			heap.back() = {d, sc};
-			std::push_heap(heap.begin(), heap.end(), worse);
-			if (!count) { s.set_min_competitive_score(std::max(floor, equal_bound(heap.front().score))); }
+	const bool counted = count != nullptr;
+	auto window = [&](ordinal_t d) {
+		const std::uint64_t end = (std::uint64_t(d) | (window_ordinals - 1)) + 1;
+		const std::size_t keep = k;
+		const double bar = floor;
+		std::uint64_t seen = 0;
+		for (; d != no_more_docs && d < end; d = s.next()) {
+			++seen;
+			if (heap.size() == keep && counted && s.current_bound() <= heap.front().score) { continue; }  // counted, cannot compete
+			double sc = s.score();
+			if (bar > 0 && sc <= bar) { continue; }  // cannot enter the top k across segments
+			if (heap.size() < keep) {
+				heap.push_back({d, sc});
+				std::push_heap(heap.begin(), heap.end(), worse);
+				if (heap.size() == keep && !counted) { s.set_min_competitive_score(std::max(bar, equal_bound(heap.front().score))); }
+			} else if (keep && sc > heap.front().score) {
+				std::pop_heap(heap.begin(), heap.end(), worse);
+				heap.back() = {d, sc};
+				std::push_heap(heap.begin(), heap.end(), worse);
+				if (!counted) { s.set_min_competitive_score(std::max(bar, equal_bound(heap.front().score))); }
+			}
 		}
+		n += seen;
+		return d;
+	};
+	for (ordinal_t at = s.next(); at != no_more_docs;) {
+		co_await sl.checkpoint();
+		at = window(at);
 	}
 	if (count) { *count = n; }
 	std::sort(heap.begin(), heap.end(), worse);
@@ -1560,88 +1605,96 @@ inline task::task<bool> disjunction_scorer::collect_top_k(top_collector& c, slic
 		}
 	}
 	started_ = true;
-	constexpr ordinal_t window = 4096;
-	const std::size_t n = children_.size();
-	std::vector<double> acc(n * window, 0.0), bound(n), below;  // acc: one window per clause
-	std::vector<std::size_t> order(n);
-	std::uint64_t bits[window / 64];
+	window_buffers buf(children_.size());
 	for (auto& ch : children_) { ch->next(); }
 	ordinal_t window_min = 0;
-	for (;;) {
-		co_await sl.checkpoint();
-		// Clauses that can still matter given the global bounds.
-		const double min = count_here ? 0.0 : c.min_competitive();
-		double prefix = 0;
-		std::size_t global_from = 0;
-		if (min > 0) {
-			while (global_from < n && sum_upper(prefix + children_[global_from]->max_score_total(), global_from + 1) <= min) { prefix += children_[global_from++]->max_score_total(); }
-		}
-		ordinal_t first = no_more_docs;
-		for (std::size_t i = global_from; i < n; ++i) {
-			if (children_[i]->doc() < window_min) { children_[i]->advance(window_min); }
-			first = std::min(first, children_[i]->doc());
-		}
-		if (first == no_more_docs) { break; }
-		window_min = first;
-		const ordinal_t window_max = window_min > no_more_docs - window ? no_more_docs - 1 : window_min + window - 1;
-		// Per-window split.
-		for (std::size_t i = 0; i < n; ++i) {
-			order[i] = i;
-			bound[i] = i < global_from ? children_[i]->max_score_total() : children_[i]->max_score(window_min, window_max);
-		}
-		std::size_t essential = 0;
-		if (min > 0) {
-			std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) { return bound[a] < bound[b]; });
-			double sum = 0;
-			while (essential < n && sum_upper(sum + bound[order[essential]], essential + 1) <= min) { sum += bound[order[essential++]]; }
-			if (essential == n) {  // nothing in this window can compete
-				window_min = window_max + 1;
-				if (window_max == no_more_docs - 1) { break; }
-				continue;
-			}
-		}
-		std::fill(bits, bits + window / 64, 0);
-		for (std::size_t e = essential; e < n; ++e) {
-			auto& ch = children_[order[e]];
-			if (ch->doc() < window_min) { ch->advance(window_min); }
-			if (ch->doc() <= window_max) { ch->score_window(window_min, window_max + 1, acc.data() + order[e] * window, bits); }
-		}
-		// Bounds of the non-essential clauses below each one, summed rather than subtracted
-		// so rounding never understates what remains.
-		below.assign(essential + 1, 0.0);
-		for (std::size_t e = 0; e < essential; ++e) { below[e + 1] = below[e] + bound[order[e]]; }
-		for (std::size_t w = 0; w < window / 64; ++w) {
-			for (std::uint64_t word = bits[w]; word; word &= word - 1) {
-				const ordinal_t i = ordinal_t(w * 64 + std::size_t(std::countr_zero(word)));
-				const ordinal_t d = window_min + i;
-				// Each clause's score lands in parts_ by its given position; the running
-				// sum only bounds what remains.
-				double score = 0;
-				for (std::size_t e = essential; e < n; ++e) {
-					double& a = acc[order[e] * window + i];
-					score += parts_[rank_[order[e]]] = a;
-					a = 0;
-				}
-				if (count_here) { ++c.count; }
-				bool competes = true;
-				for (std::size_t e = essential; e-- > 0;) {
-					if (!count_here && sum_upper(score + below[e + 1], n) <= c.min_competitive()) {
-						competes = false;
-						break;
-					}
-					auto& ch = children_[order[e]];
-					if (ch->doc() < d) { ch->advance(d); }
-					const double v = ch->doc() == d ? ch->score() : 0.0;
-					score += parts_[rank_[order[e]]] = v;
-				}
-				if (competes) { c.collect(d, sum_parts()); }
-			}
-		}
-		if (window_max == no_more_docs - 1) { break; }
-		window_min = window_max + 1;
-	}
+	// The window's work is a plain function: its locals stay in registers, which a coroutine
+	// frame's would not.
+	do { co_await sl.checkpoint(); } while (collect_window(c, count_here, window_min, buf));
 	doc_ = no_more_docs;
 	co_return true;
+}
+
+// Scores the window at or after window_min: false once no clause has a document left.
+inline bool disjunction_scorer::collect_window(top_collector& c, bool count_here, ordinal_t& window_min, window_buffers& buf) {
+	constexpr ordinal_t window = window_buffers::window;
+	const std::size_t n = children_.size();
+	double* const acc = buf.acc.data();
+	double* const bound = buf.bound.data();
+	std::size_t* const order = buf.order.data();
+	std::uint64_t* const bits = buf.bits;
+	std::vector<double>& below = buf.below;
+	// Clauses that can still matter given the global bounds.
+	const double min = count_here ? 0.0 : c.min_competitive();
+	double prefix = 0;
+	std::size_t global_from = 0;
+	if (min > 0) {
+		while (global_from < n && sum_upper(prefix + children_[global_from]->max_score_total(), global_from + 1) <= min) { prefix += children_[global_from++]->max_score_total(); }
+	}
+	ordinal_t first = no_more_docs;
+	for (std::size_t i = global_from; i < n; ++i) {
+		if (children_[i]->doc() < window_min) { children_[i]->advance(window_min); }
+		first = std::min(first, children_[i]->doc());
+	}
+	if (first == no_more_docs) { return false; }
+	window_min = first;
+	const ordinal_t window_max = window_min > no_more_docs - window ? no_more_docs - 1 : window_min + window - 1;
+	// Per-window split.
+	for (std::size_t i = 0; i < n; ++i) {
+		order[i] = i;
+		bound[i] = i < global_from ? children_[i]->max_score_total() : children_[i]->max_score(window_min, window_max);
+	}
+	std::size_t essential = 0;
+	if (min > 0) {
+		std::sort(order, order + n, [&](std::size_t a, std::size_t b) { return bound[a] < bound[b]; });
+		double sum = 0;
+		while (essential < n && sum_upper(sum + bound[order[essential]], essential + 1) <= min) { sum += bound[order[essential++]]; }
+		if (essential == n) {  // nothing in this window can compete
+			window_min = window_max + 1;
+			if (window_max == no_more_docs - 1) { return false; }
+			return true;
+		}
+	}
+	std::fill(bits, bits + window / 64, 0);
+	for (std::size_t e = essential; e < n; ++e) {
+		auto& ch = children_[order[e]];
+		if (ch->doc() < window_min) { ch->advance(window_min); }
+		if (ch->doc() <= window_max) { ch->score_window(window_min, window_max + 1, acc + order[e] * window, bits); }
+	}
+	// Bounds of the non-essential clauses below each one, summed rather than subtracted
+	// so rounding never understates what remains.
+	below.assign(essential + 1, 0.0);
+	for (std::size_t e = 0; e < essential; ++e) { below[e + 1] = below[e] + bound[order[e]]; }
+	for (std::size_t w = 0; w < window / 64; ++w) {
+		for (std::uint64_t word = bits[w]; word; word &= word - 1) {
+			const ordinal_t i = ordinal_t(w * 64 + std::size_t(std::countr_zero(word)));
+			const ordinal_t d = window_min + i;
+			// Each clause's score lands in parts_ by its given position; the running
+			// sum only bounds what remains.
+			double score = 0;
+			for (std::size_t e = essential; e < n; ++e) {
+				double& a = acc[order[e] * window + i];
+				score += parts_[rank_[order[e]]] = a;
+				a = 0;
+			}
+			if (count_here) { ++c.count; }
+			bool competes = true;
+			for (std::size_t e = essential; e-- > 0;) {
+				if (!count_here && sum_upper(score + below[e + 1], n) <= c.min_competitive()) {
+					competes = false;
+					break;
+				}
+				auto& ch = children_[order[e]];
+				if (ch->doc() < d) { ch->advance(d); }
+				const double v = ch->doc() == d ? ch->score() : 0.0;
+				score += parts_[rank_[order[e]]] = v;
+			}
+			if (competes) { c.collect(d, sum_parts()); }
+		}
+	}
+	if (window_max == no_more_docs - 1) { return false; }
+	window_min = window_max + 1;
+	return true;
 }
 
 inline task::task<std::optional<std::uint64_t>> exclusion_scorer::exact_count(slice sl) {

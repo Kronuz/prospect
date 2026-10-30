@@ -234,16 +234,23 @@ private:
 		m.shard = shard;
 		m.seg = snap.seg;
 		m.scorer_ = q.get();
-		window_gate gate;
-		for (ordinal_t d = q->next(); d != no_more_docs; d = q->next()) {
-			if (gate.due(d)) { co_await sl.checkpoint(); }
-			++count_;
-			m.ord = d;
-			m.did = snap.seg->core().docid(d);
-			m.docid = interleave_docid(m.did, shard, shards);
-			m.scored_ = false;
-			if (o_.visit) { o_.visit(m); }
-			if (o_.k) { consider(m); }
+		auto window = [&](ordinal_t d) {
+			const std::uint64_t end = (std::uint64_t(d) | (window_ordinals - 1)) + 1;
+			scorer& sc = *q;
+			for (; d != no_more_docs && d < end; d = sc.next()) {
+				++count_;
+				m.ord = d;
+				m.did = snap.seg->core().docid(d);
+				m.docid = interleave_docid(m.did, shard, shards);
+				m.scored_ = false;
+				if (o_.visit) { o_.visit(m); }
+				if (o_.k) { consider(m); }
+			}
+			return d;
+		};
+		for (ordinal_t at = q->next(); at != no_more_docs;) {
+			co_await sl.checkpoint();
+			at = window(at);
 		}
 	}
 
