@@ -29,7 +29,7 @@ MUTANTS = [
     ("search: no checkpoint in the multi-segment generic loop", "		for (ordinal_t at = q->next(); at != no_more_docs;) {\n			co_await sl.checkpoint();", "		for (ordinal_t at = q->next(); at != no_more_docs;) {", "include/prospect/searcher.hh"),
     ("exhaustive: no checkpoint in the scan", "		for (ordinal_t at = q->next(); at != no_more_docs;) {\n			co_await sl.checkpoint();", "		for (ordinal_t at = q->next(); at != no_more_docs;) {", "include/prospect/shards.hh"),
     # Identity: a resume must continue where the search stopped.
-    ("exhaustive: a match at a window start is dropped", "				++count_;\n				m.ord = d;", "				if (d % 4096 == 0) { return; }\n				++count_;\n				m.ord = d;", "include/prospect/shards.hh"),
+    ("exhaustive: a match at a window start is dropped", "				++count_;\n				m.ord = d;", "				if (d % 4096 == 0) { continue; }\n				++count_;\n				m.ord = d;", "include/prospect/shards.hh"),
     ("top_k: a match at a window start is dropped", "			++seen;\n			if (heap.size() == keep", "			if (d % 4096 == 0) { continue; }\n			++seen;\n			if (heap.size() == keep"),
     # Cancellation and the pin.
     ("slice: a set token is not observed", "if (budget_) { a.inner.emplace(budget_->checkpoint()); }", "if (budget_ && !budget_->token().requested()) { a.inner.emplace(budget_->checkpoint()); }", "include/prospect/slice.hh"),
