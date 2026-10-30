@@ -39,7 +39,7 @@ public:
 	double max_score_total() const noexcept override { return inner_->max_score_total(); }
 	std::size_t score_terms() const noexcept override { return inner_->score_terms(); }
 	void set_min_competitive_score(double s) override { inner_->set_min_competitive_score(s); }
-	std::optional<std::uint64_t> exact_count() override { return inner_->exact_count(); }
+	task::task<std::optional<std::uint64_t>> exact_count(prospect::slice sl) override { return inner_->exact_count(sl); }
 	std::unique_ptr<prospect::scorer> fresh() const override {
 		auto f = inner_->fresh();
 		return f ? std::make_unique<scoring_tally>(std::move(f), *tally_) : nullptr;

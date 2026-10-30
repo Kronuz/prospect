@@ -191,17 +191,17 @@ class exhaustive_search {
 public:
 	exhaustive_search(const multi_snapshot& snap, const scorer_builder& build, const search_options& o) : snap_(snap), build_(build), o_(o) {}
 
-	search_result run() {
+	task::task<search_result> run(slice sl) {
 		const std::size_t shards = snap_.shard_count();
 		for (std::size_t s = 0; s < shards; ++s) {
-			for (const auto& seg : snap_.segments(s)) { scan(s, seg, shards); }
+			for (const auto& seg : snap_.segments(s)) { co_await scan(s, seg, shards, sl); }
 		}
 		std::sort_heap(heap_.begin(), heap_.end(), less());
 		search_result out;
 		out.count = count_;
 		out.hits.reserve(heap_.size());
 		for (const auto& e : heap_) { out.hits.push_back({e.docid, e.score}); }
-		return out;
+		co_return out;
 	}
 
 private:
@@ -226,15 +226,17 @@ private:
 	};
 	by_rank less() const { return {this}; }
 
-	void scan(std::size_t shard, const segment_snapshot& snap, std::size_t shards) {
+	task::task<void> scan(std::size_t shard, const segment_snapshot& snap, std::size_t shards, slice sl) {
 		scorer_ptr q = build_(*snap.seg);
-		if (!q) { return; }
+		if (!q) { co_return; }
 		if (snap.any_deleted()) { q = std::make_unique<live_scorer>(std::move(q), *snap.deleted); }
 		match m;
 		m.shard = shard;
 		m.seg = snap.seg;
 		m.scorer_ = q.get();
+		window_gate gate;
 		for (ordinal_t d = q->next(); d != no_more_docs; d = q->next()) {
+			if (gate.due(d)) { co_await sl.checkpoint(); }
 			++count_;
 			m.ord = d;
 			m.did = snap.seg->core().docid(d);
@@ -276,14 +278,15 @@ private:
 // exact: a document in the top k of the whole is in the top k of its own shard, and within
 // a shard docid order is interleaved docid order. The builder must weigh with the snapshot's
 // statistics (snapshot_df and statistics over segments()).
-inline search_result search(const multi_snapshot& snap, const scorer_builder& build, const search_options& o = {}) {
-	if (o.exhaustive()) { return exhaustive_search(snap, build, o).run(); }
+// Everything it takes by reference must outlive the awaited task; search_pinned owns its inputs.
+inline task::task<search_result> search_task(const multi_snapshot& snap, const scorer_builder& build, const search_options& o, slice sl) {
+	if (o.exhaustive()) { co_return co_await exhaustive_search(snap, build, o).run(sl); }
 	search_result out;
 	std::uint64_t total = 0;
 	const std::size_t shards = snap.shard_count();
 	for (std::size_t s = 0; s < shards; ++s) {
 		std::uint64_t n = 0;
-		for (const auto& h : search(snap.segments(s), build, o.k, o.count ? &n : nullptr)) { out.hits.push_back({interleave_docid(h.docid, s, shards), h.score}); }
+		for (const auto& h : co_await search_task(snap.segments(s), build, o.k, o.count ? &n : nullptr, sl)) { out.hits.push_back({interleave_docid(h.docid, s, shards), h.score}); }
 		total += n;
 	}
 	const auto best = [](const doc_hit& a, const doc_hit& b) { return a.score != b.score ? a.score > b.score : a.docid < b.docid; };
@@ -294,7 +297,22 @@ inline search_result search(const multi_snapshot& snap, const scorer_builder& bu
 		std::sort(out.hits.begin(), out.hits.end(), best);
 	}
 	if (o.count) { out.count = total; }
-	return out;
+	co_return out;
+}
+
+// search_task run to completion on the calling thread; the caller's view outlives the call.
+inline search_result search(const multi_snapshot& snap, const scorer_builder& build, const search_options& o = {}) {
+	return run_unsliced(search_task(snap, build, o, slice{}));
+}
+
+// A search that owns its inputs, for a reactor: `pin` is the host's handle on the view the snapshot
+// points into (strata's index::view, or any movable owner), and the snapshot, builder and options are
+// moved into the frame, so the view stays pinned across every suspension and is released when the
+// search completes, throws task::cancelled, or its task is destroyed while suspended.
+template <typename Pin>
+task::task<search_result> search_pinned(Pin pin, multi_snapshot snap, scorer_builder build, search_options o, task::budget& budget) {
+	Pin held = std::move(pin);
+	co_return co_await search_task(snap, build, o, slice{budget});
 }
 
 }  // namespace prospect

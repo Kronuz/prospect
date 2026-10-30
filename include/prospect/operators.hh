@@ -330,7 +330,7 @@ public:
 		if (factor_ > 0.0 && s > 0.0) { child_->set_min_competitive_score(std::nextafter(std::nextafter(s / factor_, 0.0), 0.0)); }
 	}
 	double current_bound() override { return scaled(child_->current_bound()); }
-	std::optional<std::uint64_t> exact_count() override { return child_->exact_count(); }
+	task::task<std::optional<std::uint64_t>> exact_count(slice sl) override { return child_->exact_count(sl); }
 	bool matches_all() const noexcept override { return child_->matches_all(); }
 	std::unique_ptr<scorer> fresh() const override {
 		auto f = child_->fresh();
