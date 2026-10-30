@@ -44,7 +44,7 @@ search_pinned(pin, snapshot, builder, options, budget)      owns pin + inputs in
 
 ## Numbers
 
-See the ledger (`docs/status/phase7c-l4.md`): the no-yield A/B on this host.
+Measured on an Intel Mac, Release, a synthetic 300,000-document index, `bench/quick/ab.sh` 16 rounds x 5 runs under `quiet strict`, against main `prospect:b348da5` (A/A 0.997 to 1.003): a query that fits in one slice is about 2% slower for multi-term queries (TOP_k 1.017 to 1.022 of main, COUNT 1.014), unchanged to 2% faster for single words, and the same whether run synchronously or on a scheduler that never yields. The cost is not the checkpoint; it is the coroutine form of the per-match loops, which the first version paid at +4% until their state moved to plain locals. The ledger has the table and the open residual.
 
 ## Code
 
