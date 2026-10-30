@@ -6,6 +6,8 @@ include(FetchContent)
 # strata, the segment core prospect is the search layout of, pinned by commit; it pins the
 # libraries the core links (fst, termdict, completion, ...). Point FETCHCONTENT_SOURCE_DIR_<NAME>
 # at local checkouts to develop them together.
+# task, ahead of strata's own pin: the per-resume slice and demoted() (phase 7c L1) that sliced search relies on.
+FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG 9a85e89a2dc560b042a8a41efee9c09c62451db6)
 FetchContent_Declare(strata GIT_REPOSITORY https://github.com/Kronuz/strata.git GIT_TAG 16e9054169ca0c2e4249630a1415102dc4f37469)
 FetchContent_MakeAvailable(strata)
 # Search's own building blocks (Kronuz libraries), each pinned to the commit its gate numbers
@@ -175,6 +177,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(shards_test PRIVATE prospect::prospect)
   target_compile_definitions(shards_test PRIVATE PROSPECT_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
   add_test(NAME shards COMMAND shards_test)
+  # Sliced search: identity against the synchronous search at slice sizes from one window up, yields,
+  # cancellation, and the pinned view; cross-thread resumes make it the TSan test of the mechanism.
+  add_executable(sliced_test test/sliced_test.cc)
+  target_link_libraries(sliced_test PRIVATE prospect::prospect)
+  add_test(NAME sliced COMMAND sliced_test)
   # Fuzz targets: each target's checked-in corpus replays as a test in every build; with
   # PROSPECT_FUZZ (Clang) the libFuzzer binaries build too.
   option(PROSPECT_FUZZ "Build the libFuzzer targets (Clang)" OFF)

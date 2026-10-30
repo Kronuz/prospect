@@ -9,6 +9,8 @@
 
 #include <algorithm>
 #include <charconv>
+#include <chrono>
+#include <cstdlib>
 #include <cstdint>
 #include <memory>
 #include <span>
@@ -158,11 +160,21 @@ inline std::uint64_t run(const prospect::segment& seg, std::string_view command,
 	}
 	auto s = build(seg, q, scheme);
 	if (!s) { return counting ? 0 : 1; }
-	if (command == "COUNT") { return prospect::count(*s); }
+	// PROSPECT_BENCH_SLICED runs the query as a task on a scheduler with an hour's slice, which never
+	// yields: the cost of the checkpoint path against the synchronous driver (docs/mechanisms/sliced-search.md).
+	static const bool sliced = std::getenv("PROSPECT_BENCH_SLICED") != nullptr;
+	thread_local task::inline_scheduler sched;
+	thread_local task::budget hour(std::chrono::hours(1));
+	if (command == "COUNT") { return sliced ? task::run(sched, prospect::count_task(*s, prospect::slice{hour})) : prospect::count(*s); }
 	std::size_t k = 0;
 	std::from_chars(command.data() + 4, command.data() + command.size(), k);
 	std::uint64_t n = 0;
-	prospect::top_k(seg, *s, k, counting ? &n : nullptr, k ? s->seed(k) : 0.0);  // a segment file has no deletes
+	const double floor = k ? s->seed(k) : 0.0;  // a segment file has no deletes
+	if (sliced) {
+		task::run(sched, prospect::top_k_task(seg, *s, k, counting ? &n : nullptr, floor, prospect::slice{hour}));
+	} else {
+		prospect::top_k(seg, *s, k, counting ? &n : nullptr, floor);
+	}
 	return counting ? n : 1;
 }
 

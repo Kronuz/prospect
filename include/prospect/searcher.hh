@@ -214,7 +214,8 @@ using scorer_builder = std::function<scorer_ptr(const segment&)>;
 // number of live matches. One collector spans the segments (P6-2), keyed by docid, so
 // each segment prunes from the first competitive hit against the k best so far, and from
 // the start above the largest threshold seed of a segment without deletes (F13).
-inline std::vector<doc_hit> search(std::span<const segment_snapshot> segs, const scorer_builder& build, std::size_t k, std::uint64_t* count = nullptr) {
+// Everything it takes by reference must outlive the awaited task; search_pinned owns its inputs.
+inline task::task<std::vector<doc_hit>> search_task(std::span<const segment_snapshot> segs, const scorer_builder& build, std::size_t k, std::uint64_t* count, slice sl) {
 	if (count) { *count = 0; }
 	std::vector<scorer_ptr> queries(segs.size());
 	double floor = 0.0;
@@ -230,10 +231,10 @@ inline std::vector<doc_hit> search(std::span<const segment_snapshot> segs, const
 	if (segs.size() == 1) {  // one segment: ordinal order is docid order, nothing spans segments
 		const auto& s = segs[0];
 		scorer_ptr& q = queries[0];
-		if (!q) { return {}; }
+		if (!q) { co_return std::vector<doc_hit>{}; }
 		std::vector<doc_hit> out;
-		for (const auto& h : top_k(*s.seg, *q, k, count, floor)) { out.push_back({s.seg->core().docid(h.ord), h.score}); }
-		return out;
+		for (const auto& h : co_await top_k_task(*s.seg, *q, k, count, floor, sl)) { out.push_back({s.seg->core().docid(h.ord), h.score}); }
+		co_return out;
 	}
 	std::size_t docs = 0;
 	for (const auto& s : segs) { docs += s.seg->core().doc_count(); }
@@ -241,51 +242,76 @@ inline std::vector<doc_hit> search(std::span<const segment_snapshot> segs, const
 	c.expect_segments(segs.size());
 	if (floor > 0) { c.seed(floor); }
 	for (std::size_t i = 0; i < segs.size(); ++i) {
+		co_await sl.checkpoint();
 		const auto& s = segs[i];
 		scorer_ptr& q = queries[i];
 		if (!q) { continue; }
 		// A count known from statistics leaves the collection free to prune.
 		c.counting = false;
 		if (count) {
-			if (auto n = q->exact_count()) {
+			if (auto n = co_await q->exact_count(sl)) {
 				*count += *n;
 			} else {
 				c.counting = true;
 			}
 		}
 		if (!k) {
-			if (c.counting) { *count += prospect::count(*q); }
+			if (c.counting) { *count += co_await count_task(*q, sl); }
 			continue;
 		}
 		c.begin(*s.seg);
 		double min = c.counting ? 0.0 : c.min_competitive();
 		if (min > 0) { q->set_min_competitive_score(min); }
-		if (q->collect_top_k(c)) {
+		if (co_await q->collect_top_k(c, sl)) {
 			if (c.counting) { *count += c.count; }
 			continue;
 		}
 		std::uint64_t n = 0;
-		for (ordinal_t d = q->next(); d != no_more_docs; d = q->next()) {
-			++n;
-			if (c.counting && c.min_competitive() > 0 && q->current_bound() <= c.min_competitive()) { continue; }  // counted, cannot compete
-			c.collect(d, q->score());
-			if (!c.counting && c.min_competitive() != min) { q->set_min_competitive_score(min = c.min_competitive()); }
+		// A window of matches is a lambda of plain locals (see top_k_task).
+		auto window = [&](ordinal_t d) {
+			const std::uint64_t end = (std::uint64_t(d) | (window_ordinals - 1)) + 1;
+			std::uint64_t seen = 0;
+			double floor_now = min;
+			scorer& sc = *q;
+			for (; d != no_more_docs && d < end; d = sc.next()) {
+				++seen;
+				if (c.counting && c.min_competitive() > 0 && sc.current_bound() <= c.min_competitive()) { continue; }  // counted, cannot compete
+				c.collect(d, sc.score());
+				if (!c.counting && c.min_competitive() != floor_now) { sc.set_min_competitive_score(floor_now = c.min_competitive()); }
+			}
+			n += seen;
+			min = floor_now;
+			return d;
+		};
+		for (ordinal_t at = q->next(); at != no_more_docs;) {
+			co_await sl.checkpoint();
+			at = window(at);
 		}
 		if (c.counting) { *count += n; }
 	}
-	return c.finish_docs<doc_hit>();
+	co_return c.finish_docs<doc_hit>();
+}
+
+// search_task run to completion on the calling thread; the caller's view outlives the call.
+inline std::vector<doc_hit> search(std::span<const segment_snapshot> segs, const scorer_builder& build, std::size_t k, std::uint64_t* count = nullptr) {
+	return run_unsliced(search_task(segs, build, k, count, slice{}));
 }
 
 // The number of live matches across segments.
-inline std::uint64_t search_count(std::span<const segment_snapshot> segs, const scorer_builder& build) {
+inline task::task<std::uint64_t> search_count_task(std::span<const segment_snapshot> segs, const scorer_builder& build, slice sl) {
 	std::uint64_t n = 0;
 	for (const auto& s : segs) {
+		co_await sl.checkpoint();
 		scorer_ptr q = build(*s.seg);
 		if (!q) { continue; }
 		if (s.any_deleted()) { q = std::make_unique<live_scorer>(std::move(q), *s.deleted); }
-		n += count(*q);
+		n += co_await count_task(*q, sl);
 	}
-	return n;
+	co_return n;
+}
+
+inline std::uint64_t search_count(std::span<const segment_snapshot> segs, const scorer_builder& build) {
+	return run_unsliced(search_count_task(segs, build, slice{}));
 }
 
 }  // namespace prospect
