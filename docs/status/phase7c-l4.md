@@ -7,7 +7,7 @@
 - How it works: `docs/mechanisms/sliced-search.md`.
 - State: in review (S5 rerun and S7 recorded below when they finish)
 - Done criteria (the lead's brief, 2026-10-30; contributors tick, never edit):
-  - [x] S1 Identity: `sliced_test` compares the sliced search (slice 0 ns = every checkpoint, 3 us, one hour) with the synchronous search and with the scoring model: hits, score bits, order, counts, a visitor-fed aggregation (terms, stats, histogram, avg), key sort, descending docids; 4,536 random-corpus comparisons plus 2 x 567 on corpora of 6 to 17 windows, and a reordered segment. The existing suites (`ctest`, 51 tests) pass unchanged: `shards_test` only moved its fixtures to `shards_fixture.hh`.
+  - [x] S1 Identity: `sliced_test` compares the sliced search (slice 0 ns = every checkpoint, 3 us, one hour) with the synchronous search and with the scoring model: hits, score bits, order, counts, a visitor-fed aggregation (terms, stats, histogram, avg), key sort, descending docids; 4,536 random-corpus comparisons plus 2 x 567 on corpora of 6 to 17 windows, and a reordered segment. The existing suites were not changed except `shards_test`, which moved its fixtures to `shards_fixture.hh`, and `search_test`'s forwarding scorer, which takes the slice in `exact_count`.
   - [x] S2 Yields: at a 0 ns slice, reading every posting resumes >= 0.9 of the windows for TERM, OR, AND, AND_MAYBE, AND_NOT, PHRASE (k above the corpus, no count; exhaustive too); a counted OR or AND_NOT >= 1.8 of them (count and scoring are separate passes); `search_count_task` >= 0.9; a reordered segment's term groups >= 3. A rare term's postings fit one block: bounded work, one yield.
   - [x] S3 Cancellation: after 3 resumes the token is set; the search ends at the next checkpoint with `task::cancelled`, no visitor call after the request, `use_count()` back to 1; a pre-set token ends at the first checkpoint; destroying the suspended task frees the view.
   - [x] S4 Mutants: 17 in `test/sliced_mutants.py`, one per suspension point, the window-start-drops-a-match identity breaks, the cancel and pin claims. First run: 12 died, 5 survived (count-only checks, and the sliced search compared with a synchronous one that shares the mutated code); tests strengthened (model comparison, a no-deletion corpus, separate count assertions); on the final code all 17 die.
@@ -19,7 +19,7 @@
 - Next: review; the residual 2%: a profile of the generic loop and conjunction paths against main (candidates: the virtual `exact_count` and `collect_top_k` now return tasks, so `top_collector` and the scorers sit behind coroutine frames; the loops' cold paths).
 - Blocked on: nothing.
 - Findings folded in: none yet.
-- Last verified: 2026-10-30 `sliced_test` and the 50 other release tests pass on the head.
+- Last verified: 2026-10-30 `sliced_test` passes on the head (Release); the whole suite ran on `prospect:4dc38ad` (50 of 51, the one failure a threshold in the new test, fixed in `prospect:906c630`) and runs on the head in the preflight below.
 
 ## Design points (settled before coding)
 
