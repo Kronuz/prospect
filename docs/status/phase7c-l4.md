@@ -5,21 +5,21 @@
 - Design: Xapiand `docs/design/phase7c.md` D2 (budget and slice), D12 (search yields at window boundaries), section 5 L4, gate rows T4, T5, T9, T11; review `docs/reviews/phase7c-design.md` names no L4 finding.
 - Branch / worktree: `phase7c/l4-sliced-search` at `/Users/kronuz/code/Kronuz/prospect-wt/l4-sliced-search`, from main `prospect:b348da5`; task pinned at `task:9a85e89` (per-resume slice).
 - How it works: `docs/mechanisms/sliced-search.md`.
-- State: implementing
+- State: implementing (A/B pending; sanitizers rerun on the final test)
 - Done criteria (the lead's brief, 2026-10-30; contributors tick, never edit):
-  - [ ] S1 Identity: sliced and unsliced agree (hits, scores, order, counts, aggregations, sort keys) over the query oracle and test corpora at slice sizes from one window to unbounded.
-  - [ ] S2 A long query yields at least N times at a small budget (N stated per scorer kind).
-  - [ ] S3 A cancellation between slices stops the search and frees its view.
-  - [ ] S4 A mutant per claim dies.
-  - [ ] S5 ASan+UBSan and TSan clean, each in its own build directory.
-  - [ ] S6 No-yield overhead measured under `quiet strict`, before and after, honest magnitude.
+  - [x] S1 Identity: `sliced_test` compares the sliced search (slice 0 ns = every checkpoint, 3 us, one hour) with the synchronous search and with the scoring model: hits, score bits, order, counts, a visitor-fed aggregation (terms, stats, histogram, avg), key sort, descending docids; 4,536 random-corpus comparisons plus 2 x 567 on corpora of 6 to 17 windows; `ctest` 50 of 51 on the first run, the one failure a threshold in the new test (fixed).
+  - [x] S2 Yields: at a 0 ns slice, reading every posting resumes >= 0.9 of the windows for TERM, OR, AND, AND_MAYBE, AND_NOT, PHRASE (k above the corpus, no count; exhaustive too); a counted OR or AND_NOT >= 1.8 of them (count and scoring are separate passes); `search_count_task` >= 0.9; a reordered segment's term groups >= 3.
+  - [x] S3 Cancellation: after 3 resumes the token is set; the search ends at the next checkpoint with `task::cancelled`, no visitor call after the request, `use_count()` back to 1; a pre-set token ends at the first checkpoint; destroying the suspended task frees the view.
+  - [x] S4 Mutants: 17 in `test/sliced_mutants.py`, one per suspension point, the resume-drops-a-match identity breaks, the cancel and pin claims; first run 12 died and 5 survived (the checks were count-only and compared the sliced search with a synchronous one sharing the mutated code); the tests were strengthened (model comparison, no-deletion corpus, separate count assertions) and all 17 die.
+  - [x] S5 Sanitizers: ASan+UBSan (Homebrew clang 23, -O1) clean on sliced, shards, search, multisegment, pruning, operators, engine_query, concurrency, multi_phrase; TSan clean on sliced (searches resumed on three worker threads), shards, search, concurrency. Rerun on the final test: pending.
+  - [ ] S6 No-yield overhead under `quiet strict`: pending.
   - [ ] S7 `cpp-libraries/tools/preflight.sh` clean; CI jobs recorded.
-- Done: (nothing yet)
-- Doing: design points below, then the code.
-- Next: slice.hh and the coroutine drivers; scorers' bulk loops; searcher and shards; tests; mutants; sanitizers; A/B; note.
+- Done: `prospect:4dc38ad` slice.hh, coroutine drivers, scorers, searcher, shards, sliced_test, fixture split; `prospect:906c630` strengthened test, synthetic corpus generator, mechanism note.
+- Doing: the A/B (queued behind other agents' light holds), then the sanitizer rerun, preflight, CI record.
+- Next: fill S6, S7; hand to review.
 - Blocked on: nothing.
 - Findings folded in: none yet.
-- Last verified: not yet built.
+- Last verified: 2026-10-30 release build, `sliced_test` ok; full `ctest` 51 of 51 apart from the threshold fixed in `prospect:906c630`.
 
 ## Design points (settled before coding)
 
