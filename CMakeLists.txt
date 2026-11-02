@@ -8,7 +8,7 @@ include(FetchContent)
 # at local checkouts to develop them together.
 # task, ahead of strata's own pin: the per-resume slice and demoted() (phase 7c L1) that sliced search relies on.
 FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG 8cad661e0dd3bd1c74b964cdc0ee42066f568838)
-FetchContent_Declare(strata GIT_REPOSITORY https://github.com/Kronuz/strata.git GIT_TAG f2d762658fa659bd57ffd43060af6a740c6fb664)
+FetchContent_Declare(strata GIT_REPOSITORY https://github.com/Kronuz/strata.git GIT_TAG 501f94372308a30f901d6ffb223da4bdc73a195c)
 FetchContent_MakeAvailable(strata)
 # Search's own building blocks (Kronuz libraries), each pinned to the commit its gate numbers
 # were measured at.
