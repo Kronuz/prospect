@@ -355,7 +355,7 @@ public:
 	ordinal_t approx_next() override { return skip_blocks(it_.next()); }
 	ordinal_t approx_advance(ordinal_t t) override { return skip_blocks(it_.advance(t)); }
 	std::uint64_t cost() const noexcept override { return it_.cost(); }
-	double score() override { return score_of(it_.doc(), it_.wdf()); }
+	double score() override { return score_now(it_.doc(), it_.wdf()); }
 	void set_min_competitive_score(double s) override { min_ = s; }
 	ordinal_t block_end(ordinal_t t) override { return it_.block_end(t); }
 	double max_score_total() const noexcept override { return total_bound_; }
@@ -454,7 +454,9 @@ public:
 	}
 
 	// Lucene BM25 reads the one-byte norm; Xapian BM25 reads the exact length.
-	double score_of(ordinal_t ord, std::uint32_t wdf) const {
+	double score_of(ordinal_t ord, std::uint32_t wdf) const { return score_now(ord, wdf); }
+	// score_of at the call site, for the per-posting loops that score one document at a time.
+	[[gnu::always_inline]] double score_now(ordinal_t ord, std::uint32_t wdf) const {
 		return weight_.kind == scheme::bm25 ? weight_.by_norm(wdf, seg_->norm(ord)) : weight_(wdf, seg_->length(ord));
 	}
 	const inverted_plugin::reader& seg() const noexcept { return *seg_; }
@@ -656,7 +658,7 @@ public:
 			return end == no_more_docs ? no_more_docs : lead.advance(end + 1);
 		}
 		while (d <= upto) {
-			const double s = parts_[rank_[0]] = terms_[0]->score_of(d, lead.wdf());
+			const double s = parts_[rank_[0]] = terms_[0]->score_now(d, lead.wdf());
 			if (const double min = c.min_competitive(); min > 0) {
 				if (!bounded) { bound(d); }
 				if (sum_upper(s + rest, n) <= min) {
@@ -673,7 +675,7 @@ public:
 					agreed = false;
 					break;
 				}
-				parts_[rank_[i]] = terms_[i]->score_of(d, it.wdf());
+				parts_[rank_[i]] = terms_[i]->score_now(d, it.wdf());
 			}
 			if (agreed) {
 				c.collect(d, sum_parts());
