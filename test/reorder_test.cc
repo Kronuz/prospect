@@ -317,7 +317,7 @@ int main() {
 		}
 		CHECK(out_bytes[0] == out_bytes[1]);
 		const std::uint64_t h = xxh64::hash(out_bytes[0]);
-		constexpr std::uint64_t pinned = 0xc770db3d97fb6957ull;  // strata format 0x8000000C's bytes
+		constexpr std::uint64_t pinned = 0x37a08d24302e04a7ull;  // strata format 0x8000000D's bytes
 		if (h != pinned) { std::fprintf(stderr, "T7: reordering merge hash %016llx\n", (unsigned long long)h); }
 		CHECK(h == pinned);
 	}
