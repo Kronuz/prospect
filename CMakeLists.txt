@@ -7,16 +7,16 @@ include(FetchContent)
 # libraries the core links (fst, termdict, completion, ...). Point FETCHCONTENT_SOURCE_DIR_<NAME>
 # at local checkouts to develop them together.
 # task, ahead of strata's own pin: the per-resume slice and demoted() (phase 7c L1) that sliced search relies on.
-FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG 9a85e89a2dc560b042a8a41efee9c09c62451db6)
-FetchContent_Declare(strata GIT_REPOSITORY https://github.com/Kronuz/strata.git GIT_TAG 16e9054169ca0c2e4249630a1415102dc4f37469)
+FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG 8cad661e0dd3bd1c74b964cdc0ee42066f568838)
+FetchContent_Declare(strata GIT_REPOSITORY https://github.com/Kronuz/strata.git GIT_TAG 778a8c4ff8bd6c36c56d832c04f3b9d6ed8e3bc0)
 FetchContent_MakeAvailable(strata)
 # Search's own building blocks (Kronuz libraries), each pinned to the commit its gate numbers
 # were measured at.
-FetchContent_Declare(docset GIT_REPOSITORY https://github.com/Kronuz/docset.git GIT_TAG 0859e43b38e676fd69f59455d066557bbe9a362e)
-FetchContent_Declare(bitpack GIT_REPOSITORY https://github.com/Kronuz/bitpack.git GIT_TAG abf8972a6317a752ea63840a9c93d7b3f2a688e0)
-FetchContent_Declare(unicode GIT_REPOSITORY https://github.com/Kronuz/unicode.git GIT_TAG c93026cedf9124421886d449528dd6edb16e5ed3)
-FetchContent_Declare(snowball GIT_REPOSITORY https://github.com/Kronuz/snowball.git GIT_TAG 570a0b78fc2967f9ec6a0ec005547d20fcf32b61)
-FetchContent_Declare(analysis GIT_REPOSITORY https://github.com/Kronuz/analysis.git GIT_TAG a0825b1a376754d4718ac6dd89b7b31c6dd96738)
+FetchContent_Declare(docset GIT_REPOSITORY https://github.com/Kronuz/docset.git GIT_TAG dcbd5284739d11156038f477ff00c23540b0ba51)
+FetchContent_Declare(bitpack GIT_REPOSITORY https://github.com/Kronuz/bitpack.git GIT_TAG ca99608c954909f33b9a1a0ab99c357272bb773c)
+FetchContent_Declare(unicode GIT_REPOSITORY https://github.com/Kronuz/unicode.git GIT_TAG 297413c889fd99a182f1e9b8c1bc97bb2f2ded29)
+FetchContent_Declare(snowball GIT_REPOSITORY https://github.com/Kronuz/snowball.git GIT_TAG 3efcd0faa97997acf361cf8edff97cb083e14bc8)
+FetchContent_Declare(analysis GIT_REPOSITORY https://github.com/Kronuz/analysis.git GIT_TAG 158c81b56a7976682672bfe1e491ffa6f219ad10)
 FetchContent_MakeAvailable(docset bitpack unicode snowball analysis)
 
 # prospect: the inverted plugin, postings, scoring, queries, aggregation, reordering, and the
