@@ -892,7 +892,7 @@ public:
 	// One window's buffers: scores per clause, bounds, the clause order, the match bits.
 	struct window_buffers {
 		static constexpr ordinal_t window = 4096;
-		explicit window_buffers(std::size_t clauses) : acc(clauses * window, 0.0), bound(clauses), order(clauses) {}
+		explicit window_buffers(std::size_t clauses) : acc(clauses * window, 0.0), bound(clauses), below(clauses + 1), order(clauses) {}
 		std::vector<double> acc, bound, below;
 		std::vector<std::size_t> order;
 		std::uint64_t bits[window / 64];
@@ -1618,14 +1618,15 @@ inline task::task<bool> disjunction_scorer::collect_top_k(top_collector& c, slic
 }
 
 // Scores the window at or after window_min: false once no clause has a document left.
-inline bool disjunction_scorer::collect_window(top_collector& c, bool count_here, ordinal_t& window_min, window_buffers& buf) {
+inline bool disjunction_scorer::collect_window(top_collector& c, bool count_here, ordinal_t& window_at, window_buffers& buf) {
 	constexpr ordinal_t window = window_buffers::window;
 	const std::size_t n = children_.size();
 	double* const acc = buf.acc.data();
 	double* const bound = buf.bound.data();
 	std::size_t* const order = buf.order.data();
 	std::uint64_t* const bits = buf.bits;
-	std::vector<double>& below = buf.below;
+	double* const below = buf.below.data();
+	ordinal_t window_min = window_at;  // a local, so it stays in a register across the virtual calls
 	// Clauses that can still matter given the global bounds.
 	const double min = count_here ? 0.0 : c.min_competitive();
 	double prefix = 0;
@@ -1652,9 +1653,8 @@ inline bool disjunction_scorer::collect_window(top_collector& c, bool count_here
 		double sum = 0;
 		while (essential < n && sum_upper(sum + bound[order[essential]], essential + 1) <= min) { sum += bound[order[essential++]]; }
 		if (essential == n) {  // nothing in this window can compete
-			window_min = window_max + 1;
-			if (window_max == no_more_docs - 1) { return false; }
-			return true;
+			window_at = window_min = window_max + 1;
+			return window_max != no_more_docs - 1;
 		}
 	}
 	std::fill(bits, bits + window / 64, 0);
@@ -1665,7 +1665,7 @@ inline bool disjunction_scorer::collect_window(top_collector& c, bool count_here
 	}
 	// Bounds of the non-essential clauses below each one, summed rather than subtracted
 	// so rounding never understates what remains.
-	below.assign(essential + 1, 0.0);
+	std::fill(below, below + essential + 1, 0.0);
 	for (std::size_t e = 0; e < essential; ++e) { below[e + 1] = below[e] + bound[order[e]]; }
 	for (std::size_t w = 0; w < window / 64; ++w) {
 		for (std::uint64_t word = bits[w]; word; word &= word - 1) {
@@ -1694,9 +1694,8 @@ inline bool disjunction_scorer::collect_window(top_collector& c, bool count_here
 			if (competes) { c.collect(d, sum_parts()); }
 		}
 	}
-	if (window_max == no_more_docs - 1) { return false; }
-	window_min = window_max + 1;
-	return true;
+	window_at = window_max + 1;
+	return window_max != no_more_docs - 1;
 }
 
 inline task::task<std::optional<std::uint64_t>> exclusion_scorer::exact_count(slice sl) {
