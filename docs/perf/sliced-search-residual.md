@@ -99,6 +99,13 @@ Instructions per pass, TOP_10, final: conjunction 1.021, exclusion 0.997, requir
 `COUNT` multi-term instructions are 1.0007-1.003 (conjunction, exclusion, union; required/optional 1.02 on 1.8M) with cycles
 1.01-1.03, so its wall-time residual (36-77 us queries, 1-2 us each) is not instructions and is not attributed.
 
+## Correctness
+
+Release: `sliced_test`, `shards_test`, `search_test`, `multisegment_test`, `pruning_test`, `operators_test`,
+`engine_query_test`, `concurrency_test`, `multi_phrase_test` pass. ASan+UBSan (Homebrew clang 23, -O1) clean on all nine; TSan
+clean on `sliced_test`, `shards_test`, `search_test`, `concurrency_test`. `sliced_mutants.py` was not rerun: the change touches
+no suspension point.
+
 ## Other axes and cost
 
 - Memory: the same frames; `below` is allocated at construction (clauses + 1 doubles) instead of on the first window.
