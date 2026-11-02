@@ -4,7 +4,7 @@
 
 - Task: threadpool deletes the `ThreadPool` family; strata repins it; prospect pins that strata.
 - Branch: `phase7c/drop-threadpool`, from origin/main `prospect:465ee7d`.
-- State: `CMakeLists.txt` pins strata `eadbd52` (strata branch `phase7c/drop-threadpool`: threadpool `db38594`, task `b406766`) in
+- State: `CMakeLists.txt` pins strata `3f564dc` (strata branch `phase7c/drop-threadpool`: threadpool `eb4751a`, task `b406766`) in
   place of `501f943`, and task `b406766` in place of `8cad661` (task main; `lock(token)` replaces `lock_until` and `lock_for`,
   which prospect does not name). prospect uses `WorkPool` and `WorkGroup` only; no source changes.
 
