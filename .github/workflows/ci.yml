@@ -5,8 +5,8 @@ on:
     paths-ignore: ['docs/**', '**.md']  # docs-only pushes would cancel the run for real code
   pull_request:
   workflow_dispatch:
-  schedule:
-    - cron: '23 7 * * *'  # nightly: flaky timing, and drift in libraries tracked at main
+    inputs:
+      nightly: { type: boolean, default: false }
 concurrency:
   group: ci-${{ github.ref }}
   # Main keeps every run, so each landed commit gets a full result.
@@ -15,6 +15,7 @@ jobs:
   ci:
     uses: Kronuz/cpp-libraries/.github/workflows/cmake.yml@main
     with:
+      nightly: ${{ inputs.nightly || false }}
       # The ASan+UBSan suite ran 35-60 minutes at -O0; -O1 and four tests at once cut it.
       asan_timeout_minutes: 120
       asan_cxx_flags: -O1
