@@ -14,7 +14,7 @@
 
 ## Proof
 
-See the commit message for the preflight and CI runs.
+- `preflight.sh` (mac hardened, mac ASan+UBSan, Linux, FreeBSD) ok at `bd78224`. CI at `bd78224`: run 41546540162, all 8 jobs green.
 
 ## Next
 
