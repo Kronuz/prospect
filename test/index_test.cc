@@ -1454,7 +1454,7 @@ int main() {
 		auto ra = prospect::index::create(ic, keyed, uuid), rb = prospect::index::create(id, keyed, uuid);  // unbudgeted
 		std::mt19937_64 r(4);
 		std::uint64_t worst = 0, largest = 0;
-		for (int i = 0; i < 4000; ++i) {
+		for (int i = 0; i < 16000; ++i) {
 			const std::string key = "Q" + std::to_string(r() % 3000);
 			const auto t = tx({replace(key, "body" + std::to_string(r() % 50))});
 			auto& ix = i % 2 ? a : b;
