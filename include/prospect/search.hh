@@ -1390,14 +1390,33 @@ private:
 		std::span<const std::uint32_t> pos;
 		std::size_t j = 0;
 		bool read = false;
-		for (const std::uint32_t p : positions(a.term)) {
+		const auto lead = positions(a.term);
+		for (const std::uint32_t p : lead) {
 			if (p < a.pos) { continue; }
 			if (!read) {
+#ifdef PHR_BOUND
+				// Only positions up to the lead's last one can match; not memoized (truncated).
+				pos = readers_[b.term]->read(*terms_[b.term], lead.back() - a.pos + b.pos);
+#else
 				pos = positions(b.term);
+#endif
 				read = true;
 			}
 			const std::uint32_t want = p - a.pos + b.pos;
+#ifdef PHR_GALLOP
+			if (j < pos.size() && pos[j] < want) {
+				std::size_t lo = j, step = 1, hi = lo + 1;
+				while (hi < pos.size() && pos[hi] < want) {
+					lo = hi;
+					step <<= 1;
+					hi = lo + step;
+				}
+				hi = std::min(hi, pos.size());
+				j = std::size_t(std::lower_bound(pos.begin() + std::ptrdiff_t(lo) + 1, pos.begin() + std::ptrdiff_t(hi), want) - pos.begin());
+			}
+#else
 			while (j < pos.size() && pos[j] < want) { ++j; }
+#endif
 			if (j == pos.size()) { return 0; }
 			if (pos[j] == want) { return 1; }
 		}

@@ -1519,7 +1519,7 @@ public:
 	}
 
 	// The same, in a buffer the reader owns until its next read.
-	std::span<const std::uint32_t> read(postings_iterator& it) {
+	std::span<const std::uint32_t> read(postings_iterator& it, std::uint32_t bound = ~std::uint32_t(0)) {
 		if (none_) { return {}; }
 		const auto start = it.positions_start();
 		const std::uint32_t* counts = it.info().flags & format::counts_are_wdf ? it.wdfs() : this->counts(it.in_tail(), start.count_offset);
@@ -1539,11 +1539,32 @@ public:
 		// Spans of full blocks, then the tail.
 		while (i < first + count && i / format::block < full_blocks_) {
 			const std::uint64_t j = i / format::block;
-			if (decoded_block_ != j) { decode_block(j, start); }
 			const std::uint64_t stop = std::min<std::uint64_t>(first + count, (j + 1) * format::block);
+#ifdef PHR_PARTIAL
+			if (decoded_block_ != j && partial_block_ != j && stop - i <= PHR_PARTIAL) {
+				partial_block_ = j;
+				locate(j, start);
+				for (; i < stop; ++i) { *o++ = at += value_at(unsigned(i % format::block)); }
+				continue;
+			}
+#endif
+			if (decoded_block_ != j) { decode_block(j, start); }
+#ifdef PHR_BOUND
+			for (const std::uint32_t* v = block_buf_ + i % format::block; i < stop; ++i) {
+				at += *v++;
+				*o++ = at;
+				if (at >= bound) { return {out_.get(), std::size_t(o - out_.get())}; }
+			}
+#else
 			for (const std::uint32_t* v = block_buf_ + i % format::block; i < stop; ++i) { *o++ = at += *v++; }
+#endif
 		}
-		for (; i < first + count; ++i) { *o++ = at += tail_value(i); }
+		for (; i < first + count; ++i) {
+			*o++ = at += tail_value(i);
+#ifdef PHR_BOUND
+			if (at >= bound) { return {out_.get(), std::size_t(o - out_.get())}; }
+#endif
+		}
 		return {out_.get(), count};
 	}
 
@@ -1575,13 +1596,13 @@ private:
 		return tail_values_[t];
 	}
 
-	// Steps from the nearest known block at or before j (the decoded one, or the postings
-	// block's first) over block headers, then decodes block j.
-	void decode_block(std::uint64_t j, const postings_iterator::position_start& start) {
+	// Steps from the nearest known block at or before j (the last located one, or the postings
+	// block's first) over block headers and verifies block j; known_offset_ is its offset.
+	void locate(std::uint64_t j, const postings_iterator::position_start& start) {
 		std::uint64_t at = start.first_index / format::block, offset = start.block_offset;
-		if (decoded_block_ < j && decoded_block_ >= at) {
-			at = decoded_block_;
-			offset = decoded_offset_;
+		if (known_block_ <= j && known_block_ >= at) {
+			at = known_block_;
+			offset = known_offset_;
 		}
 		for (; at < j; ++at) {  // j >= at: position indexes never wrap (position_index, decode_group)
 			if (offset >= blocks_bytes_) { corrupt("position block bounds"); }
@@ -1591,13 +1612,53 @@ private:
 			offset += n;
 		}
 		if (offset < blocks_bytes_) { need_block(blocks_ + offset, blocks_bytes_ - offset); }
-		if (offset >= blocks_bytes_ ||
-			!bitpack::decode(reinterpret_cast<const std::uint8_t*>(blocks_ + offset), blocks_bytes_ - offset, block_buf_)) {
-			corrupt("position block");
-		}
-		decoded_block_ = j;
-		decoded_offset_ = offset;
+		if (offset >= blocks_bytes_) { corrupt("position block"); }
+		known_block_ = j;
+		known_offset_ = offset;
 	}
+
+	void decode_block(std::uint64_t j, const postings_iterator::position_start& start) {
+		locate(j, start);
+		if (!bitpack::decode(reinterpret_cast<const std::uint8_t*>(blocks_ + known_offset_), blocks_bytes_ - known_offset_, block_buf_)) { corrupt("position block"); }
+		decoded_block_ = j;
+	}
+
+#ifdef PHR_PARTIAL
+	// Value k of the located block without decoding the other 127 (bitpack's layout: lane
+	// k % 4, row k / 4).
+	std::uint32_t value_at(unsigned k) {
+		const auto* in = reinterpret_cast<const std::uint8_t*>(blocks_ + known_offset_);
+		const std::size_t total = bitpack::encoded_size(in, blocks_bytes_ - known_offset_);
+		if (!total) { corrupt("position block"); }
+		const std::uint8_t header = in[0];
+		auto load = [](const std::uint8_t* q) { std::uint32_t v; std::memcpy(&v, q, 4); return v; };
+		if (header & bitpack::constant_flag) { return load(in + 1); }
+		const unsigned bits = header & 0x3f;
+		const bool exc = header & bitpack::exceptions_flag;
+		const std::uint8_t* base = in + (exc ? 2 : 1);
+		std::uint32_t v = 0;
+		if (bits) {
+			const unsigned bitpos = (k >> 2) * bits, w = bitpos >> 5, sh = bitpos & 31, lane = k & 3;
+			v = load(base + (w * 4 + lane) * 4) >> sh;
+			if (sh + bits > 32) { v |= load(base + ((w + 1) * 4 + lane) * 4) << (32 - sh); }
+			if (bits < 32) { v &= (1u << bits) - 1; }
+		}
+		if (exc) {
+			const std::uint8_t* pos = base + bitpack::packed_bytes(bits);
+			const unsigned n = in[1];
+			if (const void* hit = std::memchr(pos, int(k), n)) {
+				const unsigned e = unsigned(static_cast<const std::uint8_t*>(hit) - pos);
+				const unsigned high_bits = pos[n];
+				const std::uint8_t* hb = pos + n + 1;
+				const std::uint64_t bit = std::uint64_t(e) * high_bits;
+				std::uint64_t word = 0;
+				std::memcpy(&word, hb + (bit >> 3), std::min<std::size_t>(8, std::size_t(in + total - (hb + (bit >> 3)))));
+				v |= std::uint32_t((word >> (bit & 7)) & ((std::uint64_t(1) << high_bits) - 1)) << bits;
+			}
+		}
+		return v;
+	}
+#endif
 
 	// Verifies [p, p + n) of the positions section before it is read.
 	void need(const char* p, std::uint64_t n) const { seg_->verify_positions(std::uint64_t(p - seg_->positions_bytes().data()), n); }
@@ -1622,7 +1683,8 @@ private:
 	std::size_t out_size_ = 0;
 	std::uint32_t counts_buf_[format::block] = {}, block_buf_[format::block] = {};
 	std::uint64_t decoded_counts_ = std::numeric_limits<std::uint64_t>::max();
-	std::uint64_t decoded_block_ = std::numeric_limits<std::uint64_t>::max(), decoded_offset_ = 0;
+	std::uint64_t decoded_block_ = std::numeric_limits<std::uint64_t>::max(), known_block_ = std::numeric_limits<std::uint64_t>::max(), known_offset_ = 0;
+	std::uint64_t partial_block_ = std::numeric_limits<std::uint64_t>::max();
 };
 
 template <class Live, class Emit>
