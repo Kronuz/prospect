@@ -1,7 +1,7 @@
 name: CI
 on:
   push:
-    branches: [main, master, 'phase*/**', 'track*/**', 'design/**', 'perf/**', 'research/**']
+    branches: [main, master, 'phase*/**', 'track*/**', 'design/**', 'perf/**', 'research/**', 'quest/**']
     paths-ignore: ['docs/**', '**.md']  # docs-only pushes would cancel the run for real code
   pull_request:
   workflow_dispatch:
