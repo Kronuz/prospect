@@ -8,7 +8,10 @@
 // weighted with the snapshot's statistics and searched across segments (Phase 3, T8).
 // With PARITY_REORDER=MIN_DF, those segments are merged into one reordered segment
 // (reordering.md D4, graph terms of at least MIN_DF documents) and searched as one.
-//   parity CORPUS_JSON N RANK_JSONL [SEGMENTS]
+// With PARITY_DELETES=R, an all-deleted first segment precedes them (older versions of every
+// R-th document, and documents added then deleted): counts must equal the oracle's while
+// the weights drift, and everything must equal it after a merge drops the deleted documents.
+//   [PARITY_DELETES=R] parity CORPUS_JSON N RANK_JSONL [SEGMENTS]
 #include "analysis.hh"
 #include "prospect/reorder.hh"
 #include "prospect/search.hh"
@@ -179,6 +182,26 @@ std::string field(const std::string& line, const std::string& key) {
 
 }  // namespace
 
+// One document's postings, analyzed as the oracle analyzes it.
+struct analyzed {
+	std::vector<prospect::posting_input> postings;
+	std::uint32_t length = 0;
+};
+
+analyzed analyze(analysis::term_generator& g, std::string_view text) {
+	std::map<std::string, std::pair<std::uint32_t, std::vector<std::uint32_t>>> terms;
+	analyzed a;
+	g.set_termpos(0);
+	g.index_text(text, [&](std::string_view term, std::uint32_t wdf, std::uint32_t pos) {
+		auto& t = terms[std::string(term)];
+		t.first += wdf;
+		a.length += wdf;
+		if (pos) { t.second.push_back(pos); }
+	});
+	for (const auto& [term, t] : terms) { a.postings.push_back({term, t.first, t.second}); }
+	return a;
+}
+
 int main(int argc, char** argv) {
 	if (argc != 4 && argc != 5) {
 		std::cerr << "usage: parity CORPUS_JSON N RANK_JSONL [SEGMENTS]\n";
@@ -186,32 +209,57 @@ int main(int argc, char** argv) {
 	}
 	const std::size_t n = std::stoul(argv[2]);
 	std::size_t parts = argc == 5 ? std::max<std::size_t>(1, std::stoul(argv[4])) : 1;
-	std::vector<prospect::segment_writer> writers(parts);
+	// PARITY_DELETES=R: an update stream whose first flush holds, all deleted since, an older
+	// version (another document's text) of every R-th document and N/R documents added and
+	// deleted (docids past N); the oracle's N documents follow in SEGMENTS segments.
+	const char* deletes_env = std::getenv("PARITY_DELETES");
+	const std::size_t every = deletes_env ? std::max<std::size_t>(1, std::stoul(deletes_env)) : 0;
+	const std::size_t extra = every ? n / every : 0;
+	std::vector<std::string> lines;
 	{
 		std::ifstream in(argv[1]);
-		std::string line;
+		for (std::string line; lines.size() < n + 2 * extra && std::getline(in, line);) { lines.push_back(std::move(line)); }
+		if (lines.size() < n + 2 * extra) {
+			std::cerr << "parity: the corpus has " << lines.size() << " lines, fewer than " << n + 2 * extra << "\n";
+			return 2;
+		}
+	}
+	std::vector<prospect::segment_writer> writers(parts + (every ? 1 : 0));
+	{
 		analysis::term_generator g;
-		std::map<std::string, std::pair<std::uint32_t, std::vector<std::uint32_t>>> terms;
-		std::vector<prospect::posting_input> postings;
-		for (std::size_t d = 0; d < n && std::getline(in, line); ++d) {
-			terms.clear();
-			std::uint32_t length = 0;
-			g.set_termpos(0);
-			g.index_text(text_field(line), [&](std::string_view term, std::uint32_t wdf, std::uint32_t pos) {
-				auto& t = terms[std::string(term)];
-				t.first += wdf;
-				length += wdf;
-				if (pos) { t.second.push_back(pos); }
-			});
-			postings.clear();
-			for (const auto& [term, t] : terms) { postings.push_back({term, t.first, t.second}); }
-			writers[d * parts / n].add(d + 1, postings, length);
+		if (every) {
+			prospect::segment_writer& stream = writers[0];
+			for (std::size_t d = 0; d < n; d += every) {
+				const auto a = analyze(g, text_field(lines[n + d / every]));
+				stream.add(d + 1, a.postings, a.length);
+			}
+			for (std::size_t j = 0; j < extra; ++j) {
+				const auto a = analyze(g, text_field(lines[n + extra + j]));
+				stream.add(n + 1 + j, a.postings, a.length);
+			}
+		}
+		const std::size_t first = every ? 1 : 0;
+		for (std::size_t d = 0; d < n; ++d) {
+			const auto a = analyze(g, text_field(lines[d]));
+			writers[first + d * parts / n].add(d + 1, a.postings, a.length);
 		}
 	}
 	std::vector<std::string> files;
 	for (auto& w : writers) { files.push_back(w.flush({})); }
 	std::vector<prospect::segment> segments;
 	for (const auto& f : files) { segments.emplace_back(f); }
+	// The stream's first segment is wholly deleted.
+	std::vector<std::uint64_t> dead_words;
+	strata::deleted_bits dead_bits;
+	if (every) {
+		const std::uint64_t docs = segments[0].core().doc_count();
+		dead_words.assign((docs + 63) / 64, 0);
+		dead_bits = strata::deleted_bits(dead_words.size());
+		for (std::uint64_t o = 0; o < docs; ++o) {
+			dead_words[o >> 6] |= std::uint64_t(1) << (o & 63);
+			dead_bits.set(o);
+		}
+	}
 	if (const char* r = std::getenv("PARITY_REORDER")) {
 		std::vector<prospect::merge_source> sources;
 		for (const auto& sg : segments) { sources.push_back({&sg, nullptr}); }
@@ -232,16 +280,27 @@ int main(int argc, char** argv) {
 	strata::field_table table;  // the one field the segments' terms are in, id 0
 	table.append({"text", strata::field_role::indexed, strata::field_postings::positions, false});
 	std::vector<prospect::segment_snapshot> snaps;
-	for (const auto& s : segments) { snaps.push_back({.seg = &s, .fields = &table}); }
-	const snapshot_weights weights{snaps, prospect::snapshot_statistics(snaps)};
-	const snapshot_weights* snap = parts > 1 ? &weights : nullptr;
-	const prospect::segment& seg = segments[0];
+	snapshot_weights weights;
+	const snapshot_weights* snap = nullptr;
 	std::uint64_t total_docs = 0;
-	for (const auto& s : segments) { total_docs += s.core().doc_count(); }
+	// Points the searches at `segments`, the first one deleted while `dead` holds.
+	auto open_snapshot = [&](bool dead) {
+		snaps.clear();
+		total_docs = 0;
+		for (std::size_t i = 0; i < segments.size(); ++i) {
+			const bool gone = dead && i == 0;
+			snaps.push_back({.seg = &segments[i], .deleted = gone ? &dead_bits : nullptr, .dead = gone ? segments[0].core().doc_count() : 0, .fields = &table});
+			total_docs += gone ? 0 : segments[i].core().doc_count();
+		}
+		weights = {snaps, prospect::snapshot_statistics(snaps)};
+		snap = segments.size() > 1 ? &weights : nullptr;
+	};
+	open_snapshot(every != 0);
 	// The k best across segments as hits by docid - 1 (the ordinal a docid-ordered segment gives).
 	auto search = [&](const node& q, const std::map<std::string, std::uint32_t>& wqf, std::uint64_t* count) {
 		std::vector<prospect::hit> out;
-		if (parts == 1) {
+		if (segments.size() == 1) {
+			const prospect::segment& seg = segments[0];
 			if (auto s = build(seg, q, wqf)) { out = prospect::top_k(seg, *s, 10, count); } else if (count) { *count = 0; }
 			for (auto& h : out) { h.ord = strata::ordinal_t(seg.core().docid(h.ord) - 1); }
 			return out;
@@ -251,58 +310,78 @@ int main(int argc, char** argv) {
 		return out;
 	};
 
-	std::ifstream rank(argv[3]);
-	std::string line;
-	std::size_t queries = 0, count_ok = 0, top_ok = 0, max_rel_shown = 0;
-	double worst = 0;
-	while (std::getline(rank, line)) {
-		if (line.find("\"index\"") != std::string::npos) {
-			std::cout << "oracle index: " << line << "  strata docs " << total_docs << " in " << parts << " segment(s)\n";
-			continue;
-		}
-		if (field(line, "check_at_least") != std::to_string(total_docs)) { continue; }  // the exact-count rows
-		++queries;
-		const std::string desc = field(line, "description");
-		node q = description_parser(desc).parse_query();
-		std::map<std::string, std::uint32_t> wqf;
-		count_terms(q, wqf);
-		const std::uint64_t want_count = std::stoull(field(line, "upper"));
-		std::uint64_t got_count = 0;
-		std::vector<prospect::hit> hits = search(q, wqf, &got_count);
-		count_ok += got_count == want_count;
+	// One pass over the rank vectors; top-10 differences are reported, and fail the pass
+	// only when `exact` (deleted documents still in the statistics shift the weights).
+	auto pass = [&](const char* label, bool exact) {
+		std::ifstream rank(argv[3]);
+		std::string line;
+		std::size_t queries = 0, count_ok = 0, top_ok = 0, max_rel_shown = 0;
+		double worst = 0;
+		while (std::getline(rank, line)) {
+			if (line.find("\"index\"") != std::string::npos) {
+				std::cout << label << ": oracle index: " << line << "  strata docs " << total_docs << " live in " << segments.size() << " segment(s)\n";
+				continue;
+			}
+			if (field(line, "check_at_least") != std::to_string(total_docs)) { continue; }  // the exact-count rows
+			++queries;
+			const std::string desc = field(line, "description");
+			node q = description_parser(desc).parse_query();
+			std::map<std::string, std::uint32_t> wqf;
+			count_terms(q, wqf);
+			const std::uint64_t want_count = std::stoull(field(line, "upper"));
+			std::uint64_t got_count = 0;
+			std::vector<prospect::hit> hits = search(q, wqf, &got_count);
+			count_ok += got_count == want_count;
 
-		// Oracle hits: [[docid, weight, percent], ...]
-		std::vector<std::pair<std::uint64_t, double>> want;
-		auto at = line.find("\"hits\":[");
-		for (std::size_t p = line.find('[', at + 8); p != std::string::npos && p < line.size(); p = line.find('[', p + 1)) {
-			std::size_t c1 = line.find(',', p), c2 = line.find(',', c1 + 1);
-			want.push_back({std::stoull(line.substr(p + 1, c1 - p - 1)), std::stod(line.substr(c1 + 1, c2 - c1 - 1))});
-		}
-		auto matches = [&](const std::vector<prospect::hit>& got) {
-			bool ok = got.size() == want.size();
-			for (std::size_t i = 0; ok && i < got.size(); ++i) {
-				const double rel = std::abs(got[i].score - want[i].second) / std::max(1e-300, std::abs(want[i].second));
-				worst = std::max(worst, rel);
-				const bool same_doc = got[i].ord + 1 == want[i].first;
-				// Near-ties (within 1e-9) may order differently; accept a docid swap among them.
-				bool tie = false;
-				for (const auto& w2 : want) { tie = tie || (w2.first == got[i].ord + 1 && std::abs(w2.second - got[i].score) <= 1e-9 * std::abs(w2.second)); }
-				ok = rel <= 1e-9 && (same_doc || tie);
+			// Oracle hits: [[docid, weight, percent], ...]
+			std::vector<std::pair<std::uint64_t, double>> want;
+			auto at = line.find("\"hits\":[");
+			for (std::size_t p = line.find('[', at + 8); p != std::string::npos && p < line.size(); p = line.find('[', p + 1)) {
+				std::size_t c1 = line.find(',', p), c2 = line.find(',', c1 + 1);
+				want.push_back({std::stoull(line.substr(p + 1, c1 - p - 1)), std::stod(line.substr(c1 + 1, c2 - c1 - 1))});
 			}
-			return ok;
-		};
-		// Counted (every match visited) and pruned (no count: thresholds skip blocks).
-		std::vector<prospect::hit> pruned = search(q, wqf, nullptr);
-		const bool ok = matches(hits) && matches(pruned);
-		top_ok += ok;
-		if ((!ok || got_count != want_count) && max_rel_shown++ < 8) {
-			std::cout << "MISMATCH " << desc << " count " << got_count << " vs " << want_count;
-			if (!hits.empty() && !want.empty()) {
-				std::printf(" top1 %llu %.17g vs %llu %.17g", (unsigned long long)(hits[0].ord + 1), hits[0].score, (unsigned long long)want[0].first, want[0].second);
+			auto matches = [&](const std::vector<prospect::hit>& got) {
+				bool ok = got.size() == want.size();
+				for (std::size_t i = 0; ok && i < got.size(); ++i) {
+					const double rel = std::abs(got[i].score - want[i].second) / std::max(1e-300, std::abs(want[i].second));
+					worst = std::max(worst, rel);
+					const bool same_doc = got[i].ord + 1 == want[i].first;
+					// Near-ties (within 1e-9) may order differently; accept a docid swap among them.
+					bool tie = false;
+					for (const auto& w2 : want) { tie = tie || (w2.first == got[i].ord + 1 && std::abs(w2.second - got[i].score) <= 1e-9 * std::abs(w2.second)); }
+					ok = rel <= 1e-9 && (same_doc || tie);
+				}
+				return ok;
+			};
+			// Counted (every match visited) and pruned (no count: thresholds skip blocks).
+			std::vector<prospect::hit> pruned = search(q, wqf, nullptr);
+			const bool ok = matches(hits) && matches(pruned);
+			top_ok += ok;
+			if ((got_count != want_count || (exact && !ok)) && max_rel_shown++ < 8) {
+				std::cout << "MISMATCH " << desc << " count " << got_count << " vs " << want_count;
+				if (!hits.empty() && !want.empty()) {
+					std::printf(" top1 %llu %.17g vs %llu %.17g", (unsigned long long)(hits[0].ord + 1), hits[0].score, (unsigned long long)want[0].first, want[0].second);
+				}
+				std::cout << '\n';
 			}
-			std::cout << '\n';
 		}
-	}
-	std::printf("queries %zu: counts equal %zu, top-10 equal %zu, worst relative error %.3g\n", queries, count_ok, top_ok, worst);
-	return count_ok == queries && top_ok == queries ? 0 : 1;
+		std::printf("%s: queries %zu: counts equal %zu, top-10 equal %zu, worst relative error %.3g\n", label, queries, count_ok, top_ok, worst);
+		return queries > 0 && count_ok == queries && (!exact || top_ok == queries);
+	};
+	if (!every) { return pass("parity", true) ? 0 : 1; }
+	// With deletes: counts exact while the statistics drift, then exact after a merge that
+	// drops every deleted document.
+	bool ok = pass("with deletes", false);
+	std::vector<prospect::merge_source> sources;
+	for (std::size_t i = 0; i < segments.size(); ++i) { sources.push_back({&segments[i], i == 0 ? &dead_words : nullptr}); }
+	std::string merged;
+	strata::string_output out(merged);
+	strata::string_spill spill;
+	(void)prospect::merge_segments(sources, {}, out, spill, {});
+	segments.clear();
+	files = {std::move(merged)};
+	segments.emplace_back(files[0]);
+	open_snapshot(false);
+	ok = pass("merged, deletes dropped", true) && ok;
+	return ok ? 0 : 1;
 }

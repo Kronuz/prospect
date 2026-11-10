@@ -15,6 +15,8 @@
 #   gate3.sh allocs [IDX [SET...]]        allocations per query by command and class (bench/allocs.py) on
 #                                         engines/IDX/idx (prospect-merged), over SETs (queries terms-stratified)
 #   gate3.sh servemem ENGINE...           serving memory over the gate queries (bench/serve_mem.py)
+#   gate3.sh parity                       tools/parity.cc (TREE_SRC's) against the oracle's rank vectors at 1,
+#                                         4, and 16 segments, and with deletes (PARITY_DELETES=7) at 4 and 16
 # Engines: prospect (PROSPECT_SRC, PROSPECT_BUDGET_MB, PROSPECT_THREADS), tantivy-0.26-st,
 # lucene-10.4.0-st, and for queries any harness engine with an index.
 set -euo pipefail
@@ -204,6 +206,24 @@ servemem() {  # ENGINE...
 	[ "$(grep -c '^| [a-z]' "$OUT/servemem.md")" -ge "$#" ] || die "serve_mem.py measured fewer engines than asked"
 }
 
+parity() {
+	: "${TREE_SRC:?TREE_SRC is required}" "${ORACLE_RANK_SHA256:?ORACLE_RANK_SHA256 is required}"
+	echo "$ORACLE_RANK_SHA256  $HOME/p3r/rank.jsonl" | sha256sum -c - || die "rank vectors are not $ORACLE_RANK_SHA256"
+	local b; b=~/p3r/build-tree-$(cut -c1-12 "$TREE_SRC/COMMIT")
+	log "parity from $(cat "$TREE_SRC/COMMIT")"
+	[ -f "$b/build.ninja" ] || cmake -S "$TREE_SRC" -B "$b" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ > "$OUT/parity-cmake.log" 2>&1 \
+		|| { tail -30 "$OUT/parity-cmake.log"; die "configure failed"; }
+	CMAKE_BUILD_PARALLEL_LEVEL=4 cmake --build "$b" --target parity > "$OUT/parity-build.log" 2>&1 || { tail -40 "$OUT/parity-build.log"; die "parity did not build"; }
+	local segs rc=0
+	for segs in 1 4 16; do
+		"$b/parity" corpus.json 10000 ~/p3r/rank.jsonl $segs | tee "$OUT/parity-$segs.txt" || rc=1
+	done
+	for segs in 4 16; do
+		PARITY_DELETES=7 "$b/parity" corpus.json 10000 ~/p3r/rank.jsonl $segs | tee "$OUT/parity-deletes-$segs.txt" || rc=1
+	done
+	[ "$rc" = 0 ] || die "a parity run failed"
+}
+
 smoke() {
 	export DOCS=20000 KEEP=1 PROSPECT_BUDGET_MB=${PROSPECT_BUDGET_MB:-256}
 	for e in prospect tantivy-0.26-st lucene-10.4.0-st; do unit "$e" smoke; done
@@ -231,6 +251,7 @@ verify) verify ;;
 queries) queries "$@" ;;
 allocs) allocs "$@" ;;
 servemem) servemem "$@" ;;
+parity) parity ;;
 *) die "unknown step $step" ;;
 esac
 log "$step done"
