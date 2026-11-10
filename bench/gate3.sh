@@ -1,0 +1,215 @@
+#!/bin/bash
+# Phase 3's gate rows on the gate VM, one step per campaign job: tools/vm/gate_job.sh ships
+# bench/ and the engine's source, then runs a step here. Each step prints the setup it ran
+# with and stops at the first unmet assertion ("ASSERT:"); its files land in $OUT.
+#   gate3.sh prepare                      build prospect_engine and the one-thread baselines; print the setup
+#   gate3.sh smoke                        every step below end to end at 20,000 documents
+#   gate3.sh unit ENGINE TAG              one keyed indexing run (T4) of DOCS documents (default: the 5M
+#                                         corpus), the baselines with NO_MERGE=1: times, peak RSS, cgroup
+#                                         peaks, segments, bytes. KEEP=1 keeps it as engines/ENGINE/idx
+#   gate3.sh merge                        engines/prospect/idx force-merged into engines/prospect-merged/idx
+#   gate3.sh sections                     prospect-merged's sections and bytes, beside keyed Lucene -bp's
+#   gate3.sh verify                       prospect_engine verify, before and after merging, both query sets
+#   gate3.sh queries TRIAL SET ENGINE...  one query trial over SET (queries, terms-stratified, ...), the
+#                                         engine order rotated by TRIAL
+# Engines: prospect (PROSPECT_SRC, PROSPECT_BUDGET_MB, PROSPECT_THREADS), tantivy-0.26-st,
+# lucene-10.4.0-st, and for queries any harness engine with an index.
+set -euo pipefail
+step=${1:?usage: gate3.sh STEP [ARG...]}
+shift
+: "${OUT:?OUT is required}" "${PROSPECT_SRC:?PROSPECT_SRC is required}"
+h=~/bench/search-benchmark-game
+cd "$h"
+export PATH=$HOME/.cargo/bin:$PATH
+log() { echo "$(date +%T) $*"; }
+die() { echo "ASSERT: $*" >&2; exit 1; }
+engine=$h/engines/prospect/build/prospect_engine
+
+corpus() {  # the corpus file for DOCS
+	local d=${DOCS:-all}
+	if [ "$d" = all ]; then echo "$h/corpus.json"; return; fi
+	[ -f "$h/corpus-$d.json" ] || head -n "$d" "$h/corpus.json" > "$h/corpus-$d.json"
+	echo "$h/corpus-$d.json"
+}
+
+segments_of() {  # ENGINE DIR LOG
+	case $1 in
+	prospect) grep -o '[0-9]* segments' "$3" | tail -1 | awk '{print $1}' ;;
+	lucene*) find "$2" -name '*.si' | wc -l ;;
+	tantivy*) find "$2" -name '*.idx' | wc -l ;;
+	esac
+}
+
+setup() {
+	log "setup: prospect $(cat "$PROSPECT_SRC/COMMIT") from $PROSPECT_SRC"
+	echo "host: $(uname -srm), $(nproc) CPUs, $(lscpu | awk -F: '/Model name/ {gsub(/^ +/, "", $2); print $2}'), $(free -m | awk '/Mem:/ {print $2}') MiB"
+	echo "toolchain: $(clang++ --version | head -1); $(java -version 2>&1 | head -1); $(cargo --version 2>/dev/null)"
+	echo "disk: $(df -h ~ | awk 'NR == 2 {print $4 " free of " $2}')"
+	echo "env: DOCS=${DOCS:-all} PROSPECT_BUDGET_MB=${PROSPECT_BUDGET_MB:-} PROSPECT_THREADS=${PROSPECT_THREADS:-1} KEEP=${KEEP:-0} WARMUP_TIME=${WARMUP_TIME:-60} NUM_ITER=${NUM_ITER:-10}"
+	[ -x "$engine" ] && [ "$(cat "$h/engines/prospect/build/.source" 2>/dev/null)" = "$(cat "$PROSPECT_SRC/COMMIT")" ] \
+		|| { [ "$step" = prepare ] || die "prospect_engine is not built from $(cat "$PROSPECT_SRC/COMMIT"): run prepare"; }
+}
+
+prepare() {
+	mkdir -p engines/prospect engines/prospect-merged ~/p3r/idx
+	cp ~/bench/phase2/engine/Makefile ~/bench/phase2/engine/details.json engines/prospect/
+	cp ~/bench/engines/prospect-merged/Makefile ~/bench/engines/prospect-merged/details.json engines/prospect-merged/
+	for e in tantivy-0.26-st lucene-10.4.0-st; do (cd ~/bench/engines/$e && tar cf - .) | tar xf - -C engines/$e; done
+	local want; want=$(cat "$PROSPECT_SRC/COMMIT")
+	# The cmake cache names one source tree: another commit's build starts over.
+	[ "$(cat engines/prospect/build/.source 2>/dev/null)" = "$want" ] || rm -rf engines/prospect/build
+	PROSPECT_SRC=$PROSPECT_SRC make -s -C engines/prospect compile > "$OUT/compile-prospect.log" 2>&1 || { tail -30 "$OUT/compile-prospect.log"; die "prospect build failed"; }
+	echo "$want" > engines/prospect/build/.source
+	file "$engine" | tee "$OUT/engine.file"
+	grep -q 'x86-64' "$OUT/engine.file" || die "prospect_engine is not an x86-64 binary"
+	for e in tantivy-0.26-st lucene-10.4.0-st; do
+		make -s -C engines/$e compile > "$OUT/compile-$e.log" 2>&1 || { tail -30 "$OUT/compile-$e.log"; die "$e build failed"; }
+	done
+	# The "after merging" baselines: their builders force-merged them (one segment each).
+	for e in lucene-10.4.0 lucene-10.4.0-bp tantivy-0.26; do
+		local n; n=$(segments_of "$e" engines/$e/idx /dev/null)
+		echo "query baseline $e: $n segments, $(du -sb engines/$e/idx | cut -f1) bytes"
+		[ "$n" = 1 ] || die "$e's index has $n segments, not 1"
+	done
+}
+
+unit() {  # ENGINE TAG
+	local e=$1 tag=$2 c dir res
+	local -a cmd
+	c=$(corpus)
+	dir=~/p3r/idx/$e-$tag
+	rm -rf "$dir" && mkdir -p "$dir"
+	case $e in
+	prospect) cmd=("$engine" index "$dir") ;;
+	tantivy-0.26-st) cmd=("$h/engines/$e/target/release/build_index" "$dir") ;;
+	lucene-10.4.0-st)
+		cmd=(java -server --add-modules jdk.incubator.vector --enable-native-access=ALL-UNNAMED
+			-cp "$h/engines/$e/build/libs/search-index-benchmark-game-lucene-1.0-SNAPSHOT.jar:$h/engines/$e/build/dependencies/*" BuildIndex "$dir") ;;
+	*) die "unit: unknown engine $e" ;;
+	esac
+	[ "$e" != prospect ] || [ -n "${PROSPECT_BUDGET_MB:-}" ] || die "unit prospect needs PROSPECT_BUDGET_MB"
+	res=$OUT/unit-$tag-$e
+	sync; echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
+	log "unit $tag $e: $(wc -l < "$c") lines of $(basename "$c")"
+	# The corpus comes through a pipe from outside the cgroup, so its pages are not charged.
+	cat "$c" | KEYED=1 NO_MERGE=1 ~/bench/cgmem.sh "$res.cg" /usr/bin/time -v -o "$res.time" "${cmd[@]}" > "$res.log" 2>&1 \
+		|| { tail -20 "$res.log"; die "unit $tag $e failed"; }
+	local wall user sys rss segs bytes docs
+	wall=$(awk -F': ' '/Elapsed/ {n = split($2, p, ":"); s = 0; for (i = 1; i <= n; i++) s = s * 60 + p[i]; print s}' "$res.time")
+	user=$(awk -F': ' '/User time/ {print $2}' "$res.time")
+	sys=$(awk -F': ' '/System time/ {print $2}' "$res.time")
+	rss=$(awk -F': ' '/Maximum resident/ {print $2}' "$res.time")
+	segs=$(segments_of "$e" "$dir" "$res.log")
+	bytes=$(du -sb "$dir" | cut -f1)
+	docs=$(wc -l < "$c")
+	if [ "$e" = prospect ]; then
+		docs=$(grep -o 'index: [0-9]* documents' "$res.log" | awk '{print $2}')
+		[ "$docs" = "$(grep -c . "$c")" ] || die "prospect indexed $docs documents of $(grep -c . "$c")"
+	fi
+	[ "${segs:-0}" -ge 1 ] || die "$e left no segments"
+	read -r cg_peak cg_cur cg_anon cg_file cg_mapped < "$res.cg"
+	{
+		echo "engine=$e tag=$tag docs=$docs wall_s=$wall user_s=$user sys_s=$sys max_rss_kb=$rss"
+		echo "cg_peak=$cg_peak cg_current_peak=$cg_cur cg_anon_peak=$cg_anon cg_file_peak=$cg_file cg_file_mapped_peak=$cg_mapped"
+		echo "segments=$segs bytes=$bytes budget_mb=${PROSPECT_BUDGET_MB:-} threads=${PROSPECT_THREADS:-1}"
+	} | tee "$res.txt"
+	if [ "${KEEP:-0}" = 1 ]; then rm -rf "engines/$e/idx" && mv "$dir" "engines/$e/idx"; else rm -rf "$dir"; fi
+}
+
+merge() {
+	[ -d engines/prospect/idx ] || die "no engines/prospect/idx: run unit prospect with KEEP=1"
+	rm -rf engines/prospect-merged/idx
+	cp -a engines/prospect/idx engines/prospect-merged/idx
+	export PROSPECT_REORDER_THREADS=${PROSPECT_REORDER_THREADS:-8}
+	log "merge: reordering on $PROSPECT_REORDER_THREADS threads"
+	/usr/bin/time -v -o "$OUT/merge.time" "$engine" merge engines/prospect-merged/idx > "$OUT/merge.log" 2>&1 || { cat "$OUT/merge.log"; die "merge failed"; }
+	cat "$OUT/merge.log"
+	grep -q 'merged: 1 segments, reordered' "$OUT/merge.log" || die "the merge did not leave one reordered segment"
+	grep -E 'Elapsed|Maximum resident|User time|System time' "$OUT/merge.time"
+}
+
+sections() {
+	# The merge keeps its sources until they are reclaimed, so the merged segment is the
+	# directory's largest file; `sections` reads DIR/segment.sx.
+	local d=engines/prospect-merged/idx seg
+	ls -la "$d" | tee "$OUT/merged-ls.txt"
+	seg=$(ls -S "$d" | head -1)
+	rm -rf ~/p3r/sections && mkdir -p ~/p3r/sections && ln -s "$h/$d/$seg" ~/p3r/sections/segment.sx
+	echo "segment: $seg"
+	"$engine" sections ~/p3r/sections | tee "$OUT/sections.txt"
+	grep -q '^file' "$OUT/sections.txt" || die "no sections"
+	cp ~/bench/results/keyed-bp-n2.sizes "$OUT/keyed-bp.sizes"
+}
+
+verify() {
+	local idx set
+	for idx in prospect prospect-merged; do
+		for set in queries terms-stratified; do
+			log "verify $idx $set"
+			"$engine" verify engines/$idx/idx < $set.txt > "$OUT/verify-$idx-$set.txt" 2>&1 || { cat "$OUT/verify-$idx-$set.txt"; die "verify $idx $set failed"; }
+			tail -2 "$OUT/verify-$idx-$set.txt"
+			grep -q ' 0 mismatches' "$OUT/verify-$idx-$set.txt" || die "verify $idx $set has mismatches"
+		done
+	done
+}
+
+queries() {  # TRIAL SET ENGINE...
+	local t=$1 set=$2; shift 2
+	local -a es=("$@") order=()
+	local n=${#es[@]} i
+	[ -f "$set.txt" ] || die "no $set.txt in the harness"
+	for i in $(seq 0 $((n - 1))); do
+		order+=("${es[$(((i + t - 1) % n))]}")
+		[ -d "engines/${es[$i]}/idx" ] || die "${es[$i]} has no index"
+	done
+	log "queries q$t-$set: ${order[*]}"
+	COMMANDS=${COMMANDS:-"TOP_10 TOP_100 TOP_1000 TOP_100_COUNT COUNT"} WARMUP_TIME=${WARMUP_TIME:-60} NUM_ITER=${NUM_ITER:-10} \
+		python3 src/client.py "$set.txt" "${order[@]}" > "$OUT/q$t-$set.log" 2>&1 || { tail -20 "$OUT/q$t-$set.log"; die "client failed"; }
+	cp results.json "$OUT/q$t-$set.json"
+	# Counts must agree between every pair of engines on every query and command.
+	python3 - "$OUT/q$t-$set.json" <<-'PY'
+	import json, sys
+	r = json.load(open(sys.argv[1]))["results"]
+	bad = 0
+	for cmd, per in r.items():
+	    if cmd not in ("COUNT", "TOP_100_COUNT"):
+	        continue
+	    engines = sorted(per)
+	    for i, q in enumerate(per[engines[0]]):
+	        counts = {e: per[e][i].get("count") for e in engines}
+	        if len(set(counts.values())) != 1:
+	            bad += 1
+	            if bad <= 5:
+	                print(f"count mismatch {cmd} {q['query']!r}: {counts}")
+	print(f"counts: {bad} mismatches over {len(r)} commands")
+	sys.exit(1 if bad else 0)
+	PY
+}
+
+smoke() {
+	export DOCS=20000 KEEP=1 PROSPECT_BUDGET_MB=${PROSPECT_BUDGET_MB:-256}
+	for e in prospect tantivy-0.26-st lucene-10.4.0-st; do unit "$e" smoke; done
+	merge
+	sections
+	local idx set
+	for idx in prospect prospect-merged; do
+		"$engine" verify engines/$idx/idx < queries-dry.txt > "$OUT/verify-$idx-dry.txt" 2>&1
+		tail -1 "$OUT/verify-$idx-dry.txt"
+		grep -q ' 0 mismatches' "$OUT/verify-$idx-dry.txt" || die "verify $idx has mismatches"
+	done
+	WARMUP_TIME=1 NUM_ITER=2 queries 1 queries-dry prospect prospect-merged tantivy-0.26-st lucene-10.4.0-st
+	log "smoke passed"
+}
+
+setup
+case $step in
+prepare) prepare ;;
+smoke) smoke ;;
+unit) unit "$@" ;;
+merge) merge ;;
+sections) sections ;;
+verify) verify ;;
+queries) queries "$@" ;;
+*) die "unknown step $step" ;;
+esac
+log "$step done"

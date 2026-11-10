@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Phase 2 query gate over harness trials (BENCHMARKS rule 3, Phase 2 review G5).
 
-  gate.py [--md] [--target X] [--prospect NAME] [--baseline FILE] TRIAL [TRIAL...]
+  gate.py [--md] [--target X] [--prospect NAME] [--as ENGINE=NAME]... [--baseline FILE] TRIAL [TRIAL...]
                                                     TRIAL: RESULTS_JSON[+RESULTS_JSON...]
 
 --baseline fills in, from baseline.py's cached file, every engine a trial did not run. The
@@ -10,6 +10,8 @@ must stay within the baseline's drift (3%) by geometric mean, or the row is mark
 and passes nothing.
 
 --prospect names the engine scored as prospect (e.g. prospect-merged); the default is prospect.
+--as reads ENGINE's results as NAME's: the "before merging" rows serve the one-thread builders'
+unmerged indexes (lucene-10.4.0-st, tantivy-0.26-st) as the reference engines.
 Results recorded before the rename label it strata, strata-merged, strata-a, and strata-b; those
 labels read as their prospect names, here and in the other scripts that read results.
 
@@ -57,7 +59,7 @@ def canon(engine):
     return LEGACY.get(engine, engine)
 
 
-def load(trial, prospect="prospect"):
+def load(trial, prospect="prospect", alias=None):
     merged = defaultdict(lambda: defaultdict(list))
     for path in trial.split("+"):
         with open(path) as f:
@@ -65,6 +67,7 @@ def load(trial, prospect="prospect"):
         for cmd, per in results.items():
             for e, qs in per.items():
                 e = canon(e)
+                e = (alias or {}).get(e, e)
                 merged[cmd]["prospect" if e == canon(prospect) else e] += qs
     return merged
 
@@ -201,8 +204,14 @@ def main(argv):
     for flag in ("--target", "--prospect", "--baseline"):
         if flag in argv:
             skip |= {argv.index(flag), argv.index(flag) + 1}
+    alias = {}
+    for i, a in enumerate(argv):
+        if a == "--as":
+            src, _, dst = argv[i + 1].partition("=")
+            alias[src] = dst
+            skip |= {i, i + 1}
     paths = [a for i, a in enumerate(argv) if a != "--md" and i not in skip]
-    results = [load(p, prospect) for p in paths]
+    results = [load(p, prospect, alias) for p in paths]
     drift = {}
     if base:
         anchor, limit = base["baseline"]["anchor"], base["baseline"]["drift"]
