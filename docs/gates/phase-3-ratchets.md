@@ -3,6 +3,53 @@
 Measured rows for Phase 3's gate, with the platform they were run on. Rows that are still
 unmeasured are listed at the end.
 
+## Gate run at main `9b88263` (gate VM, 2026-11-09 to 11)
+
+Every row in this section was measured by a campaign job on strata's Linux gate VM (8 vCPUs,
+Intel 06/9e, 15,991 MiB, Linux 6.8.0, clang 18.1.3, OpenJDK 21.0.12.1, cargo 1.99.0), the engine
+built from prospect main `9b88263` (`--ref main=`; main's later commits change only
+`docs/design/automata.md`), the harness from the quest branch. Each job runs one
+`bench/gate3.sh` step through `tools/vm/gate_job.sh`; `bench/gate3_report.py` scores the job
+files. Ratios name their direction; intervals are 95% bootstrap intervals of the median over
+trials.
+
+### Indexing, 5M keyed, one thread (the scale-up confirmation)
+
+One run per engine on the full corpus (5,032,104 documents), every engine upserting by id, the
+baselines' builders with `NO_MERGE=1`, the page cache dropped before each run, the corpus piped
+from outside the engine's cgroup. prospect at the 2,056 MiB node budget; Tantivy-st at its
+builder's 2,000,000,000-byte heap; Lucene-st at its 2,047 MB RAM buffer. Strict holds (jobs
+261109-174917-a48a55, 261109-174919-b26fd0, 261109-174921-0cc8d3).
+
+| Engine | Wall | CPU (user + sys) | Peak RSS | Anon peak | cgroup peak | Segments | Bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| prospect | 423.3 s | 376.2 s | 3,221 MiB | 3,204 MiB | 5,270 MiB | 3 | 2,785,477,354 |
+| Tantivy 0.26, one thread | 870.0 s | 1,001.6 s | 11,357 MiB | 8,573 MiB | 12,906 MiB | 1 | 3,066,216,363 |
+| Lucene 10.4.0, one thread | 1,162.2 s | 1,343.9 s | 4,588 MiB | 3,917 MiB | 7,565 MiB | 3 | 2,829,753,490 |
+
+prospect is 2.06x faster than Tantivy, the faster baseline, at 28% of its peak RSS, and 2.75x
+faster than Lucene at 70% of its peak, using 38% and 28% of their CPU time. The calibration of
+2026-10-17 (2,056 MiB peaking at 4,608 MiB against Lucene's 4,593) no longer holds: prospect
+now peaks 30% under Lucene at the same budget. It is not recalibrated, since a run with less
+memory than the reference can only understate prospect's speed.
+
+The node budget's own row misses: the peak RSS is 1.57x the 2,056 MiB budget, past budget plus
+10% (2,262 MiB). Merge buffers are not charged to the budget yet (strata `docs/design/phase-3.md`,
+"Memory budget"); a run without background merges tests whether they are the excess.
+
+## Tools
+
+The four tools PLAN asks for at Phase 3's start (strata `docs/BENCHMARKS.md`). They exist now;
+the allocation counter, the cgroup tool's job wiring, and the four-axis runner were added by this
+gate's quest, after Phase 3's code.
+
+| Tool | Where | What it does |
+|---|---|---|
+| Lucene with reordering | the harness engine `lucene-10.4.0-bp`; keyed with `BP=1` in `bench/engines/lucene-10.4.0-st` | Recursive graph bisection at force merge (`BPReorderingMergePolicy`, a 256 MB budget); the query baseline beside Lucene and Tantivy, and the disk reference (`results/keyed-bp-n2.sizes`) |
+| Allocation-counting build | `bench/alloc_count.c`, `bench/allocs.py`; `gate3.sh allocs` | An `LD_PRELOAD` shim over the release binary counting every heap allocation and its bytes at each stdin read; `allocs.py` sends one query at a time and reports allocations per query by command and class, flagging a class whose allocations grow with its matches |
+| cgroup memory tool | `bench/cgmem.sh` (every `gate3.sh unit`); `bench/serve_mem.py` (`gate3.sh servemem`) | Runs a command in its own cgroup v2: `memory.peak` and the peaks of anon, file, and file_mapped sampled every 0.2 s, beside GNU time's peak RSS |
+| A runner that scores all four axes | `bench/gate3.sh` (steps as campaign jobs via `tools/vm/gate_job.sh`), `bench/gate3_report.py` | Indexing time, CPU, and peaks per unit with trial ratios and intervals; disk per section against keyed Lucene `-bp`; write amplification; serving memory; query speed through `bench/phase2/gate.py` |
+
 ## Indexing, 1 thread (gate VM, Linux x86_64)
 
 **Superseded (2026-10-15):** these rows ran strata's benchmark engine on Phase 2's
