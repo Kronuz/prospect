@@ -139,7 +139,7 @@ static void verify(const prospect::index& ix, const model& m, std::mt19937_64& r
 // The committed segments' bytes (call after a commit).
 static std::uint64_t segment_bytes(const prospect::index& ix) {
 	std::uint64_t n = 0;
-	for (const auto& s : ix.manifest().segments) { n += s.size; }
+	for (const auto& [sid, s] : ix.manifest().segments) { n += s.size; }
 	return n;
 }
 
