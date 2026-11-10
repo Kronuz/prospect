@@ -1348,14 +1348,17 @@ int main() {
 			ix.apply(tx({add("Q" + std::to_string(i), "x")}), {});
 			ix.commit();
 		}
+		ix.reclaim(UINT64_MAX);
 		std::size_t manifests = 0;
 		for (const auto& n : fs.list()) { manifests += n.starts_with("manifest-"); }
-		CHECK(manifests == 3);
+		CHECK(manifests == 1);  // the predecessors are edits of the head's log
 		io.create_exclusive("seg-999.sx")->write_at(0, "orphan");
 		io.create_exclusive("manifest-1.tmp");
 		ix.close();
 		ix = prospect::index(prospect::index::open(io, keyed));
-		for (const auto& n : fs.list()) { CHECK(n != "seg-999.sx" && n != "manifest-1.tmp"); }
+		for (const auto& n : fs.list()) { CHECK(n != "manifest-1.tmp"); }  // the open removes temporaries
+		ix.reclaim();  // and leaves orphans to retention (D6.6)
+		for (const auto& n : fs.list()) { CHECK(n != "seg-999.sx"); }
 		CHECK(contents(ix).size() == 6);
 		// recover --to an older retained manifest commits its content as a newer
 		// generation, so the rollback holds when the index reopens.
@@ -1654,7 +1657,7 @@ int main() {
 			ix.close();
 			so.storage = &tight;
 			ix = prospect::index::open(io, so);
-			CHECK(ix.reclaim_pending() == 1);
+			CHECK(ix.reclaim_pending() == 0);  // the open's retention waits for the drain (D6.6)
 			CHECK(ix.apply(tx({add("Q5", "new")}), {}).result == verdict::accepted);
 			CHECK(ix.reclaim_pending() == 0 && throws([&] { io.open_existing(dead); }));
 			ix.close();
@@ -1707,9 +1710,9 @@ int main() {
 		}
 		std::printf("  reclamation: %llu crash points\n", (unsigned long long)points);
 	}
-	// Retention removes nothing in a round where a kept manifest cannot be read: a transient
-	// EIO or EMFILE on a pinned checkpoint's manifest, during an open or a commit, leaves
-	// the checkpoint whole, and a later round reclaims what is obsolete.
+	// Retention removes nothing in a round where a kept generation's log cannot be read: a
+	// transient EIO or EMFILE on a pinned checkpoint's log during a commit leaves the checkpoint
+	// whole, and a later round reclaims what is obsolete. The open runs no retention (D6.6).
 	for (int error : {EIO, EMFILE}) {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
@@ -1723,27 +1726,27 @@ int main() {
 			ix.force_merge(1);
 			for (int i = 0; i < 4; ++i) { ix.commit(); }
 		}
-		const std::string name = strata::index_detail::manifest_name(pinned);
+		const std::string name = strata::index_detail::manifest_name(*strata::index_detail::log_holding(io, pinned));
 		auto on_disk = [&] {
 			const auto names = fs.list();
 			return std::find(names.begin(), names.end(), name) != names.end();
 		};
 		flaky_io f(io);
-		f.arm(name, 2, error);  // the open's first read tracks the file; the second is retention's
 		auto ix = prospect::index::open(f, keyed);
-		CHECK(f.fired() && on_disk() && ix.manifest().pins == std::vector<std::uint64_t>{pinned});
-		f.arm(name, 1, error);
+		CHECK(ix.manifest().pins == std::vector<std::uint64_t>{pinned});
+		f.arm(name, 1, error);  // retention's read of the pinned generation
 		ix.apply(tx({add("Qd", "d")}), {});
 		ix.commit();
-		CHECK(f.fired() && on_disk());
+		CHECK(f.fired() && on_disk() && ix.retention_blocked() == pinned);
 		ix.apply(tx({add("Qe", "e")}), {});
-		ix.commit();  // reads it, and reclaims what no kept manifest names
+		ix.commit();  // reads it, and reclaims what no kept generation names
 		ix.reclaim(UINT64_MAX);
 		std::uint64_t manifests = 0;
 		for (const auto& n : fs.list()) {
 			if (auto p = strata::index_detail::parse_name(n); p && p->type == strata::index_detail::parsed_name::manifest) { ++manifests; }
 		}
-		CHECK(on_disk() && manifests == 1 + keyed.retained_predecessors + 1 && ix.reclaim_pending() == 0);
+		const bool head_log = name == strata::index_detail::manifest_name(*strata::index_detail::log_holding(io));
+		CHECK(on_disk() && !ix.retention_blocked() && manifests == (head_log ? 1u : 2u) && ix.reclaim_pending() == 0);
 		faultfs::filesystem tfs;
 		faultfs::io tio(tfs);
 		auto target = prospect::index::create(tio, keyed, uuid);
@@ -1787,17 +1790,24 @@ int main() {
 		}
 		CHECK(what == (error == EIO ? "corrupt" : "itself"));
 	}
-	// A kept manifest that never reads (a damaged pinned checkpoint) stops retention, which
-	// the index reports; releasing the pin resumes it (condition 13).
+	// A kept generation that never reads (a damaged pinned checkpoint in an older log) stops
+	// retention, which the index reports; releasing the pin resumes it (condition 13).
 	{
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
 		auto ix = prospect::index::create(io, keyed, uuid);
 		ix.apply(tx({add("Qa", "a")}), {});
 		const std::uint64_t pinned = ix.checkpoint();
-		const auto name = strata::index_detail::manifest_name(pinned);
+		ix.close();
+		const auto name = strata::index_detail::manifest_name(*strata::index_detail::log_holding(io, pinned));
+		const std::uint64_t size = fs.view(name).size();
+		tear(io, name);  // the reopen owes a rollover: later commits go to a newer log
+		ix = prospect::index::open(io, keyed);
+		ix.apply(tx({replace("Qa", "a-")}), {});
+		ix.commit();
+		CHECK(strata::index_detail::manifest_name(*strata::index_detail::log_holding(io)) != name);
 		std::string bytes(fs.view(name));
-		bytes[bytes.size() / 2] ^= 1;
+		bytes[size / 2] ^= 1;
 		io.remove(name);
 		{
 			auto f = io.create_exclusive(name);
@@ -1805,9 +1815,8 @@ int main() {
 			f->sync();
 		}
 		io.sync_directory();
-		ix.commit();
 		ix.close();
-		ix = prospect::index::open(io, keyed);  // a fresh index reads the damaged manifest
+		ix = prospect::index::open(io, keyed);  // a fresh index reads the damaged log at its first commit
 		auto strata_files = [&] {
 			std::size_t n = 0;
 			for (const auto& f : fs.list()) { n += strata::index_detail::parse_name(f).has_value(); }
@@ -1964,8 +1973,8 @@ int main() {
 		}
 		CHECK(returned > 0);
 	}
-	// ENOSPC on a later file of a commit's batch, then a successful retry, then power loss:
-	// the retry makes every file the manifest names durable.
+	// ENOSPC on the commit's append, then a successful retry, then power loss: the retry makes
+	// every file the log names durable.
 	for (std::uint64_t seed = 0; seed < 20; ++seed) {
 		faultfs::filesystem fs;
 		faultfs::io io(fs);
@@ -1977,9 +1986,9 @@ int main() {
 			ix.refresh();
 		}
 		ix.commit();
-		ix.apply(tx({erase("Q0"), erase("Q4"), erase("Q8")}), {});  // a deleted set per segment
+		ix.apply(tx({erase("Q0"), erase("Q4"), erase("Q8")}), {});  // deletes in each segment: the edit's only write
 		const auto want = contents(ix);
-		fs.add_fault({faultfs::op::write, 2, ENOSPC, false});
+		fs.add_fault({faultfs::op::write, 1, ENOSPC, false});
 		CHECK(throws([&] { ix.commit(); }));
 		fs.clear_faults();
 		ix.commit();
@@ -2096,10 +2105,11 @@ int main() {
 			--m.live_count;
 			reseal(io, m);
 		}, "live count");
-		expect("a resealed live length, totals in step", [&](auto& fs, auto& io, auto&) {
+		// The log keeps a segment's live length once, beside the index's total: a segment's alone
+		// is refused by the snapshot's own totals.
+		expect("a resealed live length, totals out of step", [&](auto& fs, auto& io, auto&) {
 			auto m = state_of(fs);
 			--m.segments.begin()->second.live_length;
-			--m.live_length;
 			reseal(io, m);
 		}, "totals");
 		expect("a log under a newer name", [&](auto& fs, auto& io, auto&) {
