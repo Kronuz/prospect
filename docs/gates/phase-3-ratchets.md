@@ -361,6 +361,25 @@ gate records their ratios and gaps, and Phase 4's gate does not pass while they 
 | Coverage targets and the test-parity inventory's Phase 3 rows | Owed: `cost()` checked directly (`cost_test`); scores against Lucene's own, document limits, and nested WAND or C7's cost model remain; reads while a writer commits need a shared-ownership reader (Phase 3R) | `docs/testing/parity.md` |
 | The rows on FreeBSD and arm64 (before Phase 3R) | Owed: FreeBSD VM; an arm64 host | — |
 
+## Phase 2 gate conditions
+
+The conditions the Phase 2 gate carried into Phase 3 (`docs/reviews/phase-2-gate.md`, "Third
+re-check and ruling", "Conditions"), each with where it closed, as of main `9b88263`. Strata
+hashes before its history rewrite are mapped by strata `docs/history-rewrite.md`.
+
+| Condition | State | Where it closed | What remains |
+|---|---|---|---|
+| C1 Format decisions before merge code | Closed | `ordinal_of(docid)` in `edf5469` (format 12), before the first merge code (`5c9d981`); the permuted docids kind in `b129812` (P1); strata `include/strata/core/docids.hh`, `test/docids_test.cc` | |
+| C2 Docid tie-breaks across segments | Closed, one test leg open | `8b58cca`: the seed sits below the k-th score, hits merge by (score, docid) (D14); `multisegment_test` puts small docids in newer segments, both presets, k = 1 to 1,000 | No test checks docid ties across a merge (D14 asks for duplicates "across flushes and merges", strata `docs/design/phase-3.md`) |
+| C3 Count shortcuts under deletes | Closed | `8b58cca`: `live_scorer` turns off the df-reading shortcuts (`searcher.hh`); `multisegment_test` counts against the scan under deletes | |
+| C5 Tests that match what ships | Closed | `082fb3e`: `search_test` runs both presets and the three shapes `prospect_engine` builds; `parity`'s part closed at the Phase 2 gate | |
+| C7 WAND or the cost model | Open | Only `AND_MAYBE` was measured (ARCHITECTURE, `ff026c3`); no WAND in `include/` | Conjunctions of disjunctions are not measured (the harness's intersection_union is `+a b c`, one required term); intersection_union misses 1.0× (1.11–1.41× Lucene `-bp`, `docs/perf/format13-gate-vm.md`) |
+| C9 Hardening and text | Partly closed | `a87d070`: a stored frame larger than `max_stored_frame` (from the 64 MiB record cap) is rejected before it allocates; strata `format.hh` checks bounds first | The fuzz hour at `-rss_limit_mb=2048` is not recorded (runs used 4,096); the text items: strata `docs/design/phase-2.md` collectors and skip-data text, and `include/prospect/writer.hh`'s layout comment (delta-coded level 1, where the code writes it fixed-width) |
+| C13 Every corruption check reached | Closed (ruled Pass, strata `docs/reviews/phase-3-lifecycle.md`, fourth re-check, T6) | `ade9382`: fuzz targets in CMake behind `PROSPECT_FUZZ`, corpora checked in and replayed as CTests in every build, ASan+UBSan in CI; resealed tests `5116e7b`, `3cb277c`; the wrapped position index `b5b6810` | Four of the 18 checks stay unreached with accepted reasons; no re-check after format 13 changed the decoders |
+| C14 `verify` as specified | Closed | `b1ad42d`: ordinals with ties as sets within 1e-9, both presets; extended to segments and deletes (`52674e6`); 0 mismatches at 5M before and after merging ("Verify and parity" above) | Re-runs at this gate's commit (A6) |
+| C15 The Phase 2 record | Open | — | Allocations per query by class (now measured on current code by `bench/allocs.py`, not at `63a5339`, since Phase 3's query changes landed first); the frequent-term stratum's cause and frontier lengths; Phase 2's per-trial indexing times (strata `.scratch/g5` holds query results only); the corpus checksum |
+| C16 Coverage of Phase 2's code | Closed at format 12 | strata `docs/gates/phase-3-lifecycle.md`, "Coverage": `reader.hh` 99.88% lines and 95.76% branches, `format.hh` 100 and 99.43, `search.hh` 98.72 and 92.77, `searcher.hh` 97.67 and 92.65, `writer.hh` 99.83 and 90.94; ruled Pass (T6) | No coverage run since format 13 and the repository split (`tools/coverage.sh`); re-measured with A7 |
+
 ## Still unmeasured
 
 - The same rows on macOS arm64 bare metal and on FreeBSD. They are required before Phase
