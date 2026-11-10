@@ -63,7 +63,9 @@ public class BuildIndex {
 			final BlockingQueue<String> workQueue = new ArrayBlockingQueue<>(1000);
 			final AtomicBoolean done = new AtomicBoolean();
 
-			final Thread[] threads = new Thread[1];
+			// LUCENE_THREADS: indexing threads (default 1), for the N-thread row (T4).
+			final String nThreads = System.getenv("LUCENE_THREADS");
+			final Thread[] threads = new Thread[nThreads != null ? Integer.parseInt(nThreads) : 1];
 			final AtomicInteger indexed = new AtomicInteger();
 			for (int i = 0; i < threads.length; ++i) {
 

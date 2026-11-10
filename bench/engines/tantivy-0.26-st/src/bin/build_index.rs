@@ -31,8 +31,9 @@ fn main_inner(output_dir: &Path) -> tantivy::Result<()> {
     let mut i = 0;
     {
         let mut index_writer = index
-            // TANTIVY_HEAP_MB sets the indexing heap, calibrated to equal peak memory.
-            .writer_with_num_threads(1, std::env::var("TANTIVY_HEAP_MB").ok().and_then(|v| v.parse::<usize>().ok()).map_or(2_000_000_000, |mb| mb << 20))
+            // TANTIVY_HEAP_MB sets the indexing heap, calibrated to equal peak memory;
+            // TANTIVY_THREADS the indexing threads (default 1), for the N-thread row (T4).
+            .writer_with_num_threads(std::env::var("TANTIVY_THREADS").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(1), std::env::var("TANTIVY_HEAP_MB").ok().and_then(|v| v.parse::<usize>().ok()).map_or(2_000_000_000, |mb| mb << 20))
             .expect("failed to create index writer");
         let stdin = std::io::stdin();
 

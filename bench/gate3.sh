@@ -119,7 +119,7 @@ unit() {  # ENGINE TAG
 	{
 		echo "engine=$e tag=$tag docs=$docs wall_s=$wall user_s=$user sys_s=$sys max_rss_kb=$rss"
 		echo "cg_peak=$cg_peak cg_current_peak=$cg_cur cg_anon_peak=$cg_anon cg_file_peak=$cg_file cg_file_mapped_peak=$cg_mapped"
-		echo "segments=$segs bytes=$bytes budget_mb=${PROSPECT_BUDGET_MB:-} threads=${PROSPECT_THREADS:-1}"
+		echo "segments=$segs bytes=$bytes budget_mb=${PROSPECT_BUDGET_MB:-} threads=$(case $e in prospect) echo "${PROSPECT_THREADS:-1}" ;; lucene*) echo "${LUCENE_THREADS:-1}" ;; tantivy*) echo "${TANTIVY_THREADS:-1}" ;; esac)"
 	} | tee "$res.txt"
 	if [ "${KEEP:-0}" = 1 ]; then rm -rf "engines/$e/idx" && mv "$dir" "engines/$e/idx"; else rm -rf "$dir"; fi
 }
