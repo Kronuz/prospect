@@ -15,6 +15,8 @@
 #   gate3.sh allocs [IDX [SET...]]        allocations per query by command and class (bench/allocs.py) on
 #                                         engines/IDX/idx (prospect-merged), over SETs (queries terms-stratified)
 #   gate3.sh servemem ENGINE...           serving memory over the gate queries (bench/serve_mem.py)
+#   gate3.sh wamp MODE                    write amplification (T3, bench/write_amp.sh) of DOCS documents
+#                                         (default 1,000,000), MODE append or replace, every engine keyed
 #   gate3.sh parity                       tools/parity.cc (TREE_SRC's) against the oracle's rank vectors at 1,
 #                                         4, and 16 segments, and with deletes (PARITY_DELETES=7) at 4 and 16
 # Engines: prospect (PROSPECT_SRC, PROSPECT_BUDGET_MB, PROSPECT_THREADS), tantivy-0.26-st,
@@ -50,7 +52,7 @@ setup() {
 	echo "host: $(uname -srm), $(nproc) CPUs, $(lscpu | awk -F: '/Model name/ {gsub(/^ +/, "", $2); print $2}'), $(free -m | awk '/Mem:/ {print $2}') MiB"
 	echo "toolchain: $(clang++ --version | head -1); $(java -version 2>&1 | head -1); $(cargo --version 2>/dev/null)"
 	echo "disk: $(df -h ~ | awk 'NR == 2 {print $4 " free of " $2}')"
-	echo "env: DOCS=${DOCS:-all} PROSPECT_BUDGET_MB=${PROSPECT_BUDGET_MB:-} PROSPECT_THREADS=${PROSPECT_THREADS:-1} KEEP=${KEEP:-0} WARMUP_TIME=${WARMUP_TIME:-60} NUM_ITER=${NUM_ITER:-10}"
+	echo "env: DOCS=${DOCS:-all} PROSPECT_BUDGET_MB=${PROSPECT_BUDGET_MB:-} PROSPECT_THREADS=${PROSPECT_THREADS:-1} PROSPECT_AUTO_MERGE=${PROSPECT_AUTO_MERGE:-1} KEEP=${KEEP:-0} WARMUP_TIME=${WARMUP_TIME:-60} NUM_ITER=${NUM_ITER:-10}"
 	[ -x "$engine" ] && [ "$(cat "$h/engines/prospect/build/.source" 2>/dev/null)" = "$(cat "$PROSPECT_SRC/COMMIT")" ] \
 		|| { [ "$step" = prepare ] || die "prospect_engine is not built from $(cat "$PROSPECT_SRC/COMMIT"): run prepare"; }
 }
@@ -206,6 +208,18 @@ servemem() {  # ENGINE...
 	[ "$(grep -c '^| [a-z]' "$OUT/servemem.md")" -ge "$#" ] || die "serve_mem.py measured fewer engines than asked"
 }
 
+wamp() {  # MODE
+	local mode=${1:?wamp MODE: append or replace} name r=0
+	[ "$mode" = append ] || [ "$mode" = replace ] || die "wamp: unknown mode $mode"
+	[ -n "${PROSPECT_BUDGET_MB:-}" ] || die "wamp needs PROSPECT_BUDGET_MB"
+	name=p3r-$mode-$(date -u +%Y%m%dT%H%M%S)
+	log "wamp $mode: ${DOCS:-1000000} documents, results/wamp-$name"
+	DOCS=${DOCS:-1000000} REPLACES=$([ "$mode" = replace ] && echo 1 || echo 0) bash ~/bench/write_amp.sh "$name" || r=$?
+	cp ~/bench/results/wamp-"$name"/* "$OUT"/ 2>/dev/null || true
+	[ "$r" = 0 ] || die "write_amp.sh failed"
+	grep -h amplification "$OUT"/*.result
+}
+
 parity() {
 	: "${TREE_SRC:?TREE_SRC is required}" "${ORACLE_RANK_SHA256:?ORACLE_RANK_SHA256 is required}"
 	echo "$ORACLE_RANK_SHA256  $HOME/p3r/rank.jsonl" | sha256sum -c - || die "rank vectors are not $ORACLE_RANK_SHA256"
@@ -251,6 +265,7 @@ verify) verify ;;
 queries) queries "$@" ;;
 allocs) allocs "$@" ;;
 servemem) servemem "$@" ;;
+wamp) wamp "$@" ;;
 parity) parity ;;
 *) die "unknown step $step" ;;
 esac

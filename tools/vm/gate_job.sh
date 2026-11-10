@@ -30,7 +30,7 @@ if [ "$1" = parity ]; then
 	"$vm" ssh 'mkdir -p ~/p3r && cat > ~/p3r/rank.jsonl' < "$rank"
 fi
 fwd=""
-for v in DOCS PROSPECT_BUDGET_MB PROSPECT_THREADS PROSPECT_REORDER_THREADS KEEP WARMUP_TIME NUM_ITER COMMANDS ORACLE_RANK_SHA256; do
+for v in DOCS PROSPECT_BUDGET_MB PROSPECT_THREADS PROSPECT_REORDER_THREADS PROSPECT_AUTO_MERGE KEEP WARMUP_TIME NUM_ITER COMMANDS ORACLE_RANK_SHA256; do
 	[ -n "${!v:-}" ] && fwd+="$v=$(printf %q "${!v}") "
 done
 run=$(date -u +%Y%m%dT%H%M%SZ)-$$
