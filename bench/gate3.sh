@@ -12,6 +12,9 @@
 #   gate3.sh verify                       prospect_engine verify, before and after merging, both query sets
 #   gate3.sh queries TRIAL SET ENGINE...  one query trial over SET (queries, terms-stratified, ...), the
 #                                         engine order rotated by TRIAL
+#   gate3.sh allocs [IDX [SET...]]        allocations per query by command and class (bench/allocs.py) on
+#                                         engines/IDX/idx (prospect-merged), over SETs (queries terms-stratified)
+#   gate3.sh servemem ENGINE...           serving memory over the gate queries (bench/serve_mem.py)
 # Engines: prospect (PROSPECT_SRC, PROSPECT_BUDGET_MB, PROSPECT_THREADS), tantivy-0.26-st,
 # lucene-10.4.0-st, and for queries any harness engine with an index.
 set -euo pipefail
@@ -187,6 +190,20 @@ queries() {  # TRIAL SET ENGINE...
 	PY
 }
 
+allocs() {  # [IDX [SET...]]
+	local idx=${1:-prospect-merged}; shift || true
+	local -a sets=("$@")
+	[ ${#sets[@]} -gt 0 ] || sets=(queries terms-stratified)
+	clang -O2 -shared -fPIC -o ~/p3r/alloc_count.so ~/bench/alloc_count.c || die "alloc_count.so did not build"
+	OUT=$OUT python3 ~/bench/allocs.py ~/p3r/alloc_count.so "$engine" engines/$idx/idx "${sets[@]/%/.txt}" | tee "$OUT/allocs-$idx.md"
+	grep -q 'rows grow with the number of matches' "$OUT/allocs-$idx.md" || die "allocs.py did not finish"
+}
+
+servemem() {  # ENGINE...
+	python3 ~/bench/serve_mem.py "$@" | tee "$OUT/servemem.md"
+	[ "$(grep -c '^| [a-z]' "$OUT/servemem.md")" -ge "$#" ] || die "serve_mem.py measured fewer engines than asked"
+}
+
 smoke() {
 	export DOCS=20000 KEEP=1 PROSPECT_BUDGET_MB=${PROSPECT_BUDGET_MB:-256}
 	for e in prospect tantivy-0.26-st lucene-10.4.0-st; do unit "$e" smoke; done
@@ -199,6 +216,7 @@ smoke() {
 		grep -q ' 0 mismatches' "$OUT/verify-$idx-dry.txt" || die "verify $idx has mismatches"
 	done
 	WARMUP_TIME=1 NUM_ITER=2 queries 1 queries-dry prospect prospect-merged tantivy-0.26-st lucene-10.4.0-st
+	allocs prospect-merged queries-dry
 	log "smoke passed"
 }
 
@@ -211,6 +229,8 @@ merge) merge ;;
 sections) sections ;;
 verify) verify ;;
 queries) queries "$@" ;;
+allocs) allocs "$@" ;;
+servemem) servemem "$@" ;;
 *) die "unknown step $step" ;;
 esac
 log "$step done"
