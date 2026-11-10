@@ -58,15 +58,15 @@ profile) never ran; the keys path waited for format 13; the seekable term cursor
 | The branch assumed | Now |
 |---|---|
 | `strata::segment::dictionary()`: one termdict, Xapian-prefixed terms | prospect `inverted_plugin::reader` over `fielddict`: a termdict per field with at least 256 terms, the rest pooled under a field-id varint (`include/prospect/fielddict.hh:1-14`) |
-| `segment::find_term`, `scan_terms` | `reader::find_term(field, key)` and `scan_terms` (`include/prospect/reader.hh:364-387`); `scan_dictionary(field, from, f)` (`reader.hh:389-393`) |
+| `segment::find_term`, `scan_terms` | `reader::find_term(field, key)` and `scan_terms` (`include/prospect/reader.hh:364-387`); `scan_dictionary(field, from, f)` (`reader.hh:390-393`) |
 | termdict's `cursor::seek` (O2) to be written | Landed (termdict:e4314a5), at strata main's pin termdict:d7f5954 (`termdict.hh:695`); it walks the landing restart run with an empty value visitor (`termdict.hh:717-718`) |
 | A synonym scorer (O4) to be assigned | `synonym_scorer` (`include/prospect/operators.hh:62`), and `multi_phrase_scorer` for positions holding expansions (`operators.hh:399`) |
-| Keys in the dictionary until format 13 | `keys_plugin` (strata `include/strata/core/reader.hh:246`); Xapiand scans it for the key field (`src/engine/strata/expand.cc:94-105`) |
+| Keys in the dictionary until format 13 | `keys_plugin` (strata `include/strata/core/reader.hh:246`); Xapiand scans it for the key field (`src/engine/strata/expand.cc:94-106`) |
 | `segment_snapshot`, `term_table` in strata | prospect `searcher.hh`; `term_table::column` finds a term by a linear scan of its columns (`searcher.hh:184-187`) |
 | `fst::map::intersect`, `fst::prefix_automaton` retired once the branch lands (O6) | Still in fst (fst:7338f56 `fst.hh:493`, `fst.hh:896`), with no caller in strata, prospect or Xapiand |
 | string-similarity gains a code-point OSA distance (O5) | Not built; Xapiand's `pattern.cc` holds one (`within_edit_distance`) |
 
-What Xapiand's strata engine does today (Xapiand `src/engine/strata/expand.cc:76-151`,
+What Xapiand's strata engine does today (Xapiand `src/engine/strata/expand.cc:67-151`,
 `pattern.cc`): for each field and segment it scans the dictionary from the pattern's literal bytes
 while terms start with them, and tests each term: a backtracking glob, or a full optimal string
 alignment table on the term's tail. Nothing seeks, so an edit distance without a fixed prefix, or a
@@ -114,7 +114,7 @@ For one field of one segment, the walk positions a term cursor at the automaton'
 runs the matcher on each key, and on a dead key seeks to the matcher's target, unless the target
 is the next key. This is strata-D7 without `seek_after`: with `cursor::seek` a seek re-decodes
 nothing behind the cursor. Over the pool, keys carry the field's varint; the walk strips it, as
-`fielddict::reader::scan` does (`fielddict.hh:338-361`).
+`fielddict::reader::scan` does (`fielddict.hh:339-361`).
 
 The restarted-scan arm in "Numbers" (each seek ends `scan` and starts another at the target, the
 shape `scan_dictionary` offers today) decides whether prospect needs a seekable cursor at all;
@@ -167,7 +167,7 @@ with flags, `glob` with the bits mapped, since Xapiand's `PATTERN_SINGLE` is 1 a
 (`automata.hh:156`); an edit distance is `levenshtein(str, distance, prefix_length, true)`.
 `pattern.cc`, `pattern.h` and `tests/fuzz_strata_pattern.cc` are deleted. The key field takes the
 same matcher over `keys_plugin`'s scan from a lower bound; whether edit distances on the key field
-stop being refused (`expand.cc:84-86`) is Q3.
+stop being refused (`expand.cc:80-82`) is Q3.
 
 ### D10. fst's automaton concept is deleted
 
@@ -180,7 +180,7 @@ the owner, 2026-10-17); nothing calls them.
 "document frequency" check; none does, at the branch and since its rebase (job below). The port's
 test does not flip bytes hoping to reach it: it builds a term value whose df exceeds the segment's
 document count and asserts `corrupt("document frequency")` from prospect's checks
-(`reader.hh:375`, `reader.hh:412`). Byte flips stay in the fuzz target, which must answer or throw.
+(`reader.hh:375`, `reader.hh:384`, `reader.hh:411`). Byte flips stay in the fuzz target, which must answer or throw.
 
 ### D12. The branch afterwards
 
@@ -232,7 +232,7 @@ template <class A> std::vector<std::string> expand(std::span<const segment_snaps
   it removes a documented difference from Xapian at the cost of one postings probe per matched term
   on segments with deletes; dfs keep counting deleted documents as everywhere else.
 - **Q3. Edit distance on the key field.** Xapiand refuses it on the strata engine
-  (`expand.cc:84-86`). Options: (a) keep refusing; (b) serve it with the same matcher over
+  (`expand.cc:80-82`). Options: (a) keep refusing; (b) serve it with the same matcher over
   `keys_plugin`. Recommended (b): Xapian served it, and PLAN's D7 (R-RM, remove rather than refuse)
   forbids a lasting refusal of something the engine serves naturally.
 - **Q4. string-similarity's code-point OSA distance** (O5). Options: (a) build it as decided;
