@@ -51,6 +51,7 @@ setup() {
 }
 
 prepare() {
+	export CMAKE_BUILD_PARALLEL_LEVEL=4 CARGO_BUILD_JOBS=4  # the host's build rule: four jobs
 	mkdir -p engines/prospect engines/prospect-merged ~/p3r/idx
 	cp ~/bench/phase2/engine/Makefile ~/bench/phase2/engine/details.json engines/prospect/
 	cp ~/bench/engines/prospect-merged/Makefile ~/bench/engines/prospect-merged/details.json engines/prospect-merged/
