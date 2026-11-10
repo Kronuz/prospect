@@ -182,25 +182,27 @@ std::string field(const std::string& line, const std::string& key) {
 
 }  // namespace
 
-// One document's postings, analyzed as the oracle analyzes it.
+// One document analyzed as the oracle analyzes it; `postings` views `terms`, so both live
+// until the document is added.
 struct analyzed {
+	std::map<std::string, std::pair<std::uint32_t, std::vector<std::uint32_t>>> terms;
 	std::vector<prospect::posting_input> postings;
 	std::uint32_t length = 0;
-};
 
-analyzed analyze(analysis::term_generator& g, std::string_view text) {
-	std::map<std::string, std::pair<std::uint32_t, std::vector<std::uint32_t>>> terms;
-	analyzed a;
-	g.set_termpos(0);
-	g.index_text(text, [&](std::string_view term, std::uint32_t wdf, std::uint32_t pos) {
-		auto& t = terms[std::string(term)];
-		t.first += wdf;
-		a.length += wdf;
-		if (pos) { t.second.push_back(pos); }
-	});
-	for (const auto& [term, t] : terms) { a.postings.push_back({term, t.first, t.second}); }
-	return a;
-}
+	void of(analysis::term_generator& g, std::string_view text) {
+		terms.clear();
+		postings.clear();
+		length = 0;
+		g.set_termpos(0);
+		g.index_text(text, [&](std::string_view term, std::uint32_t wdf, std::uint32_t pos) {
+			auto& t = terms[std::string(term)];
+			t.first += wdf;
+			length += wdf;
+			if (pos) { t.second.push_back(pos); }
+		});
+		for (const auto& [term, t] : terms) { postings.push_back({term, t.first, t.second}); }
+	}
+};
 
 int main(int argc, char** argv) {
 	if (argc != 4 && argc != 5) {
@@ -227,20 +229,21 @@ int main(int argc, char** argv) {
 	std::vector<prospect::segment_writer> writers(parts + (every ? 1 : 0));
 	{
 		analysis::term_generator g;
+		analyzed a;
 		if (every) {
 			prospect::segment_writer& stream = writers[0];
 			for (std::size_t d = 0; d < n; d += every) {
-				const auto a = analyze(g, text_field(lines[n + d / every]));
+				a.of(g, text_field(lines[n + d / every]));
 				stream.add(d + 1, a.postings, a.length);
 			}
 			for (std::size_t j = 0; j < extra; ++j) {
-				const auto a = analyze(g, text_field(lines[n + extra + j]));
+				a.of(g, text_field(lines[n + extra + j]));
 				stream.add(n + 1 + j, a.postings, a.length);
 			}
 		}
 		const std::size_t first = every ? 1 : 0;
 		for (std::size_t d = 0; d < n; ++d) {
-			const auto a = analyze(g, text_field(lines[d]));
+			a.of(g, text_field(lines[d]));
 			writers[first + d * parts / n].add(d + 1, a.postings, a.length);
 		}
 	}

@@ -225,7 +225,7 @@ parity() {
 }
 
 smoke() {
-	export DOCS=20000 KEEP=1 PROSPECT_BUDGET_MB=${PROSPECT_BUDGET_MB:-256}
+	export DOCS=20000 KEEP=1 PROSPECT_BUDGET_MB=4  # a budget small enough for several segments
 	for e in prospect tantivy-0.26-st lucene-10.4.0-st; do unit "$e" smoke; done
 	merge
 	sections
