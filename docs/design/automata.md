@@ -235,7 +235,7 @@ the owner, 2026-10-17); nothing calls them.
 ### D11. The branch's red check
 
 `expand_test.cc:376` expects some byte flip of a terms section, checksums refreshed, to reach the
-"document frequency" check; none does, at the branch and since its rebase (job below). The port's
+"document frequency" check; none does, at the branch and since its rebase (job 261109-173038-76ce62). The port's
 test does not flip bytes hoping to reach it: it builds a term value whose df exceeds the segment's
 document count and asserts `corrupt("document frequency")` from prospect's checks
 (`reader.hh:375`, `reader.hh:384`, `reader.hh:411`). Byte flips stay in the fuzz target, which must answer or throw.
@@ -268,11 +268,14 @@ template <class A> std::vector<std::string> expand(std::span<const segment_snaps
 
 ## Checks
 
-- This evaluation: the branch's tests at the branch, Release and ASan with UBSan (jobs below); the
-  cross-check `automata_eval check` (appendix): the branch's automata over termdict, with seeks,
-  equal Xapiand's predicates applied to every term, on random sets of valid 1- to 4-byte UTF-8,
-  and three mutants caught; `automata_eval bench` for "Numbers", which also requires the four arms
-  to return the same terms for all 70 queries over the real vocabulary.
+- This evaluation: the branch's tests at strata:219ded0d, Release (job 261109-173038-76ce62) and
+  ASan with UBSan (261109-173049-b37276): `automata` and `fuzz_automata_replay` pass, `expand`
+  fails only D11's check. The cross-check `automata_eval check 2000` (261109-174627-134722,
+  appendix): 2,000 random term sets of valid 1- to 4-byte UTF-8, 16,000 queries, 187,911 matches,
+  the branch's automata over termdict with seeks equal Xapiand's predicates applied to every term,
+  and three mutants caught. `automata_eval bench` for "Numbers" (261109-174630-31d66c), which also
+  requires the four arms to return the same terms for all 70 queries over the real vocabulary.
+  The cross-check and bench ran at prospect:39d142a, whose appendix blocks equal this revision's.
 - The `automata` quest's A1: `automata_test` and `automata_eval check`'s comparison, ported to
   prospect's dictionary (own and pooled fields, several segments, deletes); A2: `fuzz_automata`
   for a CPU-hour and the sanitizer builds; A3: Phase 5's speed rows, with `automata_eval bench`'s
