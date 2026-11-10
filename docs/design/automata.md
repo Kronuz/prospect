@@ -1,24 +1,28 @@
 # Automata: evaluating strata's `phase5/automata` and where it goes
 
-Revision 1 (2026-11-09), for quest `automata-evaluation` (owner ruling D37). It evaluates strata's
-`phase5/automata` at strata:219ded0d (2026-10-18): its design (strata `docs/design/automata.md`
-revision 1), its preliminary review (strata `docs/reviews/automata-design.md`, AUT-R1 to AUT-R14,
-APPROVE WITH CONDITIONS) and its ledger (strata `docs/status/automata.md`). The branch was written
-two days before the 2026-10-20 split moved search to prospect; it cannot land in strata as it is.
-The `automata` quest builds what this document decides.
+Revision 2 (2026-11-09), for quest `automata-evaluation` (owner rulings D37 and D46). It
+evaluates strata's `phase5/automata` at strata:219ded0d (2026-10-18): its design (strata
+`docs/design/automata.md` revision 1), its preliminary review (strata
+`docs/reviews/automata-design.md`, AUT-R1 to AUT-R14, APPROVE WITH CONDITIONS) and its ledger
+(strata `docs/status/automata.md`). The branch was written two days before the 2026-10-20 split
+moved search to prospect; it cannot land in strata as it is. The `automata` quest builds what this
+document decides.
 
-Branch decisions are cited as strata-D1 to strata-D12; this document's own are D1 to D12. Clean
-room as the branch was: Lucene and Tantivy from documentation, Xapian's semantics from its API
-documentation and oracle vectors, no Xapian source and no GPL Xapiand file.
+Branch decisions are cited as strata-D1 to strata-D12; this document's own are D1 to D12; D33,
+D37, D40, D46 and D47 are rows of Xapiand's PLAN.md Decisions. Clean room as the branch was:
+Lucene and Tantivy from documentation, Xapian's semantics from its API documentation and oracle
+vectors, no Xapian source and no GPL Xapiand file.
 
 ## Verdict
 
-Port it. The automata and the sorted-key matcher (strata-D1 to strata-D6, `automata.hh`) move
-verbatim to a library; the expansion (strata-D7 to strata-D9, `expand.hh`) is rewritten in prospect
-over its per-field dictionary; Xapiand's own expansion (`src/engine/strata/expand.cc`,
-`pattern.cc`) shrinks to the query mapping. The reason is in "Numbers": Xapiand's strata engine
-expands an edit distance without a fixed prefix by testing every term of the field, and on the
-3,964,752-term Wikipedia vocabulary the branch's matcher with seeks visits 0.03% to 0.8% of them.
+Port it; the owner ruled so in D46. The automata and the sorted-key matcher (strata-D1 to
+strata-D6, `automata.hh`) move verbatim to a new public library, `Kronuz/automata`; the expansion
+(strata-D7 to strata-D9, `expand.hh`) is rewritten in prospect over its per-field dictionary;
+Xapiand's own expansion (`src/engine/strata/expand.cc`, `pattern.cc`) shrinks to the query
+mapping. The reason is in "Numbers": Xapiand's strata engine expands an edit distance without a
+fixed prefix by testing every term of the field, about 1.0 to 1.5 s per query on the
+3,964,752-term Wikipedia vocabulary, while the branch's matcher with seeks visits 0.02% to 1.1% of
+the terms and answers in 0.5 to 20 ms: 67 to 2,650 times faster, on one x86_64 macOS host.
 
 ## What the branch is
 
@@ -42,7 +46,7 @@ The branch's decisions, as they stand after the split:
 | strata-D5 One automaton interface with `next` | Yes | The owner's O6 (2026-10-17) |
 | strata-D6 Resuming matcher, seek targets | Yes | What makes fuzzy cheap ("Numbers") |
 | strata-D7 Intersection over `segment`, run replay, `seek_after` 64 | Changes (D3, D4, D5) | `segment` is gone; terms live in prospect's per-field dictionaries; termdict's `cursor::seek` landed |
-| strata-D8 Expansion and limits, liveness rule | Mostly (D6) | Limits as Xapiand's; the liveness rule is an owner question (Q2) |
+| strata-D8 Expansion and limits, liveness rule | Yes (D6) | Limits as Xapiand's; the liveness rule holds by D46 |
 | strata-D8a Keys | Changes (D9) | Format 13 landed: keys are `keys_plugin`, scanned from a lower bound, as Xapiand does today |
 | strata-D9 Scoring: `or`, constant score, one store | Changes (D7) | prospect has `synonym_scorer` and `multi_phrase_scorer`; Xapiand builds groups; the store is `term_table` |
 | strata-D10 Where the code lives | Changes (D2, D3) | No strata home remains |
@@ -64,7 +68,7 @@ profile) never ran; the keys path waited for format 13; the seekable term cursor
 | Keys in the dictionary until format 13 | `keys_plugin` (strata `include/strata/core/reader.hh:246`); Xapiand scans it for the key field (`src/engine/strata/expand.cc:94-106`) |
 | `segment_snapshot`, `term_table` in strata | prospect `searcher.hh`; `term_table::column` finds a term by a linear scan of its columns (`searcher.hh:184-187`) |
 | `fst::map::intersect`, `fst::prefix_automaton` retired once the branch lands (O6) | Still in fst (fst:7338f56 `fst.hh:493`, `fst.hh:896`), with no caller in strata, prospect or Xapiand |
-| string-similarity gains a code-point OSA distance (O5) | Not built; Xapiand's `pattern.cc` holds one (`within_edit_distance`) |
+| string-similarity gains a code-point OSA distance (O5) | Not built, and dropped (D46); Xapiand's `pattern.cc` holds one (`within_edit_distance`), which D9 deletes |
 
 What Xapiand's strata engine does today (Xapiand `src/engine/strata/expand.cc:67-151`,
 `pattern.cc`): for each field and segment it scans the dictionary from the pattern's literal bytes
@@ -75,14 +79,56 @@ glob with a leading `*`, tests every term of the field. The matches go into a `s
 
 ## Numbers
 
-<!-- numbers -->
+A branch screen, not a milestone number: job 261109-174630-31d66c (`strict`, prospect:39d142a,
+whose harness blocks equal this revision's), `automata_eval bench` over the 3,964,752-term
+Wikipedia vocabulary (SHA-256 checked) in one termdict (19.4 MB of blocks, 0.7 MB of index), 70
+queries (10 per class, the first of each fixed, the rest drawn from the vocabulary), 5 interleaved
+runs with the arm order rotating, per-query medians; Apple clang 17, Release, x86_64 macOS only.
+Before timing, the four arms returned the same terms for every query. The one-run smoke
+(261109-174628-59e91d, 2 queries per class) agrees with it.
+
+The arms: x is Xapiand's walk (`expand.cc` and `pattern.cc`); a the branch's matcher over
+termdict's cursor, seeking on every dead key; s the same matcher over restarted scans (D4); l the a
+arm plus one dictionary lookup per matched term (D5). Visited and ms are per-query means (class
+sums over 10); x/a (sum), s/a and l/a are ratios of class sums:
+
+| Class | Visited, x | Visited, a | x ms | a ms | x/a (sum) | x/a per query | s/a | l/a |
+|---|---|---|---|---|---|---|---|---|
+| prefix | 3,409 | 3,409 | 0.09 | 0.08 | 1.18 | 0.84 to 1.40 | 1.06 | 12.89 |
+| glob, `?` third | 24,782 | 171 | 6.16 | 0.07 | 83.6 | 35.8 to 199 | 1.05 | 0.90 |
+| glob, leading `*` | 3,964,752 | 3,964,752 | 945 | 480 | 1.97 | 1.29 to 2.42 | 1.00 | 1.00 |
+| fuzzy k1, no prefix | 3,964,752 | 1,286 | 1,187 | 0.57 | 2,075 | 1,583 to 2,652 | 1.21 | 0.96 |
+| fuzzy k1, prefix 2 | 27,838 | 408 | 7.53 | 0.18 | 42.9 | 6.67 to 86.8 | 1.34 | 0.96 |
+| fuzzy k2, no prefix | 3,964,752 | 35,001 | 1,369 | 14.2 | 96.5 | 66.8 to 138 | 1.36 | 1.04 |
+| fuzzy k2, prefix 2 | 20,523 | 3,221 | 6.31 | 1.28 | 4.93 | 3.11 to 11.4 | 1.49 | 0.96 |
+
+What it shows, with its honest size:
+
+1. Fuzzy without a fixed prefix is the class that matters: Xapiand tests every term (1.0 to 1.5 s
+   of one core per query, per field and segment of this size); the matcher visits 0.02% to 0.04% of
+   them for k = 1 and 0.7% to 1.1% for k = 2, and is 67 to 2,650 times faster.
+2. With a fixed prefix or a `?` glob both walk a narrowed range, and the seeks still win 3.1 to 199
+   times; the absolute saving is milliseconds, not seconds.
+3. A prefix is the same byte-range scan in both (0.84 to 1.40, noise and constant overhead), and a
+   leading `*` stays a full scan in both: the branch's glob tests a term about twice as fast, but
+   480 ms per query remains. Leading wildcards need another index (n-grams, Xapiand #14), not this
+   port.
+4. Restarted scans (s/a) cost the same on prefix and globs (1.00 to 1.06) and 1.21 to 1.49 times
+   the cursor on fuzzy classes (up to 1.92 on one query): 14.2 against 19.4 ms per k = 2 query.
+5. A lookup per matched term (l/a) costs nothing measurable where matches are few (0.90 to 1.04
+   class sums; 0.81 to 1.23 per query, which bounds this screen's per-query noise) and 12.9 times
+   the walk on prefixes, where every visited key matches: about 0.27 µs per matched term.
+
+Not measured here: the liveness probe of D6 (one postings probe per matched term on segments with
+deletes), `term_table`'s lookups, several segments, other platforms and Lucene, Tantivy or Xapian.
+The `automata` quest's A3 (Phase 5's speed rows) measures them.
 
 ## Decisions
 
 ### D1. Port
 
-The branch is ported. Alternatives: keep Xapiand's scan (loses: it tests every term of the field
-for fuzzy and leading-`*` queries, the 130 to 3,400 times slower class in "Numbers", and Phase 5's
+The branch is ported (D46). Alternatives: keep Xapiand's scan (loses: it tests every term of the
+field for fuzzy queries without a fixed prefix, 67 to 2,650 times slower in "Numbers", and Phase 5's
 speed row cannot pass on it); write a new implementation (loses: the branch's automata were approved
 as right and well tested, and pass their tests under ASan and UBSan today); Lucene's compiled
 Levenshtein tables (loses: their tables stop at k = 2; they stay strata-D4's measured alternative).
@@ -92,7 +138,8 @@ Levenshtein tables (loses: their tables stop at k = 2; they stay strata-D4's mea
 `automata.hh` moves verbatim as `automata.hh` in namespace `automata`, header-only, depending only
 on `unicode`, with `automata_test`, `automata_reference.hh`, `fuzz_automata` (its segment half
 replaced by a termdict one) and the corpus. `intersect_sorted` stays as the reference walk; the
-walk over a dictionary is D4's. Creating the repository is the owner's call (Q1).
+walk over a dictionary is D4's. The repository is public and MIT (D46, Q1); the lead creates it
+before the `automata` quest's first step.
 
 Alternatives, from the catalog (`~/code/Kronuz`): `fst` holds the only other automaton concept,
 byte-level and unused, which O6 retires; putting character automata there would give a
@@ -100,7 +147,7 @@ dependency-free map library a `unicode` dependency for an unrelated job. `termdi
 on automata (AUT-R12): the walk needs only its cursor. `string-similarity` holds ranking metrics,
 not automata; `unicode` holds decoding. Keeping it in prospect works, since prospect is its only
 consumer, but it is library-shaped code with no prospect dependency, and Phase 5's
-`phrase-expansion` and a future completer reuse it; it is the fallback if Q1 says no.
+`phrase-expansion` and a future completer reuse it.
 
 ### D3. The expansion goes to prospect, `include/prospect/expand.hh`
 
@@ -116,19 +163,24 @@ is the next key. This is strata-D7 without `seek_after`: with `cursor::seek` a s
 nothing behind the cursor. Over the pool, keys carry the field's varint; the walk strips it, as
 `fielddict::reader::scan` does (`fielddict.hh:339-361`).
 
-The restarted-scan arm in "Numbers" (each seek ends `scan` and starts another at the target, the
-shape `scan_dictionary` offers today) decides whether prospect needs a seekable cursor at all;
-where it costs the same, the port uses `scan_dictionary` and adds no API.
+It needs a seekable term cursor in prospect: `inverted_plugin::reader` gains one per field over
+termdict's cursor, own or pooled. Restarted scans (each seek ends `scan_dictionary` and starts
+another at the target, the shape prospect offers today) cost the same on prefixes and globs but
+1.21 to 1.49 times the cursor on fuzzy classes ("Numbers", point 4), the classes the port is for.
 
-### D5. Term infos: matched terms only, through `term_table`
+The walk is one template over a source with `seek` and `next`. The key field's source restarts
+`keys_plugin`'s scan from each target (D9): that pays the measured 1.2 to 1.5 times on fuzzy key
+queries and changes no strata API; a keys cursor waits for a profile that shows the key field.
 
-The walk yields matching terms; their infos come from one dictionary lookup each, through
-`term_table`, as every other term's do. The branch's run replay (strata-D7) decoded infos during
-the walk; after a seek, a term's offsets follow its restart run's earlier values, which termdict's
-seek walks without showing (`termdict.hh:717-718`), so a replay needs either a second walk of the
-run or an additive `cursor::seek(from, visit)` in termdict. The lookup arm in "Numbers" measures
-what the simpler shape costs; if a class pays more than a tenth for it, termdict gains the visitor
-seek and prospect's term cursor decodes infos as it walks.
+### D5. Term infos: decoded in the walk
+
+The walk decodes each matched term's infos as it passes it, and termdict gains an additive
+`cursor::seek(from, visit)`, the visitor `find_run` already takes. After a seek, a term's offsets
+follow its restart run's earlier values, which termdict's seek walks without showing
+(`termdict.hh:717-718`); the visitor shows them, so a seek re-decodes nothing. The alternative, one
+dictionary lookup per matched term through `term_table`, costs nothing measurable on fuzzy and glob
+classes but 12.9 times the walk on prefixes ("Numbers", point 5), past this decision's bar of a
+tenth.
 
 `term_table` gains a hashed index from (field, term) to its column: an expansion of E terms
 otherwise costs E² string comparisons in `column` (`searcher.hh:184-187`; read from the code, not
@@ -139,9 +191,14 @@ measured).
 Xapian's limit types, as Xapiand applies them today: `error` (Xapiand's `errc::invalid`), `first`,
 `most_frequent` (ties by term order), `max_expansion` 0 for none. They move into the walk as
 strata-D8 states: `error` stops a segment at max + 1 matches, `first` at max with a merged cutoff
-across segments, `most_frequent` walks everything. A term whose every document is deleted counts,
-as now (Xapiand `docs/mechanisms/strata-callbacks.md`, known difference 2), unless Q2 rules for
-strata-D8's liveness rule.
+across segments, `most_frequent` walks everything.
+
+A matched term with no live document is skipped (D46, Q2; strata-D8's liveness rule): on a segment
+with deletes the walk probes the term's postings for a live document before it counts, so such a
+term never fills a `first` slot, counts toward `error` or ranks in `most_frequent`; a term live in
+any segment is selected. Segments without deletes skip the probe. dfs keep counting deleted
+documents, as everywhere else. This removes Xapiand's known difference 2
+(`docs/mechanisms/strata-callbacks.md`), which the Xapiand step deletes with its test.
 
 ### D7. Scoring hand-off: none from the branch
 
@@ -166,8 +223,9 @@ with flags, `glob` with the bits mapped, since Xapiand's `PATTERN_SINGLE` is 1 a
 2 (`src/engine/query.h:87-88`) and the branch's `glob::multi` is 1 and `single` 2
 (`automata.hh:156`); an edit distance is `levenshtein(str, distance, prefix_length, true)`.
 `pattern.cc`, `pattern.h` and `tests/fuzz_strata_pattern.cc` are deleted. The key field takes the
-same matcher over `keys_plugin`'s scan from a lower bound; whether edit distances on the key field
-stop being refused (`expand.cc:80-82`) is Q3.
+same matcher over `keys_plugin`'s scan from a lower bound (D4), and edit distances on it are served
+(D46, Q3): the refusal at `expand.cc:80-82` is deleted, and the key field's fuzzy query gets a docs
+page with requests and pm.test assertions (D47).
 
 ### D10. fst's automaton concept is deleted
 
@@ -213,46 +271,41 @@ template <class A> std::vector<std::string> expand(std::span<const segment_snaps
 - This evaluation: the branch's tests at the branch, Release and ASan with UBSan (jobs below); the
   cross-check `automata_eval check` (appendix): the branch's automata over termdict, with seeks,
   equal Xapiand's predicates applied to every term, on random sets of valid 1- to 4-byte UTF-8,
-  and three mutants caught; `automata_eval bench` for "Numbers".
+  and three mutants caught; `automata_eval bench` for "Numbers", which also requires the four arms
+  to return the same terms for all 70 queries over the real vocabulary.
 - The `automata` quest's A1: `automata_test` and `automata_eval check`'s comparison, ported to
   prospect's dictionary (own and pooled fields, several segments, deletes); A2: `fuzz_automata`
   for a CPU-hour and the sanitizer builds; A3: Phase 5's speed rows, with `automata_eval bench`'s
   query classes as the smoke stage.
 
-## Open questions for the owner
+## Owner rulings (D46)
 
-- **Q1. A public `Kronuz/automata` repository** for D2. Options: (a) yes, header-only, MIT,
-  depending on `unicode`; (b) no, `include/prospect/automata.hh`. Recommended (a): it has no
-  prospect dependency, and the branch's design and review recommended it once termdict's seek and
-  strata-D5's `next` existed, which both do.
-- **Q2. Terms with no live document** (strata-D8, AUT-R5). Today a term whose documents are all
-  deleted fills `first` slots and counts toward `error` until a merge. Options: (a) keep that;
-  (b) test each matched term's postings for a live document on segments with deletes, so such
-  terms are never selected, as a Xapian database with committed deletes behaves. Recommended (b):
-  it removes a documented difference from Xapian at the cost of one postings probe per matched term
-  on segments with deletes; dfs keep counting deleted documents as everywhere else.
-- **Q3. Edit distance on the key field.** Xapiand refuses it on the strata engine
-  (`expand.cc:80-82`). Options: (a) keep refusing; (b) serve it with the same matcher over
-  `keys_plugin`. Recommended (b): Xapian served it, and PLAN's D7 (R-RM, remove rather than refuse)
-  forbids a lasting refusal of something the engine serves naturally.
-- **Q4. string-similarity's code-point OSA distance** (O5). Options: (a) build it as decided;
-  (b) drop it. Recommended (b): its consumers were Xapiand's `pattern.cc`, which D9 deletes, and
-  the test reference, which keeps a private copy so it stays independent of what it checks.
+| Question | Ruling | What it changes |
+|---|---|---|
+| Q1. Where the automata live | A new public MIT header-only `Kronuz/automata`, depending only on `unicode` | D2 has no prospect fallback; the lead creates the repository before step 1 |
+| Q2. Terms with no live document (strata-D8, AUT-R5) | Skipped | D6's liveness probe on segments with deletes; Xapiand's known difference 2 and its test go; the speed rows measure the probe |
+| Q3. Edit distance on the key field | Served | D9: the refusal goes; the key field walks `keys_plugin` by restarted scans (D4); a docs page with E2E tests |
+| Q4. string-similarity's code-point OSA distance (O5) | Dropped | Nothing is built in string-similarity; the test reference keeps its private copy |
 
 ## First buildable steps
 
-1. `Kronuz/automata` (after Q1): `automata.hh` from strata:219ded0d, namespace renamed, its tests,
-   fuzz target and corpus; CI green on every platform.
-2. prospect: `expand.hh` with D4's walk over own and pooled fields, D6's limits, D8's hooks;
-   `term_table`'s hashed index; tests against brute force over several segments with deletes.
-3. Xapiand: `expand.cc` onto `prospect::expand` with D9's mapping; `pattern.cc`, `pattern.h` and
-   `fuzz_strata_pattern.cc` deleted; the E2E wildcard and fuzzy suites unchanged.
-4. fst: D10's deletion. strata: D12's archive.
-5. The Phase 5 gate rows (T4's oracle expansion mode, T6, T7) in the `phase5` quest.
+1. `Kronuz/automata` (the lead creates the repository, D46): `automata.hh` from strata:219ded0d,
+   namespace renamed, its tests, fuzz target and corpus; CI green on every platform.
+2. termdict: the additive `cursor::seek(from, visit)` (D5), tested against `find_run`'s visits.
+3. prospect: the per-field term cursor and `expand.hh` with D4's walk over own and pooled fields,
+   infos decoded in the walk (D5), D6's limits and liveness probe, D8's hooks; `term_table`'s hashed
+   index; tests against brute force over several segments with deletes, a fully deleted term
+   never selected.
+4. Xapiand: `expand.cc` onto `prospect::expand` with D9's mapping, the key field's edit distance
+   served; `pattern.cc`, `pattern.h` and `fuzz_strata_pattern.cc` deleted, with known difference 2;
+   the E2E wildcard and fuzzy suites unchanged, plus the key field's fuzzy page.
+5. fst: D10's deletion. strata: D12's archive.
+6. The Phase 5 gate rows (T4's oracle expansion mode, T6, T7) in the `phase5` quest.
 
 The port moves about 1,150 lines verbatim (the header, its tests and fuzz target), rewrites the
-394-line `expand.hh` as prospect code of about that size, and deletes about 350 lines from Xapiand;
-an estimate from the line counts above, not a measurement.
+394-line `expand.hh` as prospect code of about that size plus a per-field term cursor, adds a
+visitor seek to termdict, and deletes about 350 lines from Xapiand; an estimate from the line
+counts above, not a measurement.
 
 ## Appendix: the harness
 
