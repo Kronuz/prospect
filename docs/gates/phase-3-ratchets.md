@@ -524,27 +524,25 @@ the gate's five-trial run with every engine measures it.
 
 ## Gate status (2026-11-11)
 
-PLAN's Phase 3 gate, row by row, as measured at main `9b88263` ("Gate run at main `9b88263`"
-above); each timed row runs again at main `f0d7871` (the pending table above). The query rows
-are carried (PLAN, "Carried rows"): the gate records their ratios and gaps, and Phase 4's gate
-does not pass while they miss.
+PLAN's Phase 3 gate, row by row, at main `f0d7871` ("Gate report at main `f0d7871`" above).
+The query rows are carried (PLAN, "Carried rows"): Phase 4's gate does not pass while they miss.
 
-| Row | State at `9b88263` | The work that closes it |
+| Row | State | The work that closes it |
 |---|---|---|
 | Power loss at ≥ 10,000 crash points; crashes during recovery | Pass | `phase-3-lifecycle.md` (T1) |
 | Digest equal across two replays | Pass | `phase-3-lifecycle.md` (T2) |
 | Disk full: fail closed, no corruption, recovery | Pass | `phase-3-lifecycle.md` (T5) |
-| Queries after merging, every class at most 1.0x | Miss, carried: 7 of 40 rows miss (up to 1.18x), 19 straddle; global 0.96x to 1.01x | unions at `TOP_10` and `TOP_100` against Lucene `-bp`; intersection_union (C7, carried); `COUNT` phrase, negated, two-phase-critic against Tantivy (Track P, `phase4-gate`) |
-| Queries before merging, baselines unmerged | Miss, carried: 29 of 40 rows miss (up to 1.68x); global 0.86x to 1.23x | the same classes across 3 segments; per-segment overhead (Track P) |
-| Indexing, one thread, keyed (T4) | Pass: 2.19x to 3.60x faster than Tantivy-st at 1M, 2.06x at 5M | — |
-| Indexing, 8 threads, keyed | Owed: first run at `f0d7871` | — |
-| Write amplification against Lucene (T3) | Owed: smoke only at 20k; 500k runs at `f0d7871` | — |
-| Indexing memory: within budget plus 10%, at most 1.0x the baselines | Budget miss: 1.57x the budget at 5M, 1.52x at 1M (not the merges); against the baselines pass: 0.70x Lucene-st's peak, 0.28x Tantivy-st's | a follow-up quest (D51) |
-| Serving memory at most 1.0x | Pass: 0.94x Tantivy's peak | — |
+| Queries after merging, every class ≤ 1.0x | Miss, carried: 14 of 40 rows miss (up to 1.23x, mostly against Tantivy), 4 straddle; global 0.78x to 0.94x | Track P (`phase4-gate`); C7 (carried) |
+| Queries before merging, baselines unmerged | Miss, carried: 27 of 40 miss (up to 1.62x); global 1.01x to 1.21x | the same, and the per-segment cost |
+| Indexing, one thread, keyed (T4) | Pass: 2.68x to 2.97x faster than Tantivy-st at 1M | — |
+| Indexing, 8 threads, keyed | Owed: rerun at `fba0e0d` | — |
+| Write amplification against Lucene (T3) | Owed: rerun at `fba0e0d` | — |
+| Indexing memory: budget plus 10%, ≤ 1.0x the baselines | Budget miss (1.56x at 5M, 1.52x at 1M; `docs/perf/index-memory.md`); against the baselines pass | quest flush-within-budget |
+| Serving memory ≤ 1.0x | Pass: 0.94x Tantivy's peak | — |
 | Allocations per query do not grow with matches | Miss: the term class at every command, `TOP_100_COUNT` global | a follow-up quest |
 | Disk after a full merge, whole and per section | Whole 0.993x keyed `-bp` (pass); postings 1.012x and terms 1.123x carried (D29) | Track P |
 | `verify` and `parity` on multi-segment indexes, deletes included | Pass | — |
-| Coverage targets and the test-parity inventory's Phase 2 and 3 rows | Inventory in `docs/testing/parity.md`; coverage at `f0d7871` pending | the rows it lists as owed |
+| Coverage targets and the test-parity inventory's Phase 2 and 3 rows | Inventory and coverage in `docs/testing/parity.md`; 5 headers owe lines or branches | the rows it lists as owed |
 | The rows on FreeBSD and arm64 (before Phase 3R) | Deferred (D51): FreeBSD as a deferred check, arm64 when a host exists | — |
 
 ## Phase 2 gate conditions
