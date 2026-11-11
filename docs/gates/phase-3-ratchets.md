@@ -36,8 +36,9 @@ gives prospect less memory than either reference, so it can only understate pros
 The node budget's own row misses: the peak RSS is 1.57x the 2,056 MiB budget, past budget plus
 10% (2,262 MiB). The row stays a miss (Xapiand PLAN D51). Merge buffers are not the excess: the
 same run with `PROSPECT_AUTO_MERGE=0` (job 261110-022424-057569, strict) peaked at the same
-3,221 MiB (anon 3,204 MiB) in 352.5 s, so the follow-up quest has to find the excess elsewhere
-in the indexing path, not in charging merge buffers.
+3,221 MiB (anon 3,204 MiB) in 352.5 s. The cause is the flush's working set drawn on top of a
+buffer allowed to fill the whole budget (`docs/perf/index-memory.md`); quest flush-within-budget
+fixes it.
 
 ### Indexing, 1M keyed, one thread (two pairs)
 

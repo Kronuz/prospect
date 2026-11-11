@@ -89,26 +89,27 @@ feature, with the reason).
 
 strata `docs/TESTING.md`, "Coverage": lines and branches over the tests, `parity`, and `verify`
 on a sample index (`tools/coverage.sh`), per header of `include/prospect/`, against the tier
-each header falls in. Measured at prospect `ba6a400` (main `9b88263` with the gate harness),
-host build, job 261110-022513-292125; the run at main `f0d7871` is job 261111-023627-a73c21.
+each header falls in. Measured at prospect main `f0d7871` with the gate harness (prospect
+`fe20f43`), macOS x86_64 host build, job 261111-023627-a73c21; 51 of 51 tests passed, `parity`
+419 of 419, `verify` 0 mismatches.
 
 | Tier (lines, branches) | Header | Lines | Branches | Status |
 |---|---|---:|---:|---|
 | Decoders, readers, format (98%, 95%) | `format.hh` | 100.00% | 98.33% | met |
-| | `reader.hh` | 98.35% | 90.76% | branches owed |
+| | `reader.hh` | 98.35% | 90.64% | branches owed |
 | | `fielddict.hh` | 97.70% | 96.50% | lines owed |
 | | `docvalues.hh` | 100.00% | 94.62% | branches owed (Phase 4 code) |
 | | `values.hh` | 97.27% | 89.06% | lines and branches owed |
-| Scorers, collectors, counting (95%, 90%) | `search.hh` | 99.35% | 94.65% | met |
+| Scorers, collectors, counting (95%, 90%) | `search.hh` | 99.26% | 94.54% | met |
 | | `searcher.hh` | 98.08% | 97.06% | met |
 | | `operators.hh` | 96.77% | 93.53% | met |
 | | `shards.hh` | 100.00% | 95.00% | met |
 | | `aggregate.hh` | 97.20% | 90.54% | met |
 | | `collapse.hh` | 100.00% | 100.00% | met |
-| Everything else (90%, 80%) | `writer.hh` | 99.42% | 95.24% | met |
+| Everything else (90%, 80%) | `writer.hh` | 99.42% | 94.97% | met |
 | | `merge.hh` | 100.00% | 100.00% | met |
 | | `reorder.hh` | 98.95% | 95.31% | met |
-| | `bisection.hh` | 99.44% | 89.80% | met |
+| | `bisection.hh` | 100.00% | 90.82% | met |
 | | `inverter.hh` | 98.67% | 87.10% | met |
 | | `tuple_buffer.hh` | 100.00% | 97.17% | met |
 | | `values_writer.hh` | 97.39% | 79.41% | branches owed |
