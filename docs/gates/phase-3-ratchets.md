@@ -34,9 +34,91 @@ now peaks 30% under Lucene at the same budget. It is not recalibrated: the stale
 gives prospect less memory than either reference, so it can only understate prospect's speed.
 
 The node budget's own row misses: the peak RSS is 1.57x the 2,056 MiB budget, past budget plus
-10% (2,262 MiB). Merge buffers are not charged to the budget yet (strata `docs/design/phase-3.md`,
-"Memory budget"); a run without background merges tests whether they are the excess. The row
-stays a miss (Xapiand PLAN D51); a follow-up quest charges merge buffers to the budget.
+10% (2,262 MiB). The row stays a miss (Xapiand PLAN D51). Merge buffers are not the excess: the
+same run with `PROSPECT_AUTO_MERGE=0` (job 261110-022424-057569, strict) peaked at the same
+3,221 MiB (anon 3,204 MiB) in 352.5 s, so the follow-up quest has to find the excess elsewhere
+in the indexing path, not in charging merge buffers.
+
+### Indexing, 1M keyed, one thread (two pairs)
+
+The 1M corpus at the 1,039 MiB budget against Tantivy-st, the faster baseline at 5M; one
+exclusive job per pair, the order alternating (jobs 261110-022435-14ea61, 261110-022440-084be4).
+
+| Pair | prospect | Tantivy-st | prospect over Tantivy-st | Peak RSS, prospect / Tantivy-st |
+|---|---:|---:|---:|---:|
+| 1 (prospect first) | 77.3 s | 169.3 s | 0.456x (2.19x faster) | 1,578 / 3,100 MiB |
+| 2 (Tantivy first) | 44.4 s | 159.6 s | 0.278x (3.60x faster) | 1,578 / 2,721 MiB |
+
+Median 0.367x [0.278–0.456]: prospect is at least 2.19x faster, at about half the peak RSS.
+Its peak is 1.52x the 1,039 MiB budget, the same miss as at 5M.
+
+### Queries (quick-tier sample and terms, three trials, 20 s warm-up)
+
+181 queries and 40 terms, `NUM_ITER=10`, `WARMUP_TIME=20`, the engine order rotated, one
+exclusive job per trial; `bench/phase2/gate.py --target 1.0`; counts equal on every query.
+
+- **After merging** (prospect force-merged and reordered against force-merged Lucene, Lucene
+  `-bp`, and Tantivy; jobs 261110-022431-02bb66, 261110-022436-743e61, 261110-022442-e18d7a):
+  of 40 command and class rows, 14 pass, 7 miss, and 19 straddle 1.0x. Global: `TOP_10` 0.96x
+  [0.94–0.99], `TOP_100` 1.01x [0.99–1.09], `TOP_1000` 1.00x [0.91–1.02], `TOP_100_COUNT`
+  0.71x [0.67–0.86], `COUNT` 0.93x [0.90–1.02]. The misses: `TOP_10` union 1.18x
+  [1.16–1.22] and `TOP_100` union 1.08x (Lucene `-bp`); intersection_union at `TOP_100` 1.15x
+  and `TOP_1000` 1.13x (C7); `COUNT` two-phase-critic 1.18x, phrase 1.11x, and negated 1.08x
+  (Tantivy). Lucene without reordering sets no row's ratio: scored without it, every row is
+  unchanged to within 0.01.
+- **Before merging** (prospect's 3 segments against the one-thread builders' unmerged
+  Lucene-st, 3 segments, and Tantivy-st, 1 segment; jobs 261110-022433-017540,
+  261110-022438-9a0901, 261110-022444-671c80): 5 pass, 29 miss, 6 straddle. Global: `TOP_10`
+  0.86x [0.84–1.02], `TOP_100` 1.18x, `TOP_1000` 1.23x, `TOP_100_COUNT` 1.14x, `COUNT` 1.11x.
+  The largest: `COUNT` negated 1.68x [1.58–1.81], intersections at `TOP_100` and
+  `TOP_100_COUNT` 1.53x and 1.59x, two-phase-critic 1.51x.
+
+### Disk, memory, allocations, verify
+
+- **Disk after a full merge** (job 261110-022417-832326, the merge 261110-022415-2c93a9 in
+  985 s on 8 reorder threads): whole index 0.993x keyed Lucene `-bp` (pass); postings 1.012x
+  and terms with keys 1.123x (carried, D29); positions 0.980x, stored 0.482x, norms 1.000x.
+- **Serving memory** (job 261110-022422-c56975): peak 530 MB for prospect-merged against
+  Tantivy's 563 MB (0.94x, pass), Lucene's 1,159 MB, and Lucene `-bp`'s 1,177 MB; anonymous
+  7 MB against Tantivy's 1 MB.
+- **Allocations per query** (job 261110-022420-407111, 1,162 queries): 6 command and class
+  rows grow with their matches: the term class at every command (Spearman 0.86 to 0.98;
+  `TOP_10` from 23 to 46 allocations, `TOP_1000` up to 317) and `TOP_100_COUNT` global
+  (0.70). The row misses for single terms.
+- **Verify** (job 261110-022419-0d97c8): 962 queries and 200 stratified terms, 0 mismatches
+  on 3 segments and on the merged one. **Parity** (job 261109-174809-eb0263): 419 of 419
+  counts and top 10 at 1, 4, and 16 segments; with deletes at 4 and 16 segments counts 419 of
+  419 and top 10 157 of 419 (deleted documents stay in the statistics until a merge), exact
+  again after the merge.
+- **Write amplification**, smoke only (job 261110-022426-648c03, 20k, replacing, 4 MB
+  budget): prospect 1.098, Lucene-st 1.201, Tantivy-st 3.155. The 1M runs were cut short by a
+  host reboot.
+
+## Gate run at main `f0d7871` (pending, 2026-11-11)
+
+Main moved strata's pin to the manifest log (strata `94480d5`; `074129c` retires the manifest,
+live-docs, metadata, and field-table file codecs), so indexing and commits run new code and the
+5M index is built again. Every row runs again at main `f0d7871`, one job per row of at most 10
+minutes (Xapiand PLAN D59), on the gate VM, chained so no two of them share it:
+
+| Row | Job | Size and what it decides |
+|---|---|---|
+| Setup | 261111-023449-dbd2bc prepare, 261111-023513-9cf689 smoke (20k, every step, 8-thread units, write amplification) | Builds and asserts every arm |
+| A2, A4 indexing | 261111-023527-01525e (strict) | prospect keyed 5M at 2,056 MiB: the scale-up time beside the 2026-11-09 baselines, and the peaks against the budget |
+| A2 one thread | 261111-023615-46b75c (exclusive) | 1M at 1,039 MiB, pairs against Tantivy-st in the order P T T P |
+| A2 eight threads | 261111-023617-714ad0 (exclusive) | 1M at 1,039 MiB, prospect, Tantivy-st, and Lucene-st at 8 threads, order P T L L T P |
+| A1 before merging | 261111-023611-df2aff (exclusive) | Two rotated trials, both sets, prospect's 5M segments against Lucene-st and Tantivy-st |
+| A1 after merging | 261111-023613-74ba91 (exclusive) | Two rotated trials, both sets, prospect-merged against Lucene `-bp` and Tantivy |
+| A4, A5, A6 | 261111-023529-0480c9 merge, 261111-023531-861bbf sections, verify, allocations; 261111-023533-e5b827 serving memory | Disk per section, verify before and after merging, allocations per query, serving peaks |
+| A6 parity | 261111-023549-08d8e1 | 1, 4, 16 segments and with deletes |
+| A3 | 261111-023550-47b686 append, 261111-023552-604cea replace (strict) | 500k keyed, every engine at a 64 MB buffer |
+| A7 coverage | 261111-023627-a73c21 (host) | `tools/coverage.sh` over the tests, parity, and verify |
+
+The query rows run with `WARMUP_TIME=5` and `NUM_ITER=5`, format 13's settings
+(`docs/perf/format13-gate-vm.md`, row 4b), since a 20 s warm-up per engine and command does not
+fit two trials in 10 minutes. A 5 s warm-up may flatter prospect against the JVM engines by up
+to about 10% (the same note, "The warm-up"), so a class that beats Lucene `-bp` by less than
+10% is reported as within that caveat, not as a pass; the rows against Tantivy carry no JIT.
 
 ## Tools
 
@@ -390,24 +472,30 @@ ratio against the baseline engines is recorded from this run. Scaled by the anch
 the reordered index sits near 1.0× the fastest baseline (about 1.06× for global `TOP_10`);
 the gate's five-trial run with every engine measures it.
 
-## Gate status (2026-10-16)
+## Gate status (2026-11-11)
 
-PLAN's Phase 3 gate, row by row. The query rows are carried (PLAN, "Carried rows"): the
-gate records their ratios and gaps, and Phase 4's gate does not pass while they miss.
+PLAN's Phase 3 gate, row by row, as measured at main `9b88263` ("Gate run at main `9b88263`"
+above); each timed row runs again at main `f0d7871` (the pending table above). The query rows
+are carried (PLAN, "Carried rows"): the gate records their ratios and gaps, and Phase 4's gate
+does not pass while they miss.
 
-| Row | State | Where |
+| Row | State at `9b88263` | The work that closes it |
 |---|---|---|
-| Power loss at ≥ 10,000 crash points; crashes during recovery | Pass | `phase-3-lifecycle.md` (T1), background merges at 10,000 points at `e8accae` |
+| Power loss at ≥ 10,000 crash points; crashes during recovery | Pass | `phase-3-lifecycle.md` (T1) |
 | Digest equal across two replays | Pass | `phase-3-lifecycle.md` (T2) |
 | Disk full: fail closed, no corruption, recovery | Pass | `phase-3-lifecycle.md` (T5) |
-| Queries after merging (strata force-merged, baselines force-merged), five trials | Miss, carried: global 1.33–1.34× | above |
-| Queries before merging (baselines unmerged at equal memory) | Owed: calibration on the full corpus, then a scheduled night | — |
-| Indexing, 1 and 8 threads, keyed (T4), five trials at equal memory | Owed: calibrated at 5M (a 2,056 MB budget peaks at 4,608 MB against one-thread Lucene's 4,593 MB, 0.3% over; `results/calibrate-n2-5m.out`); the trials wait for P1, since C2 records the rows at a commit that includes it | — |
-| Write amplification against Lucene (T3), append-only and replace-heavy | Owed: rescheduled with T4 | — |
-| Memory (serving and indexing peaks), disk after a full merge, per section | Disk with P1: whole index 0.999× keyed `-bp` (pass); postings 1.014× and terms 1.20× carried to format 13. Serving memory 1.05× Tantivy (miss; anonymous 16 MB against Phase 2's 3 MB); indexing peaks with T4 | "Disk after a full merge" and "Serving memory" below |
-| `verify` and `parity` on multi-segment indexes | Pass before and after merging; `parity` with deletes owed | "Verify and parity" below |
-| Coverage targets and the test-parity inventory's Phase 3 rows | Owed: `cost()` checked directly (`cost_test`); scores against Lucene's own, document limits, and nested WAND or C7's cost model remain; reads while a writer commits need a shared-ownership reader (Phase 3R) | `docs/testing/parity.md` |
-| The rows on FreeBSD and arm64 (before Phase 3R) | Owed: FreeBSD VM; an arm64 host | — |
+| Queries after merging, every class at most 1.0x | Miss, carried: 7 of 40 rows miss (up to 1.18x), 19 straddle; global 0.96x to 1.01x | unions at `TOP_10` and `TOP_100` against Lucene `-bp`; intersection_union (C7, carried); `COUNT` phrase, negated, two-phase-critic against Tantivy (Track P, `phase4-gate`) |
+| Queries before merging, baselines unmerged | Miss, carried: 29 of 40 rows miss (up to 1.68x); global 0.86x to 1.23x | the same classes across 3 segments; per-segment overhead (Track P) |
+| Indexing, one thread, keyed (T4) | Pass: 2.19x to 3.60x faster than Tantivy-st at 1M, 2.06x at 5M | — |
+| Indexing, 8 threads, keyed | Owed: first run at `f0d7871` | — |
+| Write amplification against Lucene (T3) | Owed: smoke only at 20k; 500k runs at `f0d7871` | — |
+| Indexing memory: within budget plus 10%, at most 1.0x the baselines | Budget miss: 1.57x the budget at 5M, 1.52x at 1M (not the merges); against the baselines pass: 0.70x Lucene-st's peak, 0.28x Tantivy-st's | a follow-up quest (D51) |
+| Serving memory at most 1.0x | Pass: 0.94x Tantivy's peak | — |
+| Allocations per query do not grow with matches | Miss: the term class at every command, `TOP_100_COUNT` global | a follow-up quest |
+| Disk after a full merge, whole and per section | Whole 0.993x keyed `-bp` (pass); postings 1.012x and terms 1.123x carried (D29) | Track P |
+| `verify` and `parity` on multi-segment indexes, deletes included | Pass | — |
+| Coverage targets and the test-parity inventory's Phase 2 and 3 rows | Inventory in `docs/testing/parity.md`; coverage at `f0d7871` pending | the rows it lists as owed |
+| The rows on FreeBSD and arm64 (before Phase 3R) | Deferred (D51): FreeBSD as a deferred check, arm64 when a host exists | — |
 
 ## Phase 2 gate conditions
 
@@ -424,9 +512,9 @@ hashes before its history rewrite are mapped by strata `docs/history-rewrite.md`
 | C7 WAND or the cost model | Open, carried to the next phase (D51) | Only `AND_MAYBE` was measured (ARCHITECTURE, `ff026c3`); no WAND in `include/` | Conjunctions of disjunctions are not measured (the harness's intersection_union is `+a b c`, one required term); intersection_union misses 1.0× (1.11–1.41× Lucene `-bp`, `docs/perf/format13-gate-vm.md`) |
 | C9 Hardening and text | Partly closed; the rest to a follow-up quest (D51) | `a87d070`: a stored frame larger than `max_stored_frame` (from the 64 MiB record cap) is rejected before it allocates; strata `format.hh` checks bounds first | The fuzz hour at `-rss_limit_mb=2048` is not recorded (runs used 4,096); the text items: strata `docs/design/phase-2.md` collectors and skip-data text, and `include/prospect/writer.hh`'s layout comment (delta-coded level 1, where the code writes it fixed-width) |
 | C13 Every corruption check reached | Closed (ruled Pass, strata `docs/reviews/phase-3-lifecycle.md`, fourth re-check, T6) | `ade9382`: fuzz targets in CMake behind `PROSPECT_FUZZ`, corpora checked in and replayed as CTests in every build, ASan+UBSan in CI; resealed tests `5116e7b`, `3cb277c`; the wrapped position index `b5b6810` | Four of the 18 checks stay unreached with accepted reasons; no re-check after format 13 changed the decoders |
-| C14 `verify` as specified | Closed | `b1ad42d`: ordinals with ties as sets within 1e-9, both presets; extended to segments and deletes (`52674e6`); 0 mismatches at 5M before and after merging ("Verify and parity" above) | Re-runs at this gate's commit (A6) |
-| C15 The Phase 2 record | Allocations closed at current code (D51); the rest to a follow-up quest (D51) | Allocations per query by class at main `9b88263` (`gate3.sh allocs`, `bench/allocs.py`), not at `63a5339`, since Phase 3's query changes landed first | The frequent-term stratum's cause and frontier lengths; Phase 2's per-trial indexing times (strata `.scratch/g5` holds query results only); the corpus checksum |
-| C16 Coverage of Phase 2's code | Closed at format 12 | strata `docs/gates/phase-3-lifecycle.md`, "Coverage": `reader.hh` 99.88% lines and 95.76% branches, `format.hh` 100 and 99.43, `search.hh` 98.72 and 92.77, `searcher.hh` 97.67 and 92.65, `writer.hh` 99.83 and 90.94; ruled Pass (T6) | No coverage run since format 13 and the repository split (`tools/coverage.sh`); re-measured with A7 |
+| C14 `verify` as specified | Closed | `b1ad42d`: ordinals with ties as sets within 1e-9, both presets; extended to segments and deletes (`52674e6`); 0 mismatches at 5M before and after merging ("Verify and parity" above) | Re-runs at main `f0d7871` (job 261111-023531-861bbf) |
+| C15 The Phase 2 record | Allocations closed at current code (D51); the rest to a follow-up quest (D51) | Allocations per query by class at main `9b88263` (`gate3.sh allocs`, `bench/allocs.py`), not at `63a5339`, since Phase 3's query changes landed first; again at main `f0d7871` (job 261111-023531-861bbf) | The frequent-term stratum's cause and frontier lengths; Phase 2's per-trial indexing times (strata `.scratch/g5` holds query results only); the corpus checksum |
+| C16 Coverage of Phase 2's code | Closed at format 12 | strata `docs/gates/phase-3-lifecycle.md`, "Coverage": `reader.hh` 99.88% lines and 95.76% branches, `format.hh` 100 and 99.43, `search.hh` 98.72 and 92.77, `searcher.hh` 97.67 and 92.65, `writer.hh` 99.83 and 90.94; ruled Pass (T6) | No coverage run since format 13 and the repository split (`tools/coverage.sh`); re-measured with A7 at main `f0d7871` (job 261111-023627-a73c21) |
 
 ## Still unmeasured
 

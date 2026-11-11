@@ -47,7 +47,7 @@ feature, with the reason).
 | `TestIndexWriterForceMerge`, `TestIndexWriterMerging` (`forceMergeDeletes`) | forceMerge to N segments, forceMergeDeletes thresholds | `merge_test` (`force_merge_deletes` rewrites only segments past the threshold, `force_merge(1)` leaves one segment without deletes, the digest unchanged); `merge_policy_test` forced merges | partial: temporary disk space of a forced merge is unmeasured (pending, Phase 3R disk row) |
 | `TestSegmentMerger`, `TestIndexWriterMerging` (`testLucene`) | Merged segments hold every live document and answer the same | `merge_test` (merges byte-identical to a flush of the live documents; the result answers as its sources) | covered |
 | `TestCrash`, `TestCrashCausesCorruptIndex`, `TestIndexWriterOnJRECrash` | Crashes while indexing and after close leave the last commit openable | `lifecycle_test` (power loss at 10,000 points of seeded workloads, sector-granular), `index_test` (crash during commit opens the old or the new commit) | covered |
-| `TestIndexWriterOnDiskFull`, `TestIndexWriterDelete` (`testDeletesOnDiskFull`, `testUpdatesOnDiskFull`) | Disk full during flush, commit, and merge; the index stays consistent and usable | `index_test` (ENOSPC while flushing keeps the buffer and the commit succeeds once space returns; ENOSPC during a merge leaves the segments and digest as they were, and the merge succeeds once space returns; ENOSPC at every point of a commit's segment, live-docs, metadata, and manifest files; storage admission rejecting transactions with `no_space` and deferring merges, its accounting equal to the files on disk) | covered |
+| `TestIndexWriterOnDiskFull`, `TestIndexWriterDelete` (`testDeletesOnDiskFull`, `testUpdatesOnDiskFull`) | Disk full during flush, commit, and merge; the index stays consistent and usable | `index_test` (ENOSPC while flushing keeps the buffer and the commit succeeds once space returns; ENOSPC during a merge leaves the segments and digest as they were, and the merge succeeds once space returns; ENOSPC at every point of a commit's segment and manifest log; storage admission rejecting transactions with `no_space` and deferring merges, its accounting equal to the files on disk) | covered |
 | `TestIndexWriterExceptions`, `TestIndexWriterOnError` | Exceptions at every stage of indexing and commit; failed syncs | `index_test` (a failed sync fences and reopening recovers; a failed write during a merge fences and reopening recovers the last commit), faultfs faults before and after their effect; `lifecycle_test` (power loss at every mutation, merges included) | covered |
 | `TestIndexWriterCommit`, `TestTransactions`, `TestRollback`, `TestAtomicUpdate` | Commit on close, uncommitted work invisible after a crash, two-phase commit, atomic multi-document updates | `index_test` (uncommitted work lost and nothing half-applied, rejected transactions leave no trace) | partial: an explicit rollback to the last commit and commit user data are APIs of Phase 7 (metadata files exist) |
 | `TestDeletionPolicy`, `TestSnapshotDeletionPolicy`, `TestIndexFileDeleter`, `TestNeverDelete` | Which commits are kept, snapshots, opening older commits, leftover files | `index_test` retention (current, two predecessors, pinned checkpoints; orphans removed at open), `lifecycle_test` checkpoints and install | covered; pluggable deletion policies n/a (retention is fixed by design D1) |
@@ -84,6 +84,39 @@ feature, with the reason).
 | `indexer::merger`, `indexer::segment_updater`, `indexer::merge_index_test` | Merges with and without deletes; merges keep block-max data; deleting all documents | `merge_test` (byte-identical to a flush, so impacts are the flush's); `index_test` | covered; a merge whose documents are all deleted writes no segment (`index::merge`) |
 | `indexer::log_merge_policy` | Tantivy's log merge policy | strata has one merge policy, the tiered one (ARCHITECTURE, "One implementation per mechanism") | n/a |
 | `indexer::delete_queue`, `stamper`, `doc_opstamp_mapping` | Delete ordering by operation stamp | `index_test` (versions, replay) | covered |
+
+## Coverage
+
+strata `docs/TESTING.md`, "Coverage": lines and branches over the tests, `parity`, and `verify`
+on a sample index (`tools/coverage.sh`), per header of `include/prospect/`, against the tier
+each header falls in. Measured at prospect `ba6a400` (main `9b88263` with the gate harness),
+host build, job 261110-022513-292125; the run at main `f0d7871` is job 261111-023627-a73c21.
+
+| Tier (lines, branches) | Header | Lines | Branches | Status |
+|---|---|---:|---:|---|
+| Decoders, readers, format (98%, 95%) | `format.hh` | 100.00% | 98.33% | met |
+| | `reader.hh` | 98.35% | 90.76% | branches owed |
+| | `fielddict.hh` | 97.70% | 96.50% | lines owed |
+| | `docvalues.hh` | 100.00% | 94.62% | branches owed (Phase 4 code) |
+| | `values.hh` | 97.27% | 89.06% | lines and branches owed |
+| Scorers, collectors, counting (95%, 90%) | `search.hh` | 99.35% | 94.65% | met |
+| | `searcher.hh` | 98.08% | 97.06% | met |
+| | `operators.hh` | 96.77% | 93.53% | met |
+| | `shards.hh` | 100.00% | 95.00% | met |
+| | `aggregate.hh` | 97.20% | 90.54% | met |
+| | `collapse.hh` | 100.00% | 100.00% | met |
+| Everything else (90%, 80%) | `writer.hh` | 99.42% | 95.24% | met |
+| | `merge.hh` | 100.00% | 100.00% | met |
+| | `reorder.hh` | 98.95% | 95.31% | met |
+| | `bisection.hh` | 99.44% | 89.80% | met |
+| | `inverter.hh` | 98.67% | 87.10% | met |
+| | `tuple_buffer.hh` | 100.00% | 97.17% | met |
+| | `values_writer.hh` | 97.39% | 79.41% | branches owed |
+| | `sortkey.hh`, `exact.hh`, `ordered.hh`, `slice.hh` | 95.83% to 100.00% | 84.38% to 100.00% | met |
+
+The owed rows: `reader.hh` and `values.hh` branches (the readers' tier), `fielddict.hh` and
+`values.hh` lines, `docvalues.hh` branches by 0.4 points, and `values_writer.hh` branches by 0.6
+points. Each uncovered line with its reason (`COV_LIST=1`) is owed with them.
 
 ## Owed by Phase 3
 
