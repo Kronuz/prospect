@@ -97,20 +97,20 @@ int main() {
 		if (index_detail::parse_name(n)) { names.push_back(n); }
 	}
 	std::size_t transient = 0, open_retries = 0, heals = 0;
-	std::size_t sticky = 0, sticky_open_failed = 0, sticky_damaged = 0, sticky_unread = 0;
+	std::size_t sticky = 0, sticky_open_failed = 0, sticky_damaged = 0, sticky_unread = 0, log_offsets = 0;
 	for (const auto& name : names) {
 		const std::uint64_t size = fs.view(name).size();
 		const std::uint64_t stride = std::max<std::uint64_t>(1, size / 48);
-		// A segment's frozen prefix byte by byte (format-13.md F2), then a stride over the rest.
-		const std::uint64_t prefix = name.starts_with("seg-") ? std::min<std::uint64_t>(strata::format::prefix_size, size) : 0;
+		// A segment's frozen prefix byte by byte (format-13.md F2), then a stride over the rest; the
+		// manifest log byte by byte (manifest-log T4 case 8).
+		const bool log = index_detail::parse_name(name)->type == index_detail::parsed_name::manifest;
+		const std::uint64_t prefix = log ? size : name.starts_with("seg-") ? std::min<std::uint64_t>(strata::format::prefix_size, size) : 0;
+		if (log) { log_offsets += size; }
 		std::vector<std::uint64_t> offsets;
 		for (std::uint64_t at = 0; at < prefix; ++at) { offsets.push_back(at); }
 		for (std::uint64_t at = 0; at < size; at += stride) {
 			if (at >= prefix) { offsets.push_back(at); }
 		}
-		// The field table's version varint (bytes 8 to 12) has no checksum: a changed one reads as
-		// another version, which is unsupported, not damage (strata's fields_test), and is not retried.
-		if (name.starts_with("fields-")) { std::erase_if(offsets, [](std::uint64_t at) { return at >= 8 && at < 13; }); }
 		for (const std::uint64_t at : offsets) {
 			for (faultfs::media kind : {faultfs::media::bit_flip, faultfs::media::read_error}) {
 				// Transient: the medium returns the right bytes on the next read.
@@ -166,6 +166,8 @@ int main() {
 	}
 	fs.clear_faults();
 	CHECK(transient > 200 && open_retries > 0 && heals > 0 && sticky_open_failed > 0 && sticky_damaged > 0);
+	CHECK(log_offsets > 0);
+	std::printf("  %zu files, %zu offsets of the manifest log byte by byte\n", names.size(), log_offsets);
 	std::printf("  transient: %zu faults, all healed (%zu by the open's retry, %zu by heal())\n", transient, open_retries, heals);
 	std::printf("  sticky: %zu faults: %zu failed the open, %zu reported damaged by heal(), %zu in bytes nothing reads\n", sticky, sticky_open_failed,
 		sticky_damaged, sticky_unread);
@@ -183,7 +185,7 @@ int main() {
 		std::string merged;
 		{
 			auto ix = prospect::index::open(io, keyed);
-			merged = index_detail::segment_name(ix.manifest().segments.at(0).id);
+			merged = index_detail::segment_name(ix.manifest().segments.begin()->first);
 		}
 		// A byte in the middle of the postings, which every digest reads.
 		std::uint64_t at = 0;

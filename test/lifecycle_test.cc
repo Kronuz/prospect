@@ -180,7 +180,7 @@ int main() {
 				ix.close();
 				ix = index::open(io, opts);
 				CHECK(ix.digest() == digests[2]);
-				CHECK(ix.manifest().applied == files::position({at, 1}));
+				CHECK(ix.applied() == files::position({at, 1}));
 			}
 		}
 		CHECK(verdicts[0] == verdicts[1] && verdicts[1] == verdicts[2]);
@@ -653,8 +653,8 @@ int main() {
 				ix.reclaim(~std::uint64_t(0));
 			}
 			for (const auto& n : dfs.list()) {
-				CHECK(!n.starts_with("seg-"));  // only metadata beside the manifests
-				if (n.starts_with("manifest-")) { dio.remove(n); }
+				CHECK(n.starts_with("manifest-"));  // the metadata is the log's: no other file
+				dio.remove(n);
 			}
 			bool uncreated = false;
 			try {
@@ -663,7 +663,7 @@ int main() {
 				uncreated = true;
 			} catch (const corrupt_index&) {
 			}
-			CHECK(!uncreated && throws([&] { index::create(dio, keyed, uuid_a); }));
+			CHECK(uncreated && dfs.list().empty());  // with its log gone, nothing says an index was here
 		}
 		std::printf("  create: %llu crash points under %zu crashes, %zu created again\n", (unsigned long long)total + 1, crashes, reran);
 	}
@@ -731,7 +731,7 @@ int main() {
 					case step::checkpoint:
 					case step::release: {  // each commits
 						if (s.type == step::release && pins.empty()) { break; }
-						const point p{ix.digest(), ix.manifest().applied};
+						const point p{ix.digest(), ix.applied()};
 						if (allowed) { allowed->insert(p); }  // attempted
 						if (trace) { trace->push_back(p); }
 						if (s.type == step::commit) {
@@ -785,7 +785,7 @@ int main() {
 				{
 					run_env env(background);
 					auto ix = index::create(io, options_for(env), uuid_a);
-					allowed = {{ix.digest(), ix.manifest().applied}};
+					allowed = {{ix.digest(), ix.applied()}};
 					fs.power_off_after(at);
 					try {
 						run_workload(ix, env.exec.get(), &allowed, nullptr);
@@ -801,7 +801,7 @@ int main() {
 			auto recovered = [&](faultfs::io& io, const std::set<point>& allowed, std::uint64_t at) {
 				try {
 					auto ix = index::open(io, keyed);
-					const point got{ix.digest(), ix.manifest().applied};
+					const point got{ix.digest(), ix.applied()};
 					CHECK(allowed.count(got));
 					if (!allowed.count(got)) { std::fprintf(stderr, "  workload %llu crash point %llu%s\n", (unsigned long long)seed, (unsigned long long)at, background ? " (background merges)" : ""); }
 					std::uint64_t log = 0;

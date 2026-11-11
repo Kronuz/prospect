@@ -85,25 +85,16 @@ static std::vector<step> workload(std::uint64_t seed, std::size_t steps) {
 	return out;
 }
 
-// What recover --to g checks, read-only: every file manifest g names, against its entry.
-static std::string intact(faultfs::filesystem& fs, const std::string& manifest) {
+// What recover --to g checks, read-only: every segment generation g names, against its entry,
+// read from the log holding it (manifest-log D8).
+static std::string intact(faultfs::io& io, faultfs::filesystem& fs, std::optional<std::uint64_t> g) {
 	try {
-		const auto m = files::decode_manifest(fs.view(manifest));
-		for (const auto& r : m.segments) {
-			const auto name = index_detail::segment_name(r.id);
+		const auto m = index_detail::read_state(io, g);
+		for (const auto& [id, r] : m.segments) {
+			const auto name = index_detail::segment_name(id);
 			const std::string_view b = fs.view(name);
 			if (b.size() != r.size) { return name + " size"; }
 			if (strata::format::decode_footer(b).toc_crc != r.footer_crc) { return name + " footer"; }
-			if (r.live.generation) {
-				const auto ln = index_detail::live_name(r.id, r.live.generation);
-				const std::string_view l = fs.view(ln);
-				if (l.size() != r.live.size || files::trailing_crc(l) != r.live.crc) { return ln + " differs"; }
-			}
-		}
-		if (m.meta.generation) {
-			const auto mn = index_detail::meta_name(m.meta.generation);
-			const std::string_view b = fs.view(mn);
-			if (b.size() != m.meta.size || files::trailing_crc(b) != m.meta.crc) { return mn + " differs"; }
 		}
 	} catch (const std::exception& e) {
 		return std::string("unreadable: ") + e.what();
@@ -178,13 +169,14 @@ int main() {
 				ix.close();
 			}
 			fs.crash(seed * 7777 + at);
-			for (const auto& n : fs.list()) {
-				if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::manifest) {
-					++manifests_checked;
-					if (const auto why = intact(fs, n); !why.empty()) {
-						if (bad_manifests++ < 5) { std::printf("  workload %llu point %llu: %s names %s\n", (unsigned long long)seed, (unsigned long long)at, n.c_str(), why.c_str()); }
-					}
+			// The newest log's head is intact: an obsolete log may name reclaimed files (D8).
+			if (index_detail::log_holding(io)) {
+				++manifests_checked;
+				if (const auto why = intact(io, fs, std::nullopt); !why.empty()) {
+					if (bad_manifests++ < 5) { std::printf("  workload %llu point %llu: the head names %s\n", (unsigned long long)seed, (unsigned long long)at, why.c_str()); }
 				}
+			}
+			for (const auto& n : fs.list()) {
 				if (auto p = index_detail::parse_name(n); p && p->type == index_detail::parsed_name::segment) {
 					// A segment shorter than its footer claims was truncated by reclaim().
 					try {
@@ -197,12 +189,9 @@ int main() {
 			try {
 				byte_budget storage2(1ull << 40);
 				auto ix = index::open(io, options(&storage2));
-				for (std::uint64_t g : ix.manifest().pinned) {
-					const auto n = index_detail::manifest_name(g);
-					bool present = false;
-					for (const auto& f : fs.list()) { present = present || f == n; }
-					if (!present || !intact(fs, n).empty()) {
-						if (bad_pins++ < 5) { std::printf("  workload %llu point %llu: pinned %s %s\n", (unsigned long long)seed, (unsigned long long)at, n.c_str(), present ? "damaged" : "missing"); }
+				for (std::uint64_t g : ix.manifest().pins) {
+					if (const auto why = intact(io, fs, g); !why.empty()) {
+						if (bad_pins++ < 5) { std::printf("  workload %llu point %llu: pinned %llu: %s\n", (unsigned long long)seed, (unsigned long long)at, (unsigned long long)g, why.c_str()); }
 					}
 				}
 				ix.reclaim();
@@ -210,18 +199,13 @@ int main() {
 				ix.reclaim();
 				std::set<std::string> named;
 				std::uint64_t bytes = 0;
-				for (const auto& f : fs.list()) {
-					if (auto p = index_detail::parse_name(f); p && p->type == index_detail::parsed_name::manifest) {
-						named.insert(f);
-						const auto mf = files::decode_manifest(fs.view(f));
-						if (mf.meta.generation) { named.insert(index_detail::meta_name(mf.meta.generation)); }
-						if (mf.fields.generation) { named.insert(index_detail::fields_name(mf.fields.generation)); }
-						for (const auto& r : mf.segments) {
-							named.insert(index_detail::segment_name(r.id));
-							if (r.live.generation) { named.insert(index_detail::live_name(r.id, r.live.generation)); }
-						}
-					}
-				}
+				// What the kept generations name: the head and the pins, each with its log (D8).
+				auto keep = [&](std::uint64_t g) {
+					named.insert(index_detail::manifest_name(*index_detail::log_holding(io, g)));
+					for (const auto& [id, r] : index_detail::read_state(io, g).segments) { named.insert(index_detail::segment_name(id)); }
+				};
+				keep(ix.manifest().generation);
+				for (std::uint64_t g : ix.manifest().pins) { keep(g); }
 				for (const auto& f : fs.list()) {
 					if (index_detail::parse_name(f)) { bytes += fs.view(f).size(); }
 					if (!named.count(f)) {

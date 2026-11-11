@@ -273,6 +273,7 @@ int main() {
 		{ const prospect::index closed = std::move(ix); }
 		CHECK(has_file(io, "seg-999999.fwd"));
 		auto reopened = prospect::index::open(io, opts);
+		reopened.reclaim(UINT64_MAX);  // the open owes its orphans to reclaim() (D6.6)
 		CHECK(!has_file(io, "seg-999999.fwd"));
 		CHECK(reopened.segments().size() == 1);
 	}

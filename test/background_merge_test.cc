@@ -150,7 +150,7 @@ static std::set<std::string> segment_files(const faultfs::filesystem& fs) {
 }
 static std::set<std::string> named_segments(const prospect::index& ix) {
 	std::set<std::string> named;
-	for (const auto& s : ix.manifest().segments) { named.insert(index_detail::segment_name(s.id)); }
+	for (const auto& [sid, s] : ix.manifest().segments) { named.insert(index_detail::segment_name(s.id)); }
 	return named;
 }
 static bool no_spills(const faultfs::filesystem& fs) {
@@ -284,7 +284,7 @@ static void id_order(std::size_t threads) {
 	ix = prospect::index::open(io, bg.options());
 	CHECK(ix.digest() == digest && contents(ix).size() == 25);
 	last = 0;
-	for (const auto& s : ix.manifest().segments) {
+	for (const auto& [sid, s] : ix.manifest().segments) {
 		CHECK(s.id > last);
 		last = s.id;
 	}
@@ -426,9 +426,10 @@ static void close_while_merging(std::size_t threads) {
 	a = prospect::index::open(ia, o);
 	b = prospect::index::open(ib, o);
 	auto c = prospect::index::open(ic, o);
-	a.wait_deletes();  // an open posts its orphans' deletes to the executor
-	b.wait_deletes();
-	c.wait_deletes();
+	for (prospect::index* x : {&a, &b, &c}) {  // the open's retention, owed to reclaim() (D6.6), posts the orphans' deletes
+		x->reclaim();
+		x->wait_deletes();
+	}
 	CHECK(a.digest() == da && b.digest() == db && contents(c).size() == 24);
 	CHECK(segment_files(fa) == named_segments(a) && segment_files(fb) == named_segments(b) && segment_files(fc) == named_segments(c));
 	CHECK(no_spills(fa) && no_spills(fb) && no_spills(fc));
@@ -559,7 +560,7 @@ static void damaged_source(std::size_t threads) {
 	auto ix = prospect::index::create(io, o, uuid);
 	fill(ix, 6, 4, 3000, 10);
 	const auto digest = ix.digest();
-	const std::uint64_t victim = ix.manifest().segments.front().id;
+	const std::uint64_t victim = ix.manifest().segments.begin()->first;
 	ix.close();
 	const std::string name = index_detail::segment_name(victim);
 	{

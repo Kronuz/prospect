@@ -302,9 +302,43 @@ int main() {
 		CHECK(!text.empty());
 		pin("seeds.txt", text);
 	}
+	// The manifest log (strata's files family): a keyed index's first log, two commits and an
+	// erase, replayed to its head (manifest-log D4), pinned byte for byte.
+	{
+		strata::faultfs::filesystem fs;
+		strata::faultfs::io io(fs);
+		prospect::index::options o;
+		o.keyed = true;
+		o.identity_seed = 1;  // the segments' identities are then fixed, so the log's bytes are
+		auto ix = prospect::index::create(io, o, {'f', 'i', 'x', 't', 'u', 'r', 'e', 's', 'l', 'o', 'g', 0, 0, 0, 0, 1});
+		for (int s = 0; s < 2; ++s) {
+			prospect::transaction t;
+			t.fields = text_fields();
+			for (int i = 0; i < 6; ++i) {
+				prospect::operation op;
+				op.type = prospect::operation::add;
+				op.doc.key = "Q" + std::to_string(s * 6 + i);
+				op.doc.field().terms.push_back({words[i % 5], 1, {1}});
+				op.doc.length = 1;
+				op.doc.stored = "body " + std::to_string(s * 6 + i);
+				t.ops.push_back(op);
+			}
+			ix.apply(t, {});
+			ix.refresh();
+		}
+		prospect::transaction t;
+		t.fields = text_fields();
+		prospect::operation erase;
+		erase.type = prospect::operation::delete_key;
+		erase.key = "Q3";
+		t.ops.push_back(erase);
+		ix.apply(t, {});
+		ix.commit();
+		pin("manifest-log.bin", std::string(fs.view(strata::index_detail::manifest_name(*strata::index_detail::log_holding(io)))));
+	}
 	// C17: each family's bytes change only with its pre-freeze version. pre_freeze.txt pins
 	// both versions beside a hash of the family's fixtures (the segments' .sx, the files'
-	// .bin), so a re-pin that keeps the version fails, and so does a bump left unrecorded.
+	// manifest log), so a re-pin that keeps the version fails, and so does a bump left unrecorded.
 	{
 		auto family = [](const char* ext) {
 			std::vector<std::string> names;

@@ -553,15 +553,23 @@ int main() {
 			CHECK(m.min_version == strata::format::pre_freeze && m.max_version == strata::format::pre_freeze);
 			return m.generation;
 		};
-		// Rewrites the head manifest with `edit` applied.
-		auto rewrite = [](strata::faultfs::filesystem& fs, strata::faultfs::io& io, std::uint64_t gen, auto edit) {
+		// Puts `bytes` in generation `gen`'s log file, whatever the file held.
+		auto put_log = [](strata::faultfs::io& io, std::uint64_t gen, const std::string& bytes) {
 			const std::string name = strata::index_detail::manifest_name(gen);
-			auto m = strata::files::decode_manifest(std::string(fs.view(name)));
-			edit(m);
-			const std::string bytes = strata::files::encode(m);
-			auto f = io.open_existing(name);
-			f->truncate(0);
+			try {
+				io.remove(name);
+			} catch (const std::exception&) {
+			}
+			auto f = io.create_exclusive(name);
 			f->write_at(0, bytes);
+			f->sync();
+		};
+		// Rewrites generation `gen`'s state as a snapshot log of its own with `edit` applied, resealed.
+		auto rewrite = [&](strata::faultfs::filesystem&, strata::faultfs::io& io, std::uint64_t gen, auto edit) {
+			auto m = strata::index_detail::read_state(io, gen);
+			edit(m);
+			strata::files::recount(m);
+			put_log(io, gen, strata::files::frame_snapshot(m));
 		};
 		const auto with = [&](auto edit) {
 			strata::faultfs::filesystem fs;
@@ -570,43 +578,41 @@ int main() {
 			rewrite(fs, io, gen, edit);
 			return open_index(io, o);
 		};
-		CHECK(with([](strata::files::manifest&) {}) == verdict::opens);
+		CHECK(with([](strata::files::log_state&) {}) == verdict::opens);
 		// A mask bit this binary cannot read: unsupported, before any segment opens.
-		CHECK(with([](strata::files::manifest& m) { m.mask |= bit::points; }) == verdict::unsupported);
-		CHECK(with([](strata::files::manifest& m) { m.mask |= bit::compact; }) == verdict::unsupported);
-		CHECK(with([](strata::files::manifest& m) { m.mask |= std::uint64_t(1) << 40; }) == verdict::unsupported);  // bits 32 to 63 (F13-R40)
-		CHECK(with([](strata::files::manifest& m) { m.mask |= std::uint64_t(1) << 63; }) == verdict::unsupported);
+		CHECK(with([](strata::files::log_state& m) { m.mask |= bit::points; }) == verdict::unsupported);
+		CHECK(with([](strata::files::log_state& m) { m.mask |= bit::compact; }) == verdict::unsupported);
+		CHECK(with([](strata::files::log_state& m) { m.mask |= std::uint64_t(1) << 40; }) == verdict::unsupported);  // bits 32 to 63 (F13-R40)
+		CHECK(with([](strata::files::log_state& m) { m.mask |= std::uint64_t(1) << 63; }) == verdict::unsupported);
 		// A later release's field (a values generation) under a mask bit this binary lacks: the
 		// mask is classified first, so unsupported; the field alone is damage (F13-R42).
-		CHECK(with([](strata::files::manifest& m) {
+		CHECK(with([](strata::files::log_state& m) {
 			m.mask |= std::uint64_t(1) << 20;
-			m.segments.back().values_generation = 1;
+			m.segments.rbegin()->second.values_generation = 1;
 		}) == verdict::unsupported);
-		CHECK(with([](strata::files::manifest& m) { m.segments.back().values_generation = 1; }) == verdict::corrupt);
-		CHECK(with([](strata::files::manifest& m) {
+		CHECK(with([](strata::files::log_state& m) { m.segments.rbegin()->second.values_generation = 1; }) == verdict::corrupt);
+		CHECK(with([](strata::files::log_state& m) {
 			m.mask |= std::uint64_t(1) << 20;
-			m.fields = {1, 10, 0};
+			m.fields.append({"later", strata::field_role::indexed, strata::field_postings::docs, false});
 		}) == verdict::unsupported);
 		// A highest segment version above this binary's: unsupported.
-		CHECK(with([](strata::files::manifest& m) { m.max_version = strata::format::version + 1; }) == verdict::unsupported);
+		CHECK(with([](strata::files::log_state& m) { m.max_version = strata::format::version + 1; }) == verdict::unsupported);
 		// An index an earlier pre-freeze build wrote: unsupported (CR11).
-		CHECK(with([](strata::files::manifest& m) { m.min_version = m.max_version = 0x8000'0008; }) == verdict::unsupported);
+		CHECK(with([](strata::files::log_state& m) { m.min_version = m.max_version = 0x8000'0008; }) == verdict::unsupported);
 		// A segment that sets a bit outside its manifest's mask: damage.
-		CHECK(with([](strata::files::manifest& m) { m.mask = m.configured = bit::inverted | bit::norms | bit::keys; }) == verdict::corrupt);
+		CHECK(with([](strata::files::log_state& m) { m.mask = m.configured = bit::inverted | bit::norms | bit::keys; }) == verdict::corrupt);
 		// Configured bits no flush could write: damage at open (CR5). Clearing stored is a
 		// valid configuration.
-		CHECK(with([](strata::files::manifest& m) { m.configured = bit::inverted | bit::norms | bit::stored; }) == verdict::other);  // keys off: a keyless index, which a keyed request refuses (F3)
-		CHECK(with([](strata::files::manifest& m) { m.configured = bit::norms | bit::keys | bit::stored; }) == verdict::corrupt);    // norms without inverted
-		CHECK(with([](strata::files::manifest& m) { m.configured = bit::inverted | bit::norms | bit::keys; }) == verdict::opens);
+		CHECK(with([](strata::files::log_state& m) { m.configured = bit::inverted | bit::norms | bit::stored; }) == verdict::other);  // keys off: a keyless index, which a keyed request refuses (F3)
+		CHECK(with([](strata::files::log_state& m) { m.configured = bit::norms | bit::keys | bit::stored; }) == verdict::corrupt);    // norms without inverted
+		CHECK(with([](strata::files::log_state& m) { m.configured = bit::inverted | bit::norms | bit::keys; }) == verdict::opens);
 		// A version-1 manifest: unsupported.
 		{
 			strata::faultfs::filesystem fs;
 			strata::faultfs::io io(fs);
 			const auto gen = make(io);
 			const std::string v1 = read_file(std::string(PROSPECT_FIXTURES) + "/format12/manifest.bin");
-			auto f = io.open_existing(strata::index_detail::manifest_name(gen));
-			f->truncate(0);
-			f->write_at(0, v1);
+			put_log(io, gen, v1);
 			CHECK(open_index(io, o) == verdict::unsupported);
 		}
 		// install refuses a checkpoint whose mask holds a bit this binary cannot read.
@@ -619,9 +625,9 @@ int main() {
 				CHECK(apply(a, upsert("Q1", "w")) == strata::verdict::accepted);
 				gen = a.checkpoint();
 			}
-			rewrite(fs_a, io_a, gen, [](strata::files::manifest& m) {
+			rewrite(fs_a, io_a, gen, [](strata::files::log_state& m) {
 				m.mask |= bit::points;
-				m.segments.back().values_generation = 1;  // a later field under it: still unsupported (F13-R42)
+				m.segments.rbegin()->second.values_generation = 1;  // a later field under it: still unsupported (F13-R42)
 			});
 			auto b = prospect::index::create(io_b, o, {});
 			bool unsupported = false;
@@ -639,7 +645,7 @@ int main() {
 				return std::string(ix.segments()[i].seg()->core().section(section::header).bytes.substr(strata::format::identity_offset, 16));
 			};
 			auto entry_id = [](const prospect::index& ix, std::size_t i) {
-				const auto& id = ix.manifest().segments[i].identity;
+				const auto& id = std::next(ix.manifest().segments.begin(), i)->second.identity;
 				return std::string(reinterpret_cast<const char*>(id.data()), 16);
 			};
 			strata::faultfs::filesystem fs_a, fs_b;
@@ -667,15 +673,15 @@ int main() {
 		}
 		{
 			// A manifest entry naming another identity than its file's: damage, before any read.
-			CHECK(with([](strata::files::manifest& m) { m.segments.back().identity[15] ^= 1; }) == verdict::corrupt);
+			CHECK(with([](strata::files::log_state& m) { m.segments.rbegin()->second.identity[15] ^= 1; }) == verdict::corrupt);
 			// A segment attribute this binary lacks (F13-R43): a required one refuses the index, a
 			// cache opens and leaves at the next commit.
-			CHECK(with([](strata::files::manifest& m) { m.segments.back().attributes = {{1, "later"}}; }) == verdict::unsupported);
-			CHECK(with([](strata::files::manifest& m) { m.segments.back().attributes = {{2, "bounds"}}; }) == verdict::opens);
+			CHECK(with([](strata::files::log_state& m) { m.segments.rbegin()->second.attributes = {{1, "later"}}; }) == verdict::unsupported);
+			CHECK(with([](strata::files::log_state& m) { m.segments.rbegin()->second.attributes = {{2, "bounds"}}; }) == verdict::opens);
 			// An index attribute this binary lacks (F13-R51): the same rule at the index level.
-			CHECK(with([](strata::files::manifest& m) { m.attributes = {{1, "later"}}; }) == verdict::unsupported);
-			CHECK(with([](strata::files::manifest& m) { m.attributes = {{2, "tier"}}; }) == verdict::opens);
-			CHECK(with([](strata::files::manifest& m) { m.attributes = {{4, ""}, {2, ""}}; }) == verdict::corrupt);
+			CHECK(with([](strata::files::log_state& m) { m.attributes = {{1, "later"}}; }) == verdict::unsupported);
+			CHECK(with([](strata::files::log_state& m) { m.attributes = {{2, "tier"}}; }) == verdict::opens);
+			CHECK(with([](strata::files::log_state& m) { m.attributes = {{4, ""}, {2, ""}}; }) == verdict::corrupt);
 		}
 		// install: a checkpoint with a required index attribute this binary lacks is unsupported;
 		// one with a cache installs, and the target keeps its own index state (F13-R51).
@@ -688,7 +694,7 @@ int main() {
 				CHECK(apply(a, upsert("Q1", "w")) == strata::verdict::accepted);
 				gen = a.checkpoint();
 			}
-			rewrite(fs_a, io_a, gen, [&](strata::files::manifest& m) { m.attributes = {{tag, "replica"}}; });
+			rewrite(fs_a, io_a, gen, [&](strata::files::log_state& m) { m.attributes = {{tag, "replica"}}; });
 			auto b = prospect::index::create(io_b, o, {});
 			bool unsupported = false;
 			try {
@@ -704,13 +710,13 @@ int main() {
 			strata::faultfs::filesystem fs;
 			strata::faultfs::io io(fs);
 			const auto gen = make(io);
-			rewrite(fs, io, gen, [](strata::files::manifest& m) { m.attributes = {{2, "tier"}}; });
+			rewrite(fs, io, gen, [](strata::files::log_state& m) { m.attributes = {{2, "tier"}}; });
 			auto ix = prospect::index::open(io, o);
 			CHECK(apply(ix, upsert("Q9", "z")) == strata::verdict::accepted);
 			ix.commit();
 			CHECK(ix.manifest().generation > gen && ix.manifest().attributes.empty());
-			const std::string raw(fs.view(strata::index_detail::manifest_name(ix.manifest().generation)));
-			CHECK(raw.find("tier") == std::string::npos);
+			// The log keeps the old snapshot; its replay to the head has no attribute.
+			CHECK(strata::index_detail::read_state(io, ix.manifest().generation).attributes.empty());
 		}
 		// install refuses a checkpoint whose configured bits no flush could write (CR5).
 		{
@@ -722,7 +728,7 @@ int main() {
 				CHECK(apply(a, upsert("Q1", "w")) == strata::verdict::accepted);
 				gen = a.checkpoint();
 			}
-			rewrite(fs_a, io_a, gen, [](strata::files::manifest& m) { m.configured &= ~bit::inverted; });  // norms without inverted
+			rewrite(fs_a, io_a, gen, [](strata::files::log_state& m) { m.configured &= ~bit::inverted; });  // norms without inverted
 			auto b = prospect::index::create(io_b, o, {});
 			bool corrupt = false;
 			try {
