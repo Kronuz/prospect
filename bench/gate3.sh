@@ -3,7 +3,8 @@
 # bench/ and the engine's source, then runs a step here. Each step prints the setup it ran
 # with and stops at the first unmet assertion ("ASSERT:"); its files land in $OUT.
 #   gate3.sh prepare                      build prospect_engine and the one-thread baselines; print the setup
-#   gate3.sh smoke                        every step below end to end at 20,000 documents
+#   gate3.sh smoke                        every step below end to end at 20,000 documents, the
+#                                         baselines' kept indexes left alone
 #   gate3.sh unit ENGINE TAG              one keyed indexing run (T4) of DOCS documents (default: the 5M
 #                                         corpus), the baselines with NO_MERGE=1: times, peak RSS, cgroup
 #                                         peaks, segments, bytes. KEEP=1 keeps it as engines/ENGINE/idx
@@ -16,7 +17,8 @@
 #                                         engines/IDX/idx (prospect-merged), over SETs (queries terms-stratified)
 #   gate3.sh servemem ENGINE...           serving memory over the gate queries (bench/serve_mem.py)
 #   gate3.sh wamp MODE                    write amplification (T3, bench/write_amp.sh) of DOCS documents
-#                                         (default 1,000,000), MODE append or replace, every engine keyed
+#                                         (default 1,000,000), MODE append or replace, every engine keyed;
+#                                         LUCENE_RAM_MB and TANTIVY_HEAP_MB size the baselines' buffers
 #   gate3.sh parity                       tools/parity.cc (TREE_SRC's) against the oracle's rank vectors at 1,
 #                                         4, and 16 segments, and with deletes (PARITY_DELETES=7) at 4 and 16
 # Engines: prospect (PROSPECT_SRC, PROSPECT_BUDGET_MB, PROSPECT_THREADS), tantivy-0.26-st,
@@ -37,6 +39,11 @@ corpus() {  # the corpus file for DOCS
 	if [ "$d" = all ]; then echo "$h/corpus.json"; return; fi
 	[ -f "$h/corpus-$d.json" ] || head -n "$d" "$h/corpus.json" > "$h/corpus-$d.json"
 	echo "$h/corpus-$d.json"
+}
+
+lines_of() {  # FILE: its documents (non-empty lines), cached beside it; a cold read of the 5M corpus takes minutes
+	[ "$1.lines" -nt "$1" ] || grep -c . "$1" > "$1.lines"
+	cat "$1.lines"
 }
 
 segments_of() {  # ENGINE DIR LOG
@@ -79,6 +86,8 @@ prepare() {
 		echo "query baseline $e: $n segments, $(du -sb engines/$e/idx | cut -f1) bytes"
 		[ "$n" = 1 ] || die "$e's index has $n segments, not 1"
 	done
+	local d
+	for d in all 1000000 500000 20000; do echo "corpus $d: $(lines_of "$(DOCS=$d corpus)") documents"; done
 }
 
 unit() {  # ENGINE TAG
@@ -98,7 +107,7 @@ unit() {  # ENGINE TAG
 	[ "$e" != prospect ] || [ -n "${PROSPECT_BUDGET_MB:-}" ] || die "unit prospect needs PROSPECT_BUDGET_MB"
 	res=$OUT/unit-$tag-$e
 	sync; echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
-	log "unit $tag $e: $(wc -l < "$c") lines of $(basename "$c")"
+	log "unit $tag $e: $(lines_of "$c") documents of $(basename "$c")"
 	# The corpus comes through a pipe from outside the cgroup, so its pages are not charged.
 	cat "$c" | KEYED=1 NO_MERGE=1 ~/bench/cgmem.sh "$res.cg" /usr/bin/time -v -o "$res.time" "${cmd[@]}" > "$res.log" 2>&1 \
 		|| { tail -20 "$res.log"; die "unit $tag $e failed"; }
@@ -109,10 +118,10 @@ unit() {  # ENGINE TAG
 	rss=$(awk -F': ' '/Maximum resident/ {print $2}' "$res.time")
 	segs=$(segments_of "$e" "$dir" "$res.log")
 	bytes=$(du -sb "$dir" | cut -f1)
-	docs=$(wc -l < "$c")
+	docs=$(lines_of "$c")
 	if [ "$e" = prospect ]; then
 		docs=$(grep -o 'index: [0-9]* documents' "$res.log" | awk '{print $2}')
-		[ "$docs" = "$(grep -c . "$c")" ] || die "prospect indexed $docs documents of $(grep -c . "$c")"
+		[ "$docs" = "$(lines_of "$c")" ] || die "prospect indexed $docs documents of $(lines_of "$c")"
 	fi
 	[ "${segs:-0}" -ge 1 ] || die "$e left no segments"
 	read -r cg_peak cg_cur cg_anon cg_file cg_mapped < "$res.cg"
@@ -240,7 +249,9 @@ parity() {
 
 smoke() {
 	export DOCS=20000 KEEP=1 PROSPECT_BUDGET_MB=4  # a budget small enough for several segments
-	for e in prospect tantivy-0.26-st lucene-10.4.0-st; do unit "$e" smoke; done
+	unit prospect smoke
+	# The baselines' kept indexes are the 5M unmerged ones the "before merging" rows read.
+	for e in tantivy-0.26-st lucene-10.4.0-st; do KEEP=0 unit "$e" smoke; done
 	merge
 	sections
 	local idx set
@@ -249,7 +260,7 @@ smoke() {
 		tail -1 "$OUT/verify-$idx-dry.txt"
 		grep -q ' 0 mismatches' "$OUT/verify-$idx-dry.txt" || die "verify $idx has mismatches"
 	done
-	WARMUP_TIME=1 NUM_ITER=2 queries 1 queries-dry prospect prospect-merged tantivy-0.26-st lucene-10.4.0-st
+	WARMUP_TIME=1 NUM_ITER=2 queries 1 queries-dry prospect prospect-merged
 	allocs prospect-merged queries-dry
 	log "smoke passed"
 }
