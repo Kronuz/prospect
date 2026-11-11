@@ -78,7 +78,8 @@ prepare() {
 	file "$engine" | tee "$OUT/engine.file"
 	grep -q 'x86-64' "$OUT/engine.file" || die "prospect_engine is not an x86-64 binary"
 	for e in tantivy-0.26-st lucene-10.4.0-st; do
-		make -s -C engines/$e compile > "$OUT/compile-$e.log" 2>&1 || { tail -30 "$OUT/compile-$e.log"; die "$e build failed"; }
+		# -B: the Makefile's pattern rule has no prerequisites, so a stale builder binary stayed.
+		make -B -s -C engines/$e compile > "$OUT/compile-$e.log" 2>&1 || { tail -30 "$OUT/compile-$e.log"; die "$e build failed"; }
 	done
 	# The "after merging" baselines: their builders force-merged them (one segment each).
 	for e in lucene-10.4.0 lucene-10.4.0-bp tantivy-0.26; do

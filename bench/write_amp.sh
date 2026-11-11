@@ -1,17 +1,18 @@
 #!/bin/bash
-# T3 write amplification on Linux: bytes the device wrote while each engine indexed, over
-# the index's final bytes, counted the same way for every engine (the block device's
-# sectors written in /proc/diskstats, so commits, merges, and metadata all count). Run on a
-# quiet VM: anything else writing to the device counts too. Append-only, and with
-# REPLACES=1 a stream where half the documents replace an earlier one by id (keyed
-# engines). Results in ~/bench/results/wamp-NAME.
+# T3 write amplification on Linux: bytes each engine wrote while it indexed, over the index's
+# final bytes, with no force merge (NO_MERGE=1 for the baselines' builders). "written" is the
+# page-cache bytes the process dirtied (getrusage's ru_oublock through GNU time), so flushes,
+# merges, and files deleted before writeback all count whatever the engine's sync policy;
+# "device" is the block device's sectors written (/proc/diskstats), which misses files deleted
+# before writeback. Run on a quiet VM. Append-only, and with REPLACES=1 a stream where half the
+# documents replace an earlier one by id (keyed engines). Results in ~/bench/results/wamp-NAME.
 #   PROSPECT_BUDGET_MB=N [ENGINES="prospect lucene-10.4.0-st tantivy-0.26-st"] [DOCS=1000000|all] [REPLACES=1] write_amp.sh NAME
 set -u
 name=${1:-run}
 cd ~/bench/search-benchmark-game
 out=~/bench/results/wamp-$name
 mkdir -p "$out"
-export PATH=$HOME/.cargo/bin:$PATH KEYED=1
+export PATH=$HOME/.cargo/bin:$PATH KEYED=1 NO_MERGE=1
 # Equal memory (T3): prospect runs on the node budget whose peak RSS matches the reference
 # engine's (bench/calibrate_rss.sh); buffer settings are not comparable across engines.
 [ -n "${PROSPECT_BUDGET_MB:-}" ] || { echo "PROSPECT_BUDGET_MB is required: run calibrate_rss.sh"; exit 1; }
@@ -55,11 +56,12 @@ for e in "${engines[@]}"; do
 	esac
 	sync; echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null
 	before=$(written)
-	"${cmd[@]}" < "$corpus" > "$out/$e.log" 2>&1 || { echo "UNIT_FAILED $e"; failed=1; continue; }
+	/usr/bin/time -f %O -o "$out/$e.oublock" "${cmd[@]}" < "$corpus" > "$out/$e.log" 2>&1 || { echo "UNIT_FAILED $e"; failed=1; continue; }
 	sync
 	after=$(written)
+	dirtied=$(($(tail -1 "$out/$e.oublock") * 512))
 	final=$(find "$dir" -type f -exec stat -c%s {} + | awk '{n += $1} END {print n}')
-	echo "$e written $((after - before)) final $final amplification $(awk -v w=$((after - before)) -v f="$final" 'BEGIN { printf "%.3f", w / f }')" | tee "$out/$e.result"
+	echo "$e written $dirtied device $((after - before)) final $final amplification $(awk -v w="$dirtied" -v f="$final" 'BEGIN { printf "%.3f", w / f }') device_amplification $(awk -v w=$((after - before)) -v f="$final" 'BEGIN { printf "%.3f", w / f }')" | tee "$out/$e.result"
 	rm -rf "$dir"
 done
 [ "$failed" = 0 ] || exit 1
