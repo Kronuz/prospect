@@ -8,20 +8,27 @@
 //      host's callbacks, and releases the pinned view; so does destroying a suspended task.
 //   4. The pin holds across suspensions; a short query finishes while a long one is suspended;
 //      a suspended search may resume on another thread.
+//   5. An exhaustive scan that runs a host visitor or key per match yields at least every 256
+//      ordinals with the same hits and aggregates; one without host work keeps 4,096-ordinal windows.
+// `sliced_test bench [docs] [reps]` times the exhaustive scan per match instead (docs/perf/scan-slices.md).
 #include "shards_fixture.hh"
 #include "prospect/aggregate.hh"
 #include "prospect/slice.hh"
 #include "task.hh"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <optional>
+#include <string_view>
 #include <thread>
+#include <vector>
 
 static std::atomic<int> failures{0};
 #define CHECK(cond) \
@@ -541,9 +548,153 @@ void threads() {
 	for (std::size_t i = 0; i < got.size(); ++i) { CHECK(got[i] && got[i]->hits == reference[i % queries.size()].hits && got[i]->count == reference[i % queries.size()].count); }
 }
 
+// --- 5. a window of host work -----------------------------------------------------------------------
+
+// A search on a 0 ns slice, with the host calls each resume ran.
+struct per_resume {
+	std::optional<search_result> value;
+	std::vector<std::uint64_t> calls;
+	std::uint64_t most() const { return calls.empty() ? 0 : *std::max_element(calls.begin(), calls.end()); }
+	std::size_t yields() const { return calls.empty() ? 0 : calls.size() - 1; }
+};
+
+per_resume drive_per_resume(const multi_snapshot& multi, const scorer_builder& build, const search_options& o, const std::uint64_t& calls) {
+	task::inline_scheduler sched;
+	task::budget b(std::chrono::nanoseconds(0));
+	per_resume out;
+	task::spawn(task::scheduler_ref::of(sched), search_task(multi, build, o, slice{b}), [&](std::exception_ptr e, std::optional<search_result> v) {
+		CHECK(!e);
+		out.value = std::move(v);
+	});
+	// Checked before each resume and once after the last: each later call closes the previous resume.
+	bool started = false;
+	std::uint64_t last = 0;
+	sched.run_until([&] {
+		if (started) { out.calls.push_back(calls - last); }
+		started = true;
+		last = calls;
+		return false;
+	});
+	return out;
+}
+
+void host_windows() {
+	std::mt19937_64 r(256);
+	constexpr std::size_t n = 2;
+	const auto docs = big_docs(r, n, 60000);
+	std::set<std::pair<std::size_t, std::uint64_t>> dead;
+	for (const auto& d : docs) {
+		if (r() % 40 == 0) { dead.insert({d.shard, d.did}); }
+	}
+	const auto set = build_shards(docs, n, r, 2, dead);
+	const multi_snapshot multi(set.inputs());
+	std::map<std::uint64_t, std::string> key_of;
+	for (const auto& d : docs) { key_of[interleave_docid(d.did, d.shard, n)] = d.key; }
+	std::size_t windows = 0;
+	for (const auto& s : multi.segments()) { windows += (s.seg->core().max_docid() + 4095) / 4096 + 1; }
+	const agg::request req = aggregation();
+	for (const query& q : std::vector<query>{{"OR", {"a", "b"}}, {"AND", {"a", "b"}}}) {
+		const auto build = builder_for(q, multi, false);
+		for (int v = 0; v < 4; ++v) {  // 0 visitor feeding aggregations; 1 key; 2 key and visitor; 3 descending docids, no host work
+			std::uint64_t calls = 0;  // one per match: the visitor's, or the key's when there is no visitor
+			std::shared_ptr<agg::partial> partial;
+			auto options = [&] {
+				search_options o;
+				o.k = 10;
+				if (v == 1 || v == 2) {
+					o.key = [&calls, &key_of, v](const match& m) {
+						calls += v == 1;
+						return key_of.at(m.docid);
+					};
+				}
+				if (v == 0 || v == 2) {
+					partial = std::make_shared<agg::partial>(req);
+					o.visit = [&calls, partial](const match& m) {
+						++calls;
+						match_document doc;
+						doc.docid = m.docid;
+						partial->collect(doc);
+					};
+				}
+				if (v == 3) { o.order = docid_order::descending; }
+				return o;
+			};
+			const auto render = [&] { return partial ? agg::render(req, partial->finish()) : std::string(); };
+			const auto reference = search(multi, build, options());
+			const std::string reference_aggregates = render();
+			const auto o = options();
+			calls = 0;
+			const auto got = drive_per_resume(multi, build, o, calls);
+			CHECK(got.value && got.value->hits == reference.hits && got.value->count == reference.count);
+			CHECK(render() == reference_aggregates);
+			const std::uint64_t matches = reference.count.value_or(0);
+			CHECK(matches > 4096);
+			if (v < 3) {
+				CHECK(calls == matches);
+				CHECK(got.most() <= 256);              // a resume runs at most one window of 256 ordinals
+				CHECK(got.yields() * 256 >= matches);  // so it yields at least once per 256 matches
+			} else {
+				CHECK(got.yields() <= windows);        // no host work: windows of 4,096 ordinals
+			}
+			std::printf("  host windows: %s v%d, %llu matches, %zu yields, at most %llu per resume\n", q.kind.c_str(), v, (unsigned long long)matches, got.yields(), (unsigned long long)got.most());
+		}
+	}
+}
+
+// --- bench: the exhaustive scan per match -------------------------------------------------------------
+
+// ns per match of an exhaustive scan of TERM a over one segment, the median of `reps` timed runs after
+// one warm-up, per arm: plain (descending docids, no host work), count (a visitor that counts) and agg
+// (the visitor feeding aggregation()); each unsliced and on a 200 us slice whose resumes run at once.
+int bench(int argc, char** argv) {
+	const std::size_t count = argc > 2 ? std::size_t(std::strtoull(argv[2], nullptr, 10)) : 200000;
+	const int reps = argc > 3 ? std::atoi(argv[3]) : 15;
+	std::mt19937_64 r(4096);
+	const auto docs = big_docs(r, 1, count);
+	const auto set = build_shards(docs, 1, r, 1);
+	const multi_snapshot multi(set.inputs());
+	const query q{"TERM", {"a"}};  // the builder keeps a reference to it
+	const auto build = builder_for(q, multi, false);
+	const agg::request req = aggregation();
+	std::uint64_t sink = 0;
+	for (const std::string arm : {"plain", "count", "agg"}) {
+		for (const bool sliced : {false, true}) {
+			std::vector<double> ns;
+			std::uint64_t matches = 0;
+			for (int i = 0; i <= reps; ++i) {
+				search_options o;
+				o.k = 10;
+				std::shared_ptr<agg::partial> partial;
+				if (arm == "plain") { o.order = docid_order::descending; }
+				if (arm == "count") { o.visit = [&sink](const match& m) { sink += m.ord; }; }
+				if (arm == "agg") {
+					partial = std::make_shared<agg::partial>(req);
+					o.visit = [partial](const match& m) {
+						match_document doc;
+						doc.docid = m.docid;
+						partial->collect(doc);
+					};
+				}
+				const auto t0 = std::chrono::steady_clock::now();
+				const auto res = sliced ? drive<search_result>([&](task::budget& b) { return search_task(multi, build, o, slice{b}); }, std::chrono::microseconds(200)).value : search(multi, build, o);
+				const auto t1 = std::chrono::steady_clock::now();
+				CHECK(res && res->count);
+				matches = res && res->count ? *res->count : 0;
+				sink += res && !res->hits.empty() ? res->hits.front().docid : 0;
+				if (i > 0 && matches) { ns.push_back(std::chrono::duration<double, std::nano>(t1 - t0).count() / double(matches)); }
+			}
+			std::sort(ns.begin(), ns.end());
+			std::printf("bench %s %s %.3f ns/match (%llu matches, %d reps)\n", arm.c_str(), sliced ? "sliced" : "unsliced", ns.empty() ? 0.0 : ns[ns.size() / 2], (unsigned long long)matches, reps);
+		}
+	}
+	std::fprintf(stderr, "sink %llu\n", (unsigned long long)sink);
+	return failures ? 1 : 0;
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+	if (argc > 1 && std::string_view(argv[1]) == "bench") { return bench(argc, argv); }
 	identity(std::getenv("SLICED_ROUNDS") ? std::atoi(std::getenv("SLICED_ROUNDS")) : 12);
 	big(3, 2, 54000, true);  // several segments per shard, with deletions: the multi-segment collector, live_scorer
 	big(1, 1, 24000, false);  // one segment, no deletions: top_k alone, and the scorers' own bulk loops
@@ -551,6 +702,7 @@ int main() {
 	cancellation();
 	sharing();
 	threads();
+	host_windows();
 	if (failures) {
 		std::fprintf(stderr, "%d failures\n", failures.load());
 		return 1;
