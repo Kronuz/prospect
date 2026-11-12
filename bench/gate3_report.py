@@ -68,27 +68,28 @@ def indexing(dirs: list[str], ref: str | None, budget_mb: float | None) -> None:
         )
     ratios: list[float] = []
     for tag, per in sorted(by_tag.items()):
-        p = per.get("prospect")
         others = {e: u for e, u in per.items() if not e.startswith("prospect")}
         if ref:
             others = {e: u for e, u in others.items() if e == ref}
-        if not p or not others:
+        if not others:
             continue
         e, u = min(others.items(), key=lambda eu: float(eu[1]["wall_s"]))
-        r = float(p["wall_s"]) / float(u["wall_s"])
-        ratios.append(r)
-        rss = int(p["max_rss_kb"]) / int(u["max_rss_kb"])
-        print(
-            f"\n{tag}: prospect {r:.3f}x {e}'s wall time ({1 / r:.2f}x faster), peak RSS {rss:.2f}x",
-            end="",
-        )
-        b = budget_mb or (float(p["budget_mb"]) if p.get("budget_mb") else None)
-        if b:
-            over = int(p["max_rss_kb"]) / 1024 / b
+        # Each prospect unit in the tag (prospect, prospect-8t) against the fastest other.
+        for pe, p in sorted(x for x in per.items() if x[0].startswith("prospect")):
+            r = float(p["wall_s"]) / float(u["wall_s"])
+            ratios.append(r)
+            rss = int(p["max_rss_kb"]) / int(u["max_rss_kb"])
             print(
-                f", {over:.2f}x the {b:,.0f} MiB budget ({'within' if over <= 1.1 else 'past'} budget + 10%)",
+                f"\n{tag}: {pe} {r:.3f}x {e}'s wall time ({1 / r:.2f}x faster), peak RSS {rss:.2f}x",
                 end="",
             )
+            b = budget_mb or (float(p["budget_mb"]) if p.get("budget_mb") else None)
+            if b:
+                over = int(p["max_rss_kb"]) / 1024 / b
+                print(
+                    f", {over:.2f}x the {b:,.0f} MiB budget ({'within' if over <= 1.1 else 'past'} budget + 10%)",
+                    end="",
+                )
     print()
     if len(ratios) >= 2:
         lo, hi = interval(ratios)
