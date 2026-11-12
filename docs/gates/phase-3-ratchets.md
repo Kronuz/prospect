@@ -128,9 +128,9 @@ bootstrap intervals of the median over the runs named.
 per job, `WARMUP_TIME=5`, `NUM_ITER=5` (format 13's row 4b settings: a 20 s warm-up for each
 engine and command does not fit two trials in 10 minutes), counts equal on every query. The
 row pools both jobs' trials (D59's second run), scored by `bench/phase2/gate.py --target 1.0`
-and classified by `bench/query_verdicts.py`: pass when the interval's upper bound is at most
-1.0x, miss when its lower bound is above, straddle otherwise. A class beating a JVM engine by
-less than 10% is reported as within the warm-up caveat, not as a pass
+and classified by `bench/query_verdicts.py` (prospect `42e1c0a`): pass when the interval's
+upper bound is at most 1.0x, miss when its lower bound is above, straddle otherwise. A class
+beating a JVM engine by less than 10% is reported as within the warm-up caveat, not as a pass
 (`docs/perf/format13-gate-vm.md`, "The warm-up"). The caveat is real: against the 20 s trials at
 9b88263 on unchanged query code, prospect and Tantivy ran 2% to 25% faster per command while
 Lucene `-bp` ran 0.99x to 1.05x its time, so ratios against the JVM engines here may flatter
@@ -228,7 +228,7 @@ gate's quest, after Phase 3's code.
 | Lucene with reordering | the harness engine `lucene-10.4.0-bp`; keyed with `BP=1` in `bench/engines/lucene-10.4.0-st` | Recursive graph bisection at force merge (`BPReorderingMergePolicy`, a 256 MB budget); the query baseline beside Lucene and Tantivy, and the disk reference (`results/keyed-bp-n2.sizes`) |
 | Allocation-counting build | `bench/alloc_count.c`, `bench/allocs.py`; `gate3.sh allocs` | An `LD_PRELOAD` shim over the release binary counting every heap allocation and its bytes at each stdin read; `allocs.py` sends one query at a time and reports allocations per query by command and class, flagging a class whose allocations grow with its matches |
 | cgroup memory tool | `bench/cgmem.sh` (every `gate3.sh unit`); `bench/serve_mem.py` (`gate3.sh servemem`) | Runs a command in its own cgroup v2: `memory.peak` and the peaks of anon, file, and file_mapped sampled every 0.2 s, beside GNU time's peak RSS |
-| A runner that scores all four axes | `bench/gate3.sh` (steps as campaign jobs via `tools/vm/gate_job.sh`), `bench/gate3_report.py`, `bench/query_verdicts.py` | Indexing time, CPU, and peaks per unit with trial ratios and intervals; disk per section against keyed Lucene `-bp`; write amplification; serving memory; query speed through `bench/phase2/gate.py`, each class's verdict and binding engine through `query_verdicts.py` |
+| A runner that scores all four axes | `bench/gate3.sh` (steps as campaign jobs via `tools/vm/gate_job.sh`), `bench/gate3_report.py` | Indexing time, CPU, and peaks per unit with trial ratios and intervals; disk per section against keyed Lucene `-bp`; write amplification; serving memory; query speed through `bench/phase2/gate.py`; each class's verdict and binding engine through `bench/query_verdicts.py`, and the eight-thread ratio through `gate3_report.py`, at prospect `42e1c0a`, outside the measured tree |
 
 ## Indexing, 1 thread (gate VM, Linux x86_64)
 
