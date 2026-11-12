@@ -109,6 +109,10 @@ public:
 		return inner_->open_existing(name);
 	}
 	std::unique_ptr<kronuz::journal::File> create_exclusive(std::string_view name) override { return inner_->create_exclusive(name); }
+	std::unique_ptr<kronuz::journal::File> open_existing_read_only(std::string_view n) override { return inner_->open_existing_read_only(n); }
+	void open_existing_read_only_into(std::string_view n, kronuz::journal::File& f) override { inner_->open_existing_read_only_into(n, f); }
+	std::unique_ptr<kronuz::journal::File> open_reclaim_candidate_read_only(std::string_view n) override { return inner_->open_reclaim_candidate_read_only(n); }
+	bool open_reclaim_candidate_read_only_into(std::string_view n, kronuz::journal::File& f) override { return inner_->open_reclaim_candidate_read_only_into(n, f); }
 	void replace(std::string_view a, std::string_view b) override { inner_->replace(a, b); }
 	void remove(std::string_view name) override { inner_->remove(name); }
 	std::unique_ptr<kronuz::journal::DirectoryCursor> scan_directory() override { return inner_->scan_directory(); }
@@ -1392,7 +1396,17 @@ int main() {
 		std::string changed = kept;
 		changed[changed.size() - 30] ^= 1;  // in the footer the manifest's CRC covers
 		f->write_at(0, changed);
-		CHECK(throws([&] { prospect::index::open(io, keyed); }));
+		// Same size: the open succeeds and the first map finds the footer's checksum wrong.
+		auto ix = prospect::index::open(io, keyed);
+		const auto segs = ix.segments();
+		const auto id = segs[0].id;
+		bool corrupt = false;
+		try {
+			segs[0].seg();
+		} catch (const strata::corrupt_segment&) {
+			corrupt = true;
+		}
+		CHECK(corrupt && ix.needs_heal() && ix.heal() == std::vector<std::uint64_t>{id});
 	}
 	// The memory budget: permits draw and return bytes; two indexes sharing a small budget
 	// stay within it plus one transaction, flush into several segments, and reach the same
@@ -1780,15 +1794,24 @@ int main() {
 			}
 		}
 		CHECK(first == (error == EIO ? "corrupt" : "itself"));
+		// The open makes no segment read; the first map's two reads fail. Only EIO marks the
+		// segment, and a host error leaves it readable once the IO recovers.
 		std::string what = "none";
-		try {
-			prospect::index::open(f, keyed);
-		} catch (const strata::corrupt_index&) {
-			what = "corrupt";
-		} catch (const std::system_error& e) {
-			what = e.code().value() == error ? "itself" : "another error";
+		auto ix = prospect::index::open(f, keyed);
+		{
+			const auto segs = ix.segments();
+			try {
+				segs[0].seg();
+			} catch (const strata::corrupt_segment&) {
+				what = "corrupt";
+			} catch (const std::system_error& e) {
+				what = e.code().value() == error ? "itself" : "another error";
+			}
+			CHECK(what == (error == EIO ? "corrupt" : "itself"));
+			CHECK(ix.needs_heal() == (error == EIO));
+			if (error != EIO) { CHECK(segs[0].seg()->core().doc_count() == 1); }
 		}
-		CHECK(what == (error == EIO ? "corrupt" : "itself"));
+		if (error == EIO) { CHECK(ix.heal().empty() && !ix.needs_heal()); }  // the file reads whole again
 	}
 	// A kept generation that never reads (a damaged pinned checkpoint in an older log) stops
 	// retention, which the index reports; releasing the pin resumes it (condition 13).

@@ -185,6 +185,10 @@ struct search_result {
 	std::optional<std::uint64_t> count;
 };
 
+// A scan that runs the host's visitor or key per match checks its slice every this many ordinals,
+// so a window of host work stays near 0.15 ms at 0.5 us a match (docs/perf/scan-slices.md).
+inline constexpr std::uint64_t host_window_ordinals = 256;
+
 // Every live match of every shard, once each: the collector behind key sorts, spies and
 // descending docids. Hits are kept in a heap of the k best, so memory is k hits plus their keys.
 class exhaustive_search {
@@ -234,8 +238,9 @@ private:
 		m.shard = shard;
 		m.seg = snap.seg;
 		m.scorer_ = q.get();
+		const std::uint64_t span = o_.visit || (o_.key && o_.k) ? host_window_ordinals : window_ordinals;
 		auto window = [&](ordinal_t d) {
-			const std::uint64_t end = (std::uint64_t(d) | (window_ordinals - 1)) + 1;
+			const std::uint64_t end = (std::uint64_t(d) | (span - 1)) + 1;
 			scorer& sc = *q;
 			for (; d != no_more_docs && d < end; d = sc.next()) {
 				++count_;
