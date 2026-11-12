@@ -35,19 +35,18 @@ The pin's own suite: all 51 of `prospect:850d4e8`'s tests pass at the release's 
 |---|---|---|
 | A1 merge parity and verify | pass | 261111-201053-f77c3a, 261111-201056-33db85 |
 | A2 operator parity | pass | 261111-201050-c7d247, 261111-201053-f77c3a, 261111-201230-8ef3e1 |
-| A3 one shard against many | pass, prospect's collectors | 261111-201050-c7d247 |
+| A3 one shard against many | **miss** at the release's level; prospect's collectors pass | 261111-201050-c7d247 (prospect's evidence only) |
 | A4 stemmer vocabularies | **miss**: six names | 261111-201059-749f46 |
-| A5 fuzzing and versions | pass, zero findings | 261111-201102-4af80d, 24 fuzz jobs, 261111-201050-c7d247 |
-| A6 ASan and UBSan | pass | CI run 43153036741 |
+| A5 fuzzing and versions | **miss** as one CPU-hour; zero findings; versions pass | 261111-201102-4af80d, 24 fuzz jobs, 261111-201050-c7d247 |
+| A6 ASan and UBSan | pass | 261111-223819-03f694, CI run 43153036741 |
 
 ### A1: merging and deletes
 
 `parity` (`tools/parity.cc`) indexes 10,000 documents of the corpus and runs the oracle's 419
 ranked queries (`strata-oracle` `rank.jsonl`, Xapian 2.1.0) on each index. Every pass also checks
-that the pruned top 10 equals the counted one, and that every hit is a live document appearing
-once.
+that the pruned top 10 equals the counted one, and that no hit is a deleted extra or repeats.
 
-| Index | Counts equal | Top 10 equal | Pruned = counted | Live, unique | Worst relative error |
+| Index | Counts equal | Top 10 equal | Pruned = counted | No deleted extra or repeat | Worst relative error |
 |---|---:|---:|---:|---:|---:|
 | 1 segment | 419/419 | 419/419 | 419/419 | 419/419 | 3.87e-16 |
 | 4 segments | 419/419 | 419/419 | 419/419 | 419/419 | 3.87e-16 |
@@ -79,10 +78,11 @@ covers correctness across segments and merges, not scale.
 These are the operators Xapiand's query DSL serves (`src/query_dsl.cc`), with the vectors each
 was compared on. `operators_test` compares each query's match count and its top 50 (docid,
 weight), counted and pruned, with Xapian's recorded `ops` vectors. `parity` compares the
-count and the top 10 on `rank.jsonl` at 1, 4 and 16 segments. `shards_test` compares 3,696 rows
+count and the top 10 on `rank.jsonl` at 1, 4 and 16 segments, and after each merge with deletes
+(the exact passes; before those merges, 157 of 419 top 10s match, as A1 says). `shards_test` compares 3,696 rows
 of the sharded vectors (`shards-s*.jsonl`, 6 files).
 
-| Operator | `operators_test` | `parity` (each pass) |
+| Operator | `operators_test` | `parity` (each exact pass) |
 |---|---:|---:|
 | AND | 100 | 100/100 |
 | OR | 78 | 144/144 |
@@ -104,12 +104,16 @@ Every compared row equals the oracle's. Rows not compared:
 - WILDCARD and EDIT_DISTANCE: Xapiand expands each into OR, SYNONYM or MAX over the matching
   terms in its own code. The operators they expand into are covered above. The expansion
   itself is Xapiand's and needs a Xapiand test.
+- Value and geo ranges (`_range`): Xapiand serves them as posting sources in its own
+  `src/multivalue/range.cc` and `geospatialrange.cc`; they need a Xapiand test.
+- `match_all` (behind `_not`, `match_all` and `match_none`): not in the vectors; it needs a
+  Xapiand test.
 - ELITE_SET is no longer served by Xapiand master. Its 83 rows are still compared and equal
   (4 tied at the cutoff and skipped, 20 over composite children recorded only).
 - n-ary SCALE_WEIGHT: Xapian refuses every recorded row, and `operators_test` checks that
   prospect refuses a negative factor the same way.
 
-### A3: aggregations over one shard and over many
+### A3: aggregations over one shard and over many (miss)
 
 `aggregate_test`'s indexed section builds 60 rounds of random multi-valued documents with
 deletes, each round in 1 shard and in 2 to 7 shards over random segments. The shards'
@@ -122,10 +126,11 @@ documents deleted, all equal. `shards_test`'s visitor row saw each of 145,089 li
 exactly once. The in-memory section compares every split into 1 to 64 partials with brute
 force.
 
-Scope: this row proves prospect's collectors. Xapiand master serves aggregations from its own
-`src/aggregations` (long double sums, results in shard order), not through prospect's
-collectors. The same row at Xapiand's level needs a Xapiand test; the lead filed it as a hunt
-row. prospect's terms collector has no `_shard_size` cutoff: its partials are exact and merge
+Scope: this proves prospect's collectors, which the release does not use. Xapiand master serves
+aggregations from its own `src/aggregations` (long double sums, results in shard order) and
+never includes `prospect/aggregate.hh`. Decision (the lead, on review F1): A3 is a miss at the
+release's level. prospect's 16-kind test stays as prospect's evidence; the release's row is hunt
+row 91 (a Xapiand shard-parity test), and A3 is re-run when it lands. prospect's terms collector has no `_shard_size` cutoff: its partials are exact and merge
 exactly. Counts past `_shard_size` are approximate by design (behavior-changes audit #25), and
 that approximation lives in Xapiand's layer, so this row does not touch it.
 
@@ -163,7 +168,7 @@ swedish and sv 30,738; turkish and tr 96,325.
 Decision (the lead): the row is recorded as a miss. The fix is the hunt row "Six stemmer
 names", a separate quest, and this row is re-run when it lands.
 
-### A5: decoders
+### A5: decoders (miss as one CPU-hour)
 
 The release reads one versioned format from prospect: the segment file (`.sx`; the postings,
 values, field-dictionary and stored sections live inside it). prospect's other wire form,
@@ -172,9 +177,10 @@ in the pin's suite.
 
 Fuzzing: four libFuzzer targets built with ASan and UBSan at the release pins (job
 261111-201102-4af80d), seeded from `fuzz/corpus/*`. Each ran six seeds for 600 s with
-`-rss_limit_mb=2048 -timeout=10`, one hour per decoder and four in all, under light holds.
+`-rss_limit_mb=2048 -timeout=10`: an hour of wall-clock time per decoder at nice 19, under light
+holds beside the other row jobs. CPU time was not measured.
 
-| Target | Seeds | Executions per run | exec/s | Coverage | Peak RSS | Findings |
+| Target | Seeds | Executions per run (with the replayed seeds) | exec/s | Coverage | Peak RSS | Findings |
 |---|---|---:|---:|---:|---:|---:|
 | `fuzz_segment` | 1-6 | 2,142-3,526 | 3-5 | 6,443-6,485 | 357-383 MB | 0 |
 | `fuzz_postings` | 1-6 | 4,662-5,671 | 7-9 | 3,911-3,914 | 1,586-2,045 MB | 0 |
@@ -189,9 +195,20 @@ Jobs: segment 261111-201105-74a86d, 261111-201108-63232e, 261111-201111-fb8de3,
 261111-201159-483e21, 261111-201202-8c50a4, 261111-201206-73d52f, 261111-201209-32089f,
 261111-201213-5cf20a, 261111-201216-328810.
 
-Coverage is flat across seeds, so the hour reached a plateau, not a frontier. Executions are
-slow because each input opens a segment under ASan. Earlier records show the same rates
-(`fuzz/MEMORY.md`, `docs/reviews/f13-query-code.md`).
+The hour did not reach a plateau. Each of the 24 runs was still adding new inputs in its last
+0 to 8% of executions (segment seed 2's last new unit came at execution 2,534 of 2,534,
+fielddict seed 2's at 19,587 of 19,587). Coverage looks flat across seeds because the runs
+barely left the seed corpus. Over the coverage of the replayed seeds, postings gained 0 to 3
+edges per run, values 8 to 18 and segment 60 to 102; fielddict's runs diverged (4,598 to 4,758).
+`fuzz_segment`'s length limit stayed at 26 bytes for the whole run. Without the replayed seeds
+(about 989, 844, 279 and 756), about 10k (segment), 26k (postings), 68k (values) and 110k
+(fielddict) mutated inputs ran per decoder. Every run started from the same seed corpus and its
+new units were discarded, so each decoder got six independent 10-minute starts, not an hour of
+progress. Executions are slow because each input opens a segment under ASan; earlier records
+show the same rates (`fuzz/MEMORY.md`, `docs/reviews/f13-query-code.md`).
+
+Decision (the lead, on review F2): A5 is a miss as "one CPU-hour", with zero findings. Follow-ups:
+hunt row 92 (the slow targets) and keeping the corpus across runs so the hour accumulates.
 
 `fuzz_postings` peaked at 1,586 to 2,045 MB, and seed 6 came within 3 MB of the limit. This is
 the growth `fuzz/MEMORY.md` records: strata's stored-section check decodes each frame afresh,
@@ -206,15 +223,21 @@ fixture is refused as `unsupported_segment` at 10 unknown versions: version + 1,
 min_read_version - 1, 0x80000000, 0x80000008, 14, 13, 12, 1, 0 and 0xffffffff. A refused file is
 never read and never fenced as damage. Each of 8 format-12 fixtures is refused the same way.
 Result: 19 fixtures, 118 of 118 refusals. The corpus replays (986 segment, 841 postings, 275
-values and 751 field-dictionary inputs) pass in the Release build at the pins.
+values and 751 field-dictionary inputs) pass in the Release build at the pins. The doc-value
+column's own version byte (`include/prospect/docvalues.hh:281`) is refused as corrupt, not
+unsupported, and has no fixture; the segment version that governs it is the one tested.
 
 ### A6: sanitizers
 
+At the release pins: the reviewer's probe 261111-223819-03f694 built the eight row tests and
+`parity` with CI's ASan+UBSan flags (Debug, -O1) at Xapiand's pins and ran them, plus parity at 4
+segments and with deletes. It exited 0 in 912 s, with all 8 tests passing and no sanitizer
+report, and reproduced the rows' numbers. The fuzz targets above are ASan+UBSan builds at the
+same pins.
+
 CI run 43153036741 at `prospect:2cc69d4` is green on every platform, including
 `linux-asan-ubsan`, which runs the whole suite (the row tests among it) under ASan and UBSan,
-and `linux-tsan`. CI builds at prospect's own pins (strata main), not Xapiand's. At the release
-pins, the sanitized evidence is the fuzz runs above, whose ASan+UBSan targets ran their corpora
-and an hour of new inputs per decoder.
+and `linux-tsan`. CI builds at prospect's own pins (strata main), not Xapiand's.
 
 ## Differences from the oracle
 
@@ -223,6 +246,15 @@ and an hour of new inputs per decoder.
 | A4 | `earlyenglish`, `german2`, `nb`, `nn` stemmed by Xapian, refused by snowball | behavior change, open: hunt row "Six stemmer names" | the lead |
 | A4 | `english_lovins`, `english_porter` accepted by the schema, refused by both stemmers | open, same hunt row | the lead |
 | A1 | weights before a merge with deletes (157 of 419 top 10s equal, worst relative error 0.0536) | by design: statistics count deleted documents until a merge; counts exact, everything exact after the merge | the row's definition (`phase3-ratchets` A6) |
+
+## Residuals
+
+- `parity`'s live check (`h.ord < n`) catches only the deleted extras past N, not the deleted
+  older versions that reuse docids 1 to N; the exact counts cover those (review F5).
+- `parity`, `verify`, `stems` and `fuzz` trust that their commit-named binary directory was
+  filled by a `build` or `fuzz-build` that asserted the pins; nothing stamps it (review F7).
+- The doc-value column's version byte is refused as corrupt and has no fixture of its own (review
+  F8, A5).
 
 ## Reproducing
 
