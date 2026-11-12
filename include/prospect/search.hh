@@ -191,6 +191,14 @@ struct hit {
 	double score;
 };
 
+// Match-count bounds with an estimate between them, as Xapian reports them: lower <= matches
+// <= upper, equal when every match was counted.
+struct triple {
+	std::uint64_t lower = 0, estimate = 0, upper = 0;
+	bool exact() const noexcept { return lower == upper; }
+	bool operator==(const triple&) const = default;
+};
+
 // The threshold one segment's collection hands down once the k-th score is known: the score
 // itself, so blocks bounded at it are skipped (a later tie has a larger ordinal, hence a larger
 // docid, and never enters). Built with PROSPECT_EXPERIMENT_NO_EQUAL_SKIP, the score just below
@@ -243,6 +251,7 @@ struct top_collector {
 			return;
 		}
 		hits.push_back({score, d, cur_, 0});
+		++entered;
 		if (hits.size() >= 2 * k) { truncate(); }
 	}
 	// The k best of one segment, as ordinals, best first.
@@ -267,6 +276,7 @@ struct top_collector {
 	std::size_t k;
 	bool counting;           // every match must be counted: no skipping by score
 	std::uint64_t count = 0;
+	std::uint64_t entered = 0;  // hits that entered the buffer, each a distinct match
 
 private:
 	static constexpr std::uint32_t none = ~std::uint32_t(0);

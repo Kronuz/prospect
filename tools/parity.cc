@@ -308,7 +308,9 @@ int main(int argc, char** argv) {
 			for (auto& h : out) { h.ord = strata::ordinal_t(seg.core().docid(h.ord) - 1); }
 			return out;
 		}
-		auto hits = prospect::search(snaps, [&](const prospect::segment& sg) { return build(sg, q, wqf, snap); }, 10, count);
+		prospect::match_count counted;
+		auto hits = prospect::search(snaps, [&](const prospect::segment& sg) { return build(sg, q, wqf, snap); }, 10, count ? &counted : nullptr);
+		if (count) { *count = counted.bounds.exact() ? counted.bounds.lower : ~std::uint64_t(0); }
 		for (const auto& h : hits) { out.push_back({strata::ordinal_t(h.docid - 1), h.score}); }
 		return out;
 	};

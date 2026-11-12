@@ -166,8 +166,10 @@ using match_visitor = std::function<void(const match&)>;
 
 struct search_options {
 	std::size_t k = 10;  // hits kept: the window's end (first + maxitems)
-	// Also report the number of matches. An exhaustive search always does.
-	bool count = false;
+	// Also report bounds on the number of matches (Xapian's check_at_least, D10): every match is
+	// counted while at most this many are, so the bounds meet whenever there are no more;
+	// match_count::every counts them all. An exhaustive search always counts every match.
+	std::optional<std::uint64_t> check_at_least;
 	// Hits sort by key ascending, then by relevance, then by docid; `reverse_key` flips the key.
 	// An empty `key` sorts by relevance, then by docid.
 	host_key key;
@@ -182,7 +184,7 @@ struct search_options {
 
 struct search_result {
 	std::vector<doc_hit> hits;  // best first, docids across the shards
-	std::optional<std::uint64_t> count;
+	std::optional<triple> matches;
 };
 
 // Every live match of every shard, once each: the collector behind key sorts, spies and
@@ -198,7 +200,7 @@ public:
 		}
 		std::sort_heap(heap_.begin(), heap_.end(), less());
 		search_result out;
-		out.count = count_;
+		out.matches = triple{count_, count_, count_};
 		out.hits.reserve(heap_.size());
 		for (const auto& e : heap_) { out.hits.push_back({e.docid, e.score}); }
 		co_return out;
@@ -289,12 +291,13 @@ private:
 inline task::task<search_result> search_task(const multi_snapshot& snap, const scorer_builder& build, const search_options& o, slice sl) {
 	if (o.exhaustive()) { co_return co_await exhaustive_search(snap, build, o).run(sl); }
 	search_result out;
-	std::uint64_t total = 0;
+	// One count spans the shards, so check_at_least is the whole search's (bounds add: shards
+	// hold disjoint documents).
+	std::optional<match_count> count;
+	if (o.check_at_least) { count = match_count{*o.check_at_least}; }
 	const std::size_t shards = snap.shard_count();
 	for (std::size_t s = 0; s < shards; ++s) {
-		std::uint64_t n = 0;
-		for (const auto& h : co_await search_task(snap.segments(s), build, o.k, o.count ? &n : nullptr, sl)) { out.hits.push_back({interleave_docid(h.docid, s, shards), h.score}); }
-		total += n;
+		for (const auto& h : co_await search_task(snap.segments(s), build, o.k, count ? &*count : nullptr, sl)) { out.hits.push_back({interleave_docid(h.docid, s, shards), h.score}); }
 	}
 	const auto best = [](const doc_hit& a, const doc_hit& b) { return a.score != b.score ? a.score > b.score : a.docid < b.docid; };
 	if (out.hits.size() > o.k) {
@@ -303,7 +306,7 @@ inline task::task<search_result> search_task(const multi_snapshot& snap, const s
 	} else {
 		std::sort(out.hits.begin(), out.hits.end(), best);
 	}
-	if (o.count) { out.count = total; }
+	if (count) { out.matches = count->bounds; }
 	co_return out;
 }
 

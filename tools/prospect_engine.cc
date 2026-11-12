@@ -459,10 +459,10 @@ int verify_index(const std::string& dir) {
 			bool ok = prospect::search_count(view, builder) == scan.size();
 			for (const std::size_t k : {10u, 100u, 1000u}) {
 				for (const bool with_count : {true, false}) {
-					std::uint64_t counted = 0;
+					prospect::match_count counted;
 					const auto hits = prospect::search(view, builder, k, with_count ? &counted : nullptr);
 					const std::size_t n = std::min<std::size_t>(k, scan.size());
-					ok = ok && (!with_count || counted == scan.size()) && hits.size() == n;
+					ok = ok && (!with_count || (counted.bounds.exact() && counted.bounds.lower == scan.size())) && hits.size() == n;
 					for (std::size_t a = 0; ok && a < n;) {
 						std::size_t b = a + 1;
 						while (b < n && close(scan[b].score, scan[a].score)) { ++b; }
@@ -509,9 +509,9 @@ int dump(const std::string& dir) {
 		const parsed p = parse(q);
 		for (const auto scheme : {prospect::scheme::bm25, prospect::scheme::bm25_xapian}) {
 			for (std::size_t k : {10u, 100u, 1000u}) {
-				std::uint64_t n = 0;
+				prospect::match_count n;
 				const auto hits = search_snapshot(segs, p, k, scheme, with_count ? &n : nullptr);
-				std::printf("%s\t%d\t%zu\t%llu", q.c_str(), int(scheme), k, (unsigned long long)n);
+				std::printf("%s\t%d\t%zu\t%llu", q.c_str(), int(scheme), k, (unsigned long long)n.bounds.lower);
 				for (const auto& h : hits) { std::printf(" %llu:%a", (unsigned long long)h.docid, h.score); }
 				std::printf("\n");
 			}

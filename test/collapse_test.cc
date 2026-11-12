@@ -175,7 +175,7 @@ void check_collapse(std::mt19937_64& rng) {
 		std::vector<std::vector<doc>> split(shards);
 		for (const auto& d : docs) { split[rng() % shards].push_back(d); }
 		std::vector<co::result<item>> partials;
-		std::vector<co::triple> collapsed, uncollapsed;
+		std::vector<prospect::triple> collapsed, uncollapsed;
 		for (const auto& part : split) {
 			co::collapser<item, by_score> c(collapse_max);
 			for (const auto& d : part) { c.add(d.it, d.key); }
@@ -196,18 +196,18 @@ void check_collapse(std::mt19937_64& rng) {
 		CHECK(c.lower <= total && total <= c.upper);
 		CHECK(c.lower <= c.estimate && c.estimate <= c.upper);
 		const auto u = co::merge_uncollapsed(uncollapsed);
-		CHECK(u == (co::triple{docs.size(), docs.size(), docs.size()}));
+		CHECK(u == (prospect::triple{docs.size(), docs.size(), docs.size()}));
 	}
 }
 
 void check_triples() {
-	const std::vector<co::triple> a{{1, 2, 3}, {4, 5, 6}};
-	CHECK(co::merge_uncollapsed(a) == (co::triple{5, 7, 9}));
-	const std::vector<co::triple> b{{3, 4, 10}, {5, 6, 7}};
-	CHECK(co::merge_collapsed(b) == (co::triple{5, 10, 17}));
-	const std::vector<co::triple> c{{0, 0, 1}, {7, 7, 9}};
-	CHECK(co::merge_collapsed(c) == (co::triple{7, 7, 10}));
-	CHECK(co::merge_collapsed(std::vector<co::triple>{}) == co::triple{});
+	const std::vector<prospect::triple> a{{1, 2, 3}, {4, 5, 6}};
+	CHECK(co::merge_uncollapsed(a) == (prospect::triple{5, 7, 9}));
+	const std::vector<prospect::triple> b{{3, 4, 10}, {5, 6, 7}};
+	CHECK(co::merge_collapsed(b) == (prospect::triple{5, 10, 17}));
+	const std::vector<prospect::triple> c{{0, 0, 1}, {7, 7, 9}};
+	CHECK(co::merge_collapsed(c) == (prospect::triple{7, 7, 10}));
+	CHECK(co::merge_collapsed(std::vector<prospect::triple>{}) == prospect::triple{});
 }
 
 }  // namespace

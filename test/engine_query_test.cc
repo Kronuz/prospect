@@ -273,9 +273,9 @@ static void check_interleaved(std::mt19937_64& r) {
 			const engine::parsed q = engine::parse(w);
 			const auto want = scan(view, q, scheme::bm25);
 			for (std::size_t k : {1u, 10u, 100u}) {
-				std::uint64_t n = 0;
+				match_count n;
 				const auto got = engine::search_snapshot(view, q, k, scheme::bm25, &n);
-				CHECK(n == want.size());
+				CHECK(n.bounds == (triple{want.size(), want.size(), want.size()}));
 				CHECK(got == std::vector<doc_hit>(want.begin(), want.begin() + std::ptrdiff_t(std::min(k, want.size()))));
 			}
 		}
@@ -388,18 +388,18 @@ int main() {
 			auto reference = [&](const segment& seg) { return reference_build(seg, q, sch, ref); };
 			CHECK(search_count(segs, reference) == counted);
 			for (std::size_t k : {1u, 10u, 100u, 1000u}) {
-				std::uint64_t n = 0;
+				match_count n;
 				const auto got = engine::search_snapshot(segs, q, k, sch, &n);
-				CHECK(n == counted);
-				std::uint64_t ref_n = 0;
+				CHECK(n.bounds == (triple{counted, counted, counted}));
+				match_count ref_n;
 				CHECK(search(segs, reference, k, &ref_n) == got);
-				CHECK(ref_n == n);
+				CHECK(ref_n.bounds == n.bounds);
 				check_against_scan(got, want, k);
 				check_against_scan(engine::search_snapshot(segs, q, k, sch), want, k);
 				if (!deletes) {
-					std::uint64_t single_n = 0;
+					match_count single_n;
 					CHECK(engine::search_snapshot(single_snap, q, k, sch, &single_n) == got);
-					CHECK(single_n == n);
+					CHECK(single_n.bounds == n.bounds);
 				}
 			}
 		}

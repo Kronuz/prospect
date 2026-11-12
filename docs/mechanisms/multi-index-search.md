@@ -50,8 +50,26 @@ Without a key, a visitor or descending docids, each shard runs the existing `sea
 pruning, counting shortcuts) with the global weights, and the lists merge by score descending, then
 interleaved docid ascending, truncated to `k`. This is exact: a document in the top `k` of the whole is in
 the top `k` of its own shard, since the shard's ranking is the whole's ranking restricted to it (the
-order within a shard is the same in both numberings). Counts add. A threshold shared between shards would
-prune more; it is not built.
+order within a shard is the same in both numberings). A threshold shared between shards would prune
+more; it is not built.
+
+## Match counts
+
+`search_options::check_at_least` asks for bounds on the number of live matches, Xapian's lower bound,
+estimate and upper bound (`search_result::matches`, a `triple`; phase-4 D10). One `match_count` spans
+the shards, so `check_at_least` is the whole search's:
+
+1. A segment is counted exactly while the matches counted so far are at most `check_at_least`. It then
+   adds its count to all three, and its collection does not prune by score (a count known from
+   statistics, such as a term's frequency in a segment without deletes, leaves it free to prune).
+2. Every later segment prunes. It adds the hits that entered the collector (each a distinct live
+   match) to the lower bound, its live documents to the upper bound, and its scorer's cost, held
+   between the two, to the estimate.
+
+So the bounds always hold the true count (tier 2), and they meet at it whenever the matches are no more
+than `check_at_least` (tier 1): every segment is then reached with at most that many counted.
+`match_count::every` counts every match; an exhaustive search always does. Tier 3, the estimate equal to
+Xapian's when the bounds differ, is not claimed: Xapian's estimate depends on its matcher.
 
 ## Exhaustive search
 
@@ -84,9 +102,8 @@ also fills the hit list, so a request with hits and aggregations scans once.
 
 1. Collapse, percent and weight thresholds, and `get_eset`: the census saw none of them.
 2. `_percent` of a hit (relative to the global best hit's weight): computed by the caller from the first hit.
-3. Match estimates at `check_at_least` 0: strata counts exactly when asked (`count`), which is Xapian's
-   estimate when it checks everything (tier 1). Xapian stops after `check_at_least` documents, so its
-   bounds meet only below that.
+3. A finer switch from counting to pruning inside a segment, once `check_at_least` matches are counted:
+   today the segment that crosses it is counted whole.
 4. A threshold shared between shards in the pruned path; shards in parallel (the snapshot is read-only,
    `shards_test` runs searches from four threads).
 

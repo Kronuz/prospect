@@ -40,6 +40,23 @@ namespace {
 using namespace shards_fixture;
 using shards_fixture::built;
 
+// The search's match count when its bounds meet, else none.
+std::optional<std::uint64_t> exact_of(const search_result& r) {
+	if (!r.matches || !r.matches->exact()) { return std::nullopt; }
+	return r.matches->lower;
+}
+
+// D10's tiers for a search at `at_least` against the counted one, `all`: the same hits, bounds
+// that hold the true count with the estimate between them (tier 2), and exact when the
+// matches are no more than at_least (tier 1).
+bool tiers_hold(const search_result& got, const search_result& all, std::uint64_t at_least) {
+	if (!got.matches || !exact_of(all) || got.hits != all.hits) { return false; }
+	const triple& t = *got.matches;
+	const std::uint64_t truth = *exact_of(all);
+	if (!(t.lower <= truth && truth <= t.upper && t.lower <= t.estimate && t.estimate <= t.upper)) { return false; }
+	return truth > at_least || (t.exact() && t.lower == truth && t.estimate == truth);
+}
+
 // --- 1. the numbering ------------------------------------------------------------------------------
 
 void numbering() {
@@ -194,18 +211,18 @@ void oracle(const std::string& dir) {
 				for (const bool force : {false, true}) {
 					search_options o;
 					o.k = 25;
-					o.count = true;
+					o.check_at_least = match_count::every;
 					o.order = order;
 					o.reverse_key = reverse;
 					if (keyed) { o.key = [&](const match& m) { return key_of.at(m.docid); }; }
 					if (force) { o.visit = [](const match&) {}; }
 					const auto got = search(snap, build_fn, o);
 					CHECK(got.hits.size() == want.size());
-					CHECK(got.count && *got.count >= std::stoull(field(line, "lower")) && *got.count <= std::stoull(field(line, "upper")));
+					CHECK(exact_of(got) && *exact_of(got) >= std::stoull(field(line, "lower")) && *exact_of(got) <= std::stoull(field(line, "upper")));
 					// Xapian stops once `check_at_least` documents are checked, so its bounds meet only when the
 					// matches are fewer than that (tier 1) or when it has seen the end.
-					if (got.count && (*got.count < check || std::stoull(field(line, "lower")) == std::stoull(field(line, "upper")))) {
-						CHECK(*got.count == std::stoull(field(line, "lower")) && *got.count == std::stoull(field(line, "upper")) && *got.count == std::stoull(field(line, "estimated")));
+					if (exact_of(got) && (*exact_of(got) < check || std::stoull(field(line, "lower")) == std::stoull(field(line, "upper")))) {
+						CHECK(*exact_of(got) == std::stoull(field(line, "lower")) && *exact_of(got) == std::stoull(field(line, "upper")) && *exact_of(got) == std::stoull(field(line, "estimated")));
 					}
 					for (std::size_t h = 0; h < got.hits.size() && h < want.size(); ++h) {
 						CHECK(near_eq(got.hits[h].score, want[h].second));
@@ -219,6 +236,24 @@ void oracle(const std::string& dir) {
 							const auto &a = key_of.at(got.hits[h - 1].docid), &b = key_of.at(got.hits[h].docid);
 							CHECK(reverse ? a >= b : a <= b);
 						}
+					}
+				}
+				// Bounded counts (D10): at Xapian's own check_at_least, the bounds meet at Xapian's
+				// exact triple whenever the matches are no more; around the true count, every tier holds.
+				search_options o;
+				o.k = 25;
+				o.order = order;
+				o.reverse_key = reverse;
+				if (keyed) { o.key = [&](const match& m) { return key_of.at(m.docid); }; }
+				o.check_at_least = match_count::every;
+				const auto all = search(snap, build_fn, o);
+				const std::uint64_t truth = exact_of(all).value_or(0);
+				for (const std::uint64_t at : {check, std::uint64_t(0), std::uint64_t(1), truth ? truth - 1 : 0, truth, truth + 1}) {
+					o.check_at_least = at;
+					const auto got = search(snap, build_fn, o);
+					CHECK(tiers_hold(got, all, at));
+					if (at == check && truth <= check && got.matches) {
+						CHECK(got.matches->lower == std::stoull(field(line, "lower")) && got.matches->upper == std::stoull(field(line, "upper")) && got.matches->estimate == std::stoull(field(line, "estimated")));
 					}
 				}
 				++rows;
@@ -282,15 +317,22 @@ void identity(int rounds) {
 				// Relevance, pruned: shards equal the merged index and the model.
 				search_options o;
 				o.k = k;
-				o.count = true;
+				o.check_at_least = match_count::every;
 				const auto got = search(multi, b_multi, o), ref = search(one, b_one, o);
-				CHECK(got.count && ref.count && *got.count == *ref.count && *got.count == all.size());
+				CHECK(exact_of(got) && exact_of(ref) && *exact_of(got) == *exact_of(ref) && *exact_of(got) == all.size());
 				CHECK(got.hits == ref.hits);  // exactly: ids, order and score bits
 				auto sorted = all;
 				sort_model(sorted, false, false, docid_order::ascending);
 				std::vector<doc_hit> expect;
 				for (std::size_t i = 0; i < std::min(k, sorted.size()); ++i) { expect.push_back({sorted[i].docid, sorted[i].score}); }
 				CHECK(same_hits(got.hits, expect));
+				// Bounded counts over random segmentations and deletes, sharded and merged (D10).
+				for (const std::uint64_t at : {std::uint64_t(0), std::uint64_t(r() % (all.size() + 2)), std::uint64_t(all.size()), std::uint64_t(all.size() ? all.size() - 1 : 0)}) {
+					search_options bo = o;
+					bo.check_at_least = at;
+					CHECK(tiers_hold(search(multi, b_multi, bo), got, at));
+					CHECK(tiers_hold(search(one, b_one, bo), ref, at));
+				}
 				++compared;
 				// Exhaustive paths: key, descending docids, a visitor, each against the model
 				// (exactly: same scorer calls) and the merged index.
@@ -303,7 +345,7 @@ void identity(int rounds) {
 					if (keyed) { e.key = [&](const match& m) { return key_of.at(m.docid); }; }
 					if (variant == 0 || variant == 5) { e.visit = [](const match&) {}; }
 					const auto x = search(multi, b_multi, e), y = search(one, b_one, e);
-					CHECK(x.count && *x.count == all.size());
+					CHECK(exact_of(x) && *exact_of(x) == all.size());
 					CHECK(x.hits == y.hits);
 					sorted = all;
 					sort_model(sorted, keyed, e.reverse_key, e.order == docid_order::dont_care ? docid_order::ascending : e.order);
@@ -359,7 +401,7 @@ void visitor(int rounds) {
 				const auto got = search(snap, b, o);
 				CHECK(seen.size() == truth.size());
 				for (const auto& [id, times] : seen) { CHECK(times == 1 && truth.count(id)); }
-				CHECK(got.count && *got.count == truth.size());
+				CHECK(exact_of(got) && *exact_of(got) == truth.size());
 				CHECK(got.hits.size() == std::min(k, truth.size()));
 				visited_total += seen.size();
 			}
@@ -384,12 +426,12 @@ void concurrent() {
 		const auto b = builder_for(q, snap, true);
 		search_options o;
 		o.k = 20;
-		o.count = true;
+		o.check_at_least = match_count::every;
 		if (keyed) { o.key = [&](const match& m) { return key_of.at(m.docid); }; }
 		std::uint64_t seen = 0;
 		o.visit = [&](const match&) { ++seen; };
 		auto got = search(snap, b, o);
-		CHECK(got.count && *got.count == seen);
+		CHECK(exact_of(got) && *exact_of(got) == seen);
 		return got;
 	};
 	std::vector<search_result> alone;
@@ -404,7 +446,7 @@ void concurrent() {
 				for (std::size_t i = 0; i < queries.size(); ++i) {
 					const auto got = run(queries[(i + std::size_t(t)) % queries.size()], round % 2);
 					const auto& want = alone[((i + std::size_t(t)) % queries.size()) * 2 + std::size_t(round % 2)];
-					CHECK(got.hits == want.hits && got.count == want.count);
+					CHECK(got.hits == want.hits && exact_of(got) == exact_of(want));
 				}
 			}
 		});
@@ -453,16 +495,16 @@ void lazy_scoring() {
 	o.k = 5;
 	o.key = [&](const match& m) { return key_of.at(m.docid); };
 	const auto got = search(snap, b, o);
-	CHECK(got.count && *got.count > 300);
+	CHECK(exact_of(got) && *exact_of(got) > 300);
 	// Once the heap holds five documents with the smallest keys, a document with a larger key is
 	// rejected on its key alone: most matches are never scored.
-	CHECK(calls < *got.count / 2);
+	CHECK(calls < *exact_of(got) / 2);
 	// Without a key every kept candidate is scored, and a visitor that asks for no score costs none.
 	calls = 0;
 	o.key = nullptr;
 	o.k = 0;
 	o.visit = [](const match&) {};
-	CHECK(search(snap, b, o).count == got.count && calls == 0);
+	CHECK(exact_of(search(snap, b, o)) == exact_of(got) && calls == 0);
 }
 
 // A segment with no documents, and a shard holding only deleted ones, leave the bounds to the others.
@@ -491,10 +533,10 @@ void empty_segments() {
 	// Searching nothing finds nothing.
 	const auto b = [&](const segment&) -> scorer_ptr { return nullptr; };
 	search_options o;
-	o.count = true;
-	CHECK(search(none, b, o).hits.empty() && search(none, b, o).count == 0);
+	o.check_at_least = match_count::every;
+	CHECK(search(none, b, o).hits.empty() && exact_of(search(none, b, o)) == 0);
 	o.visit = [](const match&) {};
-	CHECK(search(none, b, o).hits.empty() && search(none, b, o).count == 0);
+	CHECK(search(none, b, o).hits.empty() && exact_of(search(none, b, o)) == 0);
 }
 
 // --- 5. fields by name (fields-and-keys T5b, D14) ---------------------------------------------------
@@ -598,13 +640,13 @@ void fields_by_name() {
 			for (int path = 0; path < 3; ++path) {
 				search_options so;
 				so.k = 10;
-				so.count = true;
+				so.check_at_least = match_count::every;
 				if (path == 1) { so.key = [](const match& m) { return std::to_string(m.docid % 5); }; }  // the exhaustive path
 				if (path == 2) { so.order = docid_order::descending; }
 				term_table ts(sharded.segments()), t1(single.segments());
 				const auto got = search(sharded, [&](const segment& seg) { return build_fields(seg, q, ts, xapian); }, so);
 				const auto want = search(single, [&](const segment& seg) { return build_fields(seg, q, t1, xapian); }, so);
-				CHECK(got.count == want.count);
+				CHECK(exact_of(got) == exact_of(want));
 				CHECK(got.hits.size() == want.hits.size());
 				for (std::size_t i = 0; i < std::min(got.hits.size(), want.hits.size()); ++i) {
 					CHECK(got.hits[i].docid == want.hits[i].docid);

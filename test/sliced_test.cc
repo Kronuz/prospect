@@ -138,7 +138,7 @@ agg::request aggregation() {
 struct answer {
 	search_result result;
 	std::string aggregates;
-	bool operator==(const answer& o) const { return result.hits == o.result.hits && result.count == o.result.count && aggregates == o.aggregates; }
+	bool operator==(const answer& o) const { return result.hits == o.result.hits && result.matches == o.result.matches && aggregates == o.aggregates; }
 };
 
 // The variants of an exhaustive search plus the pruned one, each as a function of the slice.
@@ -158,7 +158,7 @@ void identity_on(const multi_snapshot& multi, const std::map<std::uint64_t, std:
 			auto options = [&]() {
 				search_options o;
 				o.k = k;
-				o.count = v == 0;
+				if (v == 0) { o.check_at_least = match_count::every; }
 				if (v == 2 || v == 5) { o.key = [&](const match& m) { return key_of.at(m.docid); }; }
 				if (v == 3) { o.order = docid_order::descending; }
 				if (v == 4 || v == 5) {
@@ -193,7 +193,7 @@ void identity_on(const multi_snapshot& multi, const std::map<std::uint64_t, std:
 			const auto o = options();
 			auto pin = std::make_shared<int>(0);
 			const auto got = drive<search_result>([&](task::budget& b) { return search_pinned(pin, multi, build, o, b); }, std::chrono::nanoseconds(0));
-			CHECK(got.value && got.value->hits == reference.result.hits && got.value->count == reference.result.count);
+			CHECK(got.value && got.value->hits == reference.result.hits && got.value->matches == reference.result.matches);
 			CHECK(pin.use_count() == 1);
 		}
 		const auto reference_count = search_count(multi.segments(), build);
@@ -277,10 +277,10 @@ void big(std::size_t n, unsigned parts, std::size_t count, bool deletes) {
 		for (const std::size_t k : {std::size_t(10), std::size_t(1000)}) {
 			search_options o;
 			o.k = k;
-			o.count = true;
+			o.check_at_least = match_count::every;
 			for (const auto ns : slices) {
 				const auto got = drive<search_result>([&](task::budget& b) { return search_task(multi, build, o, slice{b}); }, ns);
-				CHECK(got.value && got.value->count && *got.value->count == all.size());
+				CHECK(got.value && got.value->matches == (triple{all.size(), all.size(), all.size()}));
 				std::vector<doc_hit> expect;
 				for (std::size_t i = 0; i < std::min(k, all.size()); ++i) { expect.push_back({all[i].docid, all[i].score}); }
 				CHECK(got.value && same_hits(got.value->hits, expect));
@@ -291,7 +291,7 @@ void big(std::size_t n, unsigned parts, std::size_t count, bool deletes) {
 		if (q.kind != "TERM" && q.kind != "AND_MAYBE") {  // a term's count is its frequency; so is a required term's
 			search_options o;
 			o.k = 10;
-			o.count = true;
+			o.check_at_least = match_count::every;
 			const auto got = drive<search_result>([&](task::budget& b) { return search_task(multi, build, o, slice{b}); }, std::chrono::nanoseconds(0));
 			CHECK(got.value && !got.error);
 			CHECK(got.yields() * 10 >= windows * 9);
@@ -317,7 +317,7 @@ void big(std::size_t n, unsigned parts, std::size_t count, bool deletes) {
 				for (const auto& row : all) { all_hits.push_back({row.docid, row.score}); }
 				return all_hits;
 			}()));
-			if (exhaustive) { CHECK(visited == all.size() && got.value && got.value->count && *got.value->count == all.size()); }
+			if (exhaustive) { CHECK(visited == all.size() && got.value && got.value->matches == (triple{all.size(), all.size(), all.size()})); }
 			yielded += got.yields();
 		}
 	}
@@ -354,14 +354,14 @@ void reordered() {
 		for (const std::size_t k : {std::size_t(10), std::size_t(100000)}) {
 			search_options o;
 			o.k = k;
-			o.count = k == 10;
+			if (k == 10) { o.check_at_least = match_count::every; }
 			const auto reference = search(multi, build, o);
 			std::vector<doc_hit> expect;
 			for (std::size_t i = 0; i < std::min(k, all.size()); ++i) { expect.push_back({all[i].docid, all[i].score}); }
 			CHECK(same_hits(reference.hits, expect));
 			for (const auto ns : slices) {
 				const auto got = drive<search_result>([&](task::budget& b) { return search_task(multi, build, o, slice{b}); }, ns);
-				CHECK(got.value && got.value->hits == reference.hits && got.value->count == reference.count);
+				CHECK(got.value && got.value->hits == reference.hits && got.value->matches == reference.matches);
 				if (ns.count() == 0 && k == 100000) { CHECK(got.yields() >= 3); }
 			}
 		}
@@ -382,7 +382,7 @@ void cancellation() {
 		std::atomic<std::uint64_t> visited{0};
 		search_options o;
 		o.k = 10;
-		o.count = true;
+		o.check_at_least = match_count::every;
 		if (variant == 1) { o.visit = [&](const match&) { ++visited; }; }
 		auto pin = std::make_shared<int>(0);
 		std::uint64_t at_cancel = 0;
@@ -410,7 +410,7 @@ void cancellation() {
 		task::budget b(one_hour, cancel.token());
 		search_options o;
 		o.k = 10;
-		o.count = true;
+		o.check_at_least = match_count::every;
 		std::exception_ptr error;
 		task::spawn(task::scheduler_ref::of(sched), search_pinned(pin, multi, build, o, b), [&](std::exception_ptr e, std::optional<search_result>) { error = e; });
 		sched.run();
@@ -424,7 +424,7 @@ void cancellation() {
 		task::budget b(std::chrono::nanoseconds(0));
 		search_options o;
 		o.k = 10;
-		o.count = true;
+		o.check_at_least = match_count::every;
 		{
 			auto t = search_pinned(pin, multi, build, o, b);
 			task::running_on scope(task::scheduler_ref::of(sched));
@@ -450,7 +450,7 @@ void sharing() {
 	std::vector<int> finished;
 	search_options oh, ol;
 	oh.k = ol.k = 10;
-	oh.count = ol.count = true;
+	oh.check_at_least = ol.check_at_least = match_count::every;
 	// The heavy search starts first; the light one, queued behind it, finishes before it.
 	task::spawn(task::scheduler_ref::of(sched), search_pinned(0, multi, heavy_b, oh, budget), [&](std::exception_ptr e, std::optional<search_result>) { CHECK(!e); finished.push_back(1); });
 	task::spawn(task::scheduler_ref::of(sched), search_pinned(0, multi, light_b, ol, budget), [&](std::exception_ptr e, std::optional<search_result>) { CHECK(!e); finished.push_back(2); });
@@ -514,7 +514,7 @@ void threads() {
 	std::vector<search_result> reference;
 	search_options o;
 	o.k = 25;
-	o.count = true;
+	o.check_at_least = match_count::every;
 	for (const auto& q : queries) {
 		builds.push_back(builder_for(q, multi, true));
 		reference.push_back(search(multi, builds.back(), o));
@@ -538,7 +538,7 @@ void threads() {
 		std::unique_lock lock(m);
 		cv.wait(lock, [&] { return finished == got.size(); });
 	}
-	for (std::size_t i = 0; i < got.size(); ++i) { CHECK(got[i] && got[i]->hits == reference[i % queries.size()].hits && got[i]->count == reference[i % queries.size()].count); }
+	for (std::size_t i = 0; i < got.size(); ++i) { CHECK(got[i] && got[i]->hits == reference[i % queries.size()].hits && got[i]->matches == reference[i % queries.size()].matches); }
 }
 
 }  // namespace

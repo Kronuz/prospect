@@ -9,6 +9,7 @@
 #include "strata/core/fields.hh"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <deque>
@@ -46,6 +47,17 @@ struct segment_snapshot {
 			if (w) { return true; }
 		}
 		return false;
+	}
+	// The documents not deleted.
+	std::uint64_t live() const {
+		const std::uint64_t docs = seg->core().doc_count();
+		if (!deleted || dead == 0) { return docs; }
+		std::uint64_t n = dead;
+		if (n == unknown_dead) {
+			n = 0;
+			for (auto w : *deleted) { n += std::uint64_t(std::popcount(w)); }
+		}
+		return docs - std::min(n, docs);
 	}
 };
 
@@ -210,13 +222,37 @@ private:
 // Builds a query's scorer for one segment (null when it matches nothing there).
 using scorer_builder = std::function<scorer_ptr(const segment&)>;
 
-// The k best documents across segments, best first, ties by docid; with count, also the
-// number of live matches. One collector spans the segments (P6-2), keyed by docid, so
+// Bounds on a search's live matches, as Xapian's check_at_least gives them (D10): a segment's
+// matches are counted exactly while the matches counted are at most `at_least`, so the bounds
+// meet whenever there are no more than that; a later segment prunes, bounded below by the hits
+// it collects and above by its live documents. Searches add to `bounds`, so one count spans
+// several calls (the shards of one search).
+struct match_count {
+	static constexpr std::uint64_t every = ~std::uint64_t(0);
+	std::uint64_t at_least = every;
+	triple bounds;
+
+	// Whether the next segment's matches are counted exactly.
+	bool counting() const noexcept { return bounds.upper <= at_least; }
+	void add_exact(std::uint64_t n) noexcept {
+		bounds.lower += n;
+		bounds.estimate += n;
+		bounds.upper += n;
+	}
+	// A pruned segment: `seen` distinct matches collected, `cost` its scorer's estimate.
+	void add_pruned(std::uint64_t seen, std::uint64_t cost, std::uint64_t live) noexcept {
+		bounds.lower += seen;
+		bounds.estimate += std::min(std::max(cost, seen), live);
+		bounds.upper += live;
+	}
+};
+
+// The k best documents across segments, best first, ties by docid; with count, also bounds on
+// the number of live matches. One collector spans the segments (P6-2), keyed by docid, so
 // each segment prunes from the first competitive hit against the k best so far, and from
 // the start above the largest threshold seed of a segment without deletes (F13).
 // Everything it takes by reference must outlive the awaited task; search_pinned owns its inputs.
-inline task::task<std::vector<doc_hit>> search_task(std::span<const segment_snapshot> segs, const scorer_builder& build, std::size_t k, std::uint64_t* count, slice sl) {
-	if (count) { *count = 0; }
+inline task::task<std::vector<doc_hit>> search_task(std::span<const segment_snapshot> segs, const scorer_builder& build, std::size_t k, match_count* count, slice sl) {
 	std::vector<scorer_ptr> queries(segs.size());
 	double floor = 0.0;
 	for (std::size_t i = 0; i < segs.size(); ++i) {
@@ -233,7 +269,14 @@ inline task::task<std::vector<doc_hit>> search_task(std::span<const segment_snap
 		scorer_ptr& q = queries[0];
 		if (!q) { co_return std::vector<doc_hit>{}; }
 		std::vector<doc_hit> out;
-		for (const auto& h : co_await top_k_task(*s.seg, *q, k, count, floor, sl)) { out.push_back({s.seg->core().docid(h.ord), h.score}); }
+		const bool exact = count && count->counting();
+		std::uint64_t n = 0;
+		for (const auto& h : co_await top_k_task(*s.seg, *q, k, exact ? &n : nullptr, floor, sl)) { out.push_back({s.seg->core().docid(h.ord), h.score}); }
+		if (exact) {
+			count->add_exact(n);
+		} else if (count) {
+			count->add_pruned(out.size(), q->cost(), s.live());
+		}
 		co_return out;
 	}
 	std::size_t docs = 0;
@@ -246,24 +289,29 @@ inline task::task<std::vector<doc_hit>> search_task(std::span<const segment_snap
 		const auto& s = segs[i];
 		scorer_ptr& q = queries[i];
 		if (!q) { continue; }
-		// A count known from statistics leaves the collection free to prune.
+		// A count known from statistics leaves the collection free to prune; past the count's
+		// at_least the segment prunes and is bounded by the hits that enter.
 		c.counting = false;
-		if (count) {
+		const bool bounded = count && !count->counting();
+		if (count && !bounded) {
 			if (auto n = co_await q->exact_count(sl)) {
-				*count += *n;
+				count->add_exact(*n);
 			} else {
 				c.counting = true;
 			}
 		}
 		if (!k) {
-			if (c.counting) { *count += co_await count_task(*q, sl); }
+			if (c.counting) { count->add_exact(co_await count_task(*q, sl)); }
+			if (bounded) { count->add_pruned(0, q->cost(), s.live()); }
 			continue;
 		}
 		c.begin(*s.seg);
+		const std::uint64_t entered = c.entered;
 		double min = c.counting ? 0.0 : c.min_competitive();
 		if (min > 0) { q->set_min_competitive_score(min); }
 		if (co_await q->collect_top_k(c, sl)) {
-			if (c.counting) { *count += c.count; }
+			if (c.counting) { count->add_exact(c.count); }
+			if (bounded) { count->add_pruned(c.entered - entered, q->cost(), s.live()); }
 			continue;
 		}
 		std::uint64_t n = 0;
@@ -287,13 +335,14 @@ inline task::task<std::vector<doc_hit>> search_task(std::span<const segment_snap
 			co_await sl.checkpoint();
 			at = window(at);
 		}
-		if (c.counting) { *count += n; }
+		if (c.counting) { count->add_exact(n); }
+		if (bounded) { count->add_pruned(c.entered - entered, q->cost(), s.live()); }
 	}
 	co_return c.finish_docs<doc_hit>();
 }
 
 // search_task run to completion on the calling thread; the caller's view outlives the call.
-inline std::vector<doc_hit> search(std::span<const segment_snapshot> segs, const scorer_builder& build, std::size_t k, std::uint64_t* count = nullptr) {
+inline std::vector<doc_hit> search(std::span<const segment_snapshot> segs, const scorer_builder& build, std::size_t k, match_count* count = nullptr) {
 	return run_unsliced(search_task(segs, build, k, count, slice{}));
 }
 

@@ -180,7 +180,7 @@ inline std::uint64_t run(const prospect::segment& seg, std::string_view command,
 
 // The k best documents of a query over an index's segments, weighted by the snapshot's
 // statistics (D13); with count, also the number of live matches.
-inline std::vector<prospect::doc_hit> search_snapshot(std::span<const prospect::segment_snapshot> segs, const parsed& q, std::size_t k, prospect::scheme scheme = prospect::scheme::bm25, std::uint64_t* count = nullptr) {
+inline std::vector<prospect::doc_hit> search_snapshot(std::span<const prospect::segment_snapshot> segs, const parsed& q, std::size_t k, prospect::scheme scheme = prospect::scheme::bm25, prospect::match_count* count = nullptr) {
 	prospect::term_table table(segs);
 	auto builder = [&](const prospect::segment& seg) { return build(seg, q, scheme, &table); };
 	return prospect::search(segs, builder, k, count);
@@ -225,9 +225,9 @@ inline std::uint64_t run(std::span<const prospect::segment_snapshot> segs, std::
 	if (command == "COUNT") { return count_snapshot(segs, q, scheme); }
 	std::size_t k = 0;
 	std::from_chars(command.data() + 4, command.data() + command.size(), k);
-	std::uint64_t n = 0;
+	prospect::match_count n;
 	(void)search_snapshot(segs, q, k, scheme, command.ends_with("_COUNT") ? &n : nullptr);
-	return command.ends_with("_COUNT") ? n : 1;
+	return command.ends_with("_COUNT") ? n.bounds.lower : 1;
 }
 
 }  // namespace engine

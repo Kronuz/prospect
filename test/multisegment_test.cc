@@ -242,8 +242,10 @@ int main() {
 			auto builder = [&](const segment& seg) { return build(seg, q, st, segs, xapian); };
 			const auto all = scan(segs, builder);
 			for (std::size_t k : {1u, 10u, 100u, 1000u}) {
-				std::uint64_t counted = 0;
-				const auto got = search(segs, builder, k, &counted);
+				match_count count;
+				const auto got = search(segs, builder, k, &count);
+				CHECK(count.bounds.exact());
+				const std::uint64_t counted = count.bounds.lower;
 				const auto pruned = search(segs, builder, k);
 				CHECK(search_count(segs, builder) == counted);
 				CHECK(counted == all.size());
@@ -252,9 +254,9 @@ int main() {
 				if (!deletes) {
 					// One segment with equal statistics answers identically.
 					auto single_builder = [&](const segment& seg) { return build(seg, q, st, single_snap, xapian); };
-					std::uint64_t single_count = 0;
+					match_count single_count;
 					CHECK(search(single_snap, single_builder, k, &single_count) == got);
-					CHECK(single_count == counted);
+					CHECK(single_count.bounds == count.bounds);
 				}
 			}
 		}
@@ -301,9 +303,9 @@ int main() {
 					const std::span<const segment_snapshot> v(*view);
 					const auto all = scan(v, builder);
 					for (std::size_t k : {1u, 10u, 100u, 1000u}) {
-						std::uint64_t counted = 0;
-						const auto got = search(v, builder, k, &counted);
-						CHECK(counted == all.size() && search_count(v, builder) == counted);
+						match_count count;
+						const auto got = search(v, builder, k, &count);
+						CHECK(count.bounds == (triple{all.size(), all.size(), all.size()}) && search_count(v, builder) == all.size());
 						check_against_scan(got, all, k);
 						check_against_scan(search(v, builder, k), all, k);
 					}

@@ -148,8 +148,9 @@ int main(int argc, char** argv) {
 			if (kind == "AND") { return std::make_unique<prospect::conjunction_scorer>(std::move(kids)); }
 			return std::make_unique<prospect::disjunction_scorer>(std::move(kids));
 		};
-		std::uint64_t got_count = 0;
-		const auto got = prospect::search(snaps, builder, 10, &got_count);
+		prospect::match_count counted;
+		const auto got = prospect::search(snaps, builder, 10, &counted);
+		const std::uint64_t got_count = counted.bounds.exact() ? counted.bounds.lower : ~std::uint64_t(0);
 		const std::uint64_t want_count = std::stoull(field_of(rline, "upper"));
 		count_ok += got_count == want_count;
 		std::vector<std::pair<std::uint64_t, double>> want;

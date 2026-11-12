@@ -29,6 +29,7 @@
 #pragma once
 
 #include "prospect/ordered.hh"
+#include "prospect/search.hh"
 #include "varint.hh"
 
 #include <algorithm>
@@ -192,12 +193,6 @@ result<Item> merge(const std::vector<result<Item>>& shards, std::size_t collapse
 	}
 	return std::move(c).take(!exact);
 }
-
-// Match-count bounds with an estimate between them.
-struct triple {
-	std::uint64_t lower = 0, estimate = 0, upper = 0;
-	bool operator==(const triple&) const = default;
-};
 
 // Uncollapsed counts are disjoint across shards, so every bound sums.
 inline triple merge_uncollapsed(std::span<const triple> shards) noexcept {
