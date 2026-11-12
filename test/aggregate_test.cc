@@ -66,7 +66,7 @@ static double fsum(const std::vector<double>& xs) {
 
 static bool same(double a, double b) { return std::bit_cast<std::uint64_t>(a) == std::bit_cast<std::uint64_t>(b) || (a == 0 && b == 0); }
 
-enum : agg::slot_t { I64 = 0, U64 = 1, F64 = 2, BYTES = 3 };
+enum : agg::slot_t { S_I64 = 0, S_U64 = 1, S_F64 = 2, S_BYTES = 3 };
 
 static const std::array<std::string, 6> vocabulary{"a", "b", "c", "", "a term longer than any small-string buffer", "z"};
 
@@ -77,10 +77,10 @@ struct doc final : agg::document {
 	std::vector<std::string_view> b;  // into vocabulary
 	agg::values slot(agg::slot_t s) const override {
 		switch (s) {
-		case I64: return std::span<const std::int64_t>(i);
-		case U64: return std::span<const std::uint64_t>(u);
-		case F64: return std::span<const double>(d);
-		case BYTES: return std::span<const std::string_view>(b);
+		case S_I64: return std::span<const std::int64_t>(i);
+		case S_U64: return std::span<const std::uint64_t>(u);
+		case S_F64: return std::span<const double>(d);
+		case S_BYTES: return std::span<const std::string_view>(b);
 		default: return std::span<const std::int64_t>();
 		}
 	}
@@ -123,9 +123,9 @@ static std::vector<doc> make_docs(std::mt19937_64& rng, std::size_t n) {
 
 static std::vector<agg::number> numbers_of(const doc& x, agg::slot_t s) {
 	std::vector<agg::number> out;
-	if (s == I64) { for (auto v : x.i) { out.emplace_back(std::in_place_type<std::int64_t>, v); } }
-	if (s == U64) { for (auto v : x.u) { out.emplace_back(std::in_place_type<std::uint64_t>, v); } }
-	if (s == F64) { for (double v : x.d) { out.emplace_back(std::in_place_type<double>, v == 0.0 ? 0.0 : v); } }
+	if (s == S_I64) { for (auto v : x.i) { out.emplace_back(std::in_place_type<std::int64_t>, v); } }
+	if (s == S_U64) { for (auto v : x.u) { out.emplace_back(std::in_place_type<std::uint64_t>, v); } }
+	if (s == S_F64) { for (double v : x.d) { out.emplace_back(std::in_place_type<double>, v == 0.0 ? 0.0 : v); } }
 	return out;
 }
 
@@ -301,17 +301,17 @@ static void metrics(std::uint64_t seed, std::size_t n) {
 	const auto docs = make_docs(rng, n);
 	agg::request req;
 	std::array<std::array<agg::node_id, metric_kinds.size()>, 3> ids{};
-	for (agg::slot_t s = I64; s <= F64; ++s) {
+	for (agg::slot_t s = S_I64; s <= S_F64; ++s) {
 		for (std::size_t k = 0; k < metric_kinds.size(); ++k) {
 			ids[s][k] = req.add(agg::request::root, make(metric_kinds[k], std::string(agg::kind_name(metric_kinds[k])) + std::to_string(s), s));
 		}
 	}
-	const auto bytes_count = req.add(agg::request::root, make(agg::kind::count, "bytes", BYTES));
+	const auto bytes_count = req.add(agg::request::root, make(agg::kind::count, "bytes", S_BYTES));
 	agg::partial whole(req);
 	for (const auto& x : docs) { whole.collect(x); }
 	const auto es = whole.finish();
 	CHECK(es[0].bucket && es[0].doc_count == docs.size());
-	for (agg::slot_t s = I64; s <= F64; ++s) {
+	for (agg::slot_t s = S_I64; s <= S_F64; ++s) {
 		std::vector<agg::number> all;
 		for (const auto& x : docs) { const auto v = numbers_of(x, s); all.insert(all.end(), v.begin(), v.end()); }
 		const oracle o = brute(all);
@@ -328,32 +328,32 @@ static void buckets(std::uint64_t seed, std::size_t n) {
 	std::mt19937_64 rng(seed);
 	const auto docs = make_docs(rng, n);
 	agg::request req;
-	const auto t = req.add(agg::request::root, make(agg::kind::terms, "t", BYTES));
-	const auto t_stats = req.add(t, make(agg::kind::stats, "t_stats", F64));
-	const auto v = req.add(agg::request::root, make(agg::kind::values, "v", I64));
-	auto h_spec = make(agg::kind::histogram, "h", I64);
+	const auto t = req.add(agg::request::root, make(agg::kind::terms, "t", S_BYTES));
+	const auto t_stats = req.add(t, make(agg::kind::stats, "t_stats", S_F64));
+	const auto v = req.add(agg::request::root, make(agg::kind::values, "v", S_I64));
+	auto h_spec = make(agg::kind::histogram, "h", S_I64);
 	h_spec.interval = std::int64_t(7);
 	h_spec.offset = std::int64_t(3);
 	const auto h = req.add(agg::request::root, std::move(h_spec));
-	const auto h_sum = req.add(h, make(agg::kind::sum, "h_sum", U64));
-	auto hd_spec = make(agg::kind::histogram, "hd", F64);
+	const auto h_sum = req.add(h, make(agg::kind::sum, "h_sum", S_U64));
+	auto hd_spec = make(agg::kind::histogram, "hd", S_F64);
 	hd_spec.interval = 0.25;
 	hd_spec.offset = 0.1;
 	const auto hd = req.add(agg::request::root, std::move(hd_spec));
-	auto r_spec = make(agg::kind::range, "r", F64);
+	auto r_spec = make(agg::kind::range, "r", S_F64);
 	r_spec.ranges.push_back({"", std::nullopt, agg::number(-1.0)});
 	r_spec.ranges.push_back({"", agg::number(-1.0), agg::number(1.5)});
 	r_spec.ranges.push_back({"", agg::number(1.5), std::nullopt});
 	r_spec.ranges.push_back({"", agg::number(std::int64_t(0)), agg::number(std::int64_t(100))});
 	const auto r = req.add(agg::request::root, std::move(r_spec));
-	const auto r_terms = req.add(r, make(agg::kind::terms, "r_terms", I64));
-	req.add(r_terms, make(agg::kind::extended_stats, "r_ext", F64));
+	const auto r_terms = req.add(r, make(agg::kind::terms, "r_terms", S_I64));
+	req.add(r_terms, make(agg::kind::extended_stats, "r_ext", S_F64));
 	auto f_spec = make(agg::kind::filter, "f", 0);
 	f_spec.predicate = [](const agg::document& d) { return static_cast<const doc&>(d).has("a"); };
 	const auto f = req.add(agg::request::root, std::move(f_spec));
-	const auto f_stats = req.add(f, make(agg::kind::stats, "f_stats", I64));
-	req.add(f, make(agg::kind::values, "f_values", U64));
-	const auto f_median = req.add(f, make(agg::kind::median, "f_median", F64));
+	const auto f_stats = req.add(f, make(agg::kind::stats, "f_stats", S_I64));
+	req.add(f, make(agg::kind::values, "f_values", S_U64));
+	const auto f_median = req.add(f, make(agg::kind::median, "f_median", S_F64));
 
 	agg::partial whole(req);
 	for (const auto& x : docs) { whole.collect(x); }
@@ -368,7 +368,7 @@ static void buckets(std::uint64_t seed, std::size_t n) {
 			for (const auto term : distinct) {
 				auto& w = want[std::string(term)];
 				++w.first;
-				const auto ds = numbers_of(x, F64);
+				const auto ds = numbers_of(x, S_F64);
 				w.second.insert(w.second.end(), ds.begin(), ds.end());
 			}
 		}
@@ -491,7 +491,7 @@ static void buckets(std::uint64_t seed, std::size_t n) {
 		for (const auto& x : docs) {
 			if (!x.has("a")) { continue; }
 			++count;
-			const auto is = numbers_of(x, I64), ds = numbers_of(x, F64);
+			const auto is = numbers_of(x, S_I64), ds = numbers_of(x, S_F64);
 			ints.insert(ints.end(), is.begin(), is.end());
 			reals.insert(reals.end(), ds.begin(), ds.end());
 		}
@@ -554,7 +554,7 @@ static void fixed() {
 	}
 	{
 		agg::request req;
-		auto spec = make(agg::kind::histogram, "h", I64);
+		auto spec = make(agg::kind::histogram, "h", S_I64);
 		spec.interval = std::int64_t(7);
 		spec.offset = std::int64_t(3);
 		const auto h = req.add(agg::request::root, std::move(spec));
@@ -576,12 +576,12 @@ static void fixed() {
 	{
 		// Invalid requests reject.
 		agg::request req;
-		const auto c = req.add(agg::request::root, make(agg::kind::count, "c", I64));
+		const auto c = req.add(agg::request::root, make(agg::kind::count, "c", S_I64));
 		bool threw = false;
-		try { req.add(c, make(agg::kind::sum, "s", I64)); } catch (const std::invalid_argument&) { threw = true; }
+		try { req.add(c, make(agg::kind::sum, "s", S_I64)); } catch (const std::invalid_argument&) { threw = true; }
 		CHECK(threw);
 		threw = false;
-		auto zero = make(agg::kind::histogram, "z", I64);
+		auto zero = make(agg::kind::histogram, "z", S_I64);
 		zero.interval = 0.0;
 		try { req.add(agg::request::root, std::move(zero)); } catch (const std::invalid_argument&) { threw = true; }
 		CHECK(threw);
@@ -597,13 +597,13 @@ static void deep(std::size_t depth) {
 		s.name = "l" + std::to_string(level);
 		switch (level % 4) {
 		case 0: s.type = agg::kind::filter; break;
-		case 1: s.type = agg::kind::terms; s.slot = BYTES; break;
-		case 2: s.type = agg::kind::range; s.slot = I64; s.ranges.push_back({"all", std::nullopt, std::nullopt}); break;
-		default: s.type = agg::kind::histogram; s.slot = I64; s.interval = std::int64_t(1000); break;
+		case 1: s.type = agg::kind::terms; s.slot = S_BYTES; break;
+		case 2: s.type = agg::kind::range; s.slot = S_I64; s.ranges.push_back({"all", std::nullopt, std::nullopt}); break;
+		default: s.type = agg::kind::histogram; s.slot = S_I64; s.interval = std::int64_t(1000); break;
 		}
 		parent = req.add(parent, std::move(s));
 	}
-	const auto leaf = req.add(parent, make(agg::kind::stats, "leaf", I64));
+	const auto leaf = req.add(parent, make(agg::kind::stats, "leaf", S_I64));
 	std::mt19937_64 rng(depth);
 	std::vector<doc> docs(60);
 	std::int64_t total = 0;
@@ -633,14 +633,14 @@ static void deep(std::size_t depth) {
 static void empty() {
 	agg::request req;
 	std::vector<agg::node_id> ids;
-	for (const auto k : metric_kinds) { ids.push_back(req.add(agg::request::root, make(k, std::string(agg::kind_name(k)), F64))); }
-	const auto t = req.add(agg::request::root, make(agg::kind::terms, "t", BYTES));
-	req.add(t, make(agg::kind::avg, "t_avg", F64));
-	auto r_spec = make(agg::kind::range, "r", F64);
+	for (const auto k : metric_kinds) { ids.push_back(req.add(agg::request::root, make(k, std::string(agg::kind_name(k)), S_F64))); }
+	const auto t = req.add(agg::request::root, make(agg::kind::terms, "t", S_BYTES));
+	req.add(t, make(agg::kind::avg, "t_avg", S_F64));
+	auto r_spec = make(agg::kind::range, "r", S_F64);
 	r_spec.ranges.push_back({"low", std::nullopt, agg::number(0.0)});
 	const auto r = req.add(agg::request::root, std::move(r_spec));
 	const auto f = req.add(agg::request::root, make(agg::kind::filter, "f", 0));
-	const auto f_min = req.add(f, make(agg::kind::min, "f_min", I64));
+	const auto f_min = req.add(f, make(agg::kind::min, "f_min", S_I64));
 	const oracle none = brute({});
 	for (std::size_t docs : {0, 10}) {
 		agg::partial p(req);
@@ -682,10 +682,10 @@ static std::vector<T> decode_numbers(std::string_view b) {
 static doc read_doc(const prospect::segment& seg, strata::ordinal_t ord) {
 	const auto& values = seg.get<prospect::values_plugin>();
 	doc x;
-	if (const auto v = values.value(ord, I64)) { x.i = decode_numbers<std::int64_t>(*v); }
-	if (const auto v = values.value(ord, U64)) { x.u = decode_numbers<std::uint64_t>(*v); }
-	if (const auto v = values.value(ord, F64)) { x.d = decode_numbers<double>(*v); }
-	if (const auto v = values.value(ord, BYTES)) {
+	if (const auto v = values.value(ord, S_I64)) { x.i = decode_numbers<std::int64_t>(*v); }
+	if (const auto v = values.value(ord, S_U64)) { x.u = decode_numbers<std::uint64_t>(*v); }
+	if (const auto v = values.value(ord, S_F64)) { x.d = decode_numbers<double>(*v); }
+	if (const auto v = values.value(ord, S_BYTES)) {
 		for (const char c : *v) {
 			CHECK(std::size_t(std::uint8_t(c)) < vocabulary.size());
 			x.b.push_back(vocabulary[std::uint8_t(c) % vocabulary.size()]);
@@ -737,13 +737,13 @@ static std::vector<shard_built> build_index(const std::vector<doc>& docs, const 
 				for (const auto& [t, ps] : by) { in.push_back({t, std::uint32_t(ps.size()), ps}); }
 				const strata::ordinal_t ord = w.add(where[i].did, in, pos);
 				const doc& x = docs[i];
-				if (!x.i.empty()) { w.builder<prospect::values_plugin>().add_value(ord, I64, encode_numbers(x.i)); }
-				if (!x.u.empty()) { w.builder<prospect::values_plugin>().add_value(ord, U64, encode_numbers(x.u)); }
-				if (!x.d.empty()) { w.builder<prospect::values_plugin>().add_value(ord, F64, encode_numbers(x.d)); }
+				if (!x.i.empty()) { w.builder<prospect::values_plugin>().add_value(ord, S_I64, encode_numbers(x.i)); }
+				if (!x.u.empty()) { w.builder<prospect::values_plugin>().add_value(ord, S_U64, encode_numbers(x.u)); }
+				if (!x.d.empty()) { w.builder<prospect::values_plugin>().add_value(ord, S_F64, encode_numbers(x.d)); }
 				if (!x.b.empty()) {
 					std::string b;
 					for (const auto v : x.b) { b.push_back(char(std::find(vocabulary.begin(), vocabulary.end(), v) - vocabulary.begin())); }
-					w.builder<prospect::values_plugin>().add_value(ord, BYTES, b);
+					w.builder<prospect::values_plugin>().add_value(ord, S_BYTES, b);
 				}
 				if (where[i].dead) {
 					bits.mutable_words()[ord >> 6] |= std::uint64_t(1) << (ord & 63);
@@ -762,36 +762,36 @@ static std::vector<shard_built> build_index(const std::vector<doc>& docs, const 
 // Every collector kind, nested, over every slot.
 static agg::request every_collector() {
 	agg::request req;
-	for (agg::slot_t s = I64; s <= F64; ++s) {
+	for (agg::slot_t s = S_I64; s <= S_F64; ++s) {
 		for (const auto k : metric_kinds) { req.add(agg::request::root, make(k, std::string(agg::kind_name(k)) + std::to_string(s), s)); }
 	}
-	req.add(agg::request::root, make(agg::kind::count, "bytes", BYTES));
-	const auto t = req.add(agg::request::root, make(agg::kind::terms, "t", BYTES));
-	req.add(t, make(agg::kind::extended_stats, "t_ext", F64));
-	const auto v = req.add(agg::request::root, make(agg::kind::values, "v", I64));
-	req.add(v, make(agg::kind::median, "v_median", F64));
-	auto h = make(agg::kind::histogram, "h", I64);
+	req.add(agg::request::root, make(agg::kind::count, "bytes", S_BYTES));
+	const auto t = req.add(agg::request::root, make(agg::kind::terms, "t", S_BYTES));
+	req.add(t, make(agg::kind::extended_stats, "t_ext", S_F64));
+	const auto v = req.add(agg::request::root, make(agg::kind::values, "v", S_I64));
+	req.add(v, make(agg::kind::median, "v_median", S_F64));
+	auto h = make(agg::kind::histogram, "h", S_I64);
 	h.interval = std::int64_t(7);
 	h.offset = std::int64_t(3);
 	const auto hn = req.add(agg::request::root, std::move(h));
-	req.add(hn, make(agg::kind::sum, "h_sum", U64));
-	auto hd = make(agg::kind::histogram, "hd", F64);
+	req.add(hn, make(agg::kind::sum, "h_sum", S_U64));
+	auto hd = make(agg::kind::histogram, "hd", S_F64);
 	hd.interval = 0.25;
 	hd.offset = 0.1;
 	const auto hdn = req.add(agg::request::root, std::move(hd));
-	req.add(hdn, make(agg::kind::variance, "hd_var", F64));
-	auto r = make(agg::kind::range, "r", F64);
+	req.add(hdn, make(agg::kind::variance, "hd_var", S_F64));
+	auto r = make(agg::kind::range, "r", S_F64);
 	r.ranges.push_back({"", std::nullopt, agg::number(-1.0)});
 	r.ranges.push_back({"", agg::number(-1.0), agg::number(1.5)});
 	r.ranges.push_back({"", agg::number(1.5), std::nullopt});
 	const auto rn = req.add(agg::request::root, std::move(r));
-	const auto rt = req.add(rn, make(agg::kind::terms, "r_terms", I64));
-	req.add(rt, make(agg::kind::std_deviation, "r_std", F64));
+	const auto rt = req.add(rn, make(agg::kind::terms, "r_terms", S_I64));
+	req.add(rt, make(agg::kind::std_deviation, "r_std", S_F64));
 	auto f = make(agg::kind::filter, "f", 0);
 	f.predicate = [](const agg::document& d) { return static_cast<const doc&>(d).has("a"); };
 	const auto fn = req.add(agg::request::root, std::move(f));
-	req.add(fn, make(agg::kind::mode, "f_mode", U64));
-	req.add(fn, make(agg::kind::avg, "f_avg", F64));
+	req.add(fn, make(agg::kind::mode, "f_mode", S_U64));
+	req.add(fn, make(agg::kind::avg, "f_avg", S_F64));
 	return req;
 }
 
