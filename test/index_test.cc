@@ -620,9 +620,16 @@ int main() {
 			space = e.code().value() == ENOSPC;
 		}
 		CHECK(space);
+		// Real-time get (D13) reads the frozen buffer the failed flush kept, under a newer
+		// active buffer that answers first.
+		CHECK(ix.get("Qa") == big.doc.stored);
+		CHECK(ix.apply(tx({add("Qb", "b")}), {}).result == verdict::accepted);
+		CHECK(ix.get("Qa") == big.doc.stored && ix.get("Qb") == "b");
+		CHECK(ix.apply(tx({replace("Qa", "a2")}), {}).result == verdict::accepted);
+		CHECK(ix.get("Qa") == "a2");
 		fs.set_capacity(~std::uint64_t(0));
 		ix.commit();
-		CHECK(contents(ix).size() == 1);
+		CHECK(contents(ix).size() == 2 && ix.get("Qa") == "a2" && ix.get("Qb") == "b");
 	}
 	// ENOSPC on a later run of a parallel flush publishes no run, so the retry once space
 	// returns leaves one live copy of each document.
@@ -632,10 +639,12 @@ int main() {
 		auto parallel = keyed; parallel.flush_threads = 2; parallel.flush_min_docs = 1;
 		auto ix = prospect::index::create(io, parallel, uuid);
 		std::mt19937_64 r(10);
+		std::map<std::string, std::string> stored;
 		for (const char* key : {"Qa", "Qb"}) {
 			operation big = add(key, key + 1);  // the body term without the key prefix
 			big.doc.stored.resize(20000);
 			for (auto& c : big.doc.stored) { c = char(r()); }  // incompressible
+			stored[key] = big.doc.stored;
 			CHECK(ix.apply(tx({big}), {}).result == verdict::accepted);
 		}
 		fs.set_capacity(fs.used() + 30000);  // room for one run's segment, not two
@@ -646,6 +655,8 @@ int main() {
 			space = e.code().value() == ENOSPC;
 		}
 		CHECK(space);
+		// Real-time get (D13) at two flush threads reads the whole documents the frozen buffer keeps.
+		CHECK(ix.get("Qa") == stored["Qa"] && ix.get("Qb") == stored["Qb"]);
 		fs.set_capacity(~std::uint64_t(0));
 		ix.commit();
 		std::size_t live = 0;
