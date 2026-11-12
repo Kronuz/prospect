@@ -653,7 +653,8 @@ int bench(int argc, char** argv) {
 	const auto docs = big_docs(r, 1, count);
 	const auto set = build_shards(docs, 1, r, 1);
 	const multi_snapshot multi(set.inputs());
-	const auto build = builder_for(query{"TERM", {"a"}}, multi, false);
+	const query q{"TERM", {"a"}};  // the builder keeps a reference to it
+	const auto build = builder_for(q, multi, false);
 	const agg::request req = aggregation();
 	std::uint64_t sink = 0;
 	for (const std::string arm : {"plain", "count", "agg"}) {
