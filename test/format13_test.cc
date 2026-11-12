@@ -526,10 +526,19 @@ int main() {
 
 	// --- F20: the manifest's structures and versions (7c-6) -----------------------------------
 	{
-		enum class verdict { opens, corrupt, unsupported, other };
+		// `damaged_segment`: the open succeeds (segments map lazily) and the first map throws
+		// corrupt_segment, which needs_heal() and heal() report.
+		enum class verdict { opens, corrupt, unsupported, other, damaged_segment };
 		auto open_index = [](kronuz::journal::IO& io, const prospect::index::options& o) {
 			try {
 				auto ix = prospect::index::open(io, o);
+				const auto segs = ix.segments();
+				const auto id = segs[0].id;
+				try {
+					segs[0].seg();
+				} catch (const strata::corrupt_segment&) {
+					return ix.needs_heal() && ix.heal() == std::vector<std::uint64_t>{id} ? verdict::damaged_segment : verdict::other;
+				}
 				return verdict::opens;
 			} catch (const strata::unsupported_index&) {
 				return verdict::unsupported;
@@ -600,7 +609,7 @@ int main() {
 		// An index an earlier pre-freeze build wrote: unsupported (CR11).
 		CHECK(with([](strata::files::log_state& m) { m.min_version = m.max_version = 0x8000'0008; }) == verdict::unsupported);
 		// A segment that sets a bit outside its manifest's mask: damage.
-		CHECK(with([](strata::files::log_state& m) { m.mask = m.configured = bit::inverted | bit::norms | bit::keys; }) == verdict::corrupt);
+		CHECK(with([](strata::files::log_state& m) { m.mask = m.configured = bit::inverted | bit::norms | bit::keys; }) == verdict::damaged_segment);
 		// Configured bits no flush could write: damage at open (CR5). Clearing stored is a
 		// valid configuration.
 		CHECK(with([](strata::files::log_state& m) { m.configured = bit::inverted | bit::norms | bit::stored; }) == verdict::other);  // keys off: a keyless index, which a keyed request refuses (F3)
@@ -673,7 +682,7 @@ int main() {
 		}
 		{
 			// A manifest entry naming another identity than its file's: damage, before any read.
-			CHECK(with([](strata::files::log_state& m) { m.segments.rbegin()->second.identity[15] ^= 1; }) == verdict::corrupt);
+			CHECK(with([](strata::files::log_state& m) { m.segments.rbegin()->second.identity[15] ^= 1; }) == verdict::damaged_segment);
 			// A segment attribute this binary lacks (F13-R43): a required one refuses the index, a
 			// cache opens and leaves at the next commit.
 			CHECK(with([](strata::files::log_state& m) { m.segments.rbegin()->second.attributes = {{1, "later"}}; }) == verdict::unsupported);
@@ -772,11 +781,14 @@ int main() {
 		}
 		bool corrupt = false, unsupported = false;
 		try {
-			auto again = prospect::index::open(io, o);
-		} catch (const strata::corrupt_segment&) {
-			corrupt = true;
-		} catch (const strata::corrupt_index&) {
-			corrupt = true;
+			auto again = prospect::index::open(io, o);  // opens; the first map finds the version
+			const auto segs = again.segments();
+			const auto id = segs[0].id;
+			try {
+				segs[0].seg();
+			} catch (const strata::corrupt_segment&) {
+				corrupt = again.needs_heal() && again.heal() == std::vector<std::uint64_t>{id};
+			}
 		} catch (const strata::unsupported_segment&) {
 			unsupported = true;
 		}
