@@ -63,7 +63,7 @@ build() {
 	cmake -S "$tree" -B "$b" -DCMAKE_BUILD_TYPE=Release "${overrides[@]}" > "$out/build-cmake.log" 2>&1 || { tail -30 "$out/build-cmake.log"; die "configure failed"; }
 	cmake --build "$b" -j4 --target "${rows[@]}" parity prospect_engine > "$out/build.log" 2>&1 || { grep -m20 -B2 -A8 'error' "$out/build.log"; die "the rows did not build"; }
 	ctest --test-dir "$b" --output-on-failure -j4 -R '^(segment|aggregate|operators|shards|fuzz_(segment|postings|values|fielddict)_replay)$' 2>&1 | tee "$out/build-ctest.log" | tail -30
-	grep -q '100% tests passed, 0 tests failed out of 8' "$out/build-ctest.log" || die "a row test failed"
+	grep -Eq '^100% tests passed(, 0 tests failed)? out of 8$' "$out/build-ctest.log" || die "a row test failed"
 	cmake -S "$tree/tools/release_rows" -B "$out/build-stems" -DCMAKE_BUILD_TYPE=Release > "$out/stems-cmake.log" 2>&1 || { tail -30 "$out/stems-cmake.log"; die "stem_parity did not configure"; }
 	cmake --build "$out/build-stems" -j4 > "$out/stems-build.log" 2>&1 || { tail -30 "$out/stems-build.log"; die "stem_parity did not build"; }
 	cp "$b/parity" "$b/prospect_engine" "$out/build-stems/stem_parity" "$bin/"
