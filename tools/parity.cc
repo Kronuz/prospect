@@ -11,6 +11,8 @@
 // With PARITY_DELETES=R, an all-deleted first segment precedes them (older versions of every
 // R-th document, and documents added then deleted): counts must equal the oracle's while
 // the weights drift, and everything must equal it after a merge drops the deleted documents.
+// Every pass also checks that the pruned top 10 equals the counted one, that every hit is a
+// live docid (1 to N) and that none repeats, and tallies the queries by the operators they use.
 //   [PARITY_DELETES=R] parity CORPUS_JSON N RANK_JSONL [SEGMENTS]
 #include "analysis.hh"
 #include "prospect/reorder.hh"
@@ -25,6 +27,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <set>
 #include <span>
 #include <string>
 #include <vector>
@@ -97,6 +100,11 @@ private:
 	std::string_view s_;
 	std::size_t i_ = 0;
 };
+
+void operators_of(const node& n, std::set<std::string>& ops) {
+	if (!n.op.empty()) { ops.insert(n.op); }
+	for (const auto& c : n.children) { operators_of(c, ops); }
+}
 
 void count_terms(const node& n, std::map<std::string, std::uint32_t>& wqf) {
 	if (n.op.empty()) { ++wqf[n.term]; }
@@ -318,7 +326,8 @@ int main(int argc, char** argv) {
 	auto pass = [&](const char* label, bool exact) {
 		std::ifstream rank(argv[3]);
 		std::string line;
-		std::size_t queries = 0, count_ok = 0, top_ok = 0, max_rel_shown = 0;
+		std::size_t queries = 0, count_ok = 0, top_ok = 0, max_rel_shown = 0, same_ok = 0, live_ok = 0;
+		std::map<std::string, std::pair<std::size_t, std::size_t>> by_op;  // queries, equal
 		double worst = 0;
 		while (std::getline(rank, line)) {
 			if (line.find("\"index\"") != std::string::npos) {
@@ -360,16 +369,43 @@ int main(int argc, char** argv) {
 			std::vector<prospect::hit> pruned = search(q, wqf, nullptr);
 			const bool ok = matches(hits) && matches(pruned);
 			top_ok += ok;
-			if ((got_count != want_count || (exact && !ok)) && max_rel_shown++ < 8) {
-				std::cout << "MISMATCH " << desc << " count " << got_count << " vs " << want_count;
+			// The pruned top 10 is the counted one: equal scores rank by rank, docids equal or tied.
+			bool same = hits.size() == pruned.size();
+			for (std::size_t i = 0; same && i < hits.size(); ++i) {
+				const auto close = [](double a, double b) { return std::abs(a - b) <= 1e-9 * std::max(1e-300, std::abs(a)); };
+				bool tie = hits[i].ord == pruned[i].ord;
+				for (const auto& h : hits) { tie = tie || (h.ord == pruned[i].ord && close(h.score, pruned[i].score)); }
+				same = close(hits[i].score, pruned[i].score) && tie;
+			}
+			// Every hit is a live document (docids 1 to N; the deleted extras are past N) and none repeats.
+			bool live = true;
+			for (const auto* v : {&hits, &pruned}) {
+				std::set<strata::ordinal_t> seen;
+				for (const auto& h : *v) { live = live && h.ord < n && seen.insert(h.ord).second; }
+			}
+			same_ok += same;
+			live_ok += live;
+			std::set<std::string> ops;
+			operators_of(q, ops);
+			if (ops.empty()) { ops.insert("TERM"); }
+			const bool equal = got_count == want_count && (!exact || ok) && same && live;
+			for (const auto& op : ops) {
+				++by_op[op].first;
+				by_op[op].second += equal;
+			}
+			if ((got_count != want_count || (exact && !ok) || !same || !live) && max_rel_shown++ < 8) {
+				std::cout << "MISMATCH " << desc << " count " << got_count << " vs " << want_count << (same ? "" : ", pruned differs from counted") << (live ? "" : ", a deleted or repeated docid");
 				if (!hits.empty() && !want.empty()) {
 					std::printf(" top1 %llu %.17g vs %llu %.17g", (unsigned long long)(hits[0].ord + 1), hits[0].score, (unsigned long long)want[0].first, want[0].second);
 				}
 				std::cout << '\n';
 			}
 		}
-		std::printf("%s: queries %zu: counts equal %zu, top-10 equal %zu, worst relative error %.3g\n", label, queries, count_ok, top_ok, worst);
-		return queries > 0 && count_ok == queries && (!exact || top_ok == queries);
+		std::printf("%s: queries %zu: counts equal %zu, top-10 equal %zu, pruned = counted %zu, live and unique %zu, worst relative error %.3g\n", label, queries, count_ok, top_ok, same_ok, live_ok, worst);
+		std::printf("%s: by operator:", label);
+		for (const auto& [op, c] : by_op) { std::printf(" %s %zu/%zu", op.c_str(), c.second, c.first); }
+		std::printf("\n");
+		return queries > 0 && count_ok == queries && (!exact || top_ok == queries) && same_ok == queries && live_ok == queries;
 	};
 	if (!every) { return pass("parity", true) ? 0 : 1; }
 	// With deletes: counts exact while the statistics drift, then exact after a merge that

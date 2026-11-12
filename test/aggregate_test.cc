@@ -2,8 +2,13 @@
 // force over random multi-valued documents (negatives, duplicates, extremes, and doubles
 // with heavy cancellation); one partial and any split into 1 to 64 partials, merged in any
 // order or tree, render byte for byte alike; nesting 2,000 deep runs on work stacks; empty
-// inputs report empty results.
+// inputs report empty results. Indexed: documents' values in segments of one shard and of
+// many, with deletes, fed through the shards' exhaustive visitor, give the same results as
+// one partial over the live matches, every collector kind at once.
 #include "prospect/aggregate.hh"
+#include "prospect/shards.hh"
+#include "prospect/writer.hh"
+#include "text_field.hh"
 
 #include <algorithm>
 #include <array>
@@ -11,8 +16,10 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <map>
+#include <memory>
 #include <optional>
 #include <random>
 #include <set>
@@ -654,6 +661,224 @@ static void empty() {
 	}
 }
 
+// --- indexed: one shard against many --------------------------------------------------------------
+
+// A slot's values as one opaque value: 8 bytes each for numbers, a vocabulary index per string.
+template <class T>
+static std::string encode_numbers(const std::vector<T>& xs) {
+	std::string out(xs.size() * 8, '\0');
+	for (std::size_t i = 0; i < xs.size(); ++i) { std::memcpy(out.data() + 8 * i, &xs[i], 8); }
+	return out;
+}
+template <class T>
+static std::vector<T> decode_numbers(std::string_view b) {
+	CHECK(b.size() % 8 == 0);
+	std::vector<T> out(b.size() / 8);
+	for (std::size_t i = 0; i < out.size(); ++i) { std::memcpy(&out[i], b.data() + 8 * i, 8); }
+	return out;
+}
+
+// The document a match's values describe, read from its segment's values section.
+static doc read_doc(const prospect::segment& seg, strata::ordinal_t ord) {
+	const auto& values = seg.get<prospect::values_plugin>();
+	doc x;
+	if (const auto v = values.value(ord, I64)) { x.i = decode_numbers<std::int64_t>(*v); }
+	if (const auto v = values.value(ord, U64)) { x.u = decode_numbers<std::uint64_t>(*v); }
+	if (const auto v = values.value(ord, F64)) { x.d = decode_numbers<double>(*v); }
+	if (const auto v = values.value(ord, BYTES)) {
+		for (const char c : *v) {
+			CHECK(std::size_t(std::uint8_t(c)) < vocabulary.size());
+			x.b.push_back(vocabulary[std::uint8_t(c) % vocabulary.size()]);
+		}
+	}
+	return x;
+}
+
+struct indexed_doc {
+	std::size_t shard = 0;
+	std::uint64_t did = 0;  // within its shard
+	std::vector<std::string> terms;
+	bool dead = false;
+};
+
+// One shard: its documents in 1 to `parts` segments, ascending docids within each.
+struct shard_built {
+	std::vector<std::string> bytes;
+	std::vector<std::unique_ptr<prospect::segment>> segs;
+	std::vector<strata::deleted_bits> deleted;
+	std::vector<std::uint64_t> dead;
+	std::vector<prospect::segment_snapshot> snapshots() const {
+		std::vector<prospect::segment_snapshot> out;
+		for (std::size_t i = 0; i < segs.size(); ++i) { out.push_back({segs[i].get(), dead[i] ? &deleted[i] : nullptr, dead[i], &text_table()}); }
+		return out;
+	}
+};
+
+static std::vector<shard_built> build_index(const std::vector<doc>& docs, const std::vector<indexed_doc>& where, std::size_t shards, std::mt19937_64& rng) {
+	std::vector<shard_built> out(shards);
+	for (std::size_t s = 0; s < shards; ++s) {
+		std::vector<std::size_t> mine;
+		for (std::size_t i = 0; i < docs.size(); ++i) {
+			if (where[i].shard == s) { mine.push_back(i); }
+		}
+		const std::size_t parts = 1 + rng() % 3;
+		std::vector<std::vector<std::size_t>> groups(parts);
+		for (const std::size_t i : mine) { groups[rng() % parts].push_back(i); }
+		for (const auto& g : groups) {
+			if (g.empty()) { continue; }
+			prospect::segment_writer w;
+			strata::deleted_bits bits((g.size() + 63) / 64);
+			std::uint64_t dead = 0;
+			for (const std::size_t i : g) {
+				std::map<std::string, std::vector<std::uint32_t>> by;
+				std::uint32_t pos = 0;
+				for (const auto& t : where[i].terms) { by[t].push_back(++pos); }
+				std::vector<prospect::posting_input> in;
+				for (const auto& [t, ps] : by) { in.push_back({t, std::uint32_t(ps.size()), ps}); }
+				const strata::ordinal_t ord = w.add(where[i].did, in, pos);
+				const doc& x = docs[i];
+				if (!x.i.empty()) { w.builder<prospect::values_plugin>().add_value(ord, I64, encode_numbers(x.i)); }
+				if (!x.u.empty()) { w.builder<prospect::values_plugin>().add_value(ord, U64, encode_numbers(x.u)); }
+				if (!x.d.empty()) { w.builder<prospect::values_plugin>().add_value(ord, F64, encode_numbers(x.d)); }
+				if (!x.b.empty()) {
+					std::string b;
+					for (const auto v : x.b) { b.push_back(char(std::find(vocabulary.begin(), vocabulary.end(), v) - vocabulary.begin())); }
+					w.builder<prospect::values_plugin>().add_value(ord, BYTES, b);
+				}
+				if (where[i].dead) {
+					bits.mutable_words()[ord >> 6] |= std::uint64_t(1) << (ord & 63);
+					++dead;
+				}
+			}
+			out[s].bytes.push_back(w.flush({}));
+			out[s].segs.push_back(std::make_unique<prospect::segment>(out[s].bytes.back()));
+			out[s].deleted.push_back(std::move(bits));
+			out[s].dead.push_back(dead);
+		}
+	}
+	return out;
+}
+
+// Every collector kind, nested, over every slot.
+static agg::request every_collector() {
+	agg::request req;
+	for (agg::slot_t s = I64; s <= F64; ++s) {
+		for (const auto k : metric_kinds) { req.add(agg::request::root, make(k, std::string(agg::kind_name(k)) + std::to_string(s), s)); }
+	}
+	req.add(agg::request::root, make(agg::kind::count, "bytes", BYTES));
+	const auto t = req.add(agg::request::root, make(agg::kind::terms, "t", BYTES));
+	req.add(t, make(agg::kind::extended_stats, "t_ext", F64));
+	const auto v = req.add(agg::request::root, make(agg::kind::values, "v", I64));
+	req.add(v, make(agg::kind::median, "v_median", F64));
+	auto h = make(agg::kind::histogram, "h", I64);
+	h.interval = std::int64_t(7);
+	h.offset = std::int64_t(3);
+	const auto hn = req.add(agg::request::root, std::move(h));
+	req.add(hn, make(agg::kind::sum, "h_sum", U64));
+	auto hd = make(agg::kind::histogram, "hd", F64);
+	hd.interval = 0.25;
+	hd.offset = 0.1;
+	const auto hdn = req.add(agg::request::root, std::move(hd));
+	req.add(hdn, make(agg::kind::variance, "hd_var", F64));
+	auto r = make(agg::kind::range, "r", F64);
+	r.ranges.push_back({"", std::nullopt, agg::number(-1.0)});
+	r.ranges.push_back({"", agg::number(-1.0), agg::number(1.5)});
+	r.ranges.push_back({"", agg::number(1.5), std::nullopt});
+	const auto rn = req.add(agg::request::root, std::move(r));
+	const auto rt = req.add(rn, make(agg::kind::terms, "r_terms", I64));
+	req.add(rt, make(agg::kind::std_deviation, "r_std", F64));
+	auto f = make(agg::kind::filter, "f", 0);
+	f.predicate = [](const agg::document& d) { return static_cast<const doc&>(d).has("a"); };
+	const auto fn = req.add(agg::request::root, std::move(f));
+	req.add(fn, make(agg::kind::mode, "f_mode", U64));
+	req.add(fn, make(agg::kind::avg, "f_avg", F64));
+	return req;
+}
+
+// Documents split over one shard and over 2 to 7, in random segments with the same deletes:
+// the visitor over the shards feeds one partial, or one per shard merged in any order; both
+// render exactly as one partial over the live matches, which is also the one-shard result.
+static void indexed(std::uint64_t seed, int rounds) {
+	std::mt19937_64 rng(seed);
+	const agg::request req = every_collector();
+	static const char* const words[] = {"a", "b", "c", "d"};
+	std::size_t compared = 0, matched = 0, deleted = 0;
+	for (int round = 0; round < rounds; ++round) {
+		const std::size_t n = 1 + rng() % 400;
+		const auto docs = make_docs(rng, n);
+		std::vector<indexed_doc> base(n);
+		for (auto& w : base) {
+			for (auto k = 1 + rng() % 4; k > 0; --k) { w.terms.push_back(words[rng() % 4]); }
+			w.dead = rng() % 7 == 0;
+			deleted += w.dead;
+		}
+		// The query: one term or a disjunction of two.
+		std::vector<std::string> query{words[rng() % 4]};
+		if (rng() % 2) { query.push_back(words[rng() % 4]); }
+		if (query.size() == 2 && query[0] == query[1]) { query.pop_back(); }
+		auto matches = [&](const indexed_doc& w) {
+			for (const auto& t : query) {
+				if (std::find(w.terms.begin(), w.terms.end(), t) != w.terms.end()) { return true; }
+			}
+			return false;
+		};
+		agg::partial truth(req);
+		std::size_t live_matches = 0;
+		for (std::size_t i = 0; i < n; ++i) {
+			if (!base[i].dead && matches(base[i])) {
+				truth.collect(docs[i]);
+				++live_matches;
+			}
+		}
+		const std::string want = agg::render(req, truth.finish());
+		for (const std::size_t shards : {std::size_t(1), std::size_t(2 + rng() % 6)}) {
+			auto where = base;
+			std::vector<std::uint64_t> next(shards, 0);
+			for (auto& w : where) {
+				w.shard = rng() % shards;
+				w.did = next[w.shard] += 1 + (rng() % 5 == 0 ? rng() % 3 : 0);
+			}
+			const auto built = build_index(docs, where, shards, rng);
+			std::vector<prospect::shard_input> inputs;
+			for (const auto& b : built) { inputs.push_back({b.snapshots(), 0}); }
+			const prospect::multi_snapshot snap(std::move(inputs));
+			const auto st = snap.stats();
+			const prospect::scorer_builder build = [&](const prospect::segment& seg) -> prospect::scorer_ptr {
+				std::vector<prospect::scorer_ptr> kids;
+				for (const auto& t : query) {
+					const auto& inv = seg.get<prospect::inverted_plugin>();
+					if (auto info = inv.term(0, t)) { kids.push_back(std::make_unique<prospect::term_scorer>(inv, *info, prospect::weight::bm25(st, snap.df("text", t)))); }
+				}
+				if (kids.empty()) { return nullptr; }
+				if (kids.size() == 1) { return std::move(kids[0]); }
+				return std::make_unique<prospect::disjunction_scorer>(std::move(kids));
+			};
+			agg::partial whole(req);
+			std::vector<agg::partial> per_shard(shards, agg::partial(req));
+			std::size_t seen = 0;
+			prospect::search_options o;
+			o.k = 3;
+			o.visit = [&](const prospect::match& m) {
+				const doc x = read_doc(*m.seg, m.ord);
+				whole.collect(x);
+				per_shard.at(m.shard).collect(x);
+				++seen;
+			};
+			const auto got = prospect::search(snap, build, o);
+			CHECK(seen == live_matches && got.count && *got.count == live_matches);
+			CHECK(agg::render(req, whole.finish()) == want);
+			std::shuffle(per_shard.begin(), per_shard.end(), rng);
+			agg::partial merged(req);
+			for (const auto& p : per_shard) { merged.merge(p); }
+			CHECK(agg::render(req, merged.finish()) == want);
+			compared += 2;
+			matched += seen;
+		}
+	}
+	std::printf("  indexed: %zu comparisons, %zu matches collected, %zu documents deleted\n", compared, matched, deleted);
+	CHECK(compared > 0 && matched > 1000 && deleted > 0);
+}
+
 int main() {
 	fixed();
 	empty();
@@ -663,6 +888,7 @@ int main() {
 		buckets(seed + 100, n);
 	}
 	deep(2000);
+	indexed(2026, 60);
 	std::printf(failures ? "aggregate: FAILED\n" : "aggregate: ok\n");
 	return failures ? 1 : 0;
 }

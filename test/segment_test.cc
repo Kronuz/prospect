@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <random>
 
@@ -486,6 +487,64 @@ int main() {
 		const std::uint32_t old = strata::format::version - 1;
 		std::memcpy(file.data() + 8, &old, 4);
 		CHECK(throws_corrupt([&] { prospect::segment s(file); }));
+	}
+	// Every fixture of the version written opens, and with an unknown version under a good
+	// prefix CRC is refused as unsupported, never read and never fenced as damage; every
+	// format-12 fixture is refused the same way.
+	{
+		enum class opened { opens, corrupt, unsupported, other };
+		auto open = [](const std::string& f) {
+			try {
+				prospect::segment s(f);
+				return opened::opens;
+			} catch (const strata::corrupt_segment&) {
+				return opened::corrupt;
+			} catch (const strata::unsupported_segment&) {
+				return opened::unsupported;
+			} catch (...) {
+				return opened::other;
+			}
+		};
+		auto read = [](const std::string& path) {
+			std::string bytes;
+			if (std::FILE* f = std::fopen(path.c_str(), "rb")) {
+				for (int c; (c = std::fgetc(f)) != EOF;) { bytes.push_back(char(c)); }
+				std::fclose(f);
+			}
+			return bytes;
+		};
+		auto with_version = [](std::string f, std::uint32_t v) {
+			std::memcpy(f.data() + 8, &v, 4);
+			const std::uint32_t crc = ::kronuz::crc32c::crc32c(f.data(), 12);
+			std::memcpy(f.data() + 12, &crc, 4);
+			return f;
+		};
+		const char* fixtures[] = {"small.sx", "permuted.sx", "stored-frames.sx", "keyless.sx", "wide-skips.sx", "merge-two.sx", "merge-deletes.sx", "empty.sx", "document.sx", "values.sx", "values-merge.sx"};
+		const char* format12[] = {"small.sx", "permuted.sx", "stored-frames.sx", "keyless.sx", "wide-skips.sx", "merge-two.sx", "merge-deletes.sx", "empty.sx"};
+		const std::uint32_t unknown[] = {strata::format::version + 1, strata::format::min_read_version - 1, 0x8000'0000, 0x8000'0008, 14, 13, 12, 1, 0, 0xffff'ffff};
+		std::size_t refused = 0;
+		for (const char* name : fixtures) {
+			const std::string good = read(std::string(PROSPECT_FIXTURES) + "/" + name);
+			CHECK(good.size() > strata::format::prefix_size);
+			if (good.size() <= strata::format::prefix_size) { continue; }
+			CHECK(open(good) == opened::opens);
+			for (const std::uint32_t v : unknown) {
+				const auto got = open(with_version(good, v));
+				if (got != opened::unsupported) { std::fprintf(stderr, "%s at version %08x: opened %d\n", name, v, int(got)); }
+				CHECK(got == opened::unsupported);
+				refused += got == opened::unsupported;
+			}
+		}
+		for (const char* name : format12) {
+			const std::string old = read(std::string(PROSPECT_FIXTURES) + "/format12/" + name);
+			CHECK(!old.empty());
+			const auto got = open(old);
+			if (got != opened::unsupported) { std::fprintf(stderr, "format12/%s: opened %d\n", name, int(got)); }
+			CHECK(got == opened::unsupported);
+			refused += got == opened::unsupported;
+		}
+		std::printf("  versions: %zu fixtures, %zu refusals\n", std::size(fixtures) + std::size(format12), refused);
+		CHECK(refused == std::size(fixtures) * std::size(unknown) + std::size(format12));
 	}
 
 	// docids, versions, and keys: random monotone docids map both ways, versions read back,
