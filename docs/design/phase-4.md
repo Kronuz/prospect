@@ -510,3 +510,49 @@ Elasticsearch's 100 MB request bodies.
 - Operator parity against oracle vectors; aggregations equal across one shard and many.
 - Every gate's rows (sanitizers, fuzzing, coverage, test parity) for the new code, with
   `bitpack`, `docset`, and `bkd` green on every platform in their own CI.
+
+## Proposed for review: typed values in the values section (D3, D4)
+
+> Status: PROPOSED (phase4-gate, 2026-11-11), not built. A format and decoder change: it builds
+> after a design review, with its fuzz target and fixture (A10).
+
+Today the section holds one single-valued `bytes` column per slot, and its reader refuses any
+other directory kind (`values.hh`, directory check). `docvalues.hh` already encodes every D4
+column (u64, i64, f64, bytes; multi-valued; presence; skip groups; statistics), so this step is
+the section's directory, the document's part, and the merge, not a new codec.
+
+**Directory entry, 32 bytes, same size:** `u32 slot`, `u8 type` (D3's logical type: 0 `u64`,
+1 `i64`, 2 `f64`, 3 `bytes`, 4 `date`, 5 `binary`), `u8 flags` (bit 0 multi-valued, bit 1 points
+declared; others zero), `u16 0`, `u32 documents with a value`, `u32 values` (was 0), `u64
+offset`, `u64 size`. The column's physical kind follows the type: `date` is an `f64` column, and
+`binary` (an ordered list with duplicates) is a multi-valued `bytes` column whose offsets keep
+stored order; that needs one column flag in `docvalues.hh` (stored order, duplicates kept), since
+its multi-valued `bytes` today is a sorted set.
+
+**Reader checks, at open, O(slots):** type below 6, unknown flag bits zero, the column's kind and
+multiplicity equal to the entry's, values >= documents (equal when single-valued). The column's
+own validation is unchanged (first use).
+
+**Document part:** a slot's values as one typed list: `std::variant` of `u64`, `i64`, `f64` and
+bytes per value, all of the slot's declared type. Stage 1 rejects a NaN, an empty multi-value
+list, a type other than the slot's declaration, and a second list for a slot. Numeric values map
+through `ordered.hh` at the builder.
+
+**Where declarations come from (the open fork, for the lead):**
+
+1. D3 as written: strata core's slot table (`slots-<gen>.kv` in the manifest, a `declare_slot`
+   operation). A strata change, outside this quest's file set.
+2. Metadata entries: a declaration is a `set_meta` under a reserved key prefix, already
+   replicated, ordered with documents, and in the manifest, so no strata change; prospect
+   validates it at stage 1 against the index's metadata. Costs a reserved metadata prefix and a
+   metadata read per declaring transaction.
+
+Option 2 is recommended for Phase 4: one mechanism strata already has, and a segment's directory
+copies the declarations either way (D3), so moving to option 1 later changes no segment bytes.
+
+**Digest:** `V` records gain the type byte after the slot; numeric values digest as their mapped
+`u64`, so equal content gives equal records across segmentations.
+
+**Tests and evidence:** the values test gains a slot per type, multi-valued and missing values,
+through flush, merge with deletes, reorder and reopen; a fixture `values-typed.sx`; `fuzz_values`
+gains the typed directory (one CPU-hour); the equivalence model gains a map per slot (D17).
