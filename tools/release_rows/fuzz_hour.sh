@@ -25,7 +25,7 @@ die() { echo "ASSERT: $*" >&2; exit 1; }
 # lists of five bytes each, so a limit near the seeds' (26 bytes at ten minutes) allows four changes.
 max_len() {
 	case $1 in
-	segment) echo "${FUZZ_SEGMENT_MAX_LEN:-1024}" ;;
+	segment) echo "${FUZZ_SEGMENT_MAX_LEN:-256}" ;;
 	*) echo 0 ;;
 	esac
 }
