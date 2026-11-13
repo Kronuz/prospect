@@ -89,3 +89,71 @@ target under `/usr/bin/time -p` in libFuzzer rounds until user plus system CPU r
 (each round's wall limit is 2% past the CPU left), over `$HOME/.scratch/fuzz-corpus/TARGET`, which
 persists, with the checked-in corpus as the second directory. A job is at most 30 minutes, so each
 decoder's hour is three jobs of 1,200 CPU seconds, each starting from the corpus the last left.
+
+## Cost per input under libFuzzer, before and after
+
+`fuzz_hour.sh cost`: each target's checked-in corpus under `-runs=0` (libFuzzer's instrumentation, ASan
+and UBSan), best of three, minus the best empty-corpus startup, per input. Jobs `261113-081412-4637f9`
+(before: `61e09a6`) and `261113-081415-b2fb3a` (after: `4adadb9`), strict, same inputs.
+
+| Target | Inputs | Before ms/input | After ms/input | Change | exec/s before | exec/s after |
+|---|---|---|---|---|---|---|
+| segment | 986 | 36.29 | 28.22 | 22% cheaper | 27.6 | 35.4 |
+| postings | 841 | 20.92 | 17.88 | 15% cheaper | 47.8 | 55.9 |
+| values | 275 | 4.84 | 4.95 | unchanged (noise) | 206.6 | 202.0 |
+| fielddict | 751 | 20.51 | 15.49 | 24% cheaper | 48.8 | 64.6 |
+
+segment's change is the third base (20,000 to 6,000 documents), fielddict's the cached bases, postings'
+the one top-k size per input; values is untouched. Each exec/s is 1000 over the row's ms/input, the
+replay's rate and not a fuzzing run's (mutation and coverage bookkeeping add to it).
+
+## The CPU-hour runs: results
+
+Three jobs of 1,200 CPU seconds each per decoder, at `4adadb9` (`fuzz_hour.sh run TARGET 4adadb9d82e8
+1200`, `FUZZ_SEED` 1 to 3), the corpus in `~/.scratch/fuzz-corpus/TARGET` carried across the thirds, the
+checked-in corpus as the second directory. Host idle apart from the other thirds' jobs. Each third's
+CPU is user plus system from `/usr/bin/time -p`.
+
+| Decoder | CPU s | Executions | Exec/CPU s | New units | Final coverage (edges / features) | Final corpus | Peak RSS | Findings |
+|---|---|---|---|---|---|---|---|---|
+| segment (`-max_len=256 -len_control=0`) | 3,638.9 | 137,980 | 37.9 | 2,128 | 6,763 / 19,692 | 1,461 units, 37 KiB | 430 MiB | 0 |
+| postings | 3,642.1 | 135,867 | 37.3 | 1,046 | 3,928 / 13,704 | 866 units, 143 KiB | 415 MiB | 0 |
+| values | 3,645.8 | 623,388 | 171.0 | 2,450 | 2,503 / 4,636 | 483 units, 17 KiB | 404 MiB | 0 |
+| fielddict | 3,669.1 | 221,349 | 60.3 | 2,645 | 4,840 / 21,717 | 1,435 units, 42 KiB | 550 MiB | 0 |
+
+Per third (CPU s, executions, new units):
+
+| Decoder | Third 1 | Third 2 | Third 3 |
+|---|---|---|---|
+| segment | 1,221.6, 54,786, 1,397 | 1,200.0, 38,384, 375 | 1,217.3, 44,810, 356 |
+| postings | 1,222.5, 54,676, 633 | 1,200.5, 37,680, 223 | 1,219.1, 43,511, 190 |
+| values | 1,222.1, 265,641, 1,546 | 1,205.5, 165,123, 472 | 1,218.1, 192,624, 432 |
+| fielddict | 1,221.5, 73,366, 1,634 | 1,231.8, 70,086, 583 | 1,215.8, 77,897, 428 |
+
+Each third stops when its CPU reaches the budget, so it ends within 2% past 1,200 CPU s. values and
+fielddict's second thirds ran a second short round to use the CPU left (1,627 and 2,412 executions).
+The final corpus is libFuzzer's merged corpus after the last third (the "corp:" of its `DONE` line);
+files on disk are larger (1,752 values, 2,063 fielddict) because reduced inputs are kept beside
+the originals.
+
+Coverage still moving in the last third (3 starts at 2,400 CPU s, from its `INITED` line):
+
+| Decoder | Edges at start | Edges at end | Features at start | Features at end |
+|---|---|---|---|---|
+| segment | 6,737 | 6,763 | 19,332 | 19,692 |
+| postings | 3,928 | 3,928 | 13,658 | 13,704 |
+| values | 2,500 | 2,503 | 4,607 | 4,636 |
+| fielddict | 4,824 | 4,840 | 21,381 | 21,717 |
+
+postings' edges are flat over the last 1,200 CPU s; the other three gain a few edges and tens to
+hundreds of features, so one hour is not a plateau for segment and fielddict.
+
+release-rows' ten-minute starts ran at 3 to 32 inputs/s with the corpus discarded; the same hour of CPU
+now executes 37 to 171 inputs per CPU second, with every start from the previous one's corpus.
+
+### A3: segment's length limit
+
+Third 3's log shows `lim: 256` from the first line to the `DONE` line (`INFO: Seed: 301`, 1,508
+files in, `-max_len=256 -len_control=0`); the other two thirds' command lines (job logs) carry the same
+flags. The limit does not grow with coverage, so an input holds up to 51 five-byte changes where
+release-rows' `lim: 26` allowed four.
