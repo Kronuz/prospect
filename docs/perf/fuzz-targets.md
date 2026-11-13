@@ -155,5 +155,5 @@ now executes 37 to 171 inputs per CPU second, with every start from the previous
 
 Third 3's log shows `lim: 256` from the first line to the `DONE` line (`INFO: Seed: 301`, 1,508
 files in, `-max_len=256 -len_control=0`); the other two thirds' command lines (job logs) carry the same
-flags. The limit does not grow with coverage, so an input holds up to 51 five-byte changes where
-release-rows' `lim: 26` allowed four.
+flags. The limit does not grow with coverage, so an input holds about ten times the byte changes (256 bytes against
+26).
