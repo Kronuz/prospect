@@ -2,7 +2,7 @@
 # CPU-hour fuzzing of the decoders the release reads (docs/perf/fuzz-targets.md). Binaries go to
 # $HOME/.scratch/fuzz-hour/NAME, the corpora that persist across runs to $HOME/.scratch/fuzz-corpus.
 #   fuzz_hour.sh build NAME [SRC]      the four libFuzzer targets (ASan, UBSan) from SRC (default: this
-#                                      checkout) at its own pins
+#                                      checkout) at its own pins; NAME "head" is this checkout's commit
 #   fuzz_hour.sh cost NAME             each target's CPU per input over its checked-in corpus
 #   fuzz_hour.sh run TARGET NAME [CPU_SECONDS]
 #                                      TARGET until it has used CPU_SECONDS (default 3600) of CPU time,
@@ -16,6 +16,8 @@ root=$HOME/.scratch/fuzz-hour
 corpora=${FUZZ_CORPORA:-$HOME/.scratch/fuzz-corpus}
 clang=${FUZZ_CLANG:-/usr/local/opt/llvm/bin}
 targets=(segment postings values fielddict)
+# NAME "head" is this checkout's commit, so a binary is never reused across commits.
+named() { [ "$1" = head ] && git -C "$tree" rev-parse --short=12 HEAD || echo "$1"; }
 log() { echo "$(date +%T) $*"; }
 die() { echo "ASSERT: $*" >&2; exit 1; }
 
@@ -38,7 +40,8 @@ len_flags() {
 cpu_of() { awk '/^(user|sys) [0-9.]+$/{s+=$2} END{printf "%.2f", s}' "$1"; }
 
 build() {
-	local name=${1:?build NAME} src=${2:-$tree} b dir
+	local name src=${2:-$tree} b dir
+	name=$(named "${1:?build NAME}")
 	dir=$root/$name
 	b=$dir/build
 	mkdir -p "$dir"
@@ -57,7 +60,8 @@ build() {
 # One pass of the checked-in corpus under the fuzzer binary, minus a pass over an empty corpus (the
 # static bases' build): the least of three, CPU seconds.
 cost() {
-	local name=${1:?cost NAME} dir t n best cpu empty seeds
+	local name dir t n best cpu empty seeds
+	name=$(named "${1:?cost NAME}")
 	dir=$root/$name
 	echo "target inputs startup_s corpus_s ms_per_input"
 	for t in "${targets[@]}"; do
@@ -79,7 +83,8 @@ cost() {
 }
 
 run() {
-	local t=${1:?run TARGET NAME [CPU_SECONDS]} name=${2:?run TARGET NAME [CPU_SECONDS]} budget=${3:-3600}
+	local t=${1:?run TARGET NAME [CPU_SECONDS]} name budget=${3:-3600}
+	name=$(named "${2:?run TARGET NAME [CPU_SECONDS]}")
 	local f=$root/$name/fuzz_$t corpus=$corpora/$t found=$root/findings/$t-$name used=0 round=0 left rc=0 execs=0 news=0 peak=0 flags
 	[ -x "$f" ] || die "no $f: run build"
 	mkdir -p "$corpus" "$found"
