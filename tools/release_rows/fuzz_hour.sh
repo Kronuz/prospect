@@ -96,7 +96,7 @@ run() {
 		round=$((round + 1))
 		# The wall limit is 2% past the CPU left: a fuzzer on an idle host uses 98-100% of a core.
 		# shellcheck disable=SC2086
-		/usr/bin/time -p "$f" -max_total_time=$((left * 102 / 100 + 1)) -timeout=10 -rss_limit_mb=2048 -seed="$round" $flags -print_final_stats=1 \
+		/usr/bin/time -p "$f" -max_total_time=$((left * 102 / 100 + 1)) -timeout=10 -rss_limit_mb=2048 -seed="$((${FUZZ_SEED:-0} * 100 + round))" $flags -print_final_stats=1 \
 			-artifact_prefix="$found/" "$corpus" "$tree/fuzz/corpus/$t" > "$root/$name/$t-$round.log" 2>&1 || rc=$?
 		grep -E '^(INFO: -max_len|#[0-9]+ +DONE|stat::)|ERROR|SUMMARY|^(real|user|sys) ' "$root/$name/$t-$round.log" | head -14
 		used=$(echo "$used $(cpu_of "$root/$name/$t-$round.log")" | awk '{printf "%.2f", $1 + $2}')
