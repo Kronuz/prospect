@@ -174,10 +174,14 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 				}
 			}
 			if (i != terms[k].size()) { fail("round trip length"); }
-			// Seeded top-k equals unseeded under both presets (F13).
+			// Seeded top-k equals unseeded under both presets (F13), at the sizes the shape's bits 2-3
+			// pick (one each, or all three), so an input pays for one size in most cases.
+			const std::size_t tops[] = {10, 100, 1000}, pick = shape >> 2 & 3;
+			const std::size_t from = pick == 3 ? 0 : pick, to = pick == 3 ? 2 : pick;
 			const auto& inv = s.get<prospect::inverted_plugin>();
 			for (const auto& w : {prospect::weight::bm25(inv, info->df), prospect::weight::bm25_xapian(inv, info->df)}) {
-				for (const std::size_t top : {10u, 100u, 1000u}) {
+				for (std::size_t ti = from; ti <= to; ++ti) {
+					const std::size_t top = tops[ti];
 					prospect::term_scorer a(inv, *info, w), b(inv, *info, w);
 					const double floor = a.seed(top);
 					const auto x = prospect::top_k(s, a, top, nullptr, floor), y = prospect::top_k(s, b, top);

@@ -64,19 +64,28 @@ const std::map<std::uint32_t, std::vector<std::string>>& base_terms(unsigned whi
 	return bases[which % std::size(bases)];
 }
 
-// Base 2 is generated from the input's bytes (the oracle's generator), unless it is large.
-fd::oracle::truth_t make_base(unsigned which, const std::uint8_t* data) {
+// Base 2 is generated from the input's bytes (the oracle's generator), unless it is large; the
+// two fixed bases' dictionaries are built once and copied per input.
+struct base_input {
+	fd::oracle::truth_t random;
+	const fd::oracle::truth_t* truth;
+	fd::builder::built built;
+};
+
+base_input make_base(unsigned which, const std::uint8_t* data) {
 	if (which % 3 == 2) {
 		std::mt19937_64 rng(std::uint64_t(data[1]) | std::uint64_t(data[2]) << 8);
 		auto t = fd::oracle::random_truth(rng);
 		std::size_t terms = 0;
 		for (const auto& [f, ts] : t) { terms += ts.size(); }
-		if (t.size() <= 110 && terms <= 9000) { return t; }
+		if (t.size() <= 110 && terms <= 9000) {
+			auto built = fd::oracle::build(t);
+			return {std::move(t), nullptr, std::move(built)};
+		}
 	}
-	return base_terms(which % 2);
+	static const fd::builder::built fixed[] = {fd::oracle::build(base_terms(0)), fd::oracle::build(base_terms(1))};
+	return {{}, &base_terms(which % 2), fixed[which % 2]};
 }
-
-fd::builder::built build_dictionary(const std::map<std::uint32_t, std::vector<std::string>>& terms) { return fd::oracle::build(terms); }
 
 void exercise(const fd::reader& r, std::mt19937_64& rng) {
 	bool misordered = false;
@@ -166,8 +175,8 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
 	std::mt19937_64 rng(size * 131 + data[2]);
 	try {
 		if (data[0] & 0x80) {
-			const auto base = make_base(data[0], data);
-			auto built = build_dictionary(base);
+			auto [random, truth, built] = make_base(data[0], data);
+			const auto& base = truth ? *truth : random;
 			const std::size_t td = fd::oracle::termdict_bytes_start(built.index);
 			bool mutated = false, past_directory = false;
 			if (data[1] % 5 != 0) {  // one input in five stays unmutated

@@ -1,6 +1,7 @@
 // libFuzzer target: corrupt segments must fence (corrupt_segment, termdict::corrupt,
 // unsupported_segment) or answer, never crash, read out of bounds, or allocate past the
-// RSS limit. Base segments are built once, large enough for several skip groups, bitset
+// RSS limit. Base segments are built once, large enough for several skip groups (9,000
+// documents; docs/perf/fuzz-targets.md sizes the bases), bitset
 // and FOR blocks, positions whose counts differ from wdf, positioned wdf-0 terms, and
 // stored records past one zstd frame; one base has monotone docids, versions, and keys,
 // and one the same in a permuted order (docids kind 2, a reordering merge's output).
@@ -69,7 +70,7 @@ std::string build(std::uint64_t seed, std::uint32_t docs, bool wide = false, boo
 // First bytes 250-255 pick the permuted base; the others keep their earlier mapping, so
 // the checked-in corpus still reaches the bases it was grown on.
 const std::string& base(unsigned which) {
-	static const std::string segments[] = {build(1, 300), build(2, 9000), build(3, 20000), build(4, 9000, true), build(5, 3000, false, true)};
+	static const std::string segments[] = {build(1, 300), build(2, 9000), build(3, 6000), build(4, 9000, true), build(5, 3000, false, true)};
 	static const std::string permuted = build(6, 3000, false, true, true);
 	return which >= 250 ? permuted : segments[which % std::size(segments)];
 }
