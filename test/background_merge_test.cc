@@ -1,5 +1,5 @@
 // Background merges (D11, D18), on the deterministic inline executor and on the threaded
-// one (Kronuz/threadpool's WorkPool executor, one and two threads): deletes and replaces racing a
+// one (Kronuz/workpool's WorkPool executor, one and two threads): deletes and replaces racing a
 // running merge carry over once, against an inline-merging twin's digest; seeded random
 // schedules with a power loss while merges run; close, destruction, and install while
 // merges run; the rate limit; merges that never wait for indexing-budget room; ENOSPC
