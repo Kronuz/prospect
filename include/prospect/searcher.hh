@@ -1,7 +1,7 @@
 // Search across an index's segments (Phase 3 design, "Statistics and ranking"): weights
-// read the snapshot's statistics, deleted documents are skipped, each segment prunes
-// against the k-th score found so far, and hits rank by (score descending, docid
-// ascending).
+// read the snapshot's statistics, or the caller's (supplied_statistics), deleted documents
+// are skipped, each segment prunes against the k-th score found so far, and hits rank by
+// (score descending, docid ascending).
 #pragma once
 
 #include "prospect/search.hh"
@@ -14,6 +14,7 @@
 #include <deque>
 #include <functional>
 #include <limits>
+#include <map>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -129,13 +130,81 @@ inline std::optional<format::term_info> find_term(const segment_snapshot& s, std
 	return t;
 }
 
-// A term's document frequency over every segment, deleted documents included, by field name.
-inline std::uint64_t snapshot_df(std::span<const segment_snapshot> segs, std::string_view field, std::string_view term) {
-	std::uint64_t df = 0;
+// A term's frequencies over every segment, deleted documents included, by field name.
+struct term_statistics {
+	std::uint64_t df = 0;  // documents holding the term
+	std::uint64_t cf = 0;  // collection frequency: the sum of its wdf
+	bool operator==(const term_statistics&) const = default;
+};
+
+inline term_statistics snapshot_term_statistics(std::span<const segment_snapshot> segs, std::string_view field, std::string_view term) {
+	term_statistics t;
 	for (const auto& s : segs) {
-		if (auto info = find_term(s, field, term)) { df += info->df; }
+		if (auto info = find_term(s, field, term)) {
+			t.df += info->df;
+			t.cf += info->cf;
+		}
 	}
-	return df;
+	return t;
+}
+
+inline std::uint64_t snapshot_df(std::span<const segment_snapshot> segs, std::string_view field, std::string_view term) { return snapshot_term_statistics(segs, field, term).df; }
+
+// Statistics a caller supplies for one index (docs/mechanisms/supplied-statistics.md): the
+// collection's document count and total length, and the frequencies of the terms a query
+// names, keyed by field and term. A search that takes them weights as one index holding every
+// shard's documents would; the caller gathers each shard's statistics (gather_statistics),
+// adds them (+=) and hands the sum to every shard.
+struct supplied_statistics {
+	statistics collection;
+	std::map<std::string, std::map<std::string, term_statistics, std::less<>>, std::less<>> terms;  // by field, then term
+
+	const term_statistics* find(std::string_view field, std::string_view term) const {
+		const auto f = terms.find(field);
+		if (f == terms.end()) { return nullptr; }
+		const auto t = f->second.find(term);
+		return t == f->second.end() ? nullptr : &t->second;
+	}
+
+	supplied_statistics& operator+=(const supplied_statistics& o) {
+		collection.doc_count += o.collection.doc_count;
+		collection.total_length += o.collection.total_length;
+		for (const auto& [field, by_term] : o.terms) {
+			for (const auto& [term, t] : by_term) {
+				auto& mine = terms[field][term];
+				mine.df += t.df;
+				mine.cf += t.cf;
+			}
+		}
+		return *this;
+	}
+	bool operator==(const supplied_statistics& o) const {
+		return collection.doc_count == o.collection.doc_count && collection.total_length == o.collection.total_length && terms == o.terms;
+	}
+};
+
+// A term of a query, by field name.
+struct term_name {
+	std::string_view field, term;
+};
+
+// A snapshot's own statistics and the frequencies of `names`: what a shard answers the
+// caller's statistics round trip with.
+inline supplied_statistics gather_statistics(std::span<const segment_snapshot> segs, std::span<const term_name> names) {
+	supplied_statistics out;
+	out.collection = snapshot_statistics(segs);
+	for (const auto& n : names) { out.terms[std::string(n.field)][std::string(n.term)] = snapshot_term_statistics(segs, n.field, n.term); }
+	return out;
+}
+
+// The frequencies a weight reads for a term: the supplied ones, else the snapshot's own. A
+// term the supplied set lacks is absent from the collection, which the snapshot must agree
+// with; one it holds anyway is a caller's omission and is refused, not weighted wrongly.
+inline term_statistics resolve_term(const supplied_statistics* supplied, std::string_view field, std::string_view term, term_statistics local) {
+	if (!supplied) { return local; }
+	if (const auto* t = supplied->find(field, term)) { return *t; }
+	if (local.df) { throw std::invalid_argument("prospect: supplied statistics lack a term the snapshot holds"); }
+	return {};
 }
 
 // A query's terms resolved once per segment (P6-3): one dictionary walk per term and
@@ -145,13 +214,19 @@ inline std::uint64_t snapshot_df(std::span<const segment_snapshot> segs, std::st
 // named by field name: each segment resolves it to its own index's id (D14).
 class term_table {
 public:
-	explicit term_table(std::span<const segment_snapshot> segs) : segs_(segs), st_(snapshot_statistics(segs)) {}
+	// With `supplied`, the statistics and the term frequencies (df, cf) are the caller's; the
+	// per-segment frequencies stay the segment's. The set must outlive the table.
+	explicit term_table(std::span<const segment_snapshot> segs, const supplied_statistics* supplied = nullptr)
+		: segs_(segs), supplied_(supplied), st_(supplied ? supplied->collection : snapshot_statistics(segs)) {}
 
-	// The snapshot's statistics (D13).
+	// The snapshot's statistics (D13), or the supplied ones.
 	const statistics& stats() const noexcept { return st_; }
 
-	// The term's document frequency over every segment, deleted documents included.
+	// The term's document frequency over every segment, deleted documents included, or the supplied one.
 	std::uint64_t df(std::string_view field, std::string_view term) { return column(field, term).df; }
+
+	// The term's collection frequency (the sum of its wdf), or the supplied one.
+	std::uint64_t cf(std::string_view field, std::string_view term) { return column(field, term).cf; }
 
 	// The term's document frequency in one of the snapshot's segments (0 when absent),
 	// without computing its competitive pairs.
@@ -177,7 +252,7 @@ public:
 private:
 	struct column_t {
 		std::string field, term;
-		std::uint64_t df = 0;
+		std::uint64_t df = 0, cf = 0;
 		std::vector<std::optional<format::term_info>> infos;  // by segment
 		std::vector<std::uint8_t> complete;                   // impacts computed, by segment
 	};
@@ -191,7 +266,20 @@ private:
 		c.infos.reserve(segs_.size());
 		for (const auto& s : segs_) {
 			c.infos.push_back(find_term(s, field, term));
-			if (c.infos.back()) { c.df += c.infos.back()->df; }
+			if (c.infos.back()) {
+				c.df += c.infos.back()->df;
+				c.cf += c.infos.back()->cf;
+			}
+		}
+		if (supplied_) {
+			try {
+				const auto t = resolve_term(supplied_, field, term, {c.df, c.cf});
+				c.df = t.df;
+				c.cf = t.cf;
+			} catch (...) {
+				columns_.pop_back();
+				throw;
+			}
 		}
 		c.complete.assign(segs_.size(), 0);
 		return c;
@@ -203,6 +291,7 @@ private:
 		throw std::invalid_argument("strata: a segment outside the term table's snapshot");
 	}
 	std::span<const segment_snapshot> segs_;
+	const supplied_statistics* supplied_;
 	statistics st_;
 	std::deque<column_t> columns_;  // stable addresses as columns are added
 };

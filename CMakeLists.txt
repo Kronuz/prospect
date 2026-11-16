@@ -177,6 +177,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(shards_test PRIVATE prospect::prospect)
   target_compile_definitions(shards_test PRIVATE PROSPECT_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
   add_test(NAME shards COMMAND shards_test)
+  # Supplied statistics: shards weighed with the caller's sum answer as one index holding them all.
+  add_executable(stats_test test/stats_test.cc)
+  target_link_libraries(stats_test PRIVATE prospect::prospect)
+  target_compile_definitions(stats_test PRIVATE PROSPECT_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
+  add_test(NAME stats COMMAND stats_test)
   # Sliced search: identity against the synchronous search at slice sizes from one window up, yields,
   # cancellation, and the pinned view; cross-thread resumes make it the TSan test of the mechanism.
   add_executable(sliced_test test/sliced_test.cc)
