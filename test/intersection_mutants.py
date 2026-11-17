@@ -18,8 +18,10 @@ header = os.path.join(root, "include/prospect/reader.hh")
 MUTANTS = [
     ("compare: a slot equal to the target counts as below", "n += std::uint32_t(buf_ords_[i] < target);", "n += std::uint32_t(buf_ords_[i] <= target);"),
     ("probe: a slot equal to the target is passed over", "if (buf_ords_[p] >= target) { return p; }", "if (buf_ords_[p] > target) { return p; }"),
-    ("probe: the first slot after pos_ is not probed", "for (std::size_t p = pos_ + 1; p < probes; ++p)", "for (std::size_t p = pos_ + 2; p < probes; ++p)"),
-    ("compare: only the first 16 slots are compared", "const std::size_t end = (buf_len_ + 15) & ~std::size_t(15);", "const std::size_t end = 16;"),
+    ("compare: the slots before its row are not counted", "return row + n;", "return n;"),
+    ("compare: only the first 16 slots past the row are compared", "const std::size_t row = probes & ~std::size_t(15), end = (buf_len_ + 15) & ~std::size_t(15);", "const std::size_t row = probes & ~std::size_t(15), end = row + 16;"),
+    ("bisect: a slot equal to the target counts as below", "base += (base[half] < target) * half;", "base += (base[half] <= target) * half;"),
+    ("bisect: the final slot is not counted", "return std::size_t(base - buf_ords_) + (*base < target);", "return std::size_t(base - buf_ords_);"),
     ("compare: a block's slots past its end are not filled", "			std::fill(buf_ords_ + n, buf_ords_ + format::block, no_more_docs);\n", ""),
     ("rank: the word's own rank is not added", "		rank += bits_rank_[w];\n", ""),
     ("rank: a word's rank includes the word", "			bits_rank_[w] = std::uint8_t(n);\n			n += std::size_t(std::popcount(word));", "			n += std::size_t(std::popcount(word));\n			bits_rank_[w] = std::uint8_t(n);"),
