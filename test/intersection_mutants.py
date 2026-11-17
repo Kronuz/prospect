@@ -17,9 +17,10 @@ header = os.path.join(root, "include/prospect/reader.hh")
 # (name, old, new); each old text occurs once in the header.
 MUTANTS = [
     ("compare: a slot equal to the target counts as below", "n += std::uint32_t(buf_ords_[i] < target);", "n += std::uint32_t(buf_ords_[i] <= target);"),
-    ("compare: only the first 127 slots are compared", "for (std::size_t i = 0; i < format::block; ++i) { n += std::uint32_t(buf_ords_[i] < target); }", "for (std::size_t i = 0; i + 1 < format::block; ++i) { n += std::uint32_t(buf_ords_[i] < target); }"),
+    ("probe: a slot equal to the target is passed over", "if (buf_ords_[p] >= target) { return p; }", "if (buf_ords_[p] > target) { return p; }"),
+    ("probe: the first slot after pos_ is not probed", "for (std::size_t p = pos_ + 1; p < probes; ++p)", "for (std::size_t p = pos_ + 2; p < probes; ++p)"),
+    ("compare: only the first 16 slots are compared", "const std::size_t end = (buf_len_ + 15) & ~std::size_t(15);", "const std::size_t end = 16;"),
     ("compare: a block's slots past its end are not filled", "			std::fill(buf_ords_ + n, buf_ords_ + format::block, no_more_docs);\n", ""),
-    ("compare: the single posting's slots past it are not filled", "			std::fill(buf_ords_ + 1, buf_ords_ + format::block, no_more_docs);\n", ""),
     ("rank: the word's own rank is not added", "		rank += bits_rank_[w];\n", ""),
     ("rank: a word's rank includes the word", "			bits_rank_[w] = std::uint8_t(n);\n			n += std::size_t(std::popcount(word));", "			n += std::size_t(std::popcount(word));\n			bits_rank_[w] = std::uint8_t(n);"),
     ("rank: the rank is that of the word before", "		rank += bits_rank_[w];\n", "		rank += w ? bits_rank_[w - 1] : 0;\n"),

@@ -675,7 +675,6 @@ public:
 		if (info.flags & format::single_posting) {
 			if (info.postings >= seg.doc_count()) { corrupt("single posting ordinal"); }
 			buf_ords_[0] = ordinal_t(info.postings);
-			std::fill(buf_ords_ + 1, buf_ords_ + format::block, no_more_docs);
 			buf_wdfs_[0] = info.single_wdf;
 			buf_len_ = 1;
 			blocks_ = 0;
@@ -1384,12 +1383,17 @@ private:
 	}
 
 	// The decoded block's first position holding target or more, which must be in (doc(),
-	// buf_last()]: positions up to doc() are below target.
+	// buf_last()]: positions up to doc() are below target. The next four slots are probed
+	// (targets are usually close), then the slots up to the block's end rounded up to 16 are
+	// compared branch-free so the loop vectorizes; slots past buf_len_ hold no_more_docs.
 	std::size_t find_in_block(ordinal_t target) const noexcept {
-		// Every slot compared, branch-free, so the loop vectorizes; a short block's slots
-		// past its end hold no_more_docs.
+		const std::size_t probes = std::min<std::size_t>(pos_ + 5, buf_len_);
+		for (std::size_t p = pos_ + 1; p < probes; ++p) {
+			if (buf_ords_[p] >= target) { return p; }
+		}
+		const std::size_t end = (buf_len_ + 15) & ~std::size_t(15);
 		std::uint32_t n = 0;
-		for (std::size_t i = 0; i < format::block; ++i) { n += std::uint32_t(buf_ords_[i] < target); }
+		for (std::size_t i = 0; i < end; ++i) { n += std::uint32_t(buf_ords_[i] < target); }
 		return n;
 	}
 
@@ -1447,6 +1451,7 @@ private:
 	bool with_positions_ = false, with_counts_ = false;
 	ordinal_t buf_ords_[format::block] = {};
 	std::uint64_t bits_[64] = {};  // the current bitset block while bits_pending_
+	static_assert(format::block <= 256, "bits_rank_ holds ranks up to the block's size");
 	std::uint8_t bits_rank_[64] = {};  // set bits in bits_ before each word
 	ordinal_t bits_first_ = 0, bits_doc0_ = 0, bits_last_ = 0;
 	bool bits_pending_ = false;  // buf_ords_ not yet expanded from bits_
