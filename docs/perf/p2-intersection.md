@@ -62,8 +62,9 @@ faster). Lucene is slower on every intersection row; Tantivy is the fastest base
 | intersection 3 / Tantivy | 0.801 | **1.135** | 0.965 | **1.221** | 0.947 |
 | intersection > 3 / Tantivy | 0.875 | 0.973 | **1.022** | 0.983 | 0.933 |
 
-Profile (`sample`, main, intersection 2): `TOP_1000` spends 31% in the conjunction's block loop and
-23% in `postings_iterator::advance`; `COUNT` 20% in `advance`. Inside `advance`, a target in the
+Profile (`sample`, 5 s, self time, intersection 2): main's `TOP_1000` spends 32% in the conjunction's
+block loop and 26% in `postings_iterator::advance`, its `COUNT` 18.5% in `advance`; with bits 1+2,
+27% and 21%, and 16%. Inside `advance`, a target in the
 decoded block took four linear probes and a seven-step binary search; a target in a bitset block
 took one popcount per word before it (up to 63).
 
