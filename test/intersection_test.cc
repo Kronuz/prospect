@@ -68,6 +68,12 @@ void check_term(const prospect::segment& s, const std::string& term, const std::
 		CHECK(got == want(ps, t));
 		if (got != strata::no_more_docs) { CHECK(seq.wdf() == wdf_of(got)); }
 	}
+	// Strides over the postings, each target a posting: near (probed), past the probes to the
+	// end of a block (compared from its row), and far (bisected), in full blocks and tails.
+	for (const std::size_t stride : {2u, 5u, 6u, 9u, 17u, 31u, 33u, 70u}) {
+		prospect::postings_iterator it(inv, info);
+		for (std::size_t i = 0; i < ps.size(); i += stride) { CHECK(it.advance(ps[i]) == ps[i] && it.wdf() == wdf_of(ps[i])); }
+	}
 	prospect::postings_iterator by(inv, info);
 	for (const ordinal_t d : ps) { CHECK(by.advance(d) == d && by.wdf() == wdf_of(d)); }
 	CHECK(by.advance(docs + 1) == strata::no_more_docs);
@@ -86,6 +92,8 @@ int main() {
 	every("edge", 2, f::block - 1);         // a tail one short of a block
 	every("exact", 2, f::block);            // exactly one full block
 	every("plus1", 2, f::block + 1);        // a full block and a one-posting tail
+	every("t30", 3, 30);                    // a tail of 30: past the probes, the compare from its row
+	every("run158", 3, f::block + 30);      // a full block, then a tail of 30 on the same iterator
 	every("one", 1, 1, 777);                // a single posting
 	// Bitset blocks: word 0 all ones, word 1 all zeros, words 2 and 3 half set at random;
 	// a block holds 128 postings over 256 ordinals, so every word boundary is exercised.
