@@ -141,3 +141,62 @@ those queries; for the gate's mix of classes the saving is smaller (single terms
 Landing needs `include/prospect/reader.hh` without the experiment switch (one mechanism, no
 `#if`), its tests, and the other platforms once on that commit: arm64 (NEON compares, 4 lanes),
 Linux and FreeBSD through CI. Not measured here: arm64 and the gate VM's 5M.
+
+## Follow-up: choosing the in-block search by expected skip distance
+
+Bit 1's 128-slot compare landed as four probes, a bisection of a remainder past 32 slots, and
+otherwise a compare from the target's 16-slot row (prospect:387a47f): short lists stayed neutral,
+but the 1M intersection rows kept only part of the full compare's gain. Three selectors, in
+[`p2-find-in-block.patch`](p2-find-in-block.patch) (`PROSPECT_EXPERIMENT_FIB`):
+
+1. FIB 1: the probes, then the remainder compared from its row (no bisection).
+2. FIB 2: the probes only when the target is expected within four slots at the remainder's
+   mean gap, `(target - doc) * slots < 4 * span` (division-free); otherwise straight to the
+   compare from the row.
+3. FIB 3: FIB 2, with the compare in 32-slot windows stopping at the first that reaches target.
+
+FIB 9 (the 128-slot compare) is the reference. Same rule as above (a win's ratio is also under the A/A's lower bound); a variant is kept only if
+every case of the reviewer's short-list probe stays within its A/A as well.
+
+**1M A/B** (job `261117-113100-ed8f75`, exclusive, seven rounds rotated, best of three; main
+0aad777 and its copy as A/A). Run level B/A [95%]; bold wins by the rule.
+
+| Row | A/A | FIB 1 | FIB 2 | FIB 3 | full 128 |
+|---|---|---|---|---|---|
+| intersection 2 `TOP_100` | 0.966 [0.916, 1.020] | 0.934 [0.853, 1.022] | 0.960 [0.869, 1.060] | 0.964 | 0.942 [0.899, 0.987] |
+| intersection 2 `TOP_1000` | 1.017 [0.994, 1.040] | **0.947** [0.917, 0.978] | **0.966** [0.943, 0.989] | 0.970 | 0.965 [0.904, 1.029] |
+| intersection 2 `TOP_100_COUNT` | 1.003 [0.961, 1.047] | **0.917** [0.885, 0.951] | **0.943** [0.906, 0.981] | 0.979 | **0.881** [0.839, 0.926] |
+| intersection 3 `TOP_100_COUNT` | 0.990 [0.949, 1.032] | **0.888** [0.829, 0.952] | **0.920** [0.848, 0.999] | 0.974 | **0.895** [0.817, 0.982] |
+| intersection classes, range | 0.963-1.115 | 0.888-1.049 | 0.894-0.985 | 0.913-1.013 | 0.865-0.965 |
+| guards, range (unions, negated 3, phrase 2, terms) | 0.915-1.044 | 0.844-1.045 | 0.910-1.045 | 0.909-1.028 | 0.840-1.064 |
+
+No row of any variant loses. Parity (job `261117-113110-0f8110`): `dump` counted and uncounted
+byte-identical to main and `verify` 0 mismatches over the 962 gate queries, all four variants.
+
+**Short-list probe** (job `261117-113107-dc09de`, exclusive, reviewer's `tiny_bench`, seven
+rounds rotated; median of per-round ratios to main, [min-max]). The worst case of each:
+
+| Build | A/A band | FIB 1 | FIB 2 | FIB 3 | full 128 |
+|---|---|---|---|---|---|
+| default flags (SSE2) | 0.98-1.06 | sparse50&blocks2000 **1.148** [1.02-1.22], A/A 1.040 [0.89-1.13] | sparse50&blocks2000 1.101 [0.97-1.23] | tail100&blocks2000 1.047 [1.01-1.17] | 1.20-1.77 on four cases |
+| `-march=native` (AVX2) | 0.93-1.01 | 1.028 | one&tail40&tail100 1.029 | tail40&tail100 1.117 [1.04-1.39] | 1.27-1.64 on three cases |
+
+FIB 1 loses sparse targets in a long list on the portable build: every round is over 1.0 and the
+median is past the A/A's range (four predictable missed probes, then a compare of the remainder at
+four lanes, against the bisection's six steps). FIB 2 skips those probes; its worst case (1.101)
+stays inside that case's A/A range (0.89-1.13). FIB 3's windows add a branch per window, and the
+1M gains go away.
+
+**Verdict: FIB 2 kept**, landed in `reader.hh` without the switch. Against main it wins three
+intersection rows, among them two where Tantivy leads (intersection 2 `TOP_1000` 0.966 and
+`TOP_100_COUNT` 0.943), keeps every short-list case inside its A/A, and removes the bisection.
+It recovers about half of the full compare's 1M gain (`TOP_100_COUNT` 0.943 against 0.881); the
+rest is what short lists pay for comparing every slot. FIB 1 and 3 removed.
+
+| Axis | Before (main 0aad777) | After (FIB 2) | Source |
+|---|---|---|---|
+| Query speed, intersections | 1.0 | 0.894-0.985 (three rows win, none lose) | `261117-113100-ed8f75` |
+| Query speed, short lists | 1.0 | inside the A/A on every case | `261117-113107-dc09de` |
+| Indexing speed | unchanged | unchanged | reader-only change |
+| Memory | unchanged | unchanged | no new state; one multiply per in-block search |
+| Disk | unchanged | unchanged | no format change; `dump` byte-identical |
