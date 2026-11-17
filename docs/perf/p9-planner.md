@@ -96,3 +96,56 @@ deciding A/B takes both ALPHAs with an A/A, under `quiet exclusive`.
 
 Prototype: `docs/perf/p9-planner.patch` (`include/prospect/search.hh`, bits 1, 2 and 4, ALPHA by
 `PROSPECT_P9_ALPHA`).
+
+## Result: bit 4 against main (job `261117-092109-383ae4`, exclusive)
+
+In process, seven rounds rotated, best of three; B is bit 4 at ALPHA 0, D at ALPHA 0.5, C a copy of
+main's binary. The job exited 1 after its tables: its file-count check compared macOS `wc -l`'s
+padded output with a number (840 files were there). The rounds took 10.4-11.1 s each, against
+14.5 s for three sides in the loaded screen; the numbers stand.
+
+| Class | Command | B/A (ALPHA 0) | D/A (ALPHA 0.5) | A/A |
+|---|---|---|---|---|
+| intersection 2 | `TOP_10` | 1.029 [0.925, 1.146] | 1.020 [0.968, 1.074] | 0.940 [0.853, 1.037] |
+| intersection 2 | `TOP_100` | 0.933 [0.841, 1.035] | 0.883 [0.764, 1.020] | 0.957 [0.824, 1.112] |
+| intersection 2 | `TOP_1000` | 1.029 [0.938, 1.129] | 0.945 [0.899, 0.995] | 0.966 [0.915, 1.020] |
+| intersection 3 | `TOP_10` | 0.957 [0.925, 0.991] | 0.951 [0.862, 1.049] | 0.934 [0.852, 1.023] |
+| intersection 3 | `TOP_100` | 0.950 [0.875, 1.032] | 0.971 [0.925, 1.019] | 0.977 [0.865, 1.104] |
+| intersection 3 | `TOP_1000` | 0.905 [0.812, 1.008] | 0.897 [0.813, 0.990] | 0.953 [0.850, 1.068] |
+| intersection > 3 | top-k | 0.94-0.97 | 0.93-0.98 | 0.93-1.05 |
+| intersections | `TOP_100_COUNT`, `COUNT` (untouched paths) | 0.91-1.04 | 0.97-1.06 | 0.93-1.08 |
+| intersection_union 2 | `TOP_1000` | 1.035 [0.950, 1.128] | 1.100 [1.020, 1.186] | 1.032 [0.974, 1.094] |
+| guards | other rows | 0.98-1.12 | 0.93-1.14 | 0.91-1.09 |
+
+Per-query best ratios on the intersection top-k rows: B 0.947-0.989, D 0.947-0.982, A/A
+0.984-1.037. Over `serve` (job `261117-092115-ad33ee`, five rounds; it exited 1 on the same check
+after complete tables, 375 files), bit 4 against main: 0.90-1.04 at ALPHA 0, 0.92-1.08 at ALPHA 0.5,
+every interval across 1.0. Main against Tantivy in that run: intersection 2 `TOP_100` 1.041,
+`TOP_1000` 1.080, `TOP_100_COUNT` 1.234.
+
+By the rule no row wins: the best (D, intersection 2 `TOP_1000`, 0.945; intersection 3 `TOP_1000`,
+0.897) sit inside the A/A's interval, whose spread on this host is ±5-15% per row. D loses one guard
+row (intersection_union 2 `TOP_1000`, 1.100, above the A/A's 1.094), a path bit 4 does not touch.
+The per-query bests point at 2-5% on intersection top-k, below what seven rounds resolve here.
+Full `ctest` with the patch at bit 4: passed (job `261117-092124-2768e6`).
+
+## Four axes
+
+| Axis | Before (main) | After (bit 4) | Source |
+|---|---|---|---|
+| Query speed, intersections | 1.0 | 0.88-1.03 run level, no row beyond the A/A; per-query best 0.95-0.99 | job `261117-092109-383ae4` |
+| Query speed, guards | 1.0 | 0.93-1.12, inside the A/A except one untouched row at ALPHA 0.5 | same job |
+| Indexing speed | unchanged | unchanged | reader-only change |
+| Memory | unchanged | unchanged | two locals per block loop; no allocation |
+| Disk | unchanged | unchanged | no format change; `dump` byte-identical |
+
+## Verdict
+
+**Removed, all three experiments.** Windowed top-k loses at every top-k row (1.12-1.34). Match first
+wins at `TOP_100` and `TOP_1000` and loses at `TOP_10`. The adaptive choice between them (bit 4)
+fixes `TOP_10`, but its 2-5% on intersection top-k does not clear the A/A spread in the deciding
+A/B or over `serve`. Third non-winner in a row, so the item stops here. What would move the
+intersection gap to Tantivy (1.04-1.23) is not the choice of evaluation order: the profile is
+`postings_iterator::advance` and scoring every lead document. A P9 retry needs a quieter instrument
+(more rounds, or instruction counts) before it can resolve a 3% effect.
+Not measured: arm64, Linux, FreeBSD, the gate VM's 5M.
