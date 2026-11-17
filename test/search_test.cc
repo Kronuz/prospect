@@ -55,7 +55,68 @@ struct doc_model {
 	std::vector<std::string> tokens;  // position i + 1 holds tokens[i]
 };
 
+// Negations of one term (exclusion_scorer): top-k equals the generic scan's matches ranked by
+// score then docid, nested or not, counted or not, for k from 1 to every match, in a
+// docid-ordered segment and a permuted one whose included term spans several block groups.
+static void negations() {
+	for (const bool permuted : {false, true}) {
+		std::mt19937_64 r(permuted ? 23 : 29);
+		constexpr std::uint32_t count = 30000;
+		prospect::segment_writer w;
+		w.permuted = permuted;
+		for (std::uint32_t d = 0; d < count; ++d) {
+			std::vector<prospect::posting_input> in;
+			std::uint32_t len = 0;
+			for (const auto& [t, pct] : std::vector<std::pair<const char*, std::uint32_t>>{{"a", 60}, {"b", 40}, {"c", 2}, {"e", 15}, {"f", 100}}) {
+				if (r() % 100 < pct) {
+					const auto wdf = 1 + std::uint32_t(r() % 6);
+					in.push_back({t, wdf, {}});
+					len += wdf;
+				}
+			}
+			w.add(permuted ? 1 + (std::uint64_t(d) * 7919) % count : d + 1, in, len + std::uint32_t(r() % 20));
+		}
+		const std::string file = w.flush({});
+		const prospect::segment seg(file);
+		CHECK(seg.core().docid_ordered() != permuted);
+		const auto& inv = seg.get<prospect::inverted_plugin>();
+		auto term = [&](const char* t) -> prospect::scorer_ptr { return std::make_unique<prospect::term_scorer>(inv, *inv.term(0, t)); };
+		auto minus = [](prospect::scorer_ptr a, prospect::scorer_ptr b) -> prospect::scorer_ptr { return std::make_unique<prospect::exclusion_scorer>(std::move(a), std::move(b)); };
+		const std::vector<std::function<prospect::scorer_ptr()>> queries = {
+			[&] { return minus(term("a"), term("b")); },                      // a dense excluded term
+			[&] { return minus(term("a"), term("c")); },                      // a sparse one
+			[&] { return minus(minus(term("a"), term("b")), term("c")); },    // nested
+			[&] { return minus(minus(term("e"), term("c")), term("a")); },    // nested, denser than the term
+			[&] { return minus(term("a"), term("f")); },                      // excludes everything
+		};
+		for (const auto& build : queries) {
+			std::vector<std::pair<double, std::uint64_t>> all;  // (-score, docid)
+			std::map<std::uint64_t, ordinal_t> ord_of;
+			auto q = build();
+			for (ordinal_t d = q->next(); d != strata::no_more_docs; d = q->next()) {
+				const std::uint64_t id = seg.core().docid(d);
+				all.push_back({-q->score(), id});
+				ord_of[id] = d;
+			}
+			std::sort(all.begin(), all.end());
+			for (const std::size_t k : {std::size_t(1), std::size_t(10), std::size_t(100), std::size_t(1000), std::size_t(count)}) {
+				for (const bool counted : {false, true}) {
+					auto s = build();
+					std::uint64_t n = 0;
+					const auto hits = prospect::top_k(seg, *s, k, counted ? &n : nullptr);
+					CHECK(hits.size() == std::min(k, all.size()));
+					if (counted) { CHECK(n == all.size()); }
+					for (std::size_t i = 0; i < hits.size() && i < all.size(); ++i) {
+						CHECK(hits[i].score == -all[i].first && hits[i].ord == ord_of[all[i].second]);
+					}
+				}
+			}
+		}
+	}
+}
+
 int main() {
+	negations();
 	std::mt19937_64 rng(11);
 	const std::vector<std::string> vocab = {"a", "b", "c", "d", "e", "f", "g", "h", "rare1", "rare2"};
 	for (std::size_t ndocs : {50u, 400u, 3000u, 10000u, 30000u}) {
