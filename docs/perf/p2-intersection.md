@@ -102,6 +102,26 @@ rest. The guard classes in the same job, run level B/A: unions 0.86-0.99, phrase
 postings intersection is the same `advance`), negations 0.82-0.94, single terms 0.96-1.03 (A/A
 0.94-1.03); no row loses.
 
+## After: main with bits 1+2 against Lucene and Tantivy (job `261117-075402-484d70`, exclusive)
+
+Prospect main `0aad777` (bits 1+2 landed through quest `p2-intersection`), the same harness and
+1M index, seven rounds rotated, best of three; a separate session from the baseline, so the
+before/after deltas carry both runs' noise. Bold: Tantivy still faster.
+
+| Class | `TOP_10` | `TOP_100` | `TOP_1000` | `TOP_100_COUNT` | `COUNT` |
+|---|---:|---:|---:|---:|---:|
+| intersection 2 / Lucene | 0.810 | 0.814 | 0.813 | 0.873 | 0.741 |
+| intersection 3 / Lucene | 0.803 | 0.787 | 0.727 | 0.808 | 0.742 |
+| intersection > 3 / Lucene | 0.866 | 0.805 | 0.757 | 0.806 | 0.790 |
+| intersection 2 / Tantivy | 0.984 | **1.080** | **1.145** | **1.175** | 0.973 |
+| intersection 3 / Tantivy | 0.895 | **1.011** | **1.078** | **1.132** | 0.935 |
+| intersection > 3 / Tantivy | 0.904 | 0.945 | 0.962 | 0.997 | 0.849 |
+
+Against Tantivy, `TOP_100` moved from 1.148 to 1.080 (intersection 2) and 1.135 to 1.011
+(intersection 3), `TOP_100_COUNT` from 1.302 to 1.175 and 1.221 to 1.132; `TOP_1000` of
+intersection 2 stays behind (1.103 then, 1.145 now, inside the two runs' spread). The remaining
+gap is the conjunction's top-k path, taken up by P9 (`p9-planner.md`).
+
 ## Four axes
 
 | Axis | Before (main) | After (bits 1+2) | Source |
