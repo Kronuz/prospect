@@ -1,0 +1,214 @@
+diff --git a/include/prospect/reader.hh b/include/prospect/reader.hh
+index 3efeeda..f5aff93 100644
+--- a/include/prospect/reader.hh
++++ b/include/prospect/reader.hh
+@@ -26,6 +26,10 @@
+ 
+ #pragma once
+ 
++#ifndef PROSPECT_EXPERIMENT_P2  // Track P2 prototypes: 1 block search, 2 bitset rank, 4 gallop
++#define PROSPECT_EXPERIMENT_P2 0
++#endif
++
+ #include "bitpack.hh"
+ #include "docset.hh"
+ #include "prospect/format.hh"
+@@ -675,6 +679,9 @@ public:
+ 		if (info.flags & format::single_posting) {
+ 			if (info.postings >= seg.doc_count()) { corrupt("single posting ordinal"); }
+ 			buf_ords_[0] = ordinal_t(info.postings);
++#if PROSPECT_EXPERIMENT_P2 & 1
++			std::fill(buf_ords_ + 1, buf_ords_ + format::block, no_more_docs);
++#endif
+ 			buf_wdfs_[0] = info.single_wdf;
+ 			buf_len_ = 1;
+ 			blocks_ = 0;
+@@ -763,7 +770,7 @@ public:
+ 		// Inside the decoded block: search it without touching skip data.
+ 		if (started_ && buf_len_ && target <= buf_last()) {
+ 			if (bits_pending_) { return advance_bits(target); }
+-			pos_ += count_below(buf_ords_ + pos_, buf_len_ - pos_, target);
++			pos_ = find_in_block(target);
+ 			return doc_ = buf_ords_[pos_];
+ 		}
+ 		// Skip whole blocks using skip data before decoding.
+@@ -779,13 +786,45 @@ public:
+ 			if (doc_ < target) {
+ 				if (target > buf_last()) { continue; }
+ 				if (bits_pending_) { return advance_bits(target); }
+-				pos_ += count_below(buf_ords_ + pos_, buf_len_ - pos_, target);
++				pos_ = find_in_block(target);
+ 				return doc_ = buf_ords_[pos_];
+ 			}
+ 			return doc_;
+ 		}
+ 	}
+ 
++#if PROSPECT_EXPERIMENT_P2 & 8
++	// Keeps those of the n ascending candidates this list holds, in order, and returns how
++	// many; the candidates inside one block are tested against it by a merge, not a call each.
++	std::size_t retain(ordinal_t* c, std::size_t n) {
++		std::size_t k = 0;
++		for (std::size_t i = 0; i < n;) {
++			if (advance(c[i]) == no_more_docs) { break; }
++			const ordinal_t last = buf_last();
++			if (bits_pending_) {
++				const ordinal_t from = c[i];
++				for (; i < n && c[i] <= last; ++i) {
++					// A candidate before the block's span (after the previous block) is not held.
++					const std::uint64_t at = c[i] >= bits_first_ ? c[i] - bits_first_ : 0;
++					c[k] = c[i];
++					k += std::size_t(c[i] >= bits_first_ && (bits_[at / 64] >> (at % 64) & 1));
++				}
++				if (c[i - 1] > from && doc_ < c[i - 1]) { advance_bits(c[i - 1]); }
++			} else {
++				std::size_t p = pos_;
++				for (; i < n && c[i] <= last; ++i) {
++					while (buf_ords_[p] < c[i]) { ++p; }
++					c[k] = c[i];
++					k += std::size_t(buf_ords_[p] == c[i]);
++				}
++				pos_ = p;
++				doc_ = buf_ords_[p];
++			}
++		}
++		return k;
++	}
++#endif
++
+ 	// Skip data, read without decoding postings. Blocks are numbered 0..blocks(); block
+ 	// blocks() is the tail, whose pairs are the term-level ones. Groups hold 32 blocks.
+ 
+@@ -1126,7 +1165,11 @@ private:
+ 	void skip_to_block_containing(ordinal_t target) {
+ 		// The next block holds it (targets only move forward past loaded blocks): no search.
+ 		if (next_block_ < blocks_ && target <= block_last(next_block_)) { return; }
++#if PROSPECT_EXPERIMENT_P2 & 4
++		std::size_t b = next_block_ < blocks_ ? gallop_to(target) : block_index_for(target);
++#else
+ 		std::size_t b = block_index_for(target);
++#endif
+ 		if (b > next_block_ && b <= blocks_) {
+ 			next_block_ = b;
+ 			buf_len_ = 0;
+@@ -1135,6 +1178,28 @@ private:
+ 		}
+ 	}
+ 
++#if PROSPECT_EXPERIMENT_P2 & 4
++	// The block holding target, which lies past next_block_'s: inside next_block_'s group,
++	// entries at distances 1, 2, 4, ... are probed, then the range between is bisected.
++	std::size_t gallop_to(ordinal_t target) {
++		const std::size_t g = next_block_ / format::skip::group_blocks;
++		const group& gr = group_at(g);
++		if (target > gr.last) { return block_index_for(target); }
++		const std::uint64_t rel = std::uint64_t(target) - gr.base;
++		std::size_t lo = next_block_ % format::skip::group_blocks + 1, step = 1, hi = gr.n - 1;  // the last entry ends at gr.last
++		while (lo + step - 1 < hi && stored_last(gr, lo + step - 1) < rel) {
++			lo += step;
++			step *= 2;
++		}
++		hi = std::min(hi, lo + step - 1);
++		while (lo < hi) {
++			const std::size_t mid = lo + (hi - lo) / 2;
++			if (stored_last(gr, mid) < rel) { lo = mid + 1; } else { hi = mid; }
++		}
++		return g * format::skip::group_blocks + lo;
++	}
++#endif
++
+ 	ordinal_t load_next_block() {
+ 		pos_ = 0;
+ 		bits_pending_ = false;
+@@ -1174,6 +1239,9 @@ private:
+ 			ordinal_t prev = blocks_ ? group_last(groups_n_ - 1) : std::numeric_limits<ordinal_t>::max();
+ 			const ordinal_t base = prev;
+ 			for (std::size_t i = 0; i < n; ++i) { buf_ords_[i] = prev += ordinal_t(format::get_leb(&p, end_)); }
++#if PROSPECT_EXPERIMENT_P2 & 1
++			std::fill(buf_ords_ + n, buf_ords_ + format::block, no_more_docs);
++#endif
+ 			for (std::size_t i = 0; i < n; ++i) { buf_wdfs_[i] = (info_.flags & format::no_wdf) ? 0 : std::uint32_t(format::get_leb(&p, end_)); }
+ 			wdf_pending_ = nullptr;
+ 			buf_len_ = n;
+@@ -1198,6 +1266,9 @@ private:
+ 			std::memcpy(&word, p + w * 8, std::min<std::uint64_t>(8, bytes - w * 8));
+ 			if ((w + 1) * 64 > span && span % 64) { word &= (std::uint64_t(1) << (span % 64)) - 1; }
+ 			bits_[w] = word;
++#if PROSPECT_EXPERIMENT_P2 & 2
++			bits_rank_[w] = std::uint8_t(n);
++#endif
+ 			n += std::size_t(std::popcount(word));
+ 		}
+ 		if (n != format::block || !(bits_[words - 1] >> ((span - 1) % 64) & 1)) { corrupt("bitset block count"); }
+@@ -1375,13 +1446,30 @@ private:
+ 		while (!word) { word = bits_[++w]; }
+ 		const unsigned bit = unsigned(std::countr_zero(word));
+ 		std::size_t rank = std::size_t(std::popcount(bits_[w] & ((std::uint64_t(1) << bit) - 1)));
++#if PROSPECT_EXPERIMENT_P2 & 2
++		rank += bits_rank_[w];
++#else
+ 		for (std::size_t i = 0; i < w; ++i) { rank += std::size_t(std::popcount(bits_[i])); }
++#endif
+ 		pos_ = rank;
+ 		return doc_ = bits_first_ + ordinal_t(w * 64 + bit);
+ 	}
+ 
+ 	// How many of n sorted values are below target: a few linear probes (dense lists'
+ 	// targets are usually close), then a branch-free binary search.
++	// The decoded block's first position holding target or more, which must be in (doc(),
++	// buf_last()]: positions up to doc() are below target.
++	std::size_t find_in_block(ordinal_t target) const noexcept {
++#if PROSPECT_EXPERIMENT_P2 & 1
++		// Every slot compared, branch-free, so the loop vectorizes; a short block's slots
++		// past its end hold no_more_docs.
++		std::uint32_t n = 0;
++		for (std::size_t i = 0; i < format::block; ++i) { n += std::uint32_t(buf_ords_[i] < target); }
++		return n;
++#else
++		return pos_ + count_below(buf_ords_ + pos_, buf_len_ - pos_, target);
++#endif
++	}
+ 	static std::size_t count_below(const ordinal_t* v, std::size_t n, ordinal_t target) noexcept {
+ 		std::size_t i = 0;
+ 		for (const std::size_t probe = std::min<std::size_t>(n, 4); i < probe; ++i) {
+@@ -1451,6 +1539,9 @@ private:
+ 	bool with_positions_ = false, with_counts_ = false;
+ 	ordinal_t buf_ords_[format::block] = {};
+ 	std::uint64_t bits_[64] = {};  // the current bitset block while bits_pending_
++#if PROSPECT_EXPERIMENT_P2 & 2
++	std::uint8_t bits_rank_[64] = {};  // set bits in bits_ before each word
++#endif
+ 	ordinal_t bits_first_ = 0, bits_doc0_ = 0, bits_last_ = 0;
+ 	bool bits_pending_ = false;  // buf_ords_ not yet expanded from bits_
+ 	mutable std::uint32_t buf_wdfs_[format::block] = {};
+diff --git a/include/prospect/search.hh b/include/prospect/search.hh
+index 76d0883..9c02cd7 100644
+--- a/include/prospect/search.hh
++++ b/include/prospect/search.hh
+@@ -606,6 +606,26 @@ public:
+ 		}
+ 		auto& lead = terms_[0]->postings();
+ 		ordinal_t d = doc_;
++#if PROSPECT_EXPERIMENT_P2 & 8
++		// The lead's postings in the window, up to a block at a time, filtered by each other
++		// term in turn; then d is aligned as the leapfrog below aligns it.
++		ordinal_t cand[format::block];
++		while (d < end) {
++			std::size_t n = 0;
++			for (; d < end && n < format::block; d = lead.next()) { cand[n++] = d; }
++			for (std::size_t i = 1; i < terms_.size() && n; ++i) { n = terms_[i]->postings().retain(cand, n); }
++			for (std::size_t k = 0; k < n; ++k) { bits[(cand[k] - base) >> 6] |= std::uint64_t(1) << ((cand[k] - base) & 63); }
++		}
++		for (std::size_t i = 1; i < terms_.size() && d != no_more_docs;) {
++			const ordinal_t e = terms_[i]->postings().advance(d);
++			if (e == d) {
++				++i;
++			} else {
++				d = lead.advance(e);
++				i = 1;
++			}
++		}
++#endif
+ 		while (d < end) {
+ 			bits[(d - base) >> 6] |= std::uint64_t(1) << ((d - base) & 63);
+ 			d = lead.next();
