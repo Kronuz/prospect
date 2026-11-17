@@ -60,3 +60,39 @@ intersection 2 `TOP_100_COUNT` puts `postings_iterator::advance` first (498 samp
   1.03. Keep a bit when an intersection row wins and no row loses. Results identical: `verify`
   clean over the 962 gate queries and the run's per-query results equal to main's.
 - Budget: about five experiments; stop at the third loser in a row.
+
+## Screens (in process, `quiet strict`, five rounds rotated, best of three; run level B/A)
+
+Parity of each variant: `verify` 0 mismatches over the 962 queries, `dump` counted and uncounted
+byte-identical to main's (5,772 lines).
+
+| Class | Command | 1: windowed top-k | 2: match first |
+|---|---|---|---|
+| intersection 2 | `TOP_10` | 1.342 [1.310, 1.374] | 1.067 [1.021, 1.116] |
+| intersection 2 | `TOP_100` | 1.212 [1.169, 1.257] | **0.947** [0.920, 0.975] |
+| intersection 2 | `TOP_1000` | 1.172 [1.152, 1.192] | **0.927** [0.915, 0.939] |
+| intersection 2 | `TOP_100_COUNT` / `COUNT` | 1.043 / 0.973 | 1.031 / 0.987 |
+| intersection 3 | `TOP_10` | 1.240 [1.216, 1.263] | 1.106 [1.065, 1.149] |
+| intersection 3 | `TOP_100` | 1.139 [1.114, 1.165] | **0.947** [0.917, 0.979] |
+| intersection 3 | `TOP_1000` | 1.118 [1.107, 1.129] | **0.930** [0.911, 0.949] |
+| intersection > 3 | `TOP_10` / `TOP_100` / `TOP_1000` | 1.20 / 1.14 / 1.13 | 1.035 / 0.939 / 0.928 |
+| guards (negated 3, terms, intersection_union 2) | all | 0.98-1.02 | 0.98-1.04 (one noisy `COUNT` 1.18 [0.92, 1.53]) |
+
+1. **Windowed top-k loses** (1.12-1.34 at every top-k row): finding matches from window bits is
+   cheap, but scoring them needs the original iterators moved to each match anyway, and the window
+   (4,096 ordinals) prunes far coarser than the lead's 128-posting blocks. Removed.
+2. **Match first splits by k**: 0.93-0.95 at `TOP_100` and `TOP_1000`, 1.04-1.11 at `TOP_10`. With
+   a high threshold (small k) the lead's score prunes most documents before the other terms move;
+   with a low one it rarely prunes and only costs a score on every lead document that does not
+   match. That is a per-block cost choice, which experiment 3 makes.
+3. **Adaptive (bit 4)**: per document, the lead scores first only while its score can prune, that
+   is while the threshold exceeds the other terms' block bounds by ALPHA of the lead's block bound
+   (ALPHA 0 and 0.5); else match first.
+
+Screen of bit 4 (same setup, a loaded host: unchanged rows such as terms `COUNT` spread 0.72-1.14):
+ALPHA 0 intersection rows 0.91-1.01 at the top-k commands, ALPHA 0.5 0.86-1.05; `TOP_10` no longer
+loses; `TOP_100_COUNT` and `COUNT` (counted paths, untouched) 0.95-1.08; parity clean for both. The
+deciding A/B takes both ALPHAs with an A/A, under `quiet exclusive`.
+
+Prototype: `docs/perf/p9-planner.patch` (`include/prospect/search.hh`, bits 1, 2 and 4, ALPHA by
+`PROSPECT_P9_ALPHA`).

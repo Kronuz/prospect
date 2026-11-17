@@ -1,0 +1,131 @@
+diff --git a/include/prospect/search.hh b/include/prospect/search.hh
+index 76d0883..1e81ea6 100644
+--- a/include/prospect/search.hh
++++ b/include/prospect/search.hh
+@@ -628,6 +628,18 @@ public:
+ 	// this to the generic loop.
+ 	task::task<bool> collect_top_k(top_collector& c, slice sl) override {
+ 		if (c.counting || terms_.empty()) { co_return false; }
++#if PROSPECT_EXPERIMENT_P9 & 1
++		if (prefer_windows()) {
++			if (auto cnt = fresh()) {
++				window_gate wg;
++				for (ordinal_t d = cnt->next(); d != no_more_docs;) {
++					if (wg.due(d)) { co_await sl.checkpoint(); }
++					d = collect_window(c, *cnt, d);
++				}
++				co_return true;
++			}
++		}
++#endif
+ 		auto& lead = terms_[0]->postings();
+ 		window_gate gate;
+ 		for (ordinal_t d = lead.next(); d != no_more_docs;) {
+@@ -646,18 +658,55 @@ public:
+ 		const ordinal_t upto = end == no_more_docs ? no_more_docs - 1 : end;
+ 		// The window's bounds, computed once a threshold exists: at the window's start,
+ 		// or where one first appears inside it (bounding the rest of the window).
+-		double rest = 0;
++		double rest = 0, lead_bound = 0;
+ 		bool bounded = false;
+ 		auto bound = [&](ordinal_t from) {
+ 			bounded = true;
+ 			rest = 0;
+ 			for (std::size_t i = 1; i < n; ++i) { rest += terms_[i]->max_score(from, upto); }
+-			return terms_[0]->max_score(from, upto) + rest;
++			return (lead_bound = terms_[0]->max_score(from, upto)) + rest;
+ 		};
+ 		if (const double min = c.min_competitive(); min > 0 && sum_upper(bound(d), n) <= min) {
+ 			return end == no_more_docs ? no_more_docs : lead.advance(end + 1);
+ 		}
+ 		while (d <= upto) {
++#if PROSPECT_EXPERIMENT_P9 & 6
++#ifndef PROSPECT_P9_ALPHA
++#define PROSPECT_P9_ALPHA 0.0
++#endif
++			// Bit 2: always match first. Bit 4: the lead scores first only while its score can
++			// prune (the threshold exceeds the others' bounds by ALPHA of the lead's bound).
++			bool match_first = (PROSPECT_EXPERIMENT_P9 & 2) != 0;
++			if (!match_first) {
++				const double min = c.min_competitive();
++				if (min > 0 && !bounded) { bound(d); }
++				match_first = !(min > 0 && min - rest > PROSPECT_P9_ALPHA * lead_bound);
++			}
++			if (match_first) {
++				bool agreed = true;
++				for (std::size_t i = 1; i < n; ++i) {
++					const ordinal_t e = terms_[i]->postings().advance(d);
++					if (e != d) {
++						d = lead.advance(e);
++						agreed = false;
++						break;
++					}
++				}
++				if (!agreed) { continue; }
++				const double s = parts_[rank_[0]] = terms_[0]->score_now(d, lead.wdf());
++				if (const double min = c.min_competitive(); min > 0) {
++					if (!bounded) { bound(d); }
++					if (sum_upper(s + rest, n) <= min) {
++						d = lead.next();
++						continue;
++					}
++				}
++				for (std::size_t i = 1; i < n; ++i) { parts_[rank_[i]] = terms_[i]->score_now(d, terms_[i]->postings().wdf()); }
++				c.collect(d, sum_parts());
++				d = lead.next();
++				continue;
++			}
++#endif
+ 			const double s = parts_[rank_[0]] = terms_[0]->score_now(d, lead.wdf());
+ 			if (const double min = c.min_competitive(); min > 0) {
+ 				if (!bounded) { bound(d); }
+@@ -685,6 +734,49 @@ public:
+ 		return d;
+ 	}
+ 
++#if PROSPECT_EXPERIMENT_P9 & 1
++	// The 4,096-ordinal window holding d: skipped when the summed bounds cannot compete, else
++	// its matches come from cnt's fill (window bits ANDed, or probes) and only they are scored.
++	// Returns cnt's next match.
++	ordinal_t collect_window(top_collector& c, scorer& cnt, ordinal_t d) {
++		const std::size_t n = terms_.size();
++		const ordinal_t base = d & ~ordinal_t(4095), end = base > no_more_docs - 4096 ? no_more_docs : base + 4096;
++		const ordinal_t upto = end - 1;
++		double rest = 0;
++		bool bounded = false;
++		auto bound = [&](ordinal_t from) {
++			bounded = true;
++			rest = 0;
++			for (std::size_t i = 1; i < n; ++i) { rest += terms_[i]->max_score(from, upto); }
++			return terms_[0]->max_score(from, upto) + rest;
++		};
++		if (const double min = c.min_competitive(); min > 0 && sum_upper(bound(d), n) <= min) {
++			return end == no_more_docs ? no_more_docs : cnt.advance(end);
++		}
++		std::uint64_t bits[64] = {};
++		cnt.fill(base, end, bits);
++		auto& lead = terms_[0]->postings();
++		for (std::size_t w = 0; w < 64; ++w) {
++			for (std::uint64_t word = bits[w]; word; word &= word - 1) {
++				const ordinal_t m = base + ordinal_t(w * 64 + std::size_t(std::countr_zero(word)));
++				lead.advance(m);
++				const double s = parts_[rank_[0]] = terms_[0]->score_now(m, lead.wdf());
++				if (const double min = c.min_competitive(); min > 0) {
++					if (!bounded) { bound(m); }
++					if (sum_upper(s + rest, n) <= min) { continue; }
++				}
++				for (std::size_t i = 1; i < n; ++i) {
++					auto& it = terms_[i]->postings();
++					it.advance(m);
++					parts_[rank_[i]] = terms_[i]->score_now(m, it.wdf());
++				}
++				c.collect(m, sum_parts());
++			}
++		}
++		return cnt.doc();
++	}
++#endif
++
+ 	ordinal_t doc() const noexcept override { return doc_; }
+ 	ordinal_t next() override { return doc_ = confirm(align(children_[0]->approx_next())); }
+ 	ordinal_t advance(ordinal_t t) override { return doc_ = confirm(align(children_[0]->approx_advance(t))); }
