@@ -36,6 +36,7 @@
 #include <limits>
 #include <memory>
 #include <queue>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -339,6 +340,45 @@ inline std::size_t terms_total(const std::vector<scorer_ptr>& children) noexcept
 	return n;
 }
 
+// The excluded clauses of a negation's top-k over one term (exclusion_scorer::collect_top_k), probed
+// only for hits that could enter. Each clause steps forward from where it stands; where a reordered
+// segment's groups step back in ordinals, it restarts from a fresh copy.
+class exclusion_probe {
+public:
+	// False when a clause that may restart has no fresh copy.
+	bool add(scorer& e, bool restarts) {
+		scorer_ptr own;
+		if (restarts && !(own = e.fresh())) { return false; }
+		cur_.push_back(own ? own.get() : &e);
+		base_.push_back(&e), own_.push_back(std::move(own)), started_.push_back(0);
+		return true;
+	}
+	bool excluded(ordinal_t d) {
+		if (d < last_) {
+			for (std::size_t i = 0; i < cur_.size(); ++i) {
+				if (!(own_[i] = base_[i]->fresh())) { throw std::logic_error("prospect: an excluded clause restarts without a copy"); }
+				cur_[i] = own_[i].get(), started_[i] = 0;
+			}
+		}
+		last_ = d;
+		for (std::size_t i = 0; i < cur_.size(); ++i) {
+			scorer& e = *cur_[i];
+			if (!started_[i] || e.doc() < d) {
+				started_[i] = 1;
+				e.advance(d);
+			}
+			if (e.doc() == d) { return true; }
+		}
+		return false;
+	}
+
+private:
+	std::vector<scorer*> base_, cur_;
+	std::vector<scorer_ptr> own_;
+	std::vector<char> started_;
+	ordinal_t last_ = 0;
+};
+
 class term_scorer final : public scorer {
 public:
 	term_scorer(const inverted_plugin::reader& seg, const format::term_info& info, double boost = 1.0)
@@ -368,7 +408,7 @@ public:
 	// block in one loop over its decoded postings. Counting leaves this to the generic loop.
 	task::task<bool> collect_top_k(top_collector& c, slice sl) override {
 		if (c.counting) { co_return false; }
-		if (c.reordered() && it_.groups() > 1) { co_return co_await collect_groups(c, sl); }
+		if (steps_back(c)) { co_return co_await collect_groups(c, sl); }
 		window_gate gate;
 		for (ordinal_t d = it_.next(); d != no_more_docs; d = it_.doc()) {
 			if (gate.due(d)) { co_await sl.checkpoint(); }
@@ -383,16 +423,20 @@ public:
 		if ((d = skip_blocks(d)) == no_more_docs) { return false; }
 		const ordinal_t last = it_.block_end(d);
 		it_.for_each_until(last == no_more_docs ? no_more_docs : last + 1,
-			[&](ordinal_t ord, std::uint32_t wdf) { c.collect(ord, score_of(ord, wdf)); });
+			[&](ordinal_t ord, std::uint32_t wdf) { take(c, ord, score_of(ord, wdf)); });
 		return true;
 	}
+	// Whether the bulk top-k visits ordinals out of order (a reordered segment's groups).
+	bool steps_back(const top_collector& c) const noexcept { return c.reordered() && it_.groups() > 1; }
+	// Excluded clauses for the bulk top-k to probe (none: nullptr).
+	void probe(exclusion_probe* p) noexcept { probe_ = p; }
 	void fill(ordinal_t base, ordinal_t end, std::uint64_t* bits) override { it_.fill(base, end, bits); }
 
 	// M3t, in a reordered segment, where a reordering gathers high bounds into few groups:
 	// the tail, then the groups by descending bound, each from a fresh iterator with the
 	// per-block skip inside, until a group's bound cannot beat the threshold.
 	task::task<bool> collect_groups(top_collector& c, slice sl) {
-		auto score_until = [&](postings_iterator& p, ordinal_t end) { p.for_each_until(end, [&](ordinal_t ord, std::uint32_t wdf) { c.collect(ord, score_of(ord, wdf)); }); };
+		auto score_until = [&](postings_iterator& p, ordinal_t end) { p.for_each_until(end, [&](ordinal_t ord, std::uint32_t wdf) { take(c, ord, score_of(ord, wdf)); }); };
 		const std::size_t groups = it_.groups();
 		if (it_.info().df % format::block && total_bound_ > c.min_competitive()) {
 			postings_iterator p(*seg_, it_.info());
@@ -462,6 +506,15 @@ public:
 	const inverted_plugin::reader& seg() const noexcept { return *seg_; }
 
 private:
+	// A hit for the collector, unless a probe's excluded clause matches it; a hit at or below the
+	// threshold cannot enter, so it is dropped unprobed.
+	[[gnu::always_inline]] void take(top_collector& c, ordinal_t ord, double s) {
+		if (probe_) {
+			const double m = c.min_competitive();
+			if ((m > 0 && s <= m) || probe_->excluded(ord)) { return; }
+		}
+		c.collect(ord, s);
+	}
 	double bound(std::span<const format::impact> pairs) const {
 		double best = 0;
 		for (const auto& p : pairs) { best = std::max(best, weight_(p.wdf, format::decode_length(p.length))); }
@@ -515,6 +568,7 @@ private:
 		return d;
 	}
 
+	exclusion_probe* probe_ = nullptr;
 	const inverted_plugin::reader* seg_;
 	postings_iterator it_;
 	weight weight_;
@@ -1094,6 +1148,26 @@ public:
 	double current_bound() override { return in_->current_bound(); }
 	// |include| - |include and exclude| for a term minus a term.
 	task::task<std::optional<std::uint64_t>> exact_count(slice sl) override;
+	// A term minus any clauses: the term's bulk top-k, each hit that could enter probed against
+	// the excluded clauses (p7-exclusion.md); a scorer, until the result, is the generic loop's.
+	task::task<bool> collect_top_k(top_collector& c, slice sl) override {
+		if (c.counting) { co_return false; }
+		scorer* in = in_.get();
+		while (auto* e = dynamic_cast<exclusion_scorer*>(in)) { in = e->in_.get(); }
+		auto* t = dynamic_cast<term_scorer*>(in);
+		if (!t) { co_return false; }
+		exclusion_probe probe;
+		const bool restarts = t->steps_back(c);
+		for (exclusion_scorer* e = this; e; e = dynamic_cast<exclusion_scorer*>(e->in_.get())) {
+			if (!probe.add(*e->ex_, restarts)) { co_return false; }
+		}
+		struct unset {
+			term_scorer* t;
+			~unset() { t->probe(nullptr); }
+		} guard{t};
+		t->probe(&probe);
+		co_return co_await t->collect_top_k(c, sl);
+	}
 
 	// Counting windows: include's window bits AND NOT exclude's, when filling the exclude
 	// side costs less than stepping it once per included document (about a block each).

@@ -18,8 +18,8 @@ header = os.path.join(root, "include/prospect/search.hh")
 # (name, old, new); each old text occurs once in the header.
 MUTANTS = [
     ("probe: a hit that could enter is never probed", "if ((m > 0 && s <= m) || probe_->excluded(ord)) { return; }", "if (m > 0 && s <= m) { return; }"),
-    ("probe: a step back in ordinals does not restart the excluded clauses", "for (std::size_t i = 0; i < cur.size(); ++i) { cur[i] = base[i]->fresh(), started[i] = 0; }", "(void)0;"),
-    ("nested: only the outermost excluded clause is probed", "if (!probe.add(e->ex_.get())) { co_return false; }", "if (in == this && !probe.add(e->ex_.get())) { co_return false; }"),
+    ("probe: a step back in ordinals does not restart the excluded clauses", "		if (d < last_) {", "		if (false) {"),
+    ("nested: only the outermost excluded clause is probed", "for (exclusion_scorer* e = this; e; e = dynamic_cast<exclusion_scorer*>(e->in_.get())) {", "for (exclusion_scorer* e = this; e; e = nullptr) {"),
     ("probe: the excluded clause is taken as matching every hit it reaches", "if (e.doc() == d) { return true; }", "if (e.doc() >= d) { return true; }"),
 ]
 
