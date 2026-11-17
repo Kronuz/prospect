@@ -9,7 +9,8 @@
       more than two), best of RUNS per query and round.
   classes_ab.py serve OUT ROUNDS RUNS DIR COMMANDS SIDE='serve command' ...
       The same over each engine's serve ("COMMAND\\tquery" in, one line out), one process per side
-      for the session, timed around the round trip as the harness's client does.
+      for the session, timed around the round trip as the harness's client does; each query runs
+      WARMUP times (default 1) per command first.
   classes_ab.py score OUT A B
       Per class and command: the run-level ratio B/A (each round's geometric mean over queries,
       then the mean over rounds with a t interval), the per-query best ratio, and mismatches.
@@ -147,8 +148,11 @@ def serve(
 
     try:
         tw = time.time()
-        for side, _ in sides:  # warm-up: every query once per command
-            for cmd in commands.split():
+        for (
+            side,
+            _,
+        ) in sides:  # warm-up: every query WARMUP times (default 1) per command
+            for cmd in commands.split() * int(os.environ.get("WARMUP", "1")):
                 for _, qs in cls:
                     for q in qs:
                         ask(side, cmd, q)
