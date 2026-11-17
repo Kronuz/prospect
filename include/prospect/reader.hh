@@ -1384,17 +1384,27 @@ private:
 
 	// The decoded block's first position holding target or more, which must be in (doc(),
 	// buf_last()]: positions up to doc() are below target. The next four slots are probed
-	// (targets are usually close), then the slots up to the block's end rounded up to 16 are
-	// compared branch-free so the loop vectorizes; slots past buf_len_ hold no_more_docs.
+	// (targets are usually close); a long remainder is bisected branch-free; a short one is
+	// compared whole from its 16-slot row, branch-free so the loop vectorizes (the slots past
+	// buf_len_ hold no_more_docs).
 	std::size_t find_in_block(ordinal_t target) const noexcept {
-		const std::size_t probes = std::min<std::size_t>(pos_ + 5, buf_len_);
-		for (std::size_t p = pos_ + 1; p < probes; ++p) {
+		const std::size_t first = pos_ + 1, probes = std::min<std::size_t>(first + 4, buf_len_);
+		for (std::size_t p = first; p < probes; ++p) {
 			if (buf_ords_[p] >= target) { return p; }
 		}
-		const std::size_t end = (buf_len_ + 15) & ~std::size_t(15);
+		if (buf_len_ - probes > 32) {
+			const ordinal_t* base = buf_ords_ + probes;
+			for (std::size_t len = buf_len_ - probes; len > 1;) {
+				const std::size_t half = len / 2;
+				base += (base[half] < target) * half;
+				len -= half;
+			}
+			return std::size_t(base - buf_ords_) + (*base < target);
+		}
+		const std::size_t row = probes & ~std::size_t(15), end = (buf_len_ + 15) & ~std::size_t(15);
 		std::uint32_t n = 0;
-		for (std::size_t i = 0; i < end; ++i) { n += std::uint32_t(buf_ords_[i] < target); }
-		return n;
+		for (std::size_t i = row; i < end; ++i) { n += std::uint32_t(buf_ords_[i] < target); }
+		return row + n;
 	}
 
 	// The tail's ordinals strictly increase from base (none before the first block) and stay
