@@ -187,16 +187,41 @@ four lanes, against the bisection's six steps). FIB 2 skips those probes; its wo
 stays inside that case's A/A range (0.89-1.13). FIB 3's windows add a branch per window, and the
 1M gains go away.
 
-**Verdict: FIB 2 kept**, landed in `reader.hh` without the switch. Against main it wins three
-intersection rows, among them two where Tantivy leads (intersection 2 `TOP_1000` 0.966 and
-`TOP_100_COUNT` 0.943), keeps every short-list case inside its A/A, and removes the bisection.
-It recovers about half of the full compare's 1M gain (`TOP_100_COUNT` 0.943 against 0.881); the
-rest is what short lists pay for comparing every slot. FIB 1 and 3 removed.
+FIB 2 led the screen: three intersection rows won, among them two where Tantivy leads
+(intersection 2 `TOP_1000` 0.966 and `TOP_100_COUNT` 0.943), and every short-list case stayed
+inside its A/A. It was built without the switch (prospect:10ac993; suite `261117-121855-eefc18`
+passed, its six mutants caught) and measured again at that commit.
 
-| Axis | Before (main 0aad777) | After (FIB 2) | Source |
+**Rerun at the landing commit** (job `261117-122103-e51e66`, exclusive, same harness; b is FIB 2,
+c the A/A copy of main). Run level against main [95%]:
+
+| Row | A/A | FIB 2 | Screen's FIB 2 |
 |---|---|---|---|
-| Query speed, intersections | 1.0 | 0.894-0.985 (three rows win, none lose) | `261117-113100-ed8f75` |
-| Query speed, short lists | 1.0 | inside the A/A on every case | `261117-113107-dc09de` |
+| intersection 2 `TOP_100` | 0.976 [0.919, 1.038] | 0.960 [0.872, 1.058] | 0.960 |
+| intersection 2 `TOP_1000` | 0.975 [0.842, 1.129] | 1.000 [0.932, 1.073] | **0.966** |
+| intersection 2 `TOP_100_COUNT` | 0.970 [0.936, 1.004] | 0.943 [0.906, 0.981] | **0.943** |
+| intersection 3 `TOP_100_COUNT` | 0.979 [0.914, 1.048] | 0.918 [0.852, 0.988] | **0.920** |
+| intersection 3 `COUNT` | 1.030 [0.979, 1.083] | **0.912** [0.857, 0.970] | 0.924 |
+| intersection > 3 `TOP_1000` | 1.053 [1.006, 1.102] | **0.948** [0.899, 0.999] | 0.956 |
+| intersection > 3 `COUNT` | 1.024 [0.974, 1.077] | **0.928** [0.896, 0.962] | 0.971 |
+| intersection classes, range | 0.946-1.066 | 0.903-1.090 | 0.894-0.985 |
+
+Short-list probe in the same job: FIB 2's worst case is sparse50&blocks2000 at default flags, 1.098
+[0.96-1.17] (A/A 0.961 [0.81-1.35]); every case is inside its A/A at both flag sets.
+
+**Verdict: FIB 2 removed** (and FIB 1 and 3). The rerun wins three rows, but not the ones the
+screen won: no row wins in both sessions, and the rows where Tantivy leads (intersection 2
+`TOP_100`, `TOP_1000`, `TOP_100_COUNT`) are inside the A/A at the landing commit. The point
+estimates lean 3-9% below main, but the A/A moves as much between sessions, so the selector's gain is
+no more than a few percent and not shown beyond noise. `reader.hh` stays main's (probes, bisection past
+32 slots, compare from the row); [`p2-find-in-block.patch`](p2-find-in-block.patch) is the record.
+The full compare's larger gain (`TOP_100_COUNT` 0.881) remains out of reach for short lists, which
+pay 1.2-1.8x for it.
+
+| Axis | Before (main 0aad777) | FIB 2 | Source |
+|---|---|---|---|
+| Query speed, intersections | 1.0 | screen 0.894-0.985, rerun 0.903-1.090; target rows inside the A/A | `261117-113100-ed8f75`, `261117-122103-e51e66` |
+| Query speed, short lists | 1.0 | inside the A/A on every case, both runs | `261117-113107-dc09de`, `261117-122103-e51e66` |
 | Indexing speed | unchanged | unchanged | reader-only change |
 | Memory | unchanged | unchanged | no new state; one multiply per in-block search |
-| Disk | unchanged | unchanged | no format change; `dump` byte-identical |
+| Disk | unchanged | unchanged | no format change; `dump` byte-identical (`261117-113110-0f8110`) |

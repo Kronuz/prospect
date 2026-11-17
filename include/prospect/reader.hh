@@ -1383,20 +1383,25 @@ private:
 	}
 
 	// The decoded block's first position holding target or more, which must be in (doc(),
-	// buf_last()]: positions up to doc() are below target. A target expected within four slots
-	// at the remainder's mean gap ((target - doc) * slots < 4 * span, division-free) is probed
-	// for; the rest is compared from its 16-slot row to the block's end, branch-free so the
-	// loop vectorizes (the slots past buf_len_ hold no_more_docs).
+	// buf_last()]: positions up to doc() are below target. The next four slots are probed
+	// (targets are usually close); a long remainder is bisected branch-free; a short one is
+	// compared whole from its 16-slot row, branch-free so the loop vectorizes (the slots past
+	// buf_len_ hold no_more_docs).
 	std::size_t find_in_block(ordinal_t target) const noexcept {
-		const std::size_t first = pos_ + 1;
-		const ordinal_t at = buf_ords_[pos_];
-		std::size_t p = first;
-		if (std::uint64_t(target - at) * (buf_len_ - first) < 4 * std::uint64_t(buf_ords_[buf_len_ - 1] - at)) {
-			for (const std::size_t probes = std::min<std::size_t>(first + 4, buf_len_); p < probes; ++p) {
-				if (buf_ords_[p] >= target) { return p; }
-			}
+		const std::size_t first = pos_ + 1, probes = std::min<std::size_t>(first + 4, buf_len_);
+		for (std::size_t p = first; p < probes; ++p) {
+			if (buf_ords_[p] >= target) { return p; }
 		}
-		const std::size_t row = p & ~std::size_t(15), end = (buf_len_ + 15) & ~std::size_t(15);
+		if (buf_len_ - probes > 32) {
+			const ordinal_t* base = buf_ords_ + probes;
+			for (std::size_t len = buf_len_ - probes; len > 1;) {
+				const std::size_t half = len / 2;
+				base += (base[half] < target) * half;
+				len -= half;
+			}
+			return std::size_t(base - buf_ords_) + (*base < target);
+		}
+		const std::size_t row = probes & ~std::size_t(15), end = (buf_len_ + 15) & ~std::size_t(15);
 		std::uint32_t n = 0;
 		for (std::size_t i = row; i < end; ++i) { n += std::uint32_t(buf_ords_[i] < target); }
 		return row + n;

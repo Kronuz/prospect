@@ -1,7 +1,6 @@
-// The decoded block's search (find_in_block: probes for targets expected near, a compare from the
-// row otherwise) and the bitset block's per-word rank (bits_rank_), against a model of each term's
-// postings: full, partial, short, one-posting and skewed blocks, the last block, and bitset words
-// that are all ones, all zeros, and mixed.
+// The decoded block's all-slots compare (find_in_block) and the bitset block's per-word rank
+// (bits_rank_), against a model of each term's postings: full, partial, short and one-posting
+// blocks, the last block, and bitset words that are all ones, all zeros, and mixed.
 #include "prospect/reader.hh"
 #include "prospect/writer.hh"
 
@@ -69,8 +68,8 @@ void check_term(const prospect::segment& s, const std::string& term, const std::
 		CHECK(got == want(ps, t));
 		if (got != strata::no_more_docs) { CHECK(seq.wdf() == wdf_of(got)); }
 	}
-	// Strides over the postings, each target a posting: near (probed), past the probes, and far
-	// (compared from its row), in full blocks and tails.
+	// Strides over the postings, each target a posting: near (probed), past the probes to the
+	// end of a block (compared from its row), and far (bisected), in full blocks and tails.
 	for (const std::size_t stride : {2u, 5u, 6u, 9u, 17u, 31u, 33u, 70u}) {
 		prospect::postings_iterator it(inv, info);
 		for (std::size_t i = 0; i < ps.size(); i += stride) { CHECK(it.advance(ps[i]) == ps[i] && it.wdf() == wdf_of(ps[i])); }
@@ -96,15 +95,6 @@ int main() {
 	every("t30", 3, 30);                    // a tail of 30: past the probes, the compare from its row
 	every("run158", 3, f::block + 30);      // a full block, then a tail of 30 on the same iterator
 	every("one", 1, 1, 777);                // a single posting
-	// Skewed blocks, where the remainder's mean gap misjudges the distance: a dense run then sparse
-	// postings (expected near, found past the probes), and sparse then dense (expected far, found
-	// near); each a full block, then a tail.
-	every("skew", 1, 20);
-	every("skew", 8, 108, 20);
-	every("skew", 1, 30, 900);
-	every("skew2", 20, 40);
-	every("skew2", 1, 88, 800);
-	every("skew2", 9, 20, 900);
 	// Bitset blocks: word 0 all ones, word 1 all zeros, words 2 and 3 half set at random;
 	// a block holds 128 postings over 256 ordinals, so every word boundary is exercised.
 	std::mt19937_64 rng(3);
