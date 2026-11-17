@@ -763,7 +763,7 @@ public:
 		// Inside the decoded block: search it without touching skip data.
 		if (started_ && buf_len_ && target <= buf_last()) {
 			if (bits_pending_) { return advance_bits(target); }
-			pos_ += count_below(buf_ords_ + pos_, buf_len_ - pos_, target);
+			pos_ = find_in_block(target);
 			return doc_ = buf_ords_[pos_];
 		}
 		// Skip whole blocks using skip data before decoding.
@@ -779,7 +779,7 @@ public:
 			if (doc_ < target) {
 				if (target > buf_last()) { continue; }
 				if (bits_pending_) { return advance_bits(target); }
-				pos_ += count_below(buf_ords_ + pos_, buf_len_ - pos_, target);
+				pos_ = find_in_block(target);
 				return doc_ = buf_ords_[pos_];
 			}
 			return doc_;
@@ -1174,6 +1174,7 @@ private:
 			ordinal_t prev = blocks_ ? group_last(groups_n_ - 1) : std::numeric_limits<ordinal_t>::max();
 			const ordinal_t base = prev;
 			for (std::size_t i = 0; i < n; ++i) { buf_ords_[i] = prev += ordinal_t(format::get_leb(&p, end_)); }
+			std::fill(buf_ords_ + n, buf_ords_ + format::block, no_more_docs);
 			for (std::size_t i = 0; i < n; ++i) { buf_wdfs_[i] = (info_.flags & format::no_wdf) ? 0 : std::uint32_t(format::get_leb(&p, end_)); }
 			wdf_pending_ = nullptr;
 			buf_len_ = n;
@@ -1198,6 +1199,7 @@ private:
 			std::memcpy(&word, p + w * 8, std::min<std::uint64_t>(8, bytes - w * 8));
 			if ((w + 1) * 64 > span && span % 64) { word &= (std::uint64_t(1) << (span % 64)) - 1; }
 			bits_[w] = word;
+			bits_rank_[w] = std::uint8_t(n);
 			n += std::size_t(std::popcount(word));
 		}
 		if (n != format::block || !(bits_[words - 1] >> ((span - 1) % 64) & 1)) { corrupt("bitset block count"); }
@@ -1375,26 +1377,34 @@ private:
 		while (!word) { word = bits_[++w]; }
 		const unsigned bit = unsigned(std::countr_zero(word));
 		std::size_t rank = std::size_t(std::popcount(bits_[w] & ((std::uint64_t(1) << bit) - 1)));
-		for (std::size_t i = 0; i < w; ++i) { rank += std::size_t(std::popcount(bits_[i])); }
+		rank += bits_rank_[w];
 		pos_ = rank;
 		return doc_ = bits_first_ + ordinal_t(w * 64 + bit);
 	}
 
-	// How many of n sorted values are below target: a few linear probes (dense lists'
-	// targets are usually close), then a branch-free binary search.
-	static std::size_t count_below(const ordinal_t* v, std::size_t n, ordinal_t target) noexcept {
-		std::size_t i = 0;
-		for (const std::size_t probe = std::min<std::size_t>(n, 4); i < probe; ++i) {
-			if (v[i] >= target) { return i; }
+	// The decoded block's first position holding target or more, which must be in (doc(),
+	// buf_last()]: positions up to doc() are below target. The next four slots are probed
+	// (targets are usually close); a long remainder is bisected branch-free; a short one is
+	// compared whole from its 16-slot row, branch-free so the loop vectorizes (the slots past
+	// buf_len_ hold no_more_docs).
+	std::size_t find_in_block(ordinal_t target) const noexcept {
+		const std::size_t first = pos_ + 1, probes = std::min<std::size_t>(first + 4, buf_len_);
+		for (std::size_t p = first; p < probes; ++p) {
+			if (buf_ords_[p] >= target) { return p; }
 		}
-		if (i == n) { return n; }
-		const ordinal_t* base = v + i;
-		for (std::size_t len = n - i; len > 1;) {
-			const std::size_t half = len / 2;
-			base += (base[half] < target) * half;
-			len -= half;
+		if (buf_len_ - probes > 32) {
+			const ordinal_t* base = buf_ords_ + probes;
+			for (std::size_t len = buf_len_ - probes; len > 1;) {
+				const std::size_t half = len / 2;
+				base += (base[half] < target) * half;
+				len -= half;
+			}
+			return std::size_t(base - buf_ords_) + (*base < target);
 		}
-		return std::size_t(base - v) + (*base < target);
+		const std::size_t row = probes & ~std::size_t(15), end = (buf_len_ + 15) & ~std::size_t(15);
+		std::uint32_t n = 0;
+		for (std::size_t i = row; i < end; ++i) { n += std::uint32_t(buf_ords_[i] < target); }
+		return row + n;
 	}
 
 	// The tail's ordinals strictly increase from base (none before the first block) and stay
@@ -1451,6 +1461,8 @@ private:
 	bool with_positions_ = false, with_counts_ = false;
 	ordinal_t buf_ords_[format::block] = {};
 	std::uint64_t bits_[64] = {};  // the current bitset block while bits_pending_
+	static_assert(format::block <= 256, "bits_rank_ holds ranks up to the block's size");
+	std::uint8_t bits_rank_[64] = {};  // set bits in bits_ before each word
 	ordinal_t bits_first_ = 0, bits_doc0_ = 0, bits_last_ = 0;
 	bool bits_pending_ = false;  // buf_ords_ not yet expanded from bits_
 	mutable std::uint32_t buf_wdfs_[format::block] = {};
