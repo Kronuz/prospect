@@ -110,7 +110,7 @@ int main() {
 		std::sort(v.begin(), v.end());
 		v.erase(std::unique(v.begin(), v.end()), v.end());
 	}
-	const std::uint32_t docs = 1100;
+	const std::uint32_t docs = 1200;  // past every term's last posting
 	const std::string bytes = build(terms, docs);
 	prospect::segment s(bytes);
 	for (const auto& [term, ps] : terms) { check_term(s, term, ps, docs); }
