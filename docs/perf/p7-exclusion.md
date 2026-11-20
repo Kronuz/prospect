@@ -106,18 +106,48 @@ docid-ordered segment and in a permuted one whose term spans several block group
 `test/negation_mutants.py` reverts the probe, the restart on a step back, the nested clauses, and
 the match test.
 
-**At the landing commit** (pending): suite `261117-155032-ecb275`; parity, built from the commit,
-`261117-155033-63b78b`; A/B (main, A/A copy, landing commit, sides labeled in the log)
-`261117-155036-9088e8`; mutants 0-2 `261117-155040-04a4e1`, `261117-155044-c780b6`,
-`261117-155047-253843`. The prototype's mutants 0-2 were caught at prospect:080e0a7 (jobs
-`261117-141718-c0035a`, `261117-141721-81b492`, `261117-141725-aa9027`).
+**At the landing commit.** Suite `261117-155032-ecb275` passed. Parity, from an engine built
+from the commit, `261117-155033-63b78b`: clean. Mutants 0-2 are caught (`261117-155040-04a4e1`,
+`261117-155044-c780b6`, `261117-155047-253843`). The prototype's mutants 0-2 were caught at
+prospect:080e0a7 (`261117-141718-c0035a`, `261117-141721-81b492`, `261117-141725-aa9027`).
+
+A/B `261117-155036-9088e8` (exclusive; a main, c its A/A copy, b the landing commit), run level
+[95%]; bold rows win by the rule:
+
+| Row | A/A | landing |
+|---|---|---|
+| negated 2 `TOP_10` | 1.009 [0.947, 1.075] | **0.508** [0.413, 0.624] |
+| negated 2 `TOP_100` | 1.022 [0.925, 1.130] | **0.676** [0.668, 0.685] |
+| negated 2 `TOP_1000` | 1.082 [0.988, 1.186] | 1.031 [0.932, 1.141] |
+| negated 2 `TOP_100_COUNT` | 0.963 [0.889, 1.043] | **0.794** [0.708, 0.891] |
+| negated 2 `COUNT` | 1.026 [0.930, 1.131] | 1.019 [0.958, 1.085] |
+| negated 3 `TOP_10` | 0.997 [0.925, 1.075] | **0.385** [0.353, 0.420] |
+| negated 3 `TOP_100` | 0.937 [0.882, 0.995] | **0.559** [0.515, 0.607] |
+| negated 3 `TOP_1000` | 0.994 [0.933, 1.059] | 0.936 [0.905, 0.969] |
+| negated 3 `TOP_100_COUNT` | 0.975 [0.937, 1.013] | 0.953 [0.862, 1.053] |
+| negated 3 `COUNT` | 1.018 [0.694, 1.493] | 0.933 [0.640, 1.361] |
+| intersection 2 `TOP_100` | 0.995 [0.915, 1.082] | 0.989 [0.915, 1.069] |
+| guards (terms, intersection 2, phrase 2, union 2) | 0.93-1.05 | 0.91-1.05, none beyond the A/A |
+| short negations `TOP_10` | 0.946 [0.851, 1.050] | **0.799** [0.685, 0.933] |
+| short negations `TOP_100` / `TOP_1000` | 0.953 / 0.972 | 0.931 / 1.041 [0.937, 1.157] |
+| short negations `TOP_100_COUNT` / `COUNT` | 1.003 / 0.951 | 1.002 / 1.001 |
+
+Intersection 2 `TOP_100`, the prototype's one lean row, is 0.989 at landing: the conjunction's
+code is unchanged, and the prototype's 1.053 was noise. Of the two short cases the prototype lost,
+`+quokka -the` `TOP_1000` is back inside its A/A (1.160 [0.97-1.22], A/A max 1.30).
+`+xylophone -music -film` `TOP_1000` still loses: 1.310 [1.01-1.41], against an A/A of 0.958
+[0.80-1.24], about 34.7 µs against main's 28.2 µs (means of seven rounds). It has 28 matches and
+k = 1,000, so the threshold never rises, nothing is pruned, and every hit is probed as in main;
+the bulk path adds its own overhead with nothing to skip. Its class row is neutral, and its
+`TOP_10` is 1.007. A selector that keeps the generic loop when the hits collected plus the term's
+df cannot reach k would remove this case; it is not measured.
 
 ## Four axes
 
 | Axis | Before (main 0aad777) | After (bit 1) | Source |
 |---|---|---|---|
 | Query speed, negations | 1.0 | `TOP_10` 0.42-0.49, `TOP_100` 0.62-0.66, `TOP_100_COUNT` 0.77-0.94, `TOP_1000` 0.84-0.95, `COUNT` unchanged (2.0-2.4x faster at `TOP_10`) | job `261117-140026-dba8cc` |
-| Query speed, other classes | 1.0 | 0.93-1.10, no class row beyond the A/A except intersection 2 `TOP_100` (1.053, untouched code; rechecked at landing) | same job |
+| Query speed, other classes | 1.0 | 0.93-1.10, no class row beyond the A/A except intersection 2 `TOP_100` (1.053, untouched code; 0.989 at landing, job `261117-155036-9088e8`) | same job |
 | Indexing speed | unchanged | unchanged | reader-only change |
 | Memory | unchanged | one probe per negation's top-k: three small vectors per excluded clause, plus a fresh clause copy (about 4.4 KB) per restart in a reordered segment's group walk | code |
 | Disk | unchanged | unchanged | no format change; `dump` byte-identical |
@@ -129,6 +159,8 @@ remeasured over `serve`. Negated `COUNT` (1.15-1.28) does not move: the count pa
 ## Verdict
 
 **Kept: bit 1** (a negation's top-k through its term's bulk path, the excluded clauses probed
-only for hits that could enter), pending the landing commit's A/B. **Removed: bits 2 and 4**
+only for hits that could enter): at the landing commit it wins five negated rows (0.39-0.79) and
+short `TOP_10` (0.80), loses no class row, and loses one short case of twelve at `TOP_1000`
+(`+xylophone -music -film`, about 6 µs). **Removed: bits 2 and 4**
 (counting negations apart by windows), which lose counted rows and short lists. Not measured:
 arm64, Linux, FreeBSD, and the gate VM's 5M.
