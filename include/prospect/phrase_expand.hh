@@ -162,7 +162,7 @@ private:
 		const std::uint64_t impacts = info.impacts.size() * sizeof(format::impact), copy = sizeof(format::term_info) + impacts;
 		const std::uint64_t cursor = sizeof(postings_iterator) + impacts + sizeof(positions_reader) + 3 * sizeof(void*);
 		const std::uint64_t mine = how_ == slot_scoring::synonym ? sizeof(postings_iterator) + impacts + copy + sizeof(void*) : sizeof(term_scorer) + impacts + sizeof(void*);
-		return copy + cursor + mine;
+		return copy + cursor + mine + 256;  // 256: the vectors' growth and the allocator's rounding
 	}
 
 	// One word's terms: expand under the word's own limit, tightened to what the query has left
