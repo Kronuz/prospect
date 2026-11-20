@@ -6,6 +6,21 @@
 #include <cstdio>
 #include <cstdlib>
 #include <new>
+
+// The heap is counted through replaced operators; a sanitizer owns them (and its allocator's sizes
+// are not the heap's), so under one only the charge is checked.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define SCORER_BUDGET_COUNTS 0
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer)
+#define SCORER_BUDGET_COUNTS 0
+#endif
+#endif
+#ifndef SCORER_BUDGET_COUNTS
+#define SCORER_BUDGET_COUNTS 1
+#endif
+
+#if SCORER_BUDGET_COUNTS
 #if defined(__APPLE__)
 #include <malloc/malloc.h>
 static std::size_t usable(void* p) { return malloc_size(p); }
@@ -28,6 +43,9 @@ void operator delete(void* p) noexcept {
 	}
 }
 void operator delete(void* p, std::size_t) noexcept { operator delete(p); }
+#else
+static long long g_live = 0;
+#endif
 
 static int failures = 0;
 #define CHECK(c)                                                    \
@@ -58,7 +76,10 @@ static void check(const pf::world& w, slot_scoring how, const char* what) {
 	const std::uint64_t offered = charged - built;
 	const double ratio = double(offered) / double(allocated);
 	std::printf("%s, %zu segments, %s: charged %llu, allocated %lld (%.3fx)\n", what, w.segs.size(), how == slot_scoring::any ? "any" : "synonym", (unsigned long long)offered, allocated, ratio);
+	CHECK(offered > 0);
+#if SCORER_BUDGET_COUNTS
 	CHECK(allocated > 0 && ratio > 0.9 && ratio < 1.1);
+#endif
 }
 
 int main() {
