@@ -207,6 +207,12 @@ void fixed(const pf::world& w) {
 			};
 			const auto total = charged(~std::uint64_t(0));
 			CHECK(total && *total > 0);
+			// The automaton's own bytes are part of the total, beyond the walk's matcher and terms.
+			std::uint64_t own = 0;
+			const auto count = [&own](std::uint64_t n) { own += n; };
+			if (word.how == phrase_word::glob) { (void)automata::glob(word.text, word.glob_flags, count); }
+			if (word.how == phrase_word::fuzzy) { (void)automata::levenshtein(word.text, word.distance, word.fixed, word.swaps, count); }
+			CHECK(total && *total > own);
 			CHECK(!charged(*total - 1) && charged(*total));
 		}
 		bool invalid = false;
