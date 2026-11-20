@@ -92,6 +92,3 @@ throws to refuse them.
   paused and resumed; `expand` equals the terms of the model's live documents, with each limit
   type, cancellation and charges; a term whose df exceeds the segment's documents is corrupt.
 
-## Numbers
-
-<pending: tools/expand_bench over the 3,964,752-term Wikipedia vocabulary>

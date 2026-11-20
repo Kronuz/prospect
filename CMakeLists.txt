@@ -228,8 +228,4 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(prospect_engine PRIVATE prospect::prospect)
   add_executable(keybench tools/keybench.cc)
   target_link_libraries(keybench PRIVATE prospect::prospect)
-  # The term expansion's classes over a vocabulary (docs/design/automata.md, "Numbers").
-  add_executable(expand_bench tools/expand_bench.cc)
-  target_link_libraries(expand_bench PRIVATE prospect::prospect)
-  target_include_directories(expand_bench PRIVATE "${automata_SOURCE_DIR}/test" "${CMAKE_CURRENT_SOURCE_DIR}/test")
 endif()
