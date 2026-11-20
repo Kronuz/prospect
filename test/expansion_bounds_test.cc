@@ -11,6 +11,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
 #include <string>
 
 static int failures = 0;
@@ -187,17 +188,26 @@ void fixed(const pf::world& w) {
 			cancelled = true;
 		}
 		CHECK(cancelled);
-		walk_options b;
-		b.charge = [](std::uint64_t) { throw std::length_error("budget"); };
-		// A word matching no term is charged only its matcher: the glob's and the fuzzy's reach it.
-		for (const auto& word : {phrase_word::starts_with("a"), phrase_word::wildcard("zz*yy"), phrase_word::similar("zzzz", 1)}) {
-			bool refused_by_budget = false;
-			try {
-				(void)pf::run(w, query({word}), b);
-			} catch (const std::length_error&) {
-				refused_by_budget = true;
-			}
-			CHECK(refused_by_budget);
+		// The byte budget refuses a word past what its expansion is charged: the automaton's own bytes
+		// count, so a budget one below the total refuses every kind of word.
+		for (const auto& word : {phrase_word::starts_with("a"), phrase_word::wildcard("a*"), phrase_word::wildcard("zz*yy"), phrase_word::similar("aaaa", 1), phrase_word::similar("zzzz", 1)}) {
+			auto charged = [&](std::uint64_t budget) {  // the bytes charged; none when refused
+				std::uint64_t sum = 0;
+				walk_options b;
+				b.charge = [&](std::uint64_t n) {
+					sum += n;
+					if (sum > budget) { throw std::length_error("budget"); }
+				};
+				try {
+					(void)pf::run(w, query({word}), b);
+				} catch (const std::length_error&) {
+					return std::optional<std::uint64_t>();
+				}
+				return std::optional<std::uint64_t>(sum);
+			};
+			const auto total = charged(~std::uint64_t(0));
+			CHECK(total && *total > 0);
+			CHECK(!charged(*total - 1) && charged(*total));
 		}
 		bool invalid = false;
 		try {
