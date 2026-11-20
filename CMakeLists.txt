@@ -195,6 +195,14 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(expand_test PRIVATE prospect::prospect)
   target_include_directories(expand_test PRIVATE "${automata_SOURCE_DIR}/test")
   add_test(NAME expand COMMAND expand_test)
+  # Phrases and NEAR over expanding words (docs/mechanisms/phrase-expansion.md): against brute force
+  # over the same shapes; the bounds per word and per query.
+  foreach(t phrase_expansion expansion_bounds)
+    add_executable(${t}_test test/${t}_test.cc)
+    target_link_libraries(${t}_test PRIVATE prospect::prospect)
+    target_include_directories(${t}_test PRIVATE "${automata_SOURCE_DIR}/test")
+    add_test(NAME ${t} COMMAND ${t}_test)
+  endforeach()
   # Sliced search: identity against the synchronous search at slice sizes from one window up, yields,
   # cancellation, and the pinned view; cross-thread resumes make it the TSan test of the mechanism.
   add_executable(sliced_test test/sliced_test.cc)
