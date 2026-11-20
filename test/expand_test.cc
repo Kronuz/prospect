@@ -26,6 +26,7 @@
 #include <optional>
 #include <random>
 #include <set>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -318,6 +319,70 @@ void check_corrupt_df() {
 	CHECK((got == std::vector<std::string>{"b1", "b2", "b3"}));
 }
 
+// The charge budget bounds an expansion: `prefix("")` builds no matcher, so the per-term charge is
+// its only bound; `*` is charged its matcher too. Each charges at least its terms' bytes, and a
+// budget below that refuses.
+void check_budgets(std::span<const segment_snapshot> segs) {
+	auto bytes_of = [](const std::vector<std::string>& v) {
+		std::uint64_t n = 0;
+		for (const auto& t : v) { n += t.size(); }
+		return n;
+	};
+	auto charges = [&](const auto& a, std::uint64_t budget) {  // the bytes charged and the terms' bytes; none when refused
+		std::uint64_t charged = 0;
+		walk_options o;
+		o.charge = [&](std::uint64_t n) {
+			charged += n;
+			if (charged > budget) { throw std::length_error("budget"); }
+		};
+		term_table t(segs);
+		try {
+			const auto got = expand(segs, text_name, a, {}, t, o);
+			return std::pair{std::optional<std::uint64_t>(charged), bytes_of(got)};
+		} catch (const std::length_error&) {
+			return std::pair{std::optional<std::uint64_t>(), std::uint64_t(0)};
+		}
+	};
+	auto check = [&](const auto& a) {
+		const auto [charged, bytes] = charges(a, ~std::uint64_t(0));
+		CHECK(charged && bytes > 0 && *charged >= bytes);
+		CHECK(!charges(a, bytes - 1).first);  // a budget below the terms' bytes refuses
+	};
+	check(automata::prefix(""));
+	check(automata::glob("*"));
+}
+
+// Cancellation requested mid-walk stops it within check_every entries.
+void check_cancel_bound(std::span<const segment_snapshot> segs) {
+	std::size_t best = 0, most = 0;
+	for (std::size_t i = 0; i < segs.size(); ++i) {
+		const auto n = dictionary_terms(segs[i], text_name).size();
+		if (n > most) {
+			most = n;
+			best = i;
+		}
+	}
+	const std::size_t cancel_at = 5, every = 16;
+	CHECK(most > cancel_at + 2 * every);  // the walk would run on without the cancel
+	task::cancel_source src;
+	const task::cancel_token token = src.token();
+	walk_options o;
+	o.check_every = every;
+	o.cancel = &token;
+	std::size_t seen = 0;
+	bool cancelled = false;
+	try {
+		(void)intersect(segs[best], text_name, automata::glob("*"), [&](std::string_view, const prospect::format::term_info&) {
+			if (++seen == cancel_at) { src.request(); }
+			return true;
+		}, o);
+	} catch (const task::cancelled&) {
+		cancelled = true;
+	}
+	CHECK(cancelled);
+	CHECK(seen > cancel_at && seen <= cancel_at + every);
+}
+
 }  // namespace
 
 int main() {
@@ -406,6 +471,8 @@ int main() {
 			q.pattern = p;
 			for (const char* field : {text_name, tag_name, key_name}) { check_query(segs, live, field, q, r); }
 		}
+		check_budgets(segs);
+		check_cancel_bound(segs);
 		// Cancellation stops a walk at its next check, charges are offered and may refuse.
 		{
 			task::cancel_source src;
