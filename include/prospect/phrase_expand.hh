@@ -82,7 +82,7 @@ public:
 	// Throws phrase_expansion_error past a bound, std::invalid_argument for the key field (it has
 	// no positions) or an empty phrase, and what the walks throw (task::cancelled, a charge).
 	expanded_phrase(std::span<const segment_snapshot> segs, std::string_view field, std::span<const phrase_word> words, term_table& table, const phrase_options& o = {})
-		: field_(field), table_(&table), how_(o.scoring) {
+		: field_(field), table_(&table), how_(o.scoring), charge_(o.walk.charge) {
 		if (words.empty()) { throw std::invalid_argument("prospect: a phrase needs a word"); }
 		for (const auto& s : segs) {
 			if (s.key_field() && s.key_field() == s.field_id(field)) { throw std::invalid_argument("prospect: a phrase takes a field with positions, not the key field"); }
@@ -119,25 +119,33 @@ public:
 	// no term in the segment, so the segment matches nothing.
 	scorer_ptr scorer(const segment& seg, std::uint32_t window = 0, std::span<const std::uint32_t> offsets = {}) const {
 		const auto& inv = seg.get<inverted_plugin>();
-		std::vector<phrase_slot> slots;
+		std::vector<phrase_slot> slots(slots_.size());
+		std::vector<std::vector<std::size_t>> weight_of(slots_.size());  // each present term's place in weights_
+		std::uint64_t bytes = 0;
 		for (std::size_t k = 0; k < slots_.size(); ++k) {
-			phrase_slot one;
-			std::vector<scorer_ptr> kids;
 			for (std::size_t j = 0; j < slots_[k].size(); ++j) {
-				const auto* info = table_->info(seg, field_, slots_[k][j]);
-				if (!info) { continue; }
-				one.terms.push_back(*info);
-				if (how_ == slot_scoring::any) { kids.push_back(std::make_unique<term_scorer>(inv, *info, weights_[k][j])); }
+				if (const auto* info = table_->info(seg, field_, slots_[k][j])) {
+					slots[k].terms.push_back(*info);
+					weight_of[k].push_back(j);
+					bytes += term_bytes(*info);
+				}
 			}
-			if (one.terms.empty()) { return nullptr; }
+			if (slots[k].terms.empty()) { return nullptr; }
+		}
+		if (charge_) { charge_(bytes); }  // before the iterators are allocated, as the walks charge
+		for (std::size_t k = 0; k < slots.size(); ++k) {
+			auto& one = slots[k];
 			if (how_ == slot_scoring::synonym) {
 				one.scorer = std::make_unique<synonym_scorer>(inv, one.terms, weights_[k][0]);
-			} else if (kids.size() == 1) {
+				continue;
+			}
+			std::vector<scorer_ptr> kids;
+			for (std::size_t j = 0; j < one.terms.size(); ++j) { kids.push_back(std::make_unique<term_scorer>(inv, one.terms[j], weights_[k][weight_of[k][j]])); }
+			if (kids.size() == 1) {
 				one.scorer = std::move(kids[0]);
 			} else {
 				one.scorer = std::make_unique<disjunction_scorer>(std::move(kids));
 			}
-			slots.push_back(std::move(one));
 		}
 		return std::make_unique<multi_phrase_scorer>(inv, std::move(slots), window, offsets);
 	}
@@ -148,16 +156,24 @@ public:
 	}
 
 private:
+	// What one term costs in one segment's scorer: the slot's copy of its info, the phrase's cursor
+	// (a postings iterator and a positions reader) and the slot scorer's own iterator and copies.
+	std::uint64_t term_bytes(const format::term_info& info) const noexcept {
+		const std::uint64_t impacts = info.impacts.size() * sizeof(format::impact), copy = sizeof(format::term_info) + impacts;
+		const std::uint64_t cursor = sizeof(postings_iterator) + impacts + sizeof(positions_reader) + 3 * sizeof(void*);
+		const std::uint64_t mine = how_ == slot_scoring::synonym ? sizeof(postings_iterator) + impacts + copy + sizeof(void*) : sizeof(term_scorer) + impacts + sizeof(void*);
+		return copy + cursor + mine;
+	}
+
 	// One word's terms: expand under the word's own limit, tightened to what the query has left
-	// (`left`, of `total`). `error` is handed the smaller bound; `first` and `most_frequent` keep
-	// their own max when it fits, else one past what is left, so a result larger than `left` is
-	// seen and refused.
+	// (`left`, of `total`). Under the query's bound the word's limit is `error` whatever its type: a
+	// result larger than `left` is refused either way, so the walk stops at the first term past it.
 	std::vector<std::string> expand_word(std::span<const segment_snapshot> segs, std::size_t index, const phrase_word& w, std::optional<std::uint64_t> left, std::uint64_t total, const walk_options& walk) {
 		expansion_limit eff = w.limit;
 		const std::uint64_t own = w.limit.max ? w.limit.max : ~std::uint64_t(0);
 		const std::uint64_t room = left ? *left : ~std::uint64_t(0);
 		const bool query = room < own;
-		if (query) { eff.max = eff.type == expansion_limit::error ? std::max<std::uint64_t>(room, 1) : room + 1; }
+		if (query) { eff = {expansion_limit::error, std::max<std::uint64_t>(room, 1)}; }
 		std::vector<std::string> out;
 		try {
 			switch (w.how) {
@@ -175,6 +191,7 @@ private:
 	std::string field_;
 	term_table* table_;
 	slot_scoring how_;
+	automata::charge_fn charge_;  // the walks' byte budget, offered the scorers' bytes too
 	std::vector<std::vector<std::string>> slots_;
 	std::vector<std::vector<weight>> weights_;
 };

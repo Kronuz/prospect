@@ -203,6 +203,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     target_include_directories(${t}_test PRIVATE "${automata_SOURCE_DIR}/test")
     add_test(NAME ${t} COMMAND ${t}_test)
   endforeach()
+  # The scorers' bytes offered to the byte budget against the heap they hold (a phrase's scorers).
+  add_executable(scorer_budget_test test/scorer_budget_test.cc)
+  target_link_libraries(scorer_budget_test PRIVATE prospect::prospect)
+  target_include_directories(scorer_budget_test PRIVATE "${automata_SOURCE_DIR}/test")
+  add_test(NAME scorer_budget COMMAND scorer_budget_test)
   # Sliced search: identity against the synchronous search at slice sizes from one window up, yields,
   # cancellation, and the pinned view; cross-thread resumes make it the TSan test of the mechanism.
   add_executable(sliced_test test/sliced_test.cc)

@@ -172,6 +172,50 @@ void fixed(const pf::world& w) {
 		const auto first = visited({phrase_word::starts_with("a")}, as);
 		const auto both = visited({phrase_word::starts_with("a"), phrase_word::starts_with("")}, as);
 		CHECK(both >= first && (both - first) * 2 < none);
+		// A word the query's bound refuses stops at the first term past it whatever its limit type.
+		auto refused = [&](expansion_limit::kind type) {
+			auto word = phrase_word::starts_with("");
+			word.limit = {type, all * 2};
+			return visited({word}, 3);
+		};
+		const auto by_error = refused(expansion_limit::error);
+		CHECK(by_error > 0 && by_error * 2 < none);
+		CHECK(refused(expansion_limit::first) == by_error && refused(expansion_limit::most_frequent) == by_error);
+	}
+	// The byte budget covers the scorers too: each slot term costs its iterators and cursor in each
+	// segment. A budget that admits the expansion but not one scorer's bytes refuses the phrase.
+	{
+		const std::vector<phrase_word> words = {phrase_word::starts_with("a"), phrase_word::starts_with("b")};
+		auto total_with = [&](std::uint64_t budget, bool search) {  // the bytes charged; none when refused
+			std::uint64_t sum = 0;
+			walk_options o;
+			o.charge = [&](std::uint64_t n) {
+				sum += n;
+				if (sum > budget) { throw std::length_error("budget"); }
+			};
+			try {
+				if (search) {
+					(void)pf::run(w, query(words), o);
+				} else {
+					phrase_options po;
+					po.walk = o;
+					term_table t(w.segs);
+					const expanded_phrase ph(w.segs, field, words, t, po);
+				}
+			} catch (const std::length_error&) {
+				return std::optional<std::uint64_t>();
+			}
+			return std::optional<std::uint64_t>(sum);
+		};
+		const auto none = ~std::uint64_t(0);
+		const auto built = total_with(none, false), run = total_with(none, true);
+		CHECK(built && run);
+		// One scorer holds, per slot, at least a postings iterator and a positions reader.
+		const std::uint64_t one = 2 * (sizeof(postings_iterator) + sizeof(positions_reader));
+		CHECK(*run >= *built + one);
+		CHECK(total_with(*built, false));                       // the expansion alone fits
+		CHECK(!total_with(*built + one - 1, true));             // but not with one scorer
+		CHECK(!total_with(*run - 1, true) && total_with(*run, true));
 	}
 	// Cancellation, the byte budget and the key field reach the caller.
 	{
