@@ -217,6 +217,28 @@ void fixed(const pf::world& w) {
 		CHECK(!total_with(*built + one - 1, true));             // but not with one scorer
 		CHECK(!total_with(*run - 1, true) && total_with(*run, true));
 	}
+	// A segment lacking a term of some slot builds no scorer and is charged nothing, though the other
+	// slots hold terms there.
+	{
+		std::uint64_t charged = 0;
+		phrase_options po;
+		po.walk.charge = [&](std::uint64_t n) { charged += n; };
+		term_table table(w.segs);
+		bool found = false;
+		for (const auto& tail : w.tail_pool) {
+			const std::vector<phrase_word> lone = {phrase_word::starts_with("a")}, both = {phrase_word::starts_with("a"), phrase_word::term(tail)};
+			const expanded_phrase one(w.segs, field, lone, table, {}), two(w.segs, field, both, table, po);
+			if (two.terms()[1].empty()) { continue; }
+			for (const auto& s : w.segs) {
+				if (!one.scorer(*s.seg) || two.scorer(*s.seg)) { continue; }
+				const auto before = charged;
+				CHECK(!two.scorer(*s.seg) && charged == before);
+				found = true;
+			}
+		}
+		CHECK(found);
+		CHECK(charged > 0);
+	}
 	// Cancellation, the byte budget and the key field reach the caller.
 	{
 		task::cancel_source src;
