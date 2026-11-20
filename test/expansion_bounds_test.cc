@@ -148,7 +148,7 @@ void fixed(const pf::world& w) {
 	// walk's (a segment's first entries may all be dead terms, so the first bound stops later than
 	// its fourth term in the dictionary).
 	{
-		auto visited = [&](std::uint64_t max) {
+		auto visited = [&](std::vector<phrase_word> words, std::uint64_t max) {
 			std::uint64_t n = 0;
 			walk_options o;
 			o.check_every = 1;
@@ -158,14 +158,19 @@ void fixed(const pf::world& w) {
 			po.max_expansions = max;
 			term_table t(w.segs);
 			try {
-				(void)expanded_phrase(w.segs, field, std::vector<phrase_word>{phrase_word::starts_with("")}, t, po);
+				(void)expanded_phrase(w.segs, field, words, t, po);
 			} catch (const phrase_expansion_error&) {
 				CHECK(max != 0);
 			}
 			return n;
 		};
-		const auto none = visited(0), few = visited(3), some = visited(all / 2);
+		const std::vector<phrase_word> everything = {phrase_word::starts_with("")};
+		const auto none = visited(everything, 0), few = visited(everything, 3), some = visited(everything, all / 2);
 		CHECK(few > 0 && few <= some && some < none && few * 2 < none);
+		// A word met with nothing left in the query stops at its first term, as at its limit.
+		const auto first = visited({phrase_word::starts_with("a")}, as);
+		const auto both = visited({phrase_word::starts_with("a"), phrase_word::starts_with("")}, as);
+		CHECK(both >= first && (both - first) * 2 < none);
 	}
 	// Cancellation, the byte budget and the key field reach the caller.
 	{
