@@ -147,20 +147,72 @@ variant 30.09, 29.65, 28.63 s; per round 1.04, 1.01, 1.02 (medians 28.89 and 29.
 RSS 384-432 MB against 390-415 MB, no difference beyond the spread. The flushed, unmerged index is
 691,216-691,500 KB against 691,360-691,624 KB: EF saves nothing on small segments.
 
+## Rerun at prospect:162b5d0 (jobs at the quest's head)
+
+The deciding runs again, with the same scripts, under `quiet exclusive`. The A/B, `serve` and
+indexing jobs run the builds the first runs measured (main `eef601d`, SHA-1 `bee621b9`; EF per block,
+`e38694a6`): the job's commit pins the scripts and this entry, not a rebuild. The branch's only code
+change since (`search.hh`'s exclusion scorer, P7) is off the phrase and positions paths.
+
+- **Index** (job `261119-225047-25300c`, light): the 1M re-indexed and merged by the variant, 570,321,176
+  bytes, the same 570.32 MB as the first build.
+
+A/B in process (job `261119-225047-cd30ff`, seven rounds rotated, best of three, A/A from a copy of
+main's binary; 0 mismatches on every row):
+
+| Class | Command | EF/main | A/A | Row |
+|---|---|---|---|---|
+| phrase_2 | `TOP_10` | 1.004 [0.932, 1.082] | 0.989 [0.842, 1.163] | inside |
+| phrase_2 | `TOP_100` | 1.013 [0.932, 1.101] | 1.006 [0.952, 1.063] | inside |
+| phrase_2 | `TOP_1000` | 1.063 [0.988, 1.143] | 1.047 [0.993, 1.104] | inside |
+| phrase_2 | `COUNT` | 1.063 [1.010, 1.120] | 0.980 [0.915, 1.049] | loses |
+| phrase_3 | `TOP_10` | 1.044 [1.015, 1.073] | 0.964 [0.917, 1.013] | loses |
+| phrase_3 | `TOP_100` | 1.084 [0.999, 1.175] | 0.981 [0.916, 1.051] | slower, inside |
+| phrase_3 | `TOP_1000` | 0.959 [0.889, 1.034] | 0.927 [0.866, 0.993] | inside |
+| phrase_3 | `COUNT` | 1.069 [0.995, 1.148] | 1.006 [0.949, 1.066] | inside |
+| phrase_gt3 | `TOP_10` | 0.996 [0.911, 1.089] | 0.947 [0.837, 1.072] | inside |
+| phrase_gt3 | `TOP_100` | 1.083 [1.018, 1.153] | 1.056 [0.965, 1.155] | slower, inside the band |
+| phrase_gt3 | `TOP_1000` | 1.026 [0.959, 1.099] | 1.019 [0.985, 1.055] | inside |
+| phrase_gt3 | `COUNT` | 0.995 [0.930, 1.065] | 0.994 [0.898, 1.100] | inside |
+| terms | four commands | 0.948-1.018 | 0.947-1.010 | inside |
+| intersection_2 | four commands | 0.930-1.035 | 0.961-1.014 | inside |
+
+No row wins; two phrase rows lose (`phrase_2` `COUNT` 1.063, `phrase_3` `TOP_10` 1.044) and nine
+of twelve phrase rows sit above 1.0. `phrase_3` `TOP_10` loses in both deciding runs (1.095 and
+1.044); no phrase row wins in either.
+
+- **Over `serve`** (job `261119-225048-424d5f`, five rounds): EF against main 0.96-1.13, with
+  `phrase_2` `TOP_1000` 1.131 [1.006, 1.271], `phrase_3` `TOP_1000` 1.091 [1.017, 1.171] and
+  `phrase_3` `COUNT` 1.096 [1.070, 1.122] above 1.0 and no row below it. Main against Lucene 10.4:
+  `phrase_2` 0.77-0.89, `phrase_3` 0.65-0.75, `phrase_gt3` 0.67-0.77. Main against Tantivy 0.26:
+  `phrase_2` 1.04-1.37, `phrase_3` 1.11-1.35, `phrase_gt3` 0.97-1.30; EF against Tantivy 1.16-1.40,
+  1.12-1.42, 1.06-1.39.
+- **Indexing** (job `261119-225047-032deb`, alternating, three rounds): main 29.46, 27.61, 27.72 s,
+  the variant 28.93, 28.60, 28.57 s; per round 0.98, 1.04, 1.03 (medians 27.72 and 28.60, +3.2%).
+  Peak RSS 397.7-406.8 MB against 377.0-445.1 MB; flushed index 691,060-691,352 KB against
+  691,200-691,388 KB.
+- **Decode** (job `261119-165452-b53291`, at prospect:2ce63ac, best of seven): over the 573 phrase
+  terms PFOR 0.264 ns/position, Elias-Fano 0.704 (2.7x), min(PFOR, EF) 0.570 (2.2x), Rice 4.618
+  (17.5x); over the 50 largest terms 0.279, 0.690 (2.5x), 0.559 (2.0x), 4.531 (16.2x); Rice decodes
+  with 0 mismatches.
+- **Tests** (job `261119-165445-56d539`, at prospect:2ce63ac): the patch applied and built with
+  `PROSPECT_EXPERIMENT_P13=1`, full `ctest` 53 of 53.
+
 ## Four axes
 
 | Axis | Before (main) | After (EF per block) | Source |
 |---|---|---|---|
-| Query speed, phrases | 1.0 | 0.99-1.10; four rows lose, none wins | job `261117-032504-3bf776` |
-| Query speed, guards (terms, intersection 2) | 1.0 | 0.98-1.05, inside the A/A band | same job |
-| Indexing speed | 28.89 s (1M, median of 3) | 29.65 s, +2.6% (1.01-1.04 per round) | job `261117-032510-cabfbf` |
-| Memory | 384-432 MB peak RSS indexing | 390-415 MB, same; reader unchanged | same job |
+| Query speed, phrases | 1.0 | 0.99-1.10, four rows lose; rerun 0.96-1.08, two lose; none wins in either | jobs `261117-032504-3bf776`, `261119-225047-cd30ff` |
+| Query speed, guards (terms, intersection 2) | 1.0 | 0.98-1.05; rerun 0.93-1.04; inside the A/A band | same jobs |
+| Indexing speed | 28.89 s (1M, median of 3); rerun 27.72 s | 29.65 s, +2.6%; rerun 28.60 s, +3.2% | jobs `261117-032510-cabfbf`, `261119-225047-032deb` |
+| Memory | 384-432 MB peak RSS indexing; rerun 398-407 MB | 390-415 MB; rerun 377-445 MB; same within the spread; reader unchanged | same jobs |
 | Disk | 576.29 MB merged, positions 348.09 MB | 570.32 MB (−1.04%), positions 342.13 MB (−1.71%) | `p13_positions sizes`, the variant's index |
 
 ## Verdict
 
-**Removed, both candidates.** Elias-Fano per block saves 1.04% of the segment and costs 2.0-2.5x
-PFOR's decode, which shows as 1.06-1.10x slower phrase rows and 2.6% slower indexing: by the rule
+**Removed, both candidates.** Elias-Fano per block saves 1.04% of the segment and costs 2.0-2.7x
+PFOR's decode, which shows as 1.04-1.10x slower phrase rows and 2.6-3.2% slower indexing in both
+the first runs and the rerun at prospect:162b5d0: by the rule
 (keep only on a phrase win, or at least 1% smaller with every row inside the band) it loses. Rice
 codes from the document's length save 11.0% of positions (6.6% of the segment) at 16x PFOR's decode
 against a 7-10% decode share of phrase rows: removed offline. Today's PFOR per block (FOR inside its

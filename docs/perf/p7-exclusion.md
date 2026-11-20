@@ -152,9 +152,43 @@ df cannot reach k would remove this case; it is not measured.
 | Memory | unchanged | one probe per negation's top-k: three small vectors per excluded clause, plus a fresh clause copy (about 4.4 KB) per restart in a reordered segment's group walk | code |
 | Disk | unchanged | unchanged | no format change; `dump` byte-identical |
 
-Against Tantivy, by the ratios above applied to the baseline, negated `TOP_100` would move from
-1.18 to about 0.73-0.78 and `TOP_100_COUNT` from 1.64 to about 1.25 (negated 2). This is not yet
-remeasured over `serve`. Negated `COUNT` (1.15-1.28) does not move: the count path is unchanged.
+## Gap rows at the quest's head (A14, job `261119-165524-86e55d`, exclusive)
+
+Main `0aad777` and the head `2ce63ac` (P7 bit 1 over main) against Lucene 10.4 and Tantivy 0.26
+over `serve`, 1M reordered, every gate class, seven rounds rotated, best of three; run level
+prospect/engine with its 95% interval, below 1.0 prospect faster; 0 mismatches on every row. A row
+"loses" when its interval lies above 1.0.
+
+| Class (queries) | Track P item | Head/Tantivy | Losing rows (head/Tantivy) | Head/main |
+|---|---|---|---|---|
+| negated 3 (15) | P7 | 0.47-1.15 | `TOP_1000` 1.099, `TOP_100_COUNT` 1.153, `COUNT` 1.151 | `TOP_10` 0.481, `TOP_100` 0.646, `TOP_1000` 0.951; counted 1.01-1.06 |
+| negated 2 (4) | P7 | 0.72-1.15 | `TOP_1000` 1.154 | `TOP_10` 0.687, `TOP_100` 0.716, `TOP_100_COUNT` 0.789; others 0.93-0.96 |
+| intersection 2 (198) | P2, P9 | 0.89-1.26 | `TOP_1000` 1.145, `TOP_100_COUNT` 1.258 | 0.97-0.99 |
+| intersection 3 (83) | P2, P9 | 0.88-1.07 | none | 0.97-1.05 |
+| intersection > 3 (19) | P2, P9 | 0.85-1.05 | none | 0.95-1.01 |
+| intersection_union 2 (10) | C7 | 0.46-1.19 | `TOP_1000` 1.188 | 0.93-1.06 |
+| intersection_union 3, > 3 (20, 10) | C7 | 0.47-0.96 | none | 0.97-1.04 |
+| terms (200), frequent terms | C15, P3 | 0.74-1.00 | none | 0.99-1.05 |
+| unions 2, 3, > 3 | P3 | 0.37-0.85 | none | 0.92-1.09 |
+| phrase 2 (198) | P8, P5 | 1.03-1.28 | `TOP_100` 1.172, `TOP_1000` 1.148, `TOP_100_COUNT` 1.278, `COUNT` 1.238 | 0.96-1.04 |
+| phrase 3 (83) | P8, P5 | 1.06-1.22 | `TOP_100` 1.202, `TOP_1000` 1.194, `TOP_100_COUNT` 1.224, `COUNT` 1.216 | 1.00-1.04 |
+| phrase > 3 (19) | P8, P5 | 1.03-1.28 | `TOP_1000` 1.244, `TOP_100_COUNT` 1.186, `COUNT` 1.276 | 0.97-1.04 |
+
+P7 closes the negated top-k gap it targets: against Tantivy, negated 3 `TOP_10` goes from 0.969 to
+0.466 and `TOP_100` from 1.157 to 0.747, negated 2 `TOP_100` from 1.198 to 0.858 and
+`TOP_100_COUNT` from 1.398 to 1.103 [0.946, 1.285] (main's rows from the same run). The estimate
+above (`TOP_100` about 0.73-0.78) holds for negated 3. Negated `TOP_1000` (1.10-1.15) still loses
+and the counted negations (`TOP_100_COUNT`, `COUNT`, 1.07-1.15) still trail, negated 3's beyond
+1.0: at k = 1,000 the threshold prunes little, and the count path is unchanged. Head against
+Lucene: 0.20-0.99 on every row but
+intersection_union 2 `TOP_100` (1.059 [0.954, 1.175]). This run has no A/A, so head/main rows off
+P7's path (union 2 `TOP_100` 1.085 [1.013, 1.163]) are the instrument's spread, not a change: the
+head differs from main only in `exclusion_scorer`.
+
+The gaps left at the quest's head are the phrase rows (1.15-1.28, P8 and P5; P13's codecs widen
+them), intersection 2 `TOP_1000` and `TOP_100_COUNT` (1.15-1.26; P9's evaluation order does not
+close them, `docs/perf/p9-planner.md`), intersection_union 2 `TOP_1000` (1.19) and the negations'
+`TOP_1000` and counted rows.
 
 ## Verdict
 

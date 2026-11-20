@@ -129,11 +129,44 @@ row (intersection_union 2 `TOP_1000`, 1.100, above the A/A's 1.094), a path bit 
 The per-query bests point at 2-5% on intersection top-k, below what seven rounds resolve here.
 Full `ctest` with the patch at bit 4: passed (job `261117-092124-2768e6`).
 
+## Rerun at prospect:2ce63ac (jobs at the quest's head)
+
+The same builds (main `0aad777`, SHA-1 `614e4d1e`; bit 4 at ALPHA 0, `383a79c0`, and at 0.5,
+`df3c453b`) and scripts, under `quiet exclusive`. In process (job `261119-165438-2cf08a`, seven
+rounds rotated, best of three, A/A from a copy of main's binary; 0 mismatches, 840 files):
+
+| Class | Command | B/A (ALPHA 0) | D/A (ALPHA 0.5) | A/A |
+|---|---|---|---|---|
+| intersection 2 | `TOP_10` | 0.993 [0.972, 1.014] | 1.035 [0.986, 1.086] | 1.010 [0.975, 1.047] |
+| intersection 2 | `TOP_100` | 0.994 [0.957, 1.033] | 1.002 [0.942, 1.066] | 1.054 [1.005, 1.105] |
+| intersection 2 | `TOP_1000` | 0.931 [0.865, 1.002] | 0.945 [0.855, 1.045] | 0.990 [0.908, 1.081] |
+| intersection 3 | `TOP_10` | 1.032 [0.967, 1.101] | 1.052 [0.983, 1.125] | 1.042 [0.959, 1.132] |
+| intersection 3 | `TOP_100` | **0.940** [0.899, 0.983] | 1.008 [0.954, 1.066] | 0.996 [0.954, 1.039] |
+| intersection 3 | `TOP_1000` | **0.962** [0.931, 0.993] | 0.978 [0.860, 1.113] | 1.044 [0.964, 1.131] |
+| intersection > 3 | top-k | 0.93-0.98 | 0.94-0.97 | 0.97-0.99 |
+| intersections | `TOP_100_COUNT`, `COUNT` (untouched paths) | 0.95-1.03 | 0.97-1.04 | 0.95-1.05 |
+| guards | other rows | 0.96-1.12 | 0.94-1.07 | 0.95-1.07 |
+
+Here bit 4 at ALPHA 0 passes the rule on two rows: intersection 3 `TOP_100` 0.940, under the A/A's
+0.954, and `TOP_1000` 0.962, under the A/A's 0.964 by 0.002; no row loses. At ALPHA 0.5 no row
+wins, and terms `TOP_1000` (1.044 [1.018, 1.070]) sits at the A/A's upper bound (1.044). Over
+`serve` (job `261119-165439-7fcba3`, five rounds, no A/A) bit 4 at ALPHA 0 against main is 0.91-1.10
+on the intersection rows, with intersection 3 `TOP_1000` 0.936 [0.896, 0.977] the one interval under
+1.0; main against Tantivy: intersection 2 `TOP_100` 1.048, `TOP_1000` 1.177, `TOP_100_COUNT` 1.303.
+Full `ctest` with the patch at bit 4 at prospect:2ce63ac: passed (job `261119-165432-b1efdc`).
+
+Neither row won in the first deciding run (intersection 3 `TOP_100` 0.950 and `TOP_1000` 0.905, both
+inside that A/A), and the first run's best rows (D, intersection 2 and 3 `TOP_1000`) do not clear
+this one's. By the replication rule that removed P2's in-block selector (a gain counts only when the
+same row clears the A/A in both deciding runs), no row replicated. Intersection 3 `TOP_1000` leans
+below 1.0 in all three runs (0.905, 0.962, 0.936 over `serve`): a 4-6% effect on 83 queries that
+seven rounds on this host resolve once in two.
+
 ## Four axes
 
 | Axis | Before (main) | After (bit 4) | Source |
 |---|---|---|---|
-| Query speed, intersections | 1.0 | 0.88-1.03 run level, no row beyond the A/A; per-query best 0.95-0.99 | job `261117-092109-383ae4` |
+| Query speed, intersections | 1.0 | 0.88-1.03 run level, no row beyond the A/A; per-query best 0.95-0.99; rerun 0.93-1.03, two intersection 3 rows beyond the A/A, not replicated | jobs `261117-092109-383ae4`, `261119-165438-2cf08a` |
 | Query speed, guards | 1.0 | 0.93-1.12, inside the A/A except one untouched row at ALPHA 0.5 | same job |
 | Indexing speed | unchanged | unchanged | reader-only change |
 | Memory | unchanged | unchanged | two locals per block loop; no allocation |
@@ -144,7 +177,8 @@ Full `ctest` with the patch at bit 4: passed (job `261117-092124-2768e6`).
 **Removed, all three experiments.** Windowed top-k loses at every top-k row (1.12-1.34). Match first
 wins at `TOP_100` and `TOP_1000` and loses at `TOP_10`. The adaptive choice between them (bit 4)
 fixes `TOP_10`, but its 2-5% on intersection top-k does not clear the A/A spread in the deciding
-A/B or over `serve`. Third non-winner in a row, so the item stops here. What would move the
+A/B or over `serve`; the rerun at prospect:2ce63ac clears it on two intersection 3 rows that the
+first run did not, so no row replicates. Third non-winner in a row, so the item stops here. What would move the
 intersection gap to Tantivy (1.04-1.23) is not the choice of evaluation order: the profile is
 `postings_iterator::advance` and scoring every lead document. A P9 retry needs a quieter instrument
 (more rounds, or instruction counts) before it can resolve a 3% effect.
