@@ -62,7 +62,7 @@ class world {
 public:
 	// `text_pool` is the hot vocabulary phrases are built from; `tail_pool` is a long tail of terms that
 	// gives a segment's text field the terms for its own dictionaries (fielddict::own_threshold).
-	world(std::uint64_t seed, std::size_t docs, std::size_t text_terms = 36, std::size_t title_terms = 10, std::size_t tail_terms = 500, std::size_t refresh_every = 400) : io_(fs_), r_(seed) {
+	world(std::uint64_t seed, std::size_t docs, std::size_t text_terms = 36, std::size_t title_terms = 10, std::size_t tail_terms = 800, std::size_t refresh_every = 400) : io_(fs_), r_(seed) {
 		prospect::index::options opts;
 		opts.keyed = true;
 		ix_.emplace(prospect::index::create(io_, opts, {}));
@@ -74,7 +74,7 @@ public:
 		for (std::size_t d = 0; d < docs; ++d) {
 			const std::string& key = keys_[r_() % keys_.size()];
 			doc m;
-			for (std::size_t i = 0, n = 3 + r_() % 10; i < n; ++i) { m.text.push_back(r_() % 3 == 0 ? tail_pool[r_() % tail_pool.size()] : skewed(text_pool)); }
+			for (std::size_t i = 0, n = 3 + r_() % 10; i < n; ++i) { m.text.push_back(r_() % 2 == 0 ? tail_pool[r_() % tail_pool.size()] : skewed(text_pool)); }
 			for (std::size_t i = 0, n = r_() % 4; i < n; ++i) { m.title.push_back(skewed(title_pool)); }
 			m.docid = put(key, m);
 			live[key] = std::move(m);
