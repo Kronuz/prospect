@@ -189,13 +189,16 @@ void fixed(const pf::world& w) {
 		CHECK(cancelled);
 		walk_options b;
 		b.charge = [](std::uint64_t) { throw std::length_error("budget"); };
-		bool refused_by_budget = false;
-		try {
-			(void)pf::run(w, query({phrase_word::starts_with("a")}), b);
-		} catch (const std::length_error&) {
-			refused_by_budget = true;
+		// A word matching no term is charged only its matcher: the glob's and the fuzzy's reach it.
+		for (const auto& word : {phrase_word::starts_with("a"), phrase_word::wildcard("zz*yy"), phrase_word::similar("zzzz", 1)}) {
+			bool refused_by_budget = false;
+			try {
+				(void)pf::run(w, query({word}), b);
+			} catch (const std::length_error&) {
+				refused_by_budget = true;
+			}
+			CHECK(refused_by_budget);
 		}
-		CHECK(refused_by_budget);
 		bool invalid = false;
 		try {
 			pf::query q = query({phrase_word::starts_with("k")});
