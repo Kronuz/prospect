@@ -420,6 +420,24 @@ struct inverted_plugin {
 			const reader* r_;
 			fielddict::reader::cursor c_;
 		};
+		// One field's terms in order with their infos (impacts left empty below 128 postings),
+		// seekable: what automata::walk drives (expand.hh). Neither copied nor moved.
+		class field_cursor {
+		public:
+			field_cursor(const reader& r, std::uint32_t field) : doc_count_(r.doc_count()), c_(r.dictionary(), field) {}
+			bool seek(std::string_view from) { return c_.seek(from); }
+			bool next() { return c_.next(); }
+			std::string_view key() const noexcept { return c_.key(); }
+			format::term_info info() const {
+				auto info = c_.info();
+				if (info.df > doc_count_) { corrupt("document frequency"); }
+				return info;
+			}
+
+		private:
+			std::uint64_t doc_count_;
+			fielddict::reader::field_cursor c_;
+		};
 		std::uint64_t doc_count() const noexcept { return doc_count_; }
 
 		// Every byte of the sections checked on first read.

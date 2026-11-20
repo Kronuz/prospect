@@ -20,6 +20,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace prospect {
@@ -249,34 +250,70 @@ public:
 		return &*e;
 	}
 
+	// Fills a term's column from infos already read, one per segment of the snapshot (none
+	// where absent), as an expansion's walk decodes them (automata D5); a column already
+	// present is kept.
+	void put(std::string_view field, std::string_view term, std::vector<std::optional<format::term_info>> infos) {
+		if (infos.size() != segs_.size()) { throw std::invalid_argument("strata: term infos for another snapshot"); }
+		if (index_.find(key{field, term}) == index_.end()) { add(field, term, std::move(infos)); }
+	}
+
 private:
 	struct column_t {
-		std::string field, term;
 		std::uint64_t df = 0, cf = 0;
 		std::vector<std::optional<format::term_info>> infos;  // by segment
 		std::vector<std::uint8_t> complete;                   // impacts computed, by segment
 	};
-	column_t& column(std::string_view field, std::string_view term) {
-		for (auto& c : columns_) {
-			if (c.term == term && c.field == field) { return c; }
+	// The columns by (field, term), hashed: an expansion adds thousands (automata D5). Lookups
+	// take views; the table owns its keys, so it copies safely.
+	struct key {
+		std::string_view field, term;
+	};
+	struct owned_key {
+		std::string field, term;
+	};
+	struct key_hash {
+		using is_transparent = void;
+		std::size_t operator()(const key& k) const noexcept {
+			const std::size_t h = std::hash<std::string_view>{}(k.term);
+			return h ^ (std::hash<std::string_view>{}(k.field) + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2));
 		}
+		std::size_t operator()(const owned_key& k) const noexcept { return (*this)(key{k.field, k.term}); }
+	};
+	struct key_equal {
+		using is_transparent = void;
+		static key view(const key& k) noexcept { return k; }
+		static key view(const owned_key& k) noexcept { return {k.field, k.term}; }
+		template <class A, class B>
+		bool operator()(const A& a, const B& b) const noexcept {
+			const key x = view(a), y = view(b);
+			return x.field == y.field && x.term == y.term;
+		}
+	};
+	column_t& column(std::string_view field, std::string_view term) {
+		if (const auto it = index_.find(key{field, term}); it != index_.end()) { return columns_[it->second]; }
+		std::vector<std::optional<format::term_info>> infos;
+		infos.reserve(segs_.size());
+		for (const auto& s : segs_) { infos.push_back(find_term(s, field, term)); }
+		return add(field, term, std::move(infos));
+	}
+	column_t& add(std::string_view field, std::string_view term, std::vector<std::optional<format::term_info>> infos) {
 		column_t& c = columns_.emplace_back();
-		c.field = field;
-		c.term = term;
-		c.infos.reserve(segs_.size());
-		for (const auto& s : segs_) {
-			c.infos.push_back(find_term(s, field, term));
-			if (c.infos.back()) {
-				c.df += c.infos.back()->df;
-				c.cf += c.infos.back()->cf;
+		const auto at = index_.emplace(owned_key{std::string(field), std::string(term)}, columns_.size() - 1).first;
+		for (const auto& e : infos) {
+			if (e) {
+				c.df += e->df;
+				c.cf += e->cf;
 			}
 		}
+		c.infos = std::move(infos);
 		if (supplied_) {
 			try {
 				const auto t = resolve_term(supplied_, field, term, {c.df, c.cf});
 				c.df = t.df;
 				c.cf = t.cf;
 			} catch (...) {
+				index_.erase(at);
 				columns_.pop_back();
 				throw;
 			}
@@ -294,6 +331,7 @@ private:
 	const supplied_statistics* supplied_;
 	statistics st_;
 	std::deque<column_t> columns_;  // stable addresses as columns are added
+	std::unordered_map<owned_key, std::size_t, key_hash, key_equal> index_;  // into columns_
 };
 
 // Builds a query's scorer for one segment (null when it matches nothing there).

@@ -476,6 +476,73 @@ public:
 		format::term_info info_;
 	};
 
+	// One field's terms in order, seekable (automata D4): termdict's cursor over the field's own
+	// dictionary, or over its range of the pool with the field's varint stripped. Each entry's
+	// value is decoded as the cursor passes it, seeks included (termdict's seek visitor), so the
+	// run's offsets are current at every entry and info() needs no second lookup (D5). Neither
+	// copied nor moved.
+	class field_cursor {
+	public:
+		field_cursor(const reader& r, std::uint32_t field) {
+			if (const auto e = r.entry_of(field)) {
+				c_.emplace(r.own(*e));
+			} else if (r.has_pool()) {
+				put_field(prefix_, field);
+				c_.emplace(r.pool());
+			}
+		}
+		field_cursor(const field_cursor&) = delete;
+		field_cursor& operator=(const field_cursor&) = delete;
+
+		// Moves forward to the field's first term >= from; false when there is none.
+		bool seek(std::string_view from) {
+			if (!c_) { return false; }
+			try {
+				auto visit = [this](std::string_view v) { pass(v); };
+				if (prefix_.empty()) { return land(c_->seek(from, visit)); }
+				target_.assign(prefix_);
+				target_ += from;
+				return land(c_->seek(target_, visit));
+			} catch (const termdict::corrupt&) {
+				corrupt("terms checksum");
+			}
+		}
+		// Moves to the field's next term; false past its last.
+		bool next() {
+			if (!on_) { return false; }
+			try {
+				if (!c_->next()) { return on_ = false; }
+				pass(c_->value());
+				return land(true);
+			} catch (const termdict::corrupt&) {
+				corrupt("terms checksum");
+			}
+		}
+		std::string_view key() const noexcept { return c_->key().substr(prefix_.size()); }
+		// The term's info, impacts included, from the run's offsets before it.
+		format::term_info info() const {
+			format::term_run run = before_;
+			return format::decode_term_info(c_->value(), run);
+		}
+
+	private:
+		void pass(std::string_view value) {
+			before_ = run_;
+			(void)format::decode_term_info(value, run_, false);
+			at_ = value.data();
+		}
+		bool land(bool found) {
+			on_ = found && c_->key().starts_with(prefix_);
+			if (on_ && at_ != c_->value().data()) { throw std::logic_error("fielddict: a seek landed on a value it did not show"); }
+			return on_;
+		}
+		std::optional<termdict::reader::cursor> c_;
+		std::string prefix_, target_;  // the pooled field's varint; a seek's pooled key
+		format::term_run run_, before_;
+		const char* at_ = nullptr;  // the last value passed
+		bool on_ = false;
+	};
+
 	// Adds this segment's fields to a merge's plan: an own dictionary's term count and bytes, and
 	// the pool's per-field counts and bytes (a pass over the pool's keys).
 	void add_plan(std::map<std::uint32_t, field_plan>& plan) const {

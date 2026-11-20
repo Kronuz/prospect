@@ -8,6 +8,9 @@ include(FetchContent)
 # at local checkouts to develop them together.
 # task, ahead of strata's own pin: the per-resume slice and demoted() (phase 7c L1) that sliced search relies on.
 FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG bdafa5f1ca96a2d34b1c5eb0bbb04e4b3ddb88c0)
+# termdict, ahead of strata's own pin: cursor::seek(from, visit), which the term expansion's walk
+# decodes term infos through (docs/design/automata.md D5).
+FetchContent_Declare(termdict GIT_REPOSITORY https://github.com/Kronuz/termdict.git GIT_TAG e3f6f548465feed9cebfee2964bc29f38a79be02)
 FetchContent_Declare(strata GIT_REPOSITORY https://github.com/Kronuz/strata.git GIT_TAG 86fe7c476c64b86219350a999ee88467bf86269c)
 FetchContent_MakeAvailable(strata)
 # Search's own building blocks (Kronuz libraries), each pinned to the commit its gate numbers
@@ -17,13 +20,14 @@ FetchContent_Declare(bitpack GIT_REPOSITORY https://github.com/Kronuz/bitpack.gi
 FetchContent_Declare(unicode GIT_REPOSITORY https://github.com/Kronuz/unicode.git GIT_TAG 297413c889fd99a182f1e9b8c1bc97bb2f2ded29)
 FetchContent_Declare(snowball GIT_REPOSITORY https://github.com/Kronuz/snowball.git GIT_TAG 3efcd0faa97997acf361cf8edff97cb083e14bc8)
 FetchContent_Declare(analysis GIT_REPOSITORY https://github.com/Kronuz/analysis.git GIT_TAG 158c81b56a7976682672bfe1e491ffa6f219ad10)
-FetchContent_MakeAvailable(docset bitpack unicode snowball analysis)
+FetchContent_Declare(automata GIT_REPOSITORY https://github.com/Kronuz/automata.git GIT_TAG a289a073d7dfae10ca6226abaa53e4ce459fedc5)
+FetchContent_MakeAvailable(docset bitpack unicode snowball analysis automata)
 
 # prospect: the inverted plugin, postings, scoring, queries, aggregation, reordering, and the
 # search layout (prospect/index.hh), on strata::core (docs/ARCHITECTURE.md).
 add_library(prospect INTERFACE)
 target_include_directories(prospect INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_link_libraries(prospect INTERFACE strata::core docset::docset bitpack::bitpack fst::fst analysis::analysis)
+target_link_libraries(prospect INTERFACE strata::core docset::docset bitpack::bitpack fst::fst analysis::analysis automata::automata)
 add_library(prospect::prospect ALIAS prospect)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
@@ -185,6 +189,12 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(stats_test PRIVATE prospect::prospect)
   target_compile_definitions(stats_test PRIVATE PROSPECT_FIXTURES="${CMAKE_CURRENT_SOURCE_DIR}/test/fixtures")
   add_test(NAME stats COMMAND stats_test)
+  # Term expansion (docs/design/automata.md): against brute force over own, pooled and key fields,
+  # with automata's reference predicates.
+  add_executable(expand_test test/expand_test.cc)
+  target_link_libraries(expand_test PRIVATE prospect::prospect)
+  target_include_directories(expand_test PRIVATE "${automata_SOURCE_DIR}/test")
+  add_test(NAME expand COMMAND expand_test)
   # Sliced search: identity against the synchronous search at slice sizes from one window up, yields,
   # cancellation, and the pinned view; cross-thread resumes make it the TSan test of the mechanism.
   add_executable(sliced_test test/sliced_test.cc)
@@ -218,4 +228,8 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   target_link_libraries(prospect_engine PRIVATE prospect::prospect)
   add_executable(keybench tools/keybench.cc)
   target_link_libraries(keybench PRIVATE prospect::prospect)
+  # The term expansion's classes over a vocabulary (docs/design/automata.md, "Numbers").
+  add_executable(expand_bench tools/expand_bench.cc)
+  target_link_libraries(expand_bench PRIVATE prospect::prospect)
+  target_include_directories(expand_bench PRIVATE "${automata_SOURCE_DIR}/test" "${CMAKE_CURRENT_SOURCE_DIR}/test")
 endif()

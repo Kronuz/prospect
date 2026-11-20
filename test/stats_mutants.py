@@ -32,7 +32,7 @@ MUTANTS = [
     ("gather: the collection frequency is the document frequency", "t.cf += info->cf;", "t.cf += info->df;"),
     ("find: the field is ignored", "const auto f = terms.find(field);\n		if (f == terms.end()) { return nullptr; }\n		const auto t = f->second.find(term);\n		return t == f->second.end() ? nullptr : &t->second;", "for (const auto& [name, by_term] : terms) {\n			const auto t = by_term.find(term);\n			if (t != by_term.end()) { return &t->second; }\n		}\n		return nullptr;"),
     ("refusal: a lacking term weighs by the snapshot's own", "if (local.df) { throw std::invalid_argument(\"prospect: supplied statistics lack a term the snapshot holds\"); }\n	return {};", "return local;"),
-    ("refusal: the table keeps the refused column", "columns_.pop_back();\n				throw;", "throw;"),
+    ("refusal: the table keeps the refused column", "index_.erase(at);\n				columns_.pop_back();\n				throw;", "throw;"),
     ("per-segment frequencies follow the supplied ones", "const auto& e = column(field, term).infos[index_of(seg)];\n		return e ? e->df : 0;", "(void)index_of(seg);\n		return column(field, term).df;"),
 ]
 
