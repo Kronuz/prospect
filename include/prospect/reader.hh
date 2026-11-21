@@ -397,6 +397,8 @@ struct inverted_plugin {
 		std::string_view postings_bytes() const noexcept { return postings_.bytes; }
 		std::string_view positions_bytes() const noexcept { return positions_.bytes; }
 		const fielddict::reader& dictionary() const noexcept { return *dict_; }
+		// The dictionary's field ids against the index's table (strata's vouch, run at each map).
+		void check_fields(std::uint64_t size, std::optional<std::uint32_t> key) const { dict_->check_fields(size, key); }
 
 		// Every term in (field, term) order with its info (impacts left empty below 128
 		// postings), pulled one at a time, for k-way merges. Neither copied nor moved.

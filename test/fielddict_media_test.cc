@@ -2,6 +2,7 @@
 // large own dictionaries, a few pooled fields and more than one checksum region: scan_terms, a
 // term_cursor walk and a merge each throw corrupt_segment for every flipped bit, whichever
 // dictionary or the pool it lands in; none reads the damage as data or writes it into a new segment.
+// The reader's check_fields (strata's map-time vouch) refuses a field id outside the table or the key.
 #include "prospect/check.hh"
 #include "prospect/merge.hh"
 #include "prospect/reader.hh"
@@ -69,6 +70,23 @@ static bool corrupt(F&& op) {
 	return false;
 }
 
+// The segment holds fields 0 and 5 (own dictionaries) and 1, 2, 3, 239, 240, 70000 (pooled).
+static void check_fields_tests(const std::string& file) {
+	prospect::segment s(file);
+	const auto& inv = s.get<prospect::inverted_plugin>();
+	auto refused = [&](std::uint64_t size, std::optional<std::uint32_t> key) { return corrupt([&] { inv.check_fields(size, key); }); };
+	CHECK(!refused(70001, std::nullopt));
+	CHECK(!refused(70001, 4));  // the key field holds no terms
+	CHECK(!refused(100000, 70001));
+	CHECK(refused(70000, std::nullopt));  // the pooled field 70000 is past the table
+	CHECK(refused(240, std::nullopt));  // pooled 240 and 70000
+	CHECK(refused(5, std::nullopt));  // the own field 5 (directory entry)
+	CHECK(refused(0, std::nullopt));
+	CHECK(refused(70001, 0));  // the key field holds an own dictionary
+	CHECK(refused(70001, 3));  // the key field holds pooled terms
+	CHECK(refused(70001, 70000));
+}
+
 int main() {
 	const terms_t a = base_a();
 	terms_t b;
@@ -80,6 +98,7 @@ int main() {
 		if (e.kind == strata::format::section::terms) { sec = e; }
 	}
 	CHECK(sec.length > 4 * 4096);  // several checksum regions
+	check_fields_tests(fa);
 	{  // undamaged: the same operations answer
 		prospect::segment x(fa), y(fb);
 		CHECK(scan_all(x).size() > 5500);
