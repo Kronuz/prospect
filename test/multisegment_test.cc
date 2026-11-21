@@ -7,7 +7,7 @@
 #include "prospect/index.hh"
 #include "prospect/searcher.hh"
 #include "strata/core/budget.hh"
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -22,6 +22,8 @@
 #include <cstdlib>
 #include <random>
 #include <set>
+
+namespace faultlab = kronuz::faultlab;
 
 static int failures = 0;
 #define CHECK(cond) \
@@ -161,8 +163,8 @@ static std::vector<segment_snapshot> snapshot(const prospect::index& ix) {
 int main() {
 	std::mt19937_64 r(5);
 	for (int round = 0; round < 12; ++round) {
-		faultfs::filesystem fs, serial_fs;
-		faultfs::io io(fs), serial_io(serial_fs);
+		faultlab::filesystem fs, serial_fs;
+		faultlab::io io(fs), serial_io(serial_fs);
 		// Every third round inverts each flush on four threads (D18); a serial twin of the
 		// same transactions must reach the same digest.
 		index::options opts;

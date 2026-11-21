@@ -9,7 +9,7 @@
 #include "prospect/search.hh"
 #include "prospect/searcher.hh"
 #include "prospect/writer.hh"
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 
 #include <crc32c/crc32c.hh>
 #include <sys/mman.h>
@@ -25,6 +25,8 @@
 #include <random>
 #include <string>
 #include <vector>
+
+namespace faultlab = kronuz::faultlab;
 
 static int failures = 0;
 #define CHECK(cond) \
@@ -553,7 +555,7 @@ int main() {
 		prospect::index::options o;
 		o.keyed = true;
 		// A committed index; returns its head manifest's generation.
-		auto make = [&](strata::faultfs::io& io) {
+		auto make = [&](faultlab::io& io) {
 			auto ix = prospect::index::create(io, o, {});
 			CHECK(apply(ix, upsert("Q1", "w")) == strata::verdict::accepted);
 			ix.commit();
@@ -563,7 +565,7 @@ int main() {
 			return m.generation;
 		};
 		// Puts `bytes` in generation `gen`'s log file, whatever the file held.
-		auto put_log = [](strata::faultfs::io& io, std::uint64_t gen, const std::string& bytes) {
+		auto put_log = [](faultlab::io& io, std::uint64_t gen, const std::string& bytes) {
 			const std::string name = strata::index_detail::manifest_name(gen);
 			try {
 				io.remove(name);
@@ -574,15 +576,15 @@ int main() {
 			f->sync();
 		};
 		// Rewrites generation `gen`'s state as a snapshot log of its own with `edit` applied, resealed.
-		auto rewrite = [&](strata::faultfs::filesystem&, strata::faultfs::io& io, std::uint64_t gen, auto edit) {
+		auto rewrite = [&](faultlab::filesystem&, faultlab::io& io, std::uint64_t gen, auto edit) {
 			auto m = strata::index_detail::read_state(io, gen);
 			edit(m);
 			strata::files::recount(m);
 			put_log(io, gen, strata::files::frame_snapshot(m));
 		};
 		const auto with = [&](auto edit) {
-			strata::faultfs::filesystem fs;
-			strata::faultfs::io io(fs);
+			faultlab::filesystem fs;
+			faultlab::io io(fs);
 			const auto gen = make(io);
 			rewrite(fs, io, gen, edit);
 			return open_index(io, o);
@@ -617,8 +619,8 @@ int main() {
 		CHECK(with([](strata::files::log_state& m) { m.configured = bit::inverted | bit::norms | bit::keys; }) == verdict::opens);
 		// A version-1 manifest: unsupported.
 		{
-			strata::faultfs::filesystem fs;
-			strata::faultfs::io io(fs);
+			faultlab::filesystem fs;
+			faultlab::io io(fs);
 			const auto gen = make(io);
 			const std::string v1 = read_file(std::string(PROSPECT_FIXTURES) + "/format12/manifest.bin");
 			put_log(io, gen, v1);
@@ -626,8 +628,8 @@ int main() {
 		}
 		// install refuses a checkpoint whose mask holds a bit this binary cannot read.
 		{
-			strata::faultfs::filesystem fs_a, fs_b;
-			strata::faultfs::io io_a(fs_a), io_b(fs_b);
+			faultlab::filesystem fs_a, fs_b;
+			faultlab::io io_a(fs_a), io_b(fs_b);
 			std::uint64_t gen = 0;
 			{
 				auto a = prospect::index::create(io_a, o, {});
@@ -657,8 +659,8 @@ int main() {
 				const auto& id = std::next(ix.manifest().segments.begin(), i)->second.identity;
 				return std::string(reinterpret_cast<const char*>(id.data()), 16);
 			};
-			strata::faultfs::filesystem fs_a, fs_b;
-			strata::faultfs::io io_a(fs_a), io_b(fs_b);
+			faultlab::filesystem fs_a, fs_b;
+			faultlab::io io_a(fs_a), io_b(fs_b);
 			auto a = prospect::index::create(io_a, o, {});
 			a.set_producer_term(7);
 			CHECK(apply(a, upsert("Q1", "w")) == strata::verdict::accepted);
@@ -695,8 +697,8 @@ int main() {
 		// install: a checkpoint with a required index attribute this binary lacks is unsupported;
 		// one with a cache installs, and the target keeps its own index state (F13-R51).
 		for (const std::uint64_t tag : {std::uint64_t(3), std::uint64_t(2)}) {
-			strata::faultfs::filesystem fs_a, fs_b;
-			strata::faultfs::io io_a(fs_a), io_b(fs_b);
+			faultlab::filesystem fs_a, fs_b;
+			faultlab::io io_a(fs_a), io_b(fs_b);
 			std::uint64_t gen = 0;
 			{
 				auto a = prospect::index::create(io_a, o, {});
@@ -716,8 +718,8 @@ int main() {
 		}
 		// A cache index attribute leaves at the next commit by a binary without it.
 		{
-			strata::faultfs::filesystem fs;
-			strata::faultfs::io io(fs);
+			faultlab::filesystem fs;
+			faultlab::io io(fs);
 			const auto gen = make(io);
 			rewrite(fs, io, gen, [](strata::files::log_state& m) { m.attributes = {{2, "tier"}}; });
 			auto ix = prospect::index::open(io, o);
@@ -729,8 +731,8 @@ int main() {
 		}
 		// install refuses a checkpoint whose configured bits no flush could write (CR5).
 		{
-			strata::faultfs::filesystem fs_a, fs_b;
-			strata::faultfs::io io_a(fs_a), io_b(fs_b);
+			faultlab::filesystem fs_a, fs_b;
+			faultlab::io io_a(fs_a), io_b(fs_b);
 			std::uint64_t gen = 0;
 			{
 				auto a = prospect::index::create(io_a, o, {});
@@ -751,8 +753,8 @@ int main() {
 
 	// --- At the index: a manifest-named unsupported segment is damage ------------------------
 	{
-		strata::faultfs::filesystem fs;
-		strata::faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		prospect::index::options o;
 		o.keyed = true;
 		{
@@ -943,8 +945,8 @@ int main() {
 		// A keyless index writes keyless segments, and a document's version is 0 before and
 		// after a flush, a docid replace included (F9, F13-R18).
 		{
-			strata::faultfs::filesystem fs;
-			strata::faultfs::io io(fs);
+			faultlab::filesystem fs;
+			faultlab::io io(fs);
 			auto ix = prospect::index::create(io, prospect::index::options{}, {});
 			prospect::operation add;
 			add.type = prospect::operation::add;
@@ -980,8 +982,8 @@ int main() {
 
 	// --- F8: keys leave the dictionary (7c-3) ------------------------------------------------
 	{
-		strata::faultfs::filesystem fs;
-		strata::faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		prospect::index::options o;
 		o.keyed = true;
 		o.auto_merge = false;
@@ -1190,8 +1192,8 @@ int main() {
 	// term that starts like a key is an ordinary term; a document that carries a key is
 	// invalid, never stored with its key dropped (F13-R39).
 	{
-		strata::faultfs::filesystem fs;
-		strata::faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		prospect::index::options o;
 		auto ix = prospect::index::create(io, o, {});
 		prospect::operation op;
@@ -1217,8 +1219,8 @@ int main() {
 	// field finds the key's document and the text field the term's, through flush, merge and
 	// reopen, and replace and erase by key act on the key alone.
 	{
-		strata::faultfs::filesystem fs;
-		strata::faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		prospect::index::options o;
 		o.keyed = true;
 		o.auto_merge = false;

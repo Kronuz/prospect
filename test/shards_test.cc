@@ -9,7 +9,7 @@
 #include "shards_fixture.hh"
 #include "text_field.hh"
 #include "prospect/index.hh"
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 #include "prospect/writer.hh"
 
 #include <algorithm>
@@ -26,6 +26,8 @@
 #include <thread>
 #include <string>
 #include <vector>
+
+namespace faultlab = kronuz::faultlab;
 
 static int failures = 0;
 #define CHECK(cond) \
@@ -503,8 +505,8 @@ void empty_segments() {
 // answer as one index holding every document: each shard resolves a query's field names to its
 // own ids, and the statistics are summed by name.
 struct named_index {
-	strata::faultfs::filesystem fs;
-	strata::faultfs::io io{fs};
+	faultlab::filesystem fs;
+	faultlab::io io{fs};
 	std::optional<prospect::index> ix;
 	std::vector<std::string> order;  // the field names, in declaration order
 	named_index(std::vector<std::string> names, const std::array<char, 16>& uuid) : order(std::move(names)) {

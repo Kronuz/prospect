@@ -6,13 +6,15 @@
 #include "prospect/index.hh"
 #include "prospect/reorder.hh"
 #include "view_sources.hh"
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <random>
 #include <set>
+
+namespace faultlab = kronuz::faultlab;
 
 static int failures = 0;
 #define CHECK(cond) \
@@ -78,8 +80,8 @@ std::vector<std::vector<std::uint32_t>> rows_of(const bisection::graph& g) {
 int main() {
 	for (std::uint64_t seed = 0; seed < 6; ++seed) {
 		std::mt19937_64 r(seed);
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		index::options opts;
 		opts.keyed = true;
 		opts.reorder_settings.min_df = 40;

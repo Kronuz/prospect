@@ -11,7 +11,7 @@
 #include "text_field.hh"
 #include "prospect/index.hh"
 #include "prospect/searcher.hh"
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -33,7 +33,7 @@ using prospect::operation;
 using prospect::transaction;
 using strata::verdict;
 
-namespace faultfs = strata::faultfs;
+namespace faultlab = kronuz::faultlab;
 
 static const std::array<char, 16> uuid{'c', 'h', 'u', 'r', 'n'};
 
@@ -152,8 +152,8 @@ int main() {
 	// Churn against the model.
 	{
 		std::mt19937_64 r(2026);
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		strata::byte_budget memory(4 << 20);
 		o.budget = &memory;
 		o.buffer_share = 1 << 20;
@@ -220,8 +220,8 @@ int main() {
 	// The steady state: 1,000 live keys, half replaced every cycle.
 	{
 		std::mt19937_64 r(7);
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		prospect::index::options so;
 		so.keyed = true;
 		so.auto_merge = true;
@@ -256,8 +256,8 @@ int main() {
 		}
 		verify(ix, m, r, "the steady state");
 		// A fresh index of the same documents.
-		faultfs::filesystem ffs;
-		faultfs::io fio(ffs);
+		faultlab::filesystem ffs;
+		faultlab::io fio(ffs);
 		auto fresh = prospect::index::create(fio, so, uuid);
 		model fm;
 		for (const auto& [key, doc] : m) { put(fresh, fm, key, &doc); }

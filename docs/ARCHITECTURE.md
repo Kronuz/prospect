@@ -61,7 +61,7 @@ prospect fills them:
 
 `prospect/strata.hh` brings strata's names into namespace `prospect` (and its `format` and
 `detail`), so prospect's code names the core's types unqualified. Callers outside both qualify:
-`prospect::index`, `strata::faultfs`. The specialization
+`prospect::index`, `kronuz::faultlab` (faultfs). The specialization
 `strata::order_source<prospect::search_layout>` is declared in `reader.hh` and defined in
 `reorder.hh`, so a unit that names the layout without `reorder.hh` does not compile
 (`order_source_negative`).

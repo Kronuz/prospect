@@ -14,7 +14,7 @@
 #include "prospect/expand.hh"
 #include "prospect/index.hh"
 #include "prospect/writer.hh"
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 
 #include <crc32c/crc32c.hh>
 
@@ -41,7 +41,7 @@ static int failures = 0;
 namespace {
 
 using namespace prospect;
-namespace faultfs = strata::faultfs;
+namespace faultlab = kronuz::faultlab;
 
 const char* const tag_name = "tag";
 const char* const key_name = "_id";
@@ -389,8 +389,8 @@ int main() {
 	check_corrupt_df();
 	std::mt19937_64 r(20261120);
 	for (int round = 0; round < 6; ++round) {
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		index::options opts;
 		opts.keyed = true;
 		auto ix = index::create(io, opts, {});

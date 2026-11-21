@@ -4,7 +4,7 @@
 // the segment a flush writes, a merge writes, and the buffer digest all agree.
 #include "prospect/index.hh"
 #include "prospect/searcher.hh"
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -21,7 +21,7 @@ static int failures = 0;
 	} while (0)
 
 using namespace prospect;
-namespace faultfs = strata::faultfs;
+namespace faultlab = kronuz::faultlab;
 
 static const std::array<char, 16> uuid{'f', 'i', 'e', 'l', 'd', 's'};
 
@@ -88,8 +88,8 @@ static std::map<std::pair<std::string, std::string>, std::uint64_t> dictionary_o
 }
 
 static void basic_tests() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	faultlab::filesystem fs;
+	faultlab::io io(fs);
 	prospect::index::options o;
 	o.keyed = true;
 	auto ix = prospect::index::create(io, o, uuid);
@@ -123,8 +123,8 @@ static void basic_tests() {
 }
 
 static void rejection_tests() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	faultlab::filesystem fs;
+	faultlab::io io(fs);
 	prospect::index::options o;
 	o.keyed = true;
 	auto ix = prospect::index::create(io, o, uuid);
@@ -147,8 +147,8 @@ static void rejection_tests() {
 // A field with 256 terms has a dictionary of its own; with 255 it is in the pool. Either way the
 // segment answers the same, and a merge decides again from what survives.
 static void dictionary_tests() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	faultlab::filesystem fs;
+	faultlab::io io(fs);
 	prospect::index::options o;
 	o.keyed = true;
 	o.auto_merge = false;
@@ -191,8 +191,8 @@ static void dictionary_tests() {
 
 // What the flush writes, what a merge writes and what the buffer digests agree.
 static void agreement_tests() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	faultlab::filesystem fs;
+	faultlab::io io(fs);
 	prospect::index::options o;
 	o.keyed = true;
 	o.auto_merge = false;
@@ -230,8 +230,8 @@ static void agreement_tests() {
 // A transaction names fields by its own declarations, in any order: a part's reference resolves to
 // the table's id for that name, never to the reference's number (D2).
 static void reference_tests() {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	faultlab::filesystem fs;
+	faultlab::io io(fs);
 	prospect::index::options o;
 	o.keyed = true;
 	auto ix = prospect::index::create(io, o, uuid);

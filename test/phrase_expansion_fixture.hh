@@ -11,7 +11,7 @@
 #include "prospect/index.hh"
 #include "prospect/phrase_expand.hh"
 #include "prospect/searcher.hh"
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 
 #include <algorithm>
 #include <cmath>
@@ -27,7 +27,7 @@
 namespace phrase_fixture {
 
 using namespace prospect;
-namespace faultfs = strata::faultfs;
+namespace faultlab = kronuz::faultlab;
 
 inline const char* const text_name = "text";
 inline const char* const title_name = "title";
@@ -157,8 +157,8 @@ private:
 		return apply(std::move(op));
 	}
 
-	faultfs::filesystem fs_;
-	faultfs::io io_;
+	faultlab::filesystem fs_;
+	faultlab::io io_;
 	std::optional<prospect::index> ix_;
 	std::mt19937_64 r_;
 	std::vector<std::string> keys_;

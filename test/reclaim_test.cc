@@ -10,13 +10,15 @@
 // PROSPECT_CRASH_POINTS sets how many crash points to cover per workload (default 400).
 #include "text_field.hh"
 #include "prospect/index.hh"
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
 #include <random>
 #include <set>
+
+namespace faultlab = kronuz::faultlab;
 
 using namespace prospect;
 
@@ -87,7 +89,7 @@ static std::vector<step> workload(std::uint64_t seed, std::size_t steps) {
 
 // What recover --to g checks, read-only: every segment generation g names, against its entry,
 // read from the log holding it (manifest-log D8).
-static std::string intact(faultfs::io& io, faultfs::filesystem& fs, std::optional<std::uint64_t> g) {
+static std::string intact(faultlab::io& io, faultlab::filesystem& fs, std::optional<std::uint64_t> g) {
 	try {
 		const auto m = index_detail::read_state(io, g);
 		for (const auto& [id, r] : m.segments) {
@@ -145,8 +147,8 @@ int main() {
 		};
 		std::uint64_t total;
 		{
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			faultlab::filesystem fs;
+			faultlab::io io(fs);
 			byte_budget storage(1ull << 40);
 			auto ix = index::create(io, options(&storage), uuid_a);
 			const auto base = fs.mutations();
@@ -156,8 +158,8 @@ int main() {
 		}
 		const std::uint64_t stride = total / max_points + 1;
 		for (std::uint64_t at = 0; at <= total; at += stride, ++points) {
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			faultlab::filesystem fs;
+			faultlab::io io(fs);
 			byte_budget storage(1ull << 40);
 			{
 				auto ix = index::create(io, options(&storage), uuid_a);

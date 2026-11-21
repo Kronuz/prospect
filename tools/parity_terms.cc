@@ -9,7 +9,7 @@
 #include "prospect/index.hh"
 #include "prospect/search.hh"
 #include "prospect/searcher.hh"
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 
 #include <algorithm>
 #include <cmath>
@@ -22,6 +22,8 @@
 #include <sstream>
 #include <string>
 #include <vector>
+
+namespace faultlab = kronuz::faultlab;
 
 namespace {
 
@@ -96,8 +98,8 @@ int main(int argc, char** argv) {
 			docs.back().push_back({t.field, t.value, wdf});
 		}
 	}
-	strata::faultfs::filesystem fs;
-	strata::faultfs::io io(fs);
+	faultlab::filesystem fs;
+	faultlab::io io(fs);
 	auto ix = prospect::index::create(io, prospect::index::options{}, std::array<char, 16>{'t', '3', 'b'});
 	const std::size_t per = (docs.size() + segments - 1) / segments;
 	for (std::size_t from = 0; from < docs.size(); from += per) {

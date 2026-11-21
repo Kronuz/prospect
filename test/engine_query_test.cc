@@ -12,7 +12,7 @@
 #include "text_field.hh"
 #include "prospect/index.hh"
 #include "prospect/writer.hh"
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 
 #include <algorithm>
 #include <cmath>
@@ -22,6 +22,8 @@
 #include <random>
 #include <string>
 #include <vector>
+
+namespace faultlab = kronuz::faultlab;
 
 static int failures = 0;
 #define CHECK(cond) \
@@ -190,8 +192,8 @@ static void check_against_scan(const std::vector<doc_hit>& hits, const std::vect
 // both copies bit for bit (scores sum in clause order, not in each segment's bound order).
 static void check_segment_independent(std::mt19937_64& r) {
 	const char* words[] = {"a", "b", "c", "d", "e", "f"};
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	faultlab::filesystem fs;
+	faultlab::io io(fs);
 	index::options opts;
 	opts.auto_merge = false;
 	auto ix = prospect::index::create(io, opts, uuid);
@@ -244,8 +246,8 @@ static void check_segment_independent(std::mt19937_64& r) {
 // equal scores straddle the k-th position, segments visited in index order and largest
 // first. Single words score bit for bit as the scan does, so they must equal its first k.
 static void check_interleaved(std::mt19937_64& r) {
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	faultlab::filesystem fs;
+	faultlab::io io(fs);
 	index::options opts;
 	opts.auto_merge = false;
 	auto ix = prospect::index::create(io, opts, uuid);
@@ -292,8 +294,8 @@ int main() {
 	check_interleaved(r);
 	check_segment_independent(r);
 	for (int round = 0; round < 6; ++round) {
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		index::options opts;
 		opts.auto_merge = false;
 		auto ix = prospect::index::create(io, opts, uuid);

@@ -9,7 +9,7 @@
 #include "prospect/index.hh"
 #include "prospect/merge.hh"
 #include "view_sources.hh"
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 
 #include <crc32c/crc32c.hh>
 #include <algorithm>
@@ -21,6 +21,8 @@
 #include <set>
 #include <atomic>
 #include <thread>
+
+namespace faultlab = kronuz::faultlab;
 
 static int failures = 0;
 #define CHECK(cond) \
@@ -289,8 +291,8 @@ int main() {
 	// --- The index: buffer, flush, replacement, delete, merge -------------------------------
 	for (std::uint64_t seed = 0; seed < 8; ++seed) {
 		std::mt19937_64 r(seed + 100);
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		index::options opts;
 		opts.keyed = true;
 		auto ix = prospect::index::create(io, opts, uuid);

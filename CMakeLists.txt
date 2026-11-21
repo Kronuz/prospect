@@ -11,6 +11,8 @@ FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_
 # termdict, ahead of strata's own pin: cursor::seek(from, visit), which the term expansion's walk
 # decodes term infos through (docs/design/automata.md D5).
 FetchContent_Declare(termdict GIT_REPOSITORY https://github.com/Kronuz/termdict.git GIT_TAG e3f6f548465feed9cebfee2964bc29f38a79be02)
+# completion, ahead of strata's own pin: the faultlab seam (preallocate, advise, map_shared, link) that faultlab's faultfs implements.
+FetchContent_Declare(completion GIT_REPOSITORY https://github.com/Kronuz/completion.git GIT_TAG d8b538c6778f0a1b969e42c8428995d1d29d4731)
 FetchContent_Declare(strata GIT_REPOSITORY https://github.com/Kronuz/strata.git GIT_TAG 86fe7c476c64b86219350a999ee88467bf86269c)
 FetchContent_MakeAvailable(strata)
 # Search's own building blocks (Kronuz libraries), each pinned to the commit its gate numbers
@@ -21,13 +23,15 @@ FetchContent_Declare(unicode GIT_REPOSITORY https://github.com/Kronuz/unicode.gi
 FetchContent_Declare(snowball GIT_REPOSITORY https://github.com/Kronuz/snowball.git GIT_TAG 3efcd0faa97997acf361cf8edff97cb083e14bc8)
 FetchContent_Declare(analysis GIT_REPOSITORY https://github.com/Kronuz/analysis.git GIT_TAG 158c81b56a7976682672bfe1e491ffa6f219ad10)
 FetchContent_Declare(automata GIT_REPOSITORY https://github.com/Kronuz/automata.git GIT_TAG a289a073d7dfae10ca6226abaa53e4ce459fedc5)
-FetchContent_MakeAvailable(docset bitpack unicode snowball analysis automata)
+# faultlab, the crash and fault model the tests run on (faultlab/faultfs.h), pinned by commit.
+FetchContent_Declare(faultlab GIT_REPOSITORY https://github.com/Kronuz/faultlab.git GIT_TAG b64102f2c95ad0ab49fc34189f3be8cda0507145)
+FetchContent_MakeAvailable(docset bitpack unicode snowball analysis automata faultlab)
 
 # prospect: the inverted plugin, postings, scoring, queries, aggregation, reordering, and the
 # search layout (prospect/index.hh), on strata::core (docs/ARCHITECTURE.md).
 add_library(prospect INTERFACE)
 target_include_directories(prospect INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_link_libraries(prospect INTERFACE strata::core docset::docset bitpack::bitpack fst::fst analysis::analysis automata::automata)
+target_link_libraries(prospect INTERFACE strata::core docset::docset bitpack::bitpack fst::fst analysis::analysis automata::automata faultlab::faultlab)
 add_library(prospect::prospect ALIAS prospect)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
@@ -172,10 +176,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   # the sanitizer jobs' hour.
   foreach(t index reclaim lifecycle background_merge)
     add_test(NAME ${t}_mapped COMMAND ${t}_test)
-    set_tests_properties(${t}_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1")
+    set_tests_properties(${t}_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1")
   endforeach()
-  set_tests_properties(reclaim_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1;PROSPECT_CRASH_POINTS=150")
-  set_tests_properties(lifecycle_mapped PROPERTIES ENVIRONMENT "STRATA_FAULTFS_MAP=1;PROSPECT_CRASH_POINTS=1000;PROSPECT_BG_CRASH_POINTS=200")
+  set_tests_properties(reclaim_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1;PROSPECT_CRASH_POINTS=150")
+  set_tests_properties(lifecycle_mapped PROPERTIES ENVIRONMENT "FAULTLAB_MAP=1;PROSPECT_CRASH_POINTS=1000;PROSPECT_BG_CRASH_POINTS=200")
   add_executable(engine_query_test test/engine_query_test.cc)
   target_include_directories(engine_query_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tools")
   target_link_libraries(engine_query_test PRIVATE prospect::prospect)

@@ -17,7 +17,7 @@
 #include "text_field.hh"
 #include "prospect/index.hh"
 #include "stepping_executor.hh"
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -25,6 +25,8 @@
 #include <map>
 #include <random>
 #include <set>
+
+namespace faultlab = kronuz::faultlab;
 
 static int failures = 0;
 #define CHECK(cond) \
@@ -151,8 +153,8 @@ int main() {
 		std::vector<std::uint64_t> trace[3];  // the digest after every transaction (D12)
 		std::uint64_t digests[3];
 		for (int schedule = 0; schedule < 3; ++schedule) {
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			faultlab::filesystem fs;
+			faultlab::io io(fs);
 			auto ix = index::create(io, opts, uuid_a);
 			std::uint64_t at = 0;
 			for (const auto& s : w) {
@@ -203,8 +205,8 @@ int main() {
 		std::vector<std::vector<std::uint64_t>> want;
 		std::uint64_t digest;
 		{
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			faultlab::filesystem fs;
+			faultlab::io io(fs);
 			auto ix = index::create(io, keyed, uuid_a);
 			for (std::size_t i = 0; i < log.size(); ++i) { want.push_back(record(ix.apply(log[i], {i + 1, 1}))); }
 			ix.commit();
@@ -212,8 +214,8 @@ int main() {
 		}
 		const std::size_t half = log.size() / 2;
 		for (int via_install = 0; via_install < 2; ++via_install) {
-			faultfs::filesystem fs, other;
-			faultfs::io io(fs), other_io(other);
+			faultlab::filesystem fs, other;
+			faultlab::io io(fs), other_io(other);
 			auto ix = index::create(io, keyed, uuid_a);
 			for (std::size_t i = 0; i < half; ++i) { ix.apply(log[i], {i + 1, 1}); }
 			ix.commit();
@@ -263,8 +265,8 @@ int main() {
 		std::vector<std::vector<std::uint64_t>> verdicts[4];
 		std::uint64_t digests[4];
 		for (int schedule = 0; schedule < 4; ++schedule) {
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			faultlab::filesystem fs;
+			faultlab::io io(fs);
 			auto ix = index::create(io, keyed, uuid_a);
 			for (const auto& t : log) {
 				const bool removes = t.ops[0].type == operation::delete_key || t.ops[0].type == operation::delete_docid;
@@ -289,8 +291,8 @@ int main() {
 	}
 	// Checkpoints and install.
 	for (std::uint64_t seed = 0; seed < 30; ++seed) {
-		faultfs::filesystem fa, fb;
-		faultfs::io ia(fa), ib(fb);
+		faultlab::filesystem fa, fb;
+		faultlab::io ia(fa), ib(fb);
 		auto a = index::create(ia, keyed, uuid_a);
 		auto b = index::create(ib, keyed, uuid_b);
 		for (const auto& s : workload(seed, 120)) {
@@ -335,8 +337,8 @@ int main() {
 		const auto w = workload(seed + 500, 150);
 		std::uint64_t reference;
 		{
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			faultlab::filesystem fs;
+			faultlab::io io(fs);
 			auto ix = index::create(io, keyed, uuid_a);
 			for (const auto& s : w) {
 				if (s.type == step::apply) {
@@ -353,8 +355,8 @@ int main() {
 			reference = ix.digest();
 		}
 		std::mt19937_64 r(seed);
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		auto ix = index::create(io, keyed, uuid_a);
 		std::size_t full = 0;
 		for (const auto& s : w) {
@@ -391,7 +393,7 @@ int main() {
 		o.meta_key = "after";
 		o.meta_value = "x";
 		ix.apply(tx_of(o), {});
-		fs.add_fault({faultfs::op::sync, 1, ENOSPC, false});
+		fs.add_fault({faultlab::op::sync, 1, ENOSPC, false});
 		bool fenced = false;
 		try {
 			ix.commit();
@@ -408,7 +410,7 @@ int main() {
 	// the chosen generation, never a manifest between them.
 	{
 		const auto w = workload(4242, 120);
-		auto replay = [&](faultfs::io& io, std::map<std::uint64_t, std::uint64_t>& digests) {
+		auto replay = [&](faultlab::io& io, std::map<std::uint64_t, std::uint64_t>& digests) {
 			auto ix = index::create(io, keyed, uuid_a);
 			for (const auto& s : w) {
 				switch (s.type) {
@@ -427,8 +429,8 @@ int main() {
 		};
 		std::map<std::uint64_t, std::uint64_t> digests;
 		{
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			faultlab::filesystem fs;
+			faultlab::io io(fs);
 			replay(io, digests);
 		}
 		CHECK(digests.size() >= 4);
@@ -437,8 +439,8 @@ int main() {
 		for (std::uint64_t to : {head - 1, head - 2}) {
 			std::uint64_t total;
 			{
-				faultfs::filesystem fs;
-				faultfs::io io(fs);
+				faultlab::filesystem fs;
+				faultlab::io io(fs);
 				std::map<std::uint64_t, std::uint64_t> d;
 				replay(io, d);
 				const std::uint64_t base = fs.mutations();
@@ -446,8 +448,8 @@ int main() {
 				total = fs.mutations() - base;
 			}
 			for (std::uint64_t at = 0; at <= total; ++at, ++tried) {
-				faultfs::filesystem fs;
-				faultfs::io io(fs);
+				faultlab::filesystem fs;
+				faultlab::io io(fs);
 				std::map<std::uint64_t, std::uint64_t> d;
 				replay(io, d);
 				fs.power_off_after(at);
@@ -468,8 +470,8 @@ int main() {
 	{
 		std::size_t peak[2] = {0, 0};
 		for (int budgeted = 0; budgeted < 2; ++budgeted) {
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			faultlab::filesystem fs;
+			faultlab::io io(fs);
 			byte_budget mem(32 * 1024);
 			index::options o = keyed;
 			if (budgeted) {
@@ -488,8 +490,8 @@ int main() {
 	// live docs, and metadata; every third point loses power again during the recovery.
 	// Reopening finds the target's old content or the installed one.
 	{
-		faultfs::filesystem sfs;
-		faultfs::io sio(sfs);
+		faultlab::filesystem sfs;
+		faultlab::io sio(sfs);
 		auto source = index::create(sio, keyed, uuid_a);
 		for (const auto& s : workload(9090, 160)) {
 			if (s.type == step::apply) { source.apply(s.t, {}); }
@@ -498,7 +500,7 @@ int main() {
 		const std::uint64_t cp = source.checkpoint();
 		const std::uint64_t installed = source.digest();
 		CHECK(source.segments().size() >= 2);
-		auto prepare = [&](faultfs::io& io) {
+		auto prepare = [&](faultlab::io& io) {
 			auto ix = index::create(io, keyed, uuid_b);
 			for (const auto& s : workload(9091, 40)) {
 				if (s.type == step::apply) { ix.apply(s.t, {}); }
@@ -508,8 +510,8 @@ int main() {
 		};
 		std::uint64_t total, old;
 		{
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			faultlab::filesystem fs;
+			faultlab::io io(fs);
 			auto ix = prepare(io);
 			old = ix.digest();
 			const std::uint64_t base = fs.mutations();
@@ -518,8 +520,8 @@ int main() {
 			CHECK(ix.digest() == installed);
 		}
 		for (std::uint64_t at = 0; at <= total; ++at) {
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			faultlab::filesystem fs;
+			faultlab::io io(fs);
 			{
 				auto ix = prepare(io);
 				fs.power_off_after(at);
@@ -566,8 +568,8 @@ int main() {
 		};
 		std::uint64_t total, empty;
 		{
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			faultlab::filesystem fs;
+			faultlab::io io(fs);
 			const std::uint64_t base = fs.mutations();
 			auto ix = index::create(io, keyed, uuid_a);
 			total = fs.mutations() - base;
@@ -576,8 +578,8 @@ int main() {
 		std::size_t reran = 0, crashes = 0;
 		for (std::uint64_t at = 0; at <= total; ++at) {
 			for (std::uint64_t seed = 0; seed < 50; ++seed, ++crashes) {
-				faultfs::filesystem fs;
-				faultfs::io io(fs);
+				faultlab::filesystem fs;
+				faultlab::io io(fs);
 				fs.power_off_after(at);
 				try {
 					auto ix = index::create(io, keyed, uuid_a);
@@ -599,8 +601,8 @@ int main() {
 			}
 		}
 		CHECK(total >= 5 && reran > 0);
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		{
 			auto ix = index::create(io, keyed, uuid_a);
 			ix.apply(transaction{{add_op("Qk")}, {}, {}, text_fields()}, {});
@@ -619,8 +621,8 @@ int main() {
 		CHECK(corrupt);  // segments without a manifest
 		CHECK(throws([&] { index::create(io, keyed, uuid_a); }));
 		{
-			faultfs::filesystem lfs;
-			faultfs::io lio(lfs);
+			faultlab::filesystem lfs;
+			faultlab::io lio(lfs);
 			{
 				auto ix = index::create(lio, keyed, uuid_a);
 				for (int i = 0; i < 4; ++i) {
@@ -632,8 +634,8 @@ int main() {
 			CHECK(throws([&] { index::create(lio, keyed, uuid_a); }));  // an index with no lock file
 		}
 		{
-			faultfs::filesystem dfs;
-			faultfs::io dio(dfs);
+			faultlab::filesystem dfs;
+			faultlab::io dio(dfs);
 			{
 				auto ix = index::create(dio, keyed, uuid_a);
 				ix.apply(transaction{{add_op("Qd")}, {}, {}, text_fields()}, {});
@@ -755,8 +757,8 @@ int main() {
 			// with background merges, an inline-merging twin must reach the same commit points.
 			std::uint64_t total, final_digest;
 			{
-				faultfs::filesystem fs;
-				faultfs::io io(fs);
+				faultlab::filesystem fs;
+				faultlab::io io(fs);
 				run_env env(background);
 				auto ix = index::create(io, options_for(env), uuid_a);
 				const std::uint64_t base = fs.mutations();
@@ -765,8 +767,8 @@ int main() {
 				total = fs.mutations() - base;
 				final_digest = ix.digest();
 				if (background) {
-					faultfs::filesystem tfs;
-					faultfs::io tio(tfs);
+					faultlab::filesystem tfs;
+					faultlab::io tio(tfs);
 					run_env inline_env(false);
 					auto o = options_for(inline_env);
 					o.background = nullptr;
@@ -780,7 +782,7 @@ int main() {
 			// The state power loss after `at` mutations leaves; returns the allowed commit
 			// points. The index ends before the crash, with the power still off, so the merges
 			// it stops change nothing.
-			auto crashed = [&](faultfs::filesystem& fs, faultfs::io& io, std::uint64_t at) {
+			auto crashed = [&](faultlab::filesystem& fs, faultlab::io& io, std::uint64_t at) {
 				std::set<point> allowed;
 				{
 					run_env env(background);
@@ -798,7 +800,7 @@ int main() {
 			// Opens after the crash: the recovered pair is an allowed commit point, replaying
 			// the whole log reaches the uninterrupted digest (condition 1), and the index keeps
 			// working: a full merge, a commit, and a reopen to the same digest (condition 3).
-			auto recovered = [&](faultfs::io& io, const std::set<point>& allowed, std::uint64_t at) {
+			auto recovered = [&](faultlab::io& io, const std::set<point>& allowed, std::uint64_t at) {
 				try {
 					auto ix = index::open(io, keyed);
 					const point got{ix.digest(), ix.applied()};
@@ -821,8 +823,8 @@ int main() {
 			};
 			for (std::uint64_t at = 0; at <= total && n.points < want; ++at, ++n.points) {
 				{
-					faultfs::filesystem fs;
-					faultfs::io io(fs);
+					faultlab::filesystem fs;
+					faultlab::io io(fs);
 					const auto allowed = crashed(fs, io, at);
 					if (at % 3 == 0) {
 						// A second power loss during the recovery that follows.
@@ -839,8 +841,8 @@ int main() {
 				if (at % 50 == 0) {
 					std::uint64_t steps;
 					{
-						faultfs::filesystem fs;
-						faultfs::io io(fs);
+						faultlab::filesystem fs;
+						faultlab::io io(fs);
 						crashed(fs, io, at);
 						const std::uint64_t base = fs.mutations();
 						try {
@@ -850,8 +852,8 @@ int main() {
 						steps = fs.mutations() - base;
 					}
 					for (std::uint64_t k = 0; k < steps; ++k, ++n.recovery_points) {
-						faultfs::filesystem fs;
-						faultfs::io io(fs);
+						faultlab::filesystem fs;
+						faultlab::io io(fs);
 						const auto allowed = crashed(fs, io, at);
 						fs.power_off_after(k);
 						try {
@@ -868,8 +870,8 @@ int main() {
 	// In reorder mode the runs above must really have reordered: a forced merge of a
 	// workload's documents writes a permuted segment.
 	if (reorder_all) {
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		auto ix = index::create(io, keyed, uuid_a);
 		std::mt19937_64 r(5);
 		for (int i = 0; i < 200; ++i) {

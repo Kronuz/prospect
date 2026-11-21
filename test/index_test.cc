@@ -3,7 +3,7 @@
 // recovery, retention, and fail-closed opens.
 #include "text_field.hh"
 #include "prospect/index.hh"
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -11,6 +11,8 @@
 #include <map>
 #include <random>
 #include <set>
+
+namespace faultlab = kronuz::faultlab;
 
 namespace strata {
 // Test hooks no public option offers: a lower run cap (CR12, R28).
@@ -80,16 +82,16 @@ static std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> contents(c
 }
 
 // Appends a torn record to a log, so the reopen owes a rollover and later commits go to a newer log.
-static void tear(faultfs::io& io, const std::string& name) {
+static void tear(faultlab::io& io, const std::string& name) {
 	auto f = io.open_existing(name);
 	f->write_at(f->size(), std::string(512, '\0'));
 	f->sync();
 }
 
-// faultfs::io, but the n-th later open_existing of one name fails once with `error`.
+// faultlab::io, but the n-th later open_existing of one name fails once with `error`.
 class flaky_io final : public kronuz::journal::IO {
 public:
-	explicit flaky_io(faultfs::io& inner) : inner_(&inner) {}
+	explicit flaky_io(faultlab::io& inner) : inner_(&inner) {}
 	void arm(std::string name, int nth, int error, int times = 1) {
 		name_ = std::move(name);
 		left_ = nth;
@@ -119,7 +121,7 @@ public:
 	void sync_directory() override { inner_->sync_directory(); }
 
 private:
-	faultfs::io* inner_;
+	faultlab::io* inner_;
 	std::string name_;
 	int left_ = 0, error_ = 0, times_ = 1;
 };
@@ -162,8 +164,8 @@ int main() {
 	}
 	// Keys, versions, replace, delete, and reopening.
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		auto ix = prospect::index::create(io, keyed, uuid);
 		auto v = ix.apply(tx({add("Qa", "alpha"), add("Qb", "beta"), add("", "anonymous")}), {});
 		// A document without a key has version 0 (F9).
@@ -193,8 +195,8 @@ int main() {
 	}
 	// Version checks and atomicity: a rejected transaction leaves no trace.
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		auto ix = prospect::index::create(io, keyed, uuid);
 		ix.apply(tx({add("Qa", "a")}), {});
 		auto v = ix.apply(tx({replace("Qa", "a2", 0)}), {});  // 0: must be absent
@@ -266,8 +268,8 @@ int main() {
 			d.stored = t.stored;
 			return d;
 		};
-		faultfs::filesystem fa, fb;
-		faultfs::io ia(fa), ib(fb);
+		faultlab::filesystem fa, fb;
+		faultlab::io ia(fa), ib(fb);
 		auto a = prospect::index::create(ia, keyed, uuid), b = prospect::index::create(ib, keyed, uuid);
 		std::mt19937_64 r(5);
 		const char* words[] = {"a", "b", "c", "rare", "the", "of"};
@@ -320,7 +322,7 @@ int main() {
 	// (two threads, one run), with replaces and deletes inside the buffer, explicit docids out
 	// of order, rejected transactions, and term, token, and split documents mixed.
 	{
-		auto seg_files = [](const faultfs::filesystem& fs) {
+		auto seg_files = [](const faultlab::filesystem& fs) {
 			std::map<std::string, std::string> out;
 			for (const auto& n : fs.list()) {
 				if (n.starts_with("seg-")) { out[n] = std::string(fs.view(n)); }
@@ -358,8 +360,8 @@ int main() {
 		whole.flush_min_docs = std::size_t(1) << 30;
 		const char* words[] = {"a", "b", "c", "rare", "the", "of"};
 		for (std::uint64_t seed = 0; seed < 12; ++seed) {
-			faultfs::filesystem fa, fb;
-			faultfs::io ia(fa), ib(fb);
+			faultlab::filesystem fa, fb;
+			faultlab::io ia(fa), ib(fb);
 			auto a = prospect::index::create(ia, same, uuid), b = prospect::index::create(ib, whole, uuid);
 			std::mt19937_64 r(seed);
 			for (int round = 0; round < 3; ++round) {
@@ -399,7 +401,7 @@ int main() {
 	// their words as explicit tokens, inverted on arrival and buffered whole; a word with the
 	// key prefix, a word repeating a terms entry, or tokens or a length beside split_text reject.
 	{
-		auto seg_files = [](const faultfs::filesystem& fs) {
+		auto seg_files = [](const faultlab::filesystem& fs) {
 			std::map<std::string, std::string> out;
 			for (const auto& n : fs.list()) {
 				if (n.starts_with("seg-")) { out[n] = std::string(fs.view(n)); }
@@ -431,8 +433,8 @@ int main() {
 		whole.flush_min_docs = std::size_t(1) << 30;
 		const std::string words[] = {"a", "b", "rare", "eightbyt", "ninebytes", "oneQinside", std::string(254, 'm'), std::string(300, 'l')};
 		for (std::uint64_t seed = 0; seed < 4; ++seed) {
-			faultfs::filesystem fa, fb, fc;
-			faultfs::io ia(fa), ib(fb), ic(fc);
+			faultlab::filesystem fa, fb, fc;
+			faultlab::io ia(fa), ib(fb), ic(fc);
 			auto a = prospect::index::create(ia, same, uuid), b = prospect::index::create(ib, same, uuid), c = prospect::index::create(ic, whole, uuid);
 			std::mt19937_64 r(seed);
 			for (int round = 0; round < 2; ++round) {
@@ -480,8 +482,8 @@ int main() {
 	// Terms past Lucene's and Tantivy's limits (64 KiB, 1 MiB), as keys and as body terms,
 	// are found buffered, flushed, reopened, and merged.
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		const std::string key = "Q" + std::string(std::size_t(1) << 20, 'k'), body = std::string(65531, 'b');
 		auto ix = prospect::index::create(io, keyed, uuid);
 		ix.apply(tx({add(key, body), add("Qs", body + "x")}), {});
@@ -504,8 +506,8 @@ int main() {
 	// A conditional operation without a key is invalid, whatever the expected version: a
 	// keyless document has no version to compare (Phase 4 review, M3).
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		auto ix = prospect::index::create(io, keyed, uuid);
 		auto v = ix.apply(tx({add("", "keyless")}), {});
 		const auto docid = v.docids[0];
@@ -521,8 +523,8 @@ int main() {
 	}
 	// Explicit docids, the key/docid agreement, and replayed positions.
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		auto ix = prospect::index::create(io, keyed, uuid);
 		operation o;
 		o.type = operation::replace_docid;
@@ -544,8 +546,8 @@ int main() {
 	}
 	// Commits survive crashes; uncommitted work does not, and nothing half-applied appears.
 	for (std::uint64_t seed = 0; seed < 200; ++seed) {
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> committed;
 		{
 			auto ix = prospect::index::create(io, keyed, uuid);
@@ -565,8 +567,8 @@ int main() {
 	}
 	// A crash during commit opens either the previous commit or the new one.
 	for (std::uint64_t seed = 0; seed < 300; ++seed) {
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> first, second;
 		{
 			auto ix = prospect::index::create(io, keyed, uuid);
@@ -575,7 +577,7 @@ int main() {
 			first = contents(ix);
 			ix.apply(tx({replace("Qa", "a2"), erase("Qb"), add("Qc", "c")}), {});
 			// Stop the commit at a seeded step with a failure after its effect, as power loss would.
-			const faultfs::op steps[] = {faultfs::op::sync, faultfs::op::sync_directory, faultfs::op::replace, faultfs::op::create};
+			const faultlab::op steps[] = {faultlab::op::sync, faultlab::op::sync_directory, faultlab::op::replace, faultlab::op::create};
 			fs.add_fault({steps[seed % 4], 1 + (seed / 4) % 3, EIO, true});
 			try {
 				ix.commit();
@@ -591,14 +593,14 @@ int main() {
 	}
 	// A failed sync fences; reopening recovers the last commit.
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		auto ix = prospect::index::create(io, keyed, uuid);
 		ix.apply(tx({add("Qa", "a")}), {});
 		ix.commit();
 		const auto good = contents(ix);
 		ix.apply(tx({add("Qb", "b")}), {});
-		fs.add_fault({faultfs::op::sync, 1, EIO, false});
+		fs.add_fault({faultlab::op::sync, 1, EIO, false});
 		CHECK(throws([&] { ix.commit(); }));
 		CHECK(throws([&] { ix.apply(tx({add("Qc", "c")}), {}); }));  // fenced
 		fs.clear_faults();
@@ -608,8 +610,8 @@ int main() {
 	}
 	// ENOSPC while flushing keeps the buffer; the same commit succeeds once space returns.
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		auto ix = prospect::index::create(io, keyed, uuid);
 		operation big = add("Qa", "a");
 		std::mt19937_64 r(9);
@@ -631,8 +633,8 @@ int main() {
 	// ENOSPC on a later run of a parallel flush publishes no run, so the retry once space
 	// returns leaves one live copy of each document.
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		auto parallel = keyed; parallel.flush_threads = 2; parallel.flush_min_docs = 1;
 		auto ix = prospect::index::create(io, parallel, uuid);
 		std::mt19937_64 r(10);
@@ -659,8 +661,8 @@ int main() {
 	// Merges under faults: ENOSPC leaves the index as it was and the merge succeeds once
 	// space returns; any other write failure fences, and reopening recovers the last commit.
 	for (int fault = 0; fault < 2; ++fault) {
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		auto ix = prospect::index::create(io, keyed, uuid);
 		std::mt19937_64 r(10);
 		for (int i = 0; i < 4; ++i) {
@@ -695,7 +697,7 @@ int main() {
 			ix = prospect::index(prospect::index::open(io, keyed));
 			CHECK(contents(ix) == good && ix.segments().size() == 1);
 		} else {
-			fs.add_fault({faultfs::op::create, 1, EIO, false});
+			fs.add_fault({faultlab::op::create, 1, EIO, false});
 			CHECK(throws([&] { ix.merge(ids); }));
 			CHECK(throws([&] { ix.commit(); }));  // fenced
 			fs.clear_faults();
@@ -708,15 +710,15 @@ int main() {
 	// for its next commit's files: after a commit, the budget's use is the bytes on disk
 	// plus a small allowance (a manifest and nothing pending), across reopens too.
 	{
-		auto on_disk = [](const faultfs::filesystem& fs) {
+		auto on_disk = [](const faultlab::filesystem& fs) {
 			std::uint64_t n = 0;
 			for (const auto& name : fs.list()) {
 				if (strata::index_detail::parse_name(name)) { n += fs.view(name).size(); }
 			}
 			return n;
 		};
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		byte_budget storage(~std::uint64_t(0) >> 1);
 		prospect::index::options o = keyed;
 		o.storage = &storage;
@@ -737,9 +739,9 @@ int main() {
 	// A failed truncation round (condition 18): a truncate or the file's sync fails mid-round,
 	// and once reclamation finishes the permit holds what a fault-free run holds.
 	{
-		auto beyond = [&](faultfs::op kind, std::uint64_t nth, bool fault) {
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+		auto beyond = [&](faultlab::op kind, std::uint64_t nth, bool fault) {
+			faultlab::filesystem fs;
+			faultlab::io io(fs);
 			byte_budget storage(1ull << 40);
 			prospect::index::options o = keyed;
 			o.storage = &storage;
@@ -775,17 +777,17 @@ int main() {
 			}
 			return (long long)storage.used() - (long long)bytes;
 		};
-		const auto control = beyond(faultfs::op::truncate, 1, false);
-		CHECK(beyond(faultfs::op::truncate, 1, true) == control);
-		CHECK(beyond(faultfs::op::truncate, 2, true) == control);
-		CHECK(beyond(faultfs::op::sync, 1, true) == control);
+		const auto control = beyond(faultlab::op::truncate, 1, false);
+		CHECK(beyond(faultlab::op::truncate, 1, true) == control);
+		CHECK(beyond(faultlab::op::truncate, 2, true) == control);
+		CHECK(beyond(faultlab::op::sync, 1, true) == control);
 	}
 	// Admission rejects with no_space and changes nothing; what it admitted commits without
 	// ENOSPC on a disk of the budget's size; merges wait for room; once another index on
 	// the same storage is dropped, work continues and the content holds.
 	{
-		faultfs::filesystem fs, other_fs;
-		faultfs::io io(fs), other_io(other_fs);
+		faultlab::filesystem fs, other_fs;
+		faultlab::io io(fs), other_io(other_fs);
 		const std::uint64_t capacity = 256 * 1024;
 		byte_budget storage(capacity);
 		prospect::index::options o = keyed;
@@ -845,8 +847,8 @@ int main() {
 	// a merge of segments with distant docids is refused by admission or fits.
 	{
 		const std::uint64_t capacity = 64 * 1024;
-		faultfs::filesystem fs(capacity);
-		faultfs::io io(fs);
+		faultlab::filesystem fs(capacity);
+		faultlab::io io(fs);
 		byte_budget storage(capacity);
 		prospect::index::options o = keyed;
 		o.storage = &storage;
@@ -876,8 +878,8 @@ int main() {
 						   std::uint64_t queued = 0) {
 		std::size_t merged = 0, refused = 0;
 		for (std::uint64_t room = first; room <= last; room += step) {
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			faultlab::filesystem fs;
+			faultlab::io io(fs);
 			byte_budget storage(1ull << 40);
 			prospect::index::options o = base;
 			o.storage = &storage;
@@ -965,8 +967,8 @@ int main() {
 	// A transaction admitted by draining a queued obsolete file commits at once on a disk of
 	// the budget's size: the drain frees the file's bytes durably before they count (L8).
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		byte_budget storage(1ull << 40);
 		prospect::index::options o = keyed;
 		o.storage = &storage;
@@ -1001,8 +1003,8 @@ int main() {
 	{
 		std::size_t admitted = 0;
 		for (std::size_t n = 500; n <= 40000; n += 500) {
-			faultfs::filesystem fs(80000);
-			faultfs::io io(fs);
+			faultlab::filesystem fs(80000);
+			faultlab::io io(fs);
 			byte_budget storage(80000);
 			prospect::index::options o = keyed;
 			o.storage = &storage;
@@ -1031,8 +1033,8 @@ int main() {
 	// L8, partial files: a file removed after ENOSPC mid-write frees its bytes once its
 	// removal is durable, so the commit succeeds as space returns.
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		byte_budget storage(1ull << 40);
 		prospect::index::options o = keyed;
 		o.storage = &storage;
@@ -1087,8 +1089,8 @@ int main() {
 	// commit succeeds once space returns.
 	std::size_t mid_file = 0;
 	for (std::uint64_t room = 0; room < 3000; room += 211) {
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		fs.short_writes(97);
 		auto ix = prospect::index::create(io, keyed, uuid);
 		operation big = add("Qb", "b");
@@ -1116,7 +1118,7 @@ int main() {
 	// the commit fails without fencing, and succeeds as a reference commit does once space
 	// returns.
 	{
-		auto run = [&](faultfs::filesystem& fs, faultfs::io& io, std::optional<std::uint64_t> room) {
+		auto run = [&](faultlab::filesystem& fs, faultlab::io& io, std::optional<std::uint64_t> room) {
 			auto ix = prospect::index::create(io, keyed, uuid);
 			ix.apply(tx({add("Qa", "a"), add("Qb", "b"), add("Qc", "c")}), {});
 			ix.commit();
@@ -1141,15 +1143,15 @@ int main() {
 			}
 			return std::pair{failed, std::move(ix)};
 		};
-		faultfs::filesystem ref_fs;
-		faultfs::io ref_io(ref_fs);
+		faultlab::filesystem ref_fs;
+		faultlab::io ref_io(ref_fs);
 		auto [_, ref] = run(ref_fs, ref_io, std::nullopt);
 		const auto want = contents(ref);
 		const auto digest = ref.digest();
 		std::size_t failed = 0;
 		for (std::uint64_t room = 0; room < 6000; room += 97) {
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			faultlab::filesystem fs;
+			faultlab::io io(fs);
 			auto [f, ix] = run(fs, io, room);
 			failed += f;
 			CHECK(contents(ix) == want && ix.digest() == digest && ix.metadata().at("m").size() == 1500);
@@ -1163,7 +1165,7 @@ int main() {
 	// files disagree with their entries, or that cannot be read, is refused before the
 	// target changes, and the target stays unfenced.
 	{
-		auto build_source = [&](faultfs::filesystem& fs, faultfs::io& io) {
+		auto build_source = [&](faultlab::filesystem& fs, faultlab::io& io) {
 			auto ix = prospect::index::create(io, keyed, uuid);
 			for (int i = 0; i < 10; ++i) { ix.apply(tx({add("Q" + std::to_string(i), "s" + std::to_string(i))}), {}); }
 			ix.refresh();
@@ -1178,21 +1180,21 @@ int main() {
 			(void)fs;
 			return std::pair{std::move(ix), cp};
 		};
-		auto rewrite = [](faultfs::io& io, const std::string& name, const std::string& bytes) {
+		auto rewrite = [](faultlab::io& io, const std::string& name, const std::string& bytes) {
 			io.remove(name);
 			auto f = io.create_exclusive(name);
 			f->write_at(0, bytes);
 			f->sync();
 		};
 		// The checkpoint's state as its log replays it, written back as a fresh log at its generation.
-		auto state_of = [](faultfs::io& io, std::uint64_t g) { return strata::index_detail::read_state(io, g); };
-		auto reseal = [&](faultfs::io& io, strata::files::log_state s, std::uint64_t g) {
+		auto state_of = [](faultlab::io& io, std::uint64_t g) { return strata::index_detail::read_state(io, g); };
+		auto reseal = [&](faultlab::io& io, strata::files::log_state s, std::uint64_t g) {
 			strata::files::recount(s);
 			rewrite(io, strata::index_detail::manifest_name(g), strata::files::frame_snapshot(s));
 		};
 		// One damage per case, applied to the source; the target must refuse it unchanged.
-		const std::function<void(faultfs::filesystem&, faultfs::io&, std::uint64_t)> damages[] = {
-			[&](faultfs::filesystem&, faultfs::io& io, std::uint64_t g) {  // deleted ordinals past their segment's document count
+		const std::function<void(faultlab::filesystem&, faultlab::io&, std::uint64_t)> damages[] = {
+			[&](faultlab::filesystem&, faultlab::io& io, std::uint64_t g) {  // deleted ordinals past their segment's document count
 				auto m = state_of(io, g);
 				for (auto& [id, r] : m.segments) {
 					if (r.deleted.empty()) { continue; }
@@ -1207,7 +1209,7 @@ int main() {
 				}
 				reseal(io, m, g);
 			},
-			[&](faultfs::filesystem&, faultfs::io& io, std::uint64_t g) {  // a live count unlike its deleted set, totals in step
+			[&](faultlab::filesystem&, faultlab::io& io, std::uint64_t g) {  // a live count unlike its deleted set, totals in step
 				auto m = state_of(io, g);
 				for (auto& [id, r] : m.segments) {
 					if (!r.deleted.empty()) {
@@ -1217,19 +1219,19 @@ int main() {
 				}
 				reseal(io, m, g);
 			},
-			[&](faultfs::filesystem&, faultfs::io& io, std::uint64_t g) {  // a flipped byte in the snapshot
+			[&](faultlab::filesystem&, faultlab::io& io, std::uint64_t g) {  // a flipped byte in the snapshot
 				const auto name = strata::index_detail::manifest_name(g);
 				reseal(io, state_of(io, g), g);
 				std::string bytes = strata::index_detail::read_all(*io.open_existing(name));
 				bytes[bytes.size() / 3] ^= 1;
 				rewrite(io, name, bytes);
 			},
-			[&](faultfs::filesystem&, faultfs::io& io, std::uint64_t g) {  // a snapshot under another generation's name
+			[&](faultlab::filesystem&, faultlab::io& io, std::uint64_t g) {  // a snapshot under another generation's name
 				auto m = state_of(io, g);
 				m.generation = g + 5;
 				reseal(io, m, g);
 			},
-			[&](faultfs::filesystem&, faultfs::io& io, std::uint64_t g) {  // a segment's document count unlike its entry
+			[&](faultlab::filesystem&, faultlab::io& io, std::uint64_t g) {  // a segment's document count unlike its entry
 				auto m = state_of(io, g);
 				auto& r = m.segments.begin()->second;
 				++r.doc_count;
@@ -1238,7 +1240,7 @@ int main() {
 				++m.live_count;
 				reseal(io, m, g);
 			},
-			[&](faultfs::filesystem& fs, faultfs::io& io, std::uint64_t g) {  // a damaged postings region
+			[&](faultlab::filesystem& fs, faultlab::io& io, std::uint64_t g) {  // a damaged postings region
 				const auto name = strata::index_detail::segment_name(state_of(io, g).segments.begin()->first);
 				std::string bytes(fs.view(name));
 				for (const auto& e : strata::format::decode_toc(bytes, strata::format::decode_footer(bytes))) {
@@ -1246,13 +1248,13 @@ int main() {
 				}
 				rewrite(io, name, bytes);
 			},
-			[&](faultfs::filesystem&, faultfs::io& io, std::uint64_t g) {  // a file missing from the source
+			[&](faultlab::filesystem&, faultlab::io& io, std::uint64_t g) {  // a file missing from the source
 				io.remove(strata::index_detail::segment_name(state_of(io, g).segments.begin()->first));
 			},
 		};
 		for (const auto& damage : damages) {
-			faultfs::filesystem sfs, tfs;
-			faultfs::io sio(sfs), tio(tfs);
+			faultlab::filesystem sfs, tfs;
+			faultlab::io sio(sfs), tio(tfs);
 			auto [source, cp] = build_source(sfs, sio);
 			auto target = prospect::index::create(tio, keyed, uuid);
 			target.apply(tx({add("Qt", "t")}), {});
@@ -1276,8 +1278,8 @@ int main() {
 			CHECK(contents(target).size() == 2);
 		}
 		// The same checkpoint, undamaged, installs and reopens.
-		faultfs::filesystem sfs, tfs;
-		faultfs::io sio(sfs), tio(tfs);
+		faultlab::filesystem sfs, tfs;
+		faultlab::io sio(sfs), tio(tfs);
 		auto [source, cp] = build_source(sfs, sio);
 		auto target = prospect::index::create(tio, keyed, uuid);
 		target.install(sio, cp);
@@ -1289,8 +1291,8 @@ int main() {
 	// install's admission covers its commit's log: on a disk of the
 	// budget's size, an install completes or admission refuses it; the disk never does.
 	{
-		faultfs::filesystem sfs;
-		faultfs::io sio(sfs);
+		faultlab::filesystem sfs;
+		faultlab::io sio(sfs);
 		auto source = prospect::index::create(sio, keyed, uuid);
 		for (int s = 0; s < 3; ++s) {
 			std::vector<operation> ops;
@@ -1313,8 +1315,8 @@ int main() {
 		for (std::uint64_t slack = 0; slack <= 48000; slack += 1000) {
 			std::uint64_t capacity;
 			{
-				faultfs::filesystem fs;
-				faultfs::io io(fs);
+				faultlab::filesystem fs;
+				faultlab::io io(fs);
 				byte_budget big(1ull << 40);
 				auto o = keyed;
 				o.storage = &big;
@@ -1323,8 +1325,8 @@ int main() {
 				t.commit();
 				capacity = big.used() + copy + slack;
 			}
-			faultfs::filesystem tfs(capacity);
-			faultfs::io tio(tfs);
+			faultlab::filesystem tfs(capacity);
+			faultlab::io tio(tfs);
 			byte_budget storage(capacity);
 			auto o = keyed;
 			o.storage = &storage;
@@ -1345,8 +1347,8 @@ int main() {
 	}
 	// Retention keeps the current manifest and two predecessors; orphans leave at open.
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		auto ix = prospect::index::create(io, keyed, uuid);
 		for (int i = 0; i < 6; ++i) {
 			ix.apply(tx({add("Q" + std::to_string(i), "x")}), {});
@@ -1376,8 +1378,8 @@ int main() {
 	}
 	// A missing or changed file fails the open and changes nothing.
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		{
 			auto ix = prospect::index::create(io, keyed, uuid);
 			ix.apply(tx({add("Qa", "a")}), {});
@@ -1430,8 +1432,8 @@ int main() {
 		byte_budget budget(200 * 1024);
 		index::options opts = keyed;
 		opts.budget = &budget;
-		faultfs::filesystem fa, fb, fc, fd;
-		faultfs::io ia(fa), ib(fb), ic(fc), id(fd);
+		faultlab::filesystem fa, fb, fc, fd;
+		faultlab::io ia(fa), ib(fb), ic(fc), id(fd);
 		auto a = prospect::index::create(ia, opts, uuid), b = prospect::index::create(ib, opts, uuid);
 		auto ra = prospect::index::create(ic, keyed, uuid), rb = prospect::index::create(id, keyed, uuid);  // unbudgeted
 		std::mt19937_64 r(4);
@@ -1493,7 +1495,7 @@ int main() {
 			*o.doc.length += 20;
 			return o;
 		};
-		auto seg_files = [](const faultfs::filesystem& fs) {
+		auto seg_files = [](const faultlab::filesystem& fs) {
 			std::map<std::string, std::string> out;
 			for (const auto& n : fs.list()) {
 				if (n.starts_with("seg-")) { out[n] = std::string(fs.view(n)); }
@@ -1507,8 +1509,8 @@ int main() {
 			opts.budget = &budget;
 			opts.flush_threads = plain.flush_threads = threads;
 			opts.flush_min_docs = plain.flush_min_docs = 500;
-			faultfs::filesystem fa, fb;
-			faultfs::io ia(fa), ib(fb);
+			faultlab::filesystem fa, fb;
+			faultlab::io ia(fa), ib(fb);
 			auto a = prospect::index::create(ia, opts, uuid), ref = prospect::index::create(ib, plain, uuid);
 			for (int i = 0; i < 6000; ++i) {
 				CHECK(a.apply(tx({rich(i)}), {}).result == verdict::accepted);
@@ -1538,8 +1540,8 @@ int main() {
 		byte_budget tiny(1024);
 		index::options opts = keyed;
 		opts.budget = &tiny;
-		faultfs::filesystem fa, fb;
-		faultfs::io ia(fa), ib(fb);
+		faultlab::filesystem fa, fb;
+		faultlab::io ia(fa), ib(fb);
 		auto a = prospect::index::create(ia, opts, uuid), ref = prospect::index::create(ib, keyed, uuid);
 		for (int i = 0; i < 200; ++i) {
 			CHECK(a.apply(tx({rich(i)}), {}).result == verdict::accepted);
@@ -1554,8 +1556,8 @@ int main() {
 	// The offline check: a healthy index passes and reports what it read; a byte changed
 	// inside a section (which opening the index does not read) fails it.
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		std::string seg_name;
 		{
 			auto ix = prospect::index::create(io, keyed, uuid);
@@ -1594,8 +1596,8 @@ int main() {
 	// With auto_merge, a commit merges what its flush adds, so an index driven only by
 	// commits stays within the policy's tiers.
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		auto o = keyed;
 		o.auto_merge = true;
 		auto ix = prospect::index::create(io, o, uuid);
@@ -1628,7 +1630,7 @@ int main() {
 		};
 		// Builds a committed index with a big segment (Q0, Q1) and a small one (Q2), then
 		// deletes Q0 and Q1; returns the big segment's file name and size.
-		auto setup = [&](faultfs::io& io, prospect::index& ix) {
+		auto setup = [&](faultlab::io& io, prospect::index& ix) {
 			CHECK(ix.apply(tx({big("Q0"), big("Q1")}), {}).result == verdict::accepted);
 			ix.refresh();
 			const auto first = ids(ix);
@@ -1640,8 +1642,8 @@ int main() {
 			return std::pair{dead, size};
 		};
 		{
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			faultlab::filesystem fs;
+			faultlab::io io(fs);
 			auto ix = prospect::index::create(io, o, uuid);
 			const auto [dead, size] = setup(io, ix);
 			CHECK(size > 80000);
@@ -1657,8 +1659,8 @@ int main() {
 		}
 		// Admission drains queued files when space is short.
 		{
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			faultlab::filesystem fs;
+			faultlab::io io(fs);
 			strata::byte_budget storage(1 << 30);
 			auto so = o;
 			so.storage = &storage;
@@ -1679,8 +1681,8 @@ int main() {
 		// Power lost after every mutation of the commit and its reclamation.
 		std::uint64_t points = 0;
 		{
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			faultlab::filesystem fs;
+			faultlab::io io(fs);
 			auto ix = prospect::index::create(io, o, uuid);
 			setup(io, ix);
 			const auto from = fs.mutations();
@@ -1690,8 +1692,8 @@ int main() {
 		}
 		CHECK(points > 20);
 		for (std::uint64_t n = 0; n < points; ++n) {
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			faultlab::filesystem fs;
+			faultlab::io io(fs);
 			std::map<std::uint64_t, std::pair<std::uint64_t, std::string>> before, after;
 			{
 				auto ix = prospect::index::create(io, o, uuid);
@@ -1728,8 +1730,8 @@ int main() {
 	// transient EIO or EMFILE on a pinned checkpoint's log during a commit leaves the checkpoint
 	// whole, and a later round reclaims what is obsolete. The open runs no retention (D6.6).
 	for (int error : {EIO, EMFILE}) {
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		std::uint64_t pinned, digest;
 		{
 			auto ix = prospect::index::create(io, keyed, uuid);
@@ -1761,8 +1763,8 @@ int main() {
 		}
 		const bool head_log = name == strata::index_detail::manifest_name(*strata::index_detail::log_holding(io));
 		CHECK(on_disk() && !ix.retention_blocked() && manifests == (head_log ? 1u : 2u) && ix.reclaim_pending() == 0);
-		faultfs::filesystem tfs;
-		faultfs::io tio(tfs);
+		faultlab::filesystem tfs;
+		faultlab::io tio(tfs);
 		auto target = prospect::index::create(tio, keyed, uuid);
 		target.install(io, pinned);
 		CHECK(target.digest() == digest);
@@ -1770,8 +1772,8 @@ int main() {
 	// Condition 15: only an EIO that survives the retry reads as damage; a lack of file
 	// descriptors or memory, or a refused permission, stays what it is.
 	for (int error : {EMFILE, ENFILE, ENOMEM, EACCES, EIO}) {
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		std::string segment;
 		{
 			auto ix = prospect::index::create(io, keyed, uuid);
@@ -1816,8 +1818,8 @@ int main() {
 	// A kept generation that never reads (a damaged pinned checkpoint in an older log) stops
 	// retention, which the index reports; releasing the pin resumes it (condition 13).
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		auto ix = prospect::index::create(io, keyed, uuid);
 		ix.apply(tx({add("Qa", "a")}), {});
 		const std::uint64_t pinned = ix.checkpoint();
@@ -1859,8 +1861,8 @@ int main() {
 	// generation from before the release): retention skips it and keeps reclaiming
 	// (condition 14).
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		std::uint64_t listing;
 		{
 			auto ix = prospect::index::create(io, keyed, uuid);
@@ -1893,9 +1895,9 @@ int main() {
 	}
 	// A merge whose admission drains through a failing truncate or unlink is not fenced; the
 	// file stays queued (condition 14, condition 10's merge half).
-	for (faultfs::op kind : {faultfs::op::truncate, faultfs::op::remove}) {
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+	for (faultlab::op kind : {faultlab::op::truncate, faultlab::op::remove}) {
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		byte_budget storage(1ull << 40);
 		prospect::index::options o = keyed;
 		o.storage = &storage;
@@ -1939,8 +1941,8 @@ int main() {
 	}
 	// A queued file that is gone before its truncation opens it is forgotten, not an error.
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		prospect::index::options o = keyed;
 		o.reclaim_slice = 0;
 		o.reclaim_step = 4096;
@@ -1961,14 +1963,14 @@ int main() {
 	}
 	// A failed truncate, unlink, or directory sync after the commit point neither fails
 	// commit() nor loses the commit; the file stays queued and a later round reclaims it.
-	for (faultfs::op kind : {faultfs::op::truncate, faultfs::op::remove, faultfs::op::sync_directory}) {
+	for (faultlab::op kind : {faultlab::op::truncate, faultlab::op::remove, faultlab::op::sync_directory}) {
 		std::size_t returned = 0;
 		for (std::uint64_t nth = 1; nth <= 6; ++nth) {
 			prospect::index::options o = keyed;
 			o.retained_predecessors = 0;
 			o.reclaim_step = 4096;
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			faultlab::filesystem fs;
+			faultlab::io io(fs);
 			auto ix = prospect::index::create(io, o, uuid);
 			ix.apply(tx({add("Qa", std::string(40000, 'a'))}), {});
 			ix.commit();
@@ -1999,8 +2001,8 @@ int main() {
 	// ENOSPC on the commit's append, then a successful retry, then power loss: the retry makes
 	// every file the log names durable.
 	for (std::uint64_t seed = 0; seed < 20; ++seed) {
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		auto ix = prospect::index::create(io, keyed, uuid);
 		for (int s = 0; s < 3; ++s) {
 			std::vector<operation> ops;
@@ -2011,7 +2013,7 @@ int main() {
 		ix.commit();
 		ix.apply(tx({erase("Q0"), erase("Q4"), erase("Q8")}), {});  // deletes in each segment: the edit's only write
 		const auto want = contents(ix);
-		fs.add_fault({faultfs::op::write, 1, ENOSPC, false});
+		fs.add_fault({faultlab::op::write, 1, ENOSPC, false});
 		CHECK(throws([&] { ix.commit(); }));
 		fs.clear_faults();
 		ix.commit();
@@ -2024,7 +2026,7 @@ int main() {
 	// that check's error and changes nothing on disk.
 	{
 		// An index of keys Q0..Q9 with bodies of `letter`: three commits, all retained.
-		auto build = [&](faultfs::io& io, char letter, const std::array<char, 16>& id, int first_deleted) {
+		auto build = [&](faultlab::io& io, char letter, const std::array<char, 16>& id, int first_deleted) {
 			auto ix = prospect::index::create(io, keyed, id);
 			std::vector<operation> ops;
 			for (int i = 0; i < 10; ++i) { ops.push_back(add("Q" + std::to_string(i), std::string(4, letter))); }
@@ -2044,7 +2046,7 @@ int main() {
 			ix.apply(tx({m}), {});
 			ix.commit();
 		};
-		auto put = [](faultfs::io& io, const std::string& name, std::string_view bytes) {
+		auto put = [](faultlab::io& io, const std::string& name, std::string_view bytes) {
 			try {
 				io.remove(name);
 			} catch (const std::exception&) {
@@ -2054,7 +2056,7 @@ int main() {
 			f->sync();
 			io.sync_directory();
 		};
-		auto head = [](faultfs::filesystem& fs) {
+		auto head = [](faultlab::filesystem& fs) {
 			std::string best;
 			std::uint64_t top = 0;
 			for (const auto& n : fs.list()) {
@@ -2065,16 +2067,16 @@ int main() {
 			}
 			return best;
 		};
-		auto snapshot_of = [](faultfs::filesystem& fs) {
+		auto snapshot_of = [](faultlab::filesystem& fs) {
 			std::map<std::string, std::string> out;
 			for (const auto& n : fs.list()) { out[n] = std::string(fs.view(n)); }
 			return out;
 		};
 		const std::array<char, 16> other = {'o', 't', 'h', 'e', 'r'};
 		// Each case: damage, then the open must fail with `want` and leave every file as it was.
-		auto expect = [&](const char* what, const std::function<void(faultfs::filesystem&, faultfs::io&, faultfs::filesystem&)>& damage, const std::string& want) {
-			faultfs::filesystem fs, ofs;
-			faultfs::io io(fs), oio(ofs);
+		auto expect = [&](const char* what, const std::function<void(faultlab::filesystem&, faultlab::io&, faultlab::filesystem&)>& damage, const std::string& want) {
+			faultlab::filesystem fs, ofs;
+			faultlab::io io(fs), oio(ofs);
 			build(io, 'a', uuid, 1);
 			build(oio, 'b', other, 3);
 			damage(fs, io, ofs);
@@ -2092,11 +2094,11 @@ int main() {
 			if (got.find(want) == std::string::npos) { std::fprintf(stderr, "  %s: got \"%s\"\n", what, got.c_str()); }
 		};
 		// The head state as the newest log replays it, and a fresh log holding a changed state.
-		auto state_of = [](faultfs::filesystem& fs) {
-			faultfs::io io(fs);
+		auto state_of = [](faultlab::filesystem& fs) {
+			faultlab::io io(fs);
 			return strata::index_detail::read_state(io);
 		};
-		auto reseal = [&](faultfs::io& io, strata::files::log_state m) {
+		auto reseal = [&](faultlab::io& io, strata::files::log_state m) {
 			strata::files::recount(m);
 			put(io, strata::index_detail::manifest_name(m.generation), strata::files::frame_snapshot(m));
 		};
@@ -2145,8 +2147,8 @@ int main() {
 	// occurrences of one word encode to about 70 KB, past the 64 KiB cap, so each such entry
 	// takes a run alone (CR12, CR17); the writer then takes more and commits them all.
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		auto ix = prospect::index::create(io, keyed, uuid);
 		strata::index_test_access::max_run_bytes(ix, 64 << 10);
 		CHECK(ix.apply(tx({add("Qa", "a")}), {}).result == verdict::accepted);
@@ -2175,8 +2177,8 @@ int main() {
 	// reopens, against a model.
 	for (std::size_t flush_threads : {1, 2}) {
 		for (std::uint64_t seed = 1; seed <= 3; ++seed) {
-			faultfs::filesystem fs;
-			faultfs::io io(fs);
+			faultlab::filesystem fs;
+			faultlab::io io(fs);
 			prospect::index::options opts;
 			opts.keyed = true;
 			opts.flush_threads = flush_threads;
@@ -2216,8 +2218,8 @@ int main() {
 	// A search-layout index opened as the document layout fails closed: its manifest lists a
 	// structure the document layout cannot read, and the open refuses it, never misreads it.
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		prospect::index::options opts;
 		opts.keyed = true;
 		auto ix = prospect::index::create(io, opts, uuid);

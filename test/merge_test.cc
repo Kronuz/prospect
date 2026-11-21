@@ -5,7 +5,7 @@
 #include "prospect/index.hh"
 #include "prospect/merge.hh"
 #include "view_sources.hh"
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 #include "strata/core/merge_policy.hh"
 
 #include <algorithm>
@@ -15,6 +15,8 @@
 #include <map>
 #include <random>
 #include <set>
+
+namespace faultlab = kronuz::faultlab;
 
 static int failures = 0;
 #define CHECK(cond) \
@@ -29,8 +31,8 @@ static const std::array<char, 16> uuid = {'m', 'e', 'r', 'g', 'e', '-', 't', 'e'
 int main() {
 	for (std::uint64_t seed = 0; seed < 20; ++seed) {
 		std::mt19937_64 r(seed);
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		index::options opts;
 		opts.keyed = true;
 		auto ix = prospect::index::create(io, opts, uuid);
@@ -235,8 +237,8 @@ int main() {
 	// An index merging as it goes keeps few segments and the same digest as one that never
 	// merges.
 	{
-		faultfs::filesystem fa, fb;
-		faultfs::io ia(fa), ib(fb);
+		faultlab::filesystem fa, fb;
+		faultlab::io ia(fa), ib(fb);
 		index::options merging;
 		merging.keyed = true;
 		merging.auto_merge = true;
@@ -271,8 +273,8 @@ int main() {
 	// Forced merges on an index: force_merge_deletes rewrites only segments past its
 	// threshold, force_merge(1) leaves one segment without deletes; the digest holds.
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		index::options o;
 		o.keyed = true;
 		auto ix = prospect::index::create(io, o, uuid);

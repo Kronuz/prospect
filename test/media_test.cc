@@ -10,12 +10,14 @@
 //     name it (recover --to).
 #include "text_field.hh"
 #include "prospect/index.hh"
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <optional>
+
+namespace faultlab = kronuz::faultlab;
 
 static int failures = 0;
 #define CHECK(cond) \
@@ -66,8 +68,8 @@ int main() {
 	prospect::index::options keyed;
 	keyed.keyed = true;
 	keyed.retained_predecessors = 2;  // the head is recovered from a predecessor that does not name the damaged segment
-	faultfs::filesystem fs;
-	faultfs::io io(fs);
+	faultlab::filesystem fs;
+	faultlab::io io(fs);
 	{
 		auto ix = prospect::index::create(io, keyed, uuid);
 		for (int s = 0; s < 3; ++s) {
@@ -112,7 +114,7 @@ int main() {
 			if (at >= prefix) { offsets.push_back(at); }
 		}
 		for (const std::uint64_t at : offsets) {
-			for (faultfs::media kind : {faultfs::media::bit_flip, faultfs::media::read_error}) {
+			for (faultlab::media kind : {faultlab::media::bit_flip, faultlab::media::read_error}) {
 				// Transient: the medium returns the right bytes on the next read.
 				fs.clear_faults();
 				fs.add_media_fault(name, kind, at, at + 1, 1);
@@ -122,12 +124,12 @@ int main() {
 					bool healed = false;
 					const auto d = read_digest(ix, healed);
 					CHECK(d && *d == reference);
-					if (!d || *d != reference) { std::fprintf(stderr, "  transient %s at %llu of %s\n", kind == faultfs::media::bit_flip ? "flip" : "EIO", (unsigned long long)at, name.c_str()); }
+					if (!d || *d != reference) { std::fprintf(stderr, "  transient %s at %llu of %s\n", kind == faultlab::media::bit_flip ? "flip" : "EIO", (unsigned long long)at, name.c_str()); }
 					open_retries += ix.media_retries() && !healed;
 					heals += healed;
 				} catch (const std::exception& e) {
 					CHECK(false);
-					std::fprintf(stderr, "  transient %s at %llu of %s: %s\n", kind == faultfs::media::bit_flip ? "flip" : "EIO", (unsigned long long)at, name.c_str(), e.what());
+					std::fprintf(stderr, "  transient %s at %llu of %s: %s\n", kind == faultlab::media::bit_flip ? "flip" : "EIO", (unsigned long long)at, name.c_str(), e.what());
 				}
 				// Sticky: the medium is damaged for good.
 				fs.clear_faults();
@@ -151,7 +153,7 @@ int main() {
 					} catch (const corrupt_index&) {
 					} catch (const std::exception& e) {
 						CHECK(false);
-						std::fprintf(stderr, "  merge over sticky %s at %llu of %s: %s\n", kind == faultfs::media::bit_flip ? "flip" : "EIO", (unsigned long long)at, name.c_str(), e.what());
+						std::fprintf(stderr, "  merge over sticky %s at %llu of %s: %s\n", kind == faultlab::media::bit_flip ? "flip" : "EIO", (unsigned long long)at, name.c_str(), e.what());
 					}
 				} catch (const corrupt_index&) {
 					++sticky_open_failed;
@@ -159,7 +161,7 @@ int main() {
 					++sticky_open_failed;
 				} catch (const std::exception& e) {
 					CHECK(false);
-					std::fprintf(stderr, "  sticky %s at %llu of %s: %s\n", kind == faultfs::media::bit_flip ? "flip" : "EIO", (unsigned long long)at, name.c_str(), e.what());
+					std::fprintf(stderr, "  sticky %s at %llu of %s: %s\n", kind == faultlab::media::bit_flip ? "flip" : "EIO", (unsigned long long)at, name.c_str(), e.what());
 				}
 			}
 		}
@@ -196,7 +198,7 @@ int main() {
 			}
 		}
 		CHECK(at != 0);
-		fs.add_media_fault(merged, faultfs::media::bit_flip, at, at + 1, 0);
+		fs.add_media_fault(merged, faultlab::media::bit_flip, at, at + 1, 0);
 		bool head_failed = false;
 		try {
 			auto ix = prospect::index::open(io, keyed);

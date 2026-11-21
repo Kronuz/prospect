@@ -6,7 +6,7 @@
 #include "prospect/merge.hh"
 #include "prospect/reader.hh"
 #include "prospect/writer.hh"
-#include "strata/core/faultfs.hh"
+#include "faultlab/faultfs.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -18,6 +18,8 @@
 #include <random>
 #include <string>
 #include <vector>
+
+namespace faultlab = kronuz::faultlab;
 
 static int failures = 0;
 #define CHECK(cond) \
@@ -190,8 +192,8 @@ int main() {
 	}
 	// The digest of a fixed script: keys, replaces, deletes, metadata, buffered documents.
 	{
-		faultfs::filesystem fs;
-		faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		index::options o;
 		o.keyed = true;
 		o.auto_merge = false;
@@ -239,8 +241,8 @@ int main() {
 		pin("digest.txt", text);
 		// The same script's documents with values, still buffered, flushed, and merged away.
 		const std::array<char, 16> uuid2 = {'f', 'i', 'x', 't', 'u', 'r', 'e', 's', 'v', 'a', 'l', 'u', 'e', 's', '0', '1'};
-		faultfs::filesystem fs2;
-		faultfs::io io2(fs2);
+		faultlab::filesystem fs2;
+		faultlab::io io2(fs2);
 		auto vx = index::create(io2, o, uuid2);
 		for (std::uint32_t d = 0; d < 120; ++d) {
 			transaction t;
@@ -305,8 +307,8 @@ int main() {
 	// The manifest log (strata's files family): a keyed index's first log, two commits and an
 	// erase, replayed to its head (manifest-log D4), pinned byte for byte.
 	{
-		strata::faultfs::filesystem fs;
-		strata::faultfs::io io(fs);
+		faultlab::filesystem fs;
+		faultlab::io io(fs);
 		prospect::index::options o;
 		o.keyed = true;
 		o.identity_seed = 1;  // the segments' identities are then fixed, so the log's bytes are
