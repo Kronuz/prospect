@@ -578,7 +578,10 @@ public:
 	}
 
 	// Every field id of the dictionary lies in a table of `table_size` fields and none is the key
-	// field (D7: it holds no terms). A pass over the directory and the pool's keys.
+	// field (D7: it holds no terms). A pass over the directory, then the pool's keys: two seeks
+	// while every valid id is one byte, since the pool is in key order and an id's bytes sort as
+	// the id (D10), so a key past the table, malformed leads included, sorts after every valid
+	// one and the key field's keys sort together; else a pass over them.
 	void check_fields(std::uint64_t table_size, std::optional<std::uint32_t> key_field) const {
 		auto ok = [&](std::uint64_t id) { return id < table_size && id != key_field; };
 		for (std::uint64_t i = 0; i < entry_count_; ++i) {
@@ -586,6 +589,24 @@ public:
 		}
 		if (!has_pool()) { return; }
 		try {
+			if (table_size <= 0xF0) {
+				auto refuse_from = [&](char lead, bool same_lead) {
+					pool().scan(std::string_view(&lead, 1), [&](std::string_view key, std::string_view) {
+						if (same_lead && key[0] != lead) { return false; }
+						const char* q = key.data();
+						std::uint32_t id;
+						if (!get_field(q, key.data() + key.size(), id)) { corrupt("pooled field id"); }
+						corrupt("field id outside the field table");
+					});
+				};
+				pool().scan({}, [&](std::string_view key, std::string_view) {
+					if (key.empty()) { corrupt("pooled field id"); }
+					return false;
+				});
+				refuse_from(char(table_size), false);
+				if (key_field && *key_field < table_size) { refuse_from(char(*key_field), true); }
+				return;
+			}
 			pool().scan({}, [&](std::string_view key, std::string_view) {
 				const char* q = key.data();
 				std::uint32_t id;
