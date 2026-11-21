@@ -55,7 +55,7 @@ the rename works unchanged.
 
 Kept as `STRATA_*` because strata's code reads them, or because the thing they name is strata's:
 
-- `STRATA_FAULTFS_MAP`: read by strata's `faultfs.hh`; the `*_mapped` tests set it.
+- `FAULTLAB_MAP`: read by faultlab's `faultfs.h`; the `*_mapped` tests set it.
 - The gate VM's `STRATA_VM_*`, `STRATA_BSD_*`, and `STRATA_TRIALS_LOG` (`tools/vm/`), and the VM's
   `strata` user and hostnames: the VM is strata's machine, shared by both repositories.
 - `STRATA_WRITE_FIXTURES` in strata's own tests writes strata's fixtures; prospect's tests read
