@@ -585,8 +585,11 @@ public:
 			if (!ok(entry_at(i).field)) { corrupt("field id outside the field table"); }
 		}
 		if (!has_pool()) { return; }
+		// The pool read through a reader of its own, dropped here: the check keeps nothing.
+		dict_context ctx{};
+		const termdict::reader pool = transient(own_blocks_, terms_.size() - own_blocks_, pool_index_, &ctx);
 		try {
-			pool().scan({}, [&](std::string_view key, std::string_view) {
+			pool.scan({}, [&](std::string_view key, std::string_view) {
 				const char* q = key.data();
 				std::uint32_t id;
 				if (!get_field(q, key.data() + key.size(), id)) { corrupt("pooled field id"); }
@@ -706,10 +709,14 @@ private:
 
 	// An own dictionary read through the same checksum verifier as open_at's; `ctx` outlives it.
 	termdict::reader dictionary(const entry& e, dict_context* ctx) const {
-		const std::string_view blocks = terms_.substr(e.blocks, e.blocks_size), index = indexes_.substr(e.index, e.index_size);
+		return transient(e.blocks, e.blocks_size, indexes_.substr(e.index, e.index_size), ctx);
+	}
+	// The dictionary at `base`, uncached, read through open_at's verifier; `ctx` outlives it.
+	termdict::reader transient(std::uint64_t base, std::uint64_t size, std::string_view index, dict_context* ctx) const {
+		const std::string_view blocks = terms_.substr(base, size);
 		try {
 			if (!verify_) { return termdict::reader(blocks, index); }
-			*ctx = dict_context{verify_, context_, e.blocks};
+			*ctx = dict_context{verify_, context_, base};
 			return termdict::reader(blocks, index, &verify_in, ctx);
 		} catch (const termdict::corrupt&) {
 			corrupt("term index");

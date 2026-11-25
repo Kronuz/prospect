@@ -8,10 +8,26 @@
 #include <cstdio>
 #include <cstdlib>
 #include <map>
+#include <new>
 #include <random>
 #include <set>
 #include <string>
 #include <vector>
+
+// Live heap blocks, counted by replacing the global allocator: a probe of what a reader keeps.
+static std::size_t live_blocks = 0;
+void* operator new(std::size_t n) {
+	if (void* p = std::malloc(n ? n : 1)) {
+		++live_blocks;
+		return p;
+	}
+	throw std::bad_alloc();
+}
+void operator delete(void* p) noexcept {
+	if (p) { --live_blocks; }
+	std::free(p);
+}
+void operator delete(void* p, std::size_t) noexcept { operator delete(p); }
 
 static int failures = 0;
 #define CHECK(cond) \
@@ -411,7 +427,76 @@ static void field_table_tests() {
 	CHECK(threw);
 }
 
+// check_fields scans the pool through a reader it drops: it leaves no pool reader cached (the
+// live heap is the same before and after), reads through the verifier, and refuses as before.
+// A query that needs the pool still caches it, once.
+static void pool_reader_transient_tests() {
+	std::mt19937_64 rng(29);
+	dict_model m;
+	for (unsigned i = 0; i < 4; ++i) { m[{2, "p" + std::to_string(i)}] = random_info(rng); }  // pooled
+	for (unsigned i = 0; i < 300; ++i) { m[{5, std::to_string(100000 + i)}] = random_info(rng); }  // own
+	for (unsigned i = 0; i < 4; ++i) { m[{9, "p" + std::to_string(i)}] = random_info(rng); }  // pooled
+	const built_dict d = build(m);
+	{
+		const fielddict::reader r(d.terms, d.index);
+		(void)find(r, 5, "100001");  // an own dictionary opens and caches; the pool stays unread
+		const std::size_t before = live_blocks;
+		r.check_fields(10, std::nullopt);
+		CHECK(live_blocks == before);
+		r.check_fields(10, std::nullopt);
+		CHECK(live_blocks == before);
+		CHECK(find(r, 2, "p1").has_value());  // a pooled lookup caches the pool reader, once
+		const std::size_t cached = live_blocks;
+		CHECK(cached > before);
+		r.check_fields(10, std::nullopt);
+		CHECK(live_blocks == cached);
+		CHECK(find(r, 9, "p3").has_value());
+		CHECK(live_blocks == cached);
+	}
+	struct count_t { std::size_t calls = 0; bool accept = true; } counter;
+	auto verify = [](void* c, std::uint64_t, std::uint64_t) {
+		auto* k = static_cast<count_t*>(c);
+		++k->calls;
+		return k->accept;
+	};
+	{
+		const fielddict::reader r(d.terms, d.index, verify, &counter);
+		r.check_fields(10, std::nullopt);  // the scan is read through the verifier
+		CHECK(counter.calls > 0);
+	}
+	{
+		counter.accept = false;
+		bool threw = false;
+		try {
+			const fielddict::reader r(d.terms, d.index, verify, &counter);
+			r.check_fields(10, std::nullopt);
+		} catch (const strata::corrupt_segment&) {
+			threw = true;
+		}
+		CHECK(threw);
+	}
+	// A pooled key whose field id does not decode is refused as "pooled field id", as through pool().
+	std::string key_bytes("\xFF" "term", 5);
+	fielddict::byte_set alphabet;
+	alphabet.add(key_bytes);
+	termdict::builder bad_pool(alphabet.bytes());
+	bad_pool.add(key_bytes, "v");
+	const termdict::tables bad = bad_pool.finish();
+	std::string bad_index;
+	for (int i = 0; i < 4; ++i) { prospect::format::put_leb(bad_index, 0); }  // no own dictionary
+	bad_index += bad.index;
+	std::string what;
+	try {
+		const fielddict::reader r(bad.blocks, bad_index);
+		r.check_fields(10, std::nullopt);
+	} catch (const strata::corrupt_segment& e) {
+		what = e.what();
+	}
+	CHECK(what.find("pooled field id") != std::string::npos);
+}
+
 int main() {
+	pool_reader_transient_tests();
 	count_tests();
 	pool_pairing_tests();
 	overplanned_pool_tests();
