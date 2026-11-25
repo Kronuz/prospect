@@ -15,7 +15,16 @@
 #include <vector>
 
 // Live heap blocks, counted by replacing the global allocator: a probe of what a reader keeps.
+// ThreadSanitizer's runtime defines the allocator itself, so there the heap checks are skipped.
+#if defined(__SANITIZE_THREAD__)
+#define HEAP_PROBE 0
+#elif defined(__has_feature)
+#define HEAP_PROBE !__has_feature(thread_sanitizer)
+#else
+#define HEAP_PROBE 1
+#endif
 static std::size_t live_blocks = 0;
+#if HEAP_PROBE
 void* operator new(std::size_t n) {
 	if (void* p = std::malloc(n ? n : 1)) {
 		++live_blocks;
@@ -28,6 +37,7 @@ void operator delete(void* p) noexcept {
 	std::free(p);
 }
 void operator delete(void* p, std::size_t) noexcept { operator delete(p); }
+#endif
 
 static int failures = 0;
 #define CHECK(cond) \
@@ -447,7 +457,7 @@ static void pool_reader_transient_tests() {
 		CHECK(live_blocks == before);
 		CHECK(find(r, 2, "p1").has_value());  // a pooled lookup caches the pool reader, once
 		const std::size_t cached = live_blocks;
-		CHECK(cached > before);
+		CHECK(!HEAP_PROBE || cached > before);
 		r.check_fields(10, std::nullopt);
 		CHECK(live_blocks == cached);
 		CHECK(find(r, 9, "p3").has_value());
